@@ -21,6 +21,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from fno.pr._proc import ToolMissing
 
 # Defaults named in the PR body: change them here, never in the
 # operator's live config file.
@@ -162,6 +163,8 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
+        # A stale row's gate answers are history, not verdicts.
+        out["ready_blockers"] = ["status_stale"]
         out.pop("failures", None)
         out["stale_reason"] = (
             "secondary rate limit backoff - the check set is unreadable, so "
@@ -194,7 +197,32 @@ def _serve(row: dict, *, stale: bool) -> int:
     return code
 
 
-def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
+def _merge_decision_key(slug_key: str, pr: str, info: dict, cwd: Optional[str]) -> str:
+    """The row key, minted by the owner's status-cache-key op."""
+    from fno.rust_binary import verb_call
+
+    try:
+        out = verb_call(
+            "authorized-merge",
+            {
+                "op": "status-cache-key",
+                "cwd": cwd or os.getcwd(),
+                "pr": int(pr),
+                "head_sha": str(info["head_sha"]),
+                "pr_state": str(info.get("state") or ""),
+                "slug": slug_key,
+            },
+            timeout=60,
+        )
+        key = out.get("key") if isinstance(out, dict) else None
+        if isinstance(key, str) and key:
+            return key
+    except Exception:  # noqa: BLE001 - degraded keying, never a wrong row
+        pass
+    return f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}"
+
+
+def _cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
     """`fno do pr status` through the coalescing cache: the CLI chokepoint.
 
     Head-keyed rows, one read per TTL, backoff degradation, and the `--refresh`
@@ -239,7 +267,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             if code >= 0:
                 return code
         return run_status(pr, cwd)
-    key = f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}"
+    key = _merge_decision_key(slug_key, pr, info, cwd)
 
     def _servable(row: Optional[dict], at: float) -> int:
         """Fast-path serve: a fresh row answers verbatim; anything staler
@@ -279,8 +307,8 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 code = run_status(pr, cwd, prior=(row or {}).get("output"))
             finally:
                 sys.stdout = real_stdout
-            line = buf.getvalue()
-            sys.stdout.write(line)
+                line = buf.getvalue()
+                sys.stdout.write(line)
             try:
                 output = json.loads(line) if line.strip() else None
             except json.JSONDecodeError:
@@ -305,3 +333,25 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             return code
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
+    buf, real_stdout = io.StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        code = _cached_status(pr, cwd, refresh=refresh)
+    except ToolMissing:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a crashed reader is exit 4, never red's exit 1
+        why = f"reader failed: {type(exc).__name__}: {exc}"
+        sys.stderr.write(f"fno do pr status: {why}\n")
+        try:
+            payload = json.loads(buf.getvalue().strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            payload = dict(pr=pr, verdict="error", settled=False, green=False, reason=why)
+        payload["reader_error"] = why
+        buf, code = io.StringIO(json.dumps(payload) + "\n"), 4
+    finally:
+        sys.stdout = real_stdout
+    sys.stdout.write(buf.getvalue())
+    return code

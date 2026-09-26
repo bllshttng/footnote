@@ -97,12 +97,28 @@ def live_head(monkeypatch):
 
 
 def _merge_refusal(capsys, tmp_path, fake):
-    """The refusal sentence run_merge emits for this row, prefix stripped."""
+    """The refusal sentence the merge verb renders for this row, prefix
+    stripped. The coverage gate is decide's now (x-53c5): the test seeds the
+    row, lets the gate compose its own line, has the owner hold with it, and
+    pins the render."""
     monkeypatch_run = pytest.MonkeyPatch()
     monkeypatch_run.setattr(_merge, "run", fake)
     try:
+        _state, refusal, _covered, note = _coverage_gate.coverage_verdict(
+            42, str(tmp_path), recompute=False
+        )
+        line = _coverage_gate.refusal_line(refusal, note)
+        detail = f"unreviewed merge refused: {line}" if line else (
+            "unreviewed merge refused"
+        )
+
+        def _held(pr_number, repo, **kw):
+            return {"outcome": "held", "detail": detail}
+
+        monkeypatch_run.setattr(_merge, "_authorized_merge", _held)
         assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-        reason = _last_json(capsys, stream="err")["reason"]
+        # A held receipt renders on stdout (err=False in the emit table).
+        reason = _merge.reason_after_outcome(_last_json(capsys)["reason"])
     finally:
         monkeypatch_run.undo()
     assert reason.startswith("unreviewed merge refused: ")
@@ -309,10 +325,20 @@ def test_merge_blocks_when_the_head_fetch_fails(
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: None)
     fake = FakeRun(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
+    # The refusal is decide's now: the owner's coverage gate answers
+    # UNANSWERED for the dead head probe, and the verb renders its sentence.
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {
+            "outcome": "held",
+            "detail": "coverage probe failed, merge refused: pr head fetch failed",
+        },
+    )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
-    assert obj["reason"] == "coverage probe failed, merge refused: pr head fetch failed"
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert obj["reason"] == "held: coverage probe failed, merge refused: pr head fetch failed"
 
 
 # ---- the 3am release valve on the verb the docs name ----
@@ -1196,40 +1222,26 @@ def test_ac7_cap_discharged_merge_merges(
 
 
 def test_status_keys_the_hold_on_the_row_word(monkeypatch, tmp_path):
-    """`fno do pr status` holds a PR on its row conjuncts alone: the round
-    cap is not a blocker, so an uncovered row reads review_coverage_uncovered
-    whatever the chain spent, and a covered row at the cap holds on nothing."""
-    from fno.pr import _status
+    """The row conjuncts answer by row word (the gate's own helper, one copy
+    with the merge verb since x-53c5): an uncovered row fails as uncovered,
+    never impossible, and a covered row fails on nothing."""
+    from fno.pr._coverage_gate import covered_conjuncts
 
     _seed_cap_chain(tmp_path, _cap_chain(6))
-    uncovered = _status._ready_blockers(
-        True,
-        "green",
-        0,
+    uncovered = covered_conjuncts(
         {"coverage": "uncovered", "reviewed_count": 0, "head_sha": f"{5:040x}"},
-        review_lane=True,
-        head=f"{5:040x}",
-        head_branch="feature/x-cap",
-        code_review_required=False,
-        repo=str(tmp_path),
+        f"{5:040x}",
+        False,
     )
-    assert "review_coverage_uncovered" in uncovered
-    assert "review_coverage_impossible" not in uncovered
+    assert uncovered == (False, "uncovered")
 
-    _seed_cap_chain(tmp_path, _cap_chain(6, category="nit"))
-    covered = _status._ready_blockers(
-        True,
-        "green",
-        0,
+    covered = covered_conjuncts(
         {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2,
          "head_sha": f"{5:040x}"},
-        review_lane=True,
-        head=f"{5:040x}",
-        head_branch="feature/x-cap",
-        code_review_required=False,
-        repo=str(tmp_path),
+        f"{5:040x}",
+        False,
     )
-    assert not [b for b in covered if b.startswith("review_coverage_")]
+    assert covered == (True, "")
 
 
 def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
@@ -2555,8 +2567,29 @@ WAIVE_HEAD = "f" * 40
 
 @pytest.fixture(autouse=True)
 def _sandbox_decision_graph(tmp_path, monkeypatch):
-    """Keep this module's graph-backed decision reads beside its JSONL index."""
+    """Keep this module's decision reads entirely inside the test's tmp.
+
+    The graph-backed reads resolve through paths.graph_json, and the engine's
+    index seam derives decisions.jsonl from paths.ledger_json - both must land
+    in the SAME per-test directory, or the seeder writes one file while the
+    reader reads the worker's shared conftest sandbox, where an earlier
+    test's import leaves rows that shadow the fresh seed.
+    """
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
+    monkeypatch.setattr(
+        "fno.paths.ledger_json", lambda: tmp_path / ".decision-index" / "ledger.json"
+    )
+    monkeypatch.setattr(
+        "fno.paths.decisions_jsonl",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
+    monkeypatch.setattr(
+        "fno.decide._decisions_index_path",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
 
 
 def test_law_authority_reads_the_real_index_three_ways(tmp_path):
@@ -2567,10 +2600,14 @@ def test_law_authority_reads_the_real_index_three_ways(tmp_path):
     from fno import paths
 
     def _seed(*rows):
-        paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-        paths.decisions_jsonl().write_text(
-            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
-        )
+        p = paths.decisions_jsonl()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Each scenario is a fresh history: the store beside the index
+        # accumulates, so a leftover db would resurrect earlier rows.
+        from fno.events.store_client import store_db_path
+
+        store_db_path(p).unlink(missing_ok=True)
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def _row(decision):
         return {
@@ -2757,11 +2794,20 @@ def test_recorded_scoped_waiver_covers_only_its_head(
 def _seed_waiver_law_row(
     subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"
 ):
-    """One live law-lane row at an exact subject, in the sandboxed index."""
-    from fno import paths
+    """One live law-lane row at an exact subject, in the sandboxed index.
 
-    paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-    paths.decisions_jsonl().open("a", encoding="utf-8").write(
+    The store beside the index imports the jsonl ONCE per store, and the
+    conftest sandbox is shared across every test in a worker process: a
+    leftover db resurrects an earlier test's rows under the same fixed ids
+    and the fresh seed reads as already-seen. Reset it with the file.
+    """
+    from fno import paths
+    from fno.events.store_client import store_db_path
+
+    index = paths.decisions_jsonl()
+    index.parent.mkdir(parents=True, exist_ok=True)
+    store_db_path(index).unlink(missing_ok=True)
+    index.open("a", encoding="utf-8").write(
         json.dumps(
             {
                 "type": "operator_decision",
@@ -3307,55 +3353,25 @@ def test_status_and_merge_answer_one_word_on_one_constructed_chain(
     assert state == _coverage_gate.COVERED
     assert refusal == ""
     assert "review budget discharged (6/2 rounds)" in note
-    # The status side: the ready conjunct reads the row word, never the cap.
-    blockers = _status._ready_blockers(
-        True,
-        "green",
-        0,
-        dict(_cap_cov_row()),
-        True,
-        head=f"{5:040x}",
-        head_branch="feature/x-cap",
-        code_review_required=False,
-        repo=str(tmp_path),
-    )
-    assert not [b for b in blockers if b.startswith("review_coverage_")]
+    # The gate side: the row word, never the cap (covered_conjuncts, one
+    # copy with the merge verb since x-53c5).
+    from fno.pr._coverage_gate import covered_conjuncts
+
+    assert covered_conjuncts(dict(_cap_cov_row()), f"{5:040x}", False) == (True, "")
     # A row still carrying a stale impossible flag must NOT block on it:
-    # the cap is not a status conjunct at all, on any row.
+    # the cap is not a conjunct at all, on any row.
     flagged_row = dict(_cap_cov_row())
     flagged_row["impossible"] = True
-    clean = _status._ready_blockers(
-        True,
-        "green",
-        0,
-        flagged_row,
-        True,
-        head=f"{5:040x}",
-        head_branch="feature/x-cap",
-        code_review_required=False,
-        repo=str(tmp_path),
-    )
-    assert "review_coverage_impossible" not in clean
+    assert covered_conjuncts(flagged_row, f"{5:040x}", False) == (True, "")
 
 
 def test_a_pr_without_a_head_branch_appends_no_cap_blocker(tmp_path):
-    """No head branch, covered row: no blocker at all. The cap is not a
-    status conjunct, and the other coverage conjuncts are unchanged."""
-    from fno.pr import _status
+    """No head branch, covered row: no conjunct fails. The cap is not a
+    conjunct, and the other coverage conjuncts are unchanged."""
+    from fno.pr._coverage_gate import covered_conjuncts
 
     _seed_cap_chain(tmp_path, _cap_chain(6))
-    blockers = _status._ready_blockers(
-        True,
-        "green",
-        0,
-        _cap_cov_row(),
-        True,
-        head=f"{5:040x}",
-        head_branch="",
-        code_review_required=False,
-        repo=str(tmp_path),
-    )
-    assert blockers == []
+    assert covered_conjuncts(_cap_cov_row(), f"{5:040x}", False) == (True, "")
 
 
 

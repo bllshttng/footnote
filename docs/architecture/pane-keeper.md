@@ -1,6 +1,6 @@
-# The pane keeper: worker panes that outlive the mux server
+# The pane keeper: every pane outlives the mux server
 
-A worker pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Plain panes are unchanged. The server holds their master directly, and they die with it, exactly as they always have. Every pane the resume path spawns is keeper-hosted too. `resume_worker_into` spawns through the same keeper, so no worker pane the server creates dies with it. Giving them a keeper means reusing the canonical mesh spawn wrapper, which lives in the Python launcher.
+A pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Every pane takes this road now: worker panes, resumed panes, portal viewers, ad-hoc `pane run`, and plain shells. A plain shell carries its shell integration into the keeper as an env prefix in its argv. When the keeper cannot start, the inline pty survives as the named fallback. The pane still opens, and the server marks it `unkept`. A later `kill-server` refuses while it is live unless `--end-unkept` is passed.
 
 ## Ownership rule
 
@@ -47,7 +47,7 @@ Re-adoption is not respawn. The proof below pins the SAME child pid across the s
 
 ## The reaper contract
 
-`kill_all_panes` (the server shutdown sweep) skips `PtyShell::Keeper` panes. Plain panes die with their server. Keeper-hosted panes survive to re-adoption. A hangup must never become a close. The deliberate path is unchanged. `reap_pane` (explicit pane close) still sends Kill. The keeper SIGKILLs its own child, unlinks its socket, and exits. Surviving a hangup never becomes surviving a close.
+`kill_all_panes` (the server shutdown sweep) skips `PtyShell::Keeper` panes. Every pane is keeper-hosted now, so a server death keeps them all to re-adoption. A hangup must never become a close. The deliberate paths are unchanged. `reap_pane` (explicit pane close) still sends Kill. The keeper SIGKILLs its own child, unlinks its socket, and exits. And `fno mux kill-server` measures before it signals. A live pane with no live keeper at its id is unkept. The kill refuses while one is live, and `--end-unkept` is the deliberate override. Surviving a hangup never becomes surviving a close.
 
 ## Two traps the implementation had to learn
 
@@ -57,23 +57,19 @@ Re-adoption is not respawn. The proof below pins the SAME child pid across the s
 
 ## The proof
 
-`tests/mux-keeper-survives-server-kill.sh` builds both binaries and drives a real server. It asserts survival by named pids, never by exit codes or survivor counts. A passing run reads:
-
-```
-[before] worker pane 825 child=57345 keeper=57342; plain pane 826 child=57458
-[after kill] worker child 57345 is ALIVE
-[after kill] worker child 57345 is still parented by its keeper 57342
-[after kill] keeper 57342 is ALIVE and holds the master
-[after kill] keeper 57342 reparented to init/launchd (ppid=1)
-[after kill] plain pane child 57458 is dead, as it always was
-[re-adopt] fresh server bound the SAME child pid 57345 as pane 825 - a re-adoption, not a respawn
-[answer] the surviving pane answered through the re-adopted server: GOT:proof-line-274a
-PASS: worker child 57345 outlived the killed server fk-57210, was re-adopted by a fresh server, and answered a prompt; the plain pane died with it
-```
-
-The server is killed with SIGKILL so no graceful path can spare the child. The answer step reads the whole visible grid, not `--lines`. `read_tail` reads the bottom N display rows. A fresh adopted VT holds this pane's short answer at the top rows with an empty history.
+`tests/mux-restart-survival-matrix.sh` is the whole-contract proof. It drives a plain shell, an ad-hoc pane, a keeper worker, a portal viewer, and the daemon legs in one private root. Each row crosses three restarts: the server alone, the daemon alone, and both SIGKILLed together. It opens with a dead-canary positive control for its liveness reader. It then asserts survival by named pids and a canary counter that must keep advancing across the gap. It fails on any row whose child pid changes or whose counter stops. `tests/mux-keeper-survives-server-kill.sh` remains the single-pane identity proof: the SAME child pid, re-adopted, still answering a prompt, with the plain pane surviving by the same road.
 
 ## The hard limit
 
 A pane keeper cannot be refreshed on demand. It holds a live child process and its pty master. Surviving a restart is the keeper's whole purpose, so cycling it can only destroy the thing it exists to keep. Until then the running-process census reports the keeper stale and kept, and no restart surface promises otherwise. The census row names the split in three words: `stale`, `kept`, `current only when its pane ends`.
+
+## A hand-off moves the socket, not the process
+
+A pane keeper becomes a THREAD keeper by moving its socket. `fno mux pane kill --hand-off-to <path>` renames the socket from `mux/panes/` to `mux/threads/`. It then drops the pane from the layout and the persisted squad, and closes the server's connection without sending a Kill frame. A Kill makes the keeper kill its child and exit. A bare hangup is what the keeper is built to survive, so the child keeps running and keeps its pid. The daemon's keeper sweep then finds it at the new path and rebinds the row.
+
+The rename is safe because a renamed unix socket path still reaches the same listener, and the old path stops answering. That was measured on macOS 25.3 with a positive control on the old path, not assumed from the man page.
+
+`fno mux pane keeper list` walks both lanes. Each row carries a `lane` field of `pane` or `thread`. The listing read only `mux/panes/` at first. `tests/convert-pane-to-thread-journey.sh` caught that gap. A conversion moved its own keeper out of the one directory the listing read. So the verb said the keeper was gone while it was running.
+
+An INLINE pane has no keeper. The server itself holds the master, so releasing that entry kills the child with the pty. The hand-off refuses such a pane by name. The remedy it names is to stop and resume the session, which relaunches it keeper-hosted.
 

@@ -51,8 +51,8 @@ def _clear_env(monkeypatch):
 
 
 def _sessions(g: Path, node_id: str) -> list[dict]:
-    from fno.graph.store import read_graph
-    return next(e for e in read_graph(g) if e["id"] == node_id).get("sessions", [])
+    from fno.graph.store import read_graph_strict
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id).get("sessions", [])
 
 
 # --- fno do pr merge closes its own node (baked-in reconcile, no memory) ---------
@@ -154,8 +154,8 @@ def test_reconcile_backfills_pr_number_for_a_url_only_node(tmp_path, monkeypatch
     monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
     monkeypatch.setattr(M, "run", _stub_run([]))
     M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-recon001")
     assert node["pr_number"] == 777
     assert node["pr_url"] == url
 
@@ -175,8 +175,8 @@ def test_reconcile_does_not_clobber_existing_primary(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-multi01")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-multi01")
     assert node["pr_number"] == 100                 # primary untouched
     assert node["pr_url"] == f"{_FOOT}/100"         # url pair intact
     assert len(calls) == 1                          # still closed, scoped to the node
@@ -220,18 +220,76 @@ def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
     g = _make_graph(tmp_path, [{"id": "ab-conf001", "title": "t",
                                 "pr_number": 556, "pr_url": url}])
     _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
     _clear_env(monkeypatch)
     import fno.pr._merge as M
     monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._on_confirmed_merge(556, str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-conf001")
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-conf001")
     assert node.get("merge_status") == "merged"
     assert calls
     assert calls[0][-7:] == [
         "backlog", "reconcile", "--pr-number", "556", "--repo", "bllshttng/footnote", "--json",
+    ]
+
+
+def test_on_confirmed_merge_defer_close_syncs_status_and_skips_reconcile(
+    tmp_path, monkeypatch
+):
+    # The watcher's durable-grant merge cannot hold the 79-179s whole-graph
+    # reconcile inside its phase slice: defer_close still syncs merge_status
+    # but fires no reconcile child, and the queued owners (the sweep ritual's
+    # reconcile leg and the daemon's merge_close arm) close the node instead.
+    url = f"{_FOOT}/556"
+    g = _make_graph(tmp_path, [{"id": "ab-defer01", "title": "t",
+                                "pr_number": 556, "pr_url": url}])
+    _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
+    _clear_env(monkeypatch)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    calls = []
+    monkeypatch.setattr(M, "run", _stub_run(calls))
+    closed = M._on_confirmed_merge(556, str(tmp_path), defer_close=True)
+    from fno.graph.store import read_graph_strict
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-defer01")
+    assert node.get("merge_status") == "merged"
+    assert calls == []
+    assert closed == []
+
+
+def test_on_confirmed_merge_without_the_keyword_still_closes_inline(
+    tmp_path, monkeypatch
+):
+    # No defer_close keyword -> today's behavior unchanged: exactly one
+    # `backlog reconcile --pr-number` child, so a standalone merge still
+    # closes its own node before returning.
+    url = f"{_FOOT}/557"
+    g = _make_graph(tmp_path, [{"id": "ab-inline01", "title": "t",
+                                "pr_number": 557, "pr_url": url}])
+    _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
+    _clear_env(monkeypatch)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    calls = []
+    monkeypatch.setattr(M, "run", _stub_run(calls))
+    M._on_confirmed_merge(557, str(tmp_path))
+    assert len(calls) == 1
+    assert calls[0][-7:] == [
+        "backlog", "reconcile", "--pr-number", "557", "--repo", "bllshttng/footnote", "--json",
     ]
 
 
@@ -304,9 +362,9 @@ def test_reconcile_merged_pr_node_closes_via_seam_under_external(
     assert tracker.close_calls == ["ab-recon001"]
     assert calls == []  # the refused reconcile subprocess never fired
     # The backfill went to the sidecar, not the graph.
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    node = next(e for e in read_graph_strict(g) if e["id"] == "ab-recon001")
     assert node.get("pr_number") != 777
     sc = json.loads((sc_dir / "ab-recon001.json").read_text())
     assert sc["pr_number"] == 777
@@ -494,10 +552,11 @@ def _stub_git_root(monkeypatch, module, root: Path):
 
 
 def _requested_rows(log: Path) -> list[dict]:
+    from tests._event_rows import event_rows
+
     return [
-        json.loads(line)
-        for line in log.read_text().splitlines()
-        if json.loads(line).get("type") == "merge_cleanup_requested"
+        row for row in event_rows(log)
+        if row.get("type") == "merge_cleanup_requested"
     ]
 
 
@@ -506,14 +565,15 @@ def test_post_merge_followups_mints_cleanup_request(tmp_path, monkeypatch):
     # carrying merged_at, the closed node ids, and the session identity.
     import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: True)
+    # A linked worktree's `.git` is a FILE; this fixture needs the merge
+    # cleanup to see cwd as one (x-7b9c inlined the predicate in _merge.py).
+    (tmp_path / ".git").write_text("gitdir: /elsewhere/worktrees/t/.git\n")
     monkeypatch.setattr(
         E, "rows_for_cleanup",
         lambda worktree, node_ids, runner=None: ["target-x-07dc-a1"],
@@ -538,14 +598,12 @@ def test_merge_with_no_bound_nodes_still_mints_empty(tmp_path, monkeypatch):
     # Held shape: a reconcile that bound nothing still mints, with
     # node_ids [] - the daemon's doneness re-read holds that request.
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
 
     M._run_post_merge_followups(9, "squash", str(tmp_path), bound_node_ids=[])
 
@@ -603,61 +661,6 @@ def test_ritual_mint_shares_request_id_with_merge_mint(tmp_path, monkeypatch):
     assert ids == [twin, twin]
 
 
-def test_remove_rows_after_archive_empty_list_is_not_success(monkeypatch, tmp_path):
-    # An empty candidate list is not a successful removal. The leg used to
-    # initialise removed=True and loop over nothing, so the archive leg
-    # emitted the daemon's completion under the pending request id and
-    # tombstoned an order that removed nothing.
-    import fno.pr._ritual as R
-
-    monkeypatch.setattr(
-        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
-    )
-    ritual = R.Ritual.__new__(R.Ritual)
-    ritual.cwd = tmp_path
-    ritual.ctx = R._Ctx(
-        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
-        project="proj", lane_project="", parking_lot=None, holder="",
-        node_ids=["x-07dc"],
-    )
-    assert (
-        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 0)
-        is False
-    )
-
-
-def test_remove_rows_after_archive_names_each_removal(monkeypatch, tmp_path):
-    # The non-empty arm: every candidate is rm'd under the request id, and a
-    # failed rm reads as not-removed (no completion tombstone).
-    import fno.pr._ritual as R
-    from types import SimpleNamespace
-
-    calls: list[list[str]] = []
-
-    def fake_runner(argv, **kwargs):
-        calls.append(argv)
-        return SimpleNamespace(ok=True)
-
-    monkeypatch.setattr(
-        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: ["t-07dc-a1"]
-    )
-    ritual = R.Ritual.__new__(R.Ritual)
-    ritual.cwd = tmp_path
-    ritual.runner = fake_runner
-    ritual.ctx = R._Ctx(
-        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
-        project="proj", lane_project="", parking_lot=None, holder="",
-        node_ids=["x-07dc"],
-    )
-    assert (
-        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 123)
-        is True
-    )
-    assert len(calls) == 1
-    assert "agents" in calls[0] and "t-07dc-a1" in calls[0]
-    assert "req-1" in calls[0]
-
-
 def _patch_sidecar(monkeypatch, rows):
     from fno.tracker import sidecar as sidecar_store
     from fno.tracker.sidecar import Sidecar
@@ -677,16 +680,13 @@ def test_merge_mint_recovers_node_ids_from_sidecar(tmp_path, monkeypatch):
     # AC1-HP: a merge whose reconcile bound nothing recovers the PR's node
     # ids from the sidecar store (repo-scoped off the PR url), so the request
     # names what it can reap instead of holding on no-node-ids for a day.
-    import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     _patch_sidecar(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7,
          "pr_url": "https://github.com/owner/repo/pull/7"}])
@@ -724,14 +724,12 @@ def test_merge_mint_excludes_foreign_repo_sidecar_nodes(tmp_path, monkeypatch):
     # AC1-EDGE: a sidecar node whose pr_url names another repo sharing the
     # PR number stays out of the recovered ids (repo-scoped, never guessed).
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     _patch_sidecar(monkeypatch, [
         {"id": "fno-forei", "pr_number": 7,
          "pr_url": "https://github.com/other/repo/pull/7"}])

@@ -43,18 +43,32 @@ def _rust_cross_tree_inputs() -> set[str]:
     return inputs
 
 
+def _manifest_paths_diffed_by(run: str) -> set[str]:
+    """Run the step's own awk filter over the manifest, so the test reads the paths CI diffs."""
+    awk = re.search(r"awk -F'\\t' '(?P<prog>[^']+)'", run)
+    assert awk, "the freshness step reads generated-artifacts.tsv without its awk filter"
+    out = subprocess.check_output(
+        ["awk", "-F\t", awk.group("prog"), "generated-artifacts.tsv"], cwd=_REPO_ROOT, text=True
+    )
+    return {line for line in out.splitlines() if line}
+
+
 def _cargo_job_step_inputs() -> set[str]:
-    job = _workflow()["jobs"]["test"]
-    run_blocks = [step.get("run", "") for step in job["steps"]]
+    jobs = _workflow()["jobs"]
     inputs: set[str] = set()
-    for run in run_blocks:
-        for block in re.findall(r"git diff --exit-code --(?P<paths>.*?)(?:\n\n|\Z)", run, re.S):
-            inputs.update(
-                path
-                for line in block.splitlines()
-                if (path := line.strip().lstrip("\\"))
-            )
-        inputs.update(re.findall(r"bash ([^\s;&|]+)", run))
+    for job_name in ("test-agents", "test-agents-integration", "test-mux", "test"):
+        run_blocks = [step.get("run", "") for step in jobs[job_name]["steps"]]
+        for run in run_blocks:
+            for block in re.findall(r"git diff --exit-code --(?P<paths>.*?)(?:\n\n|\Z)", run, re.S):
+                inputs.update(
+                    path
+                    for line in block.splitlines()
+                    if (path := line.strip().lstrip("\\")) and not path.startswith("<")
+                )
+            if "generated-artifacts.tsv" in run:
+                inputs.add("generated-artifacts.tsv")
+                inputs.update(_manifest_paths_diffed_by(run))
+            inputs.update(re.findall(r"bash ([^\s;&|]+)", run))
     return inputs
 
 

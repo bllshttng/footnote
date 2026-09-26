@@ -386,7 +386,7 @@ if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
     printf '{{'
     first=1
     for h in $(printf '%s' "$4" | /usr/bin/tr ',' ' '); do
-      if [ "$h" = "{S4}" ]; then
+      if [ "$h" = "{S4}" ] || [ "$h" = "{U4}" ]; then
         row='{{"state":"working","last_activity_age_s":2}}'
       else
         row='{{"state":"stalled","last_activity_age_s":100000}}'
@@ -395,7 +395,7 @@ if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
       printf '"%s":%s' "$h" "$row"
     done
     printf '}}\n'
-  elif [ "$3" = "{S4}" ]; then
+  elif [ "$3" = "{S4}" ] || [ "$3" = "{U4}" ]; then
     printf '{{"state":"working","last_activity_age_s":2}}\n'
   else
     printf '{{"state":"stalled","last_activity_age_s":100000}}\n'
@@ -409,6 +409,7 @@ fi
 exit 2
 "#,
             S4 = S4,
+            U4 = U4,
         )
         .as_str(),
     );
@@ -447,7 +448,7 @@ exit 2
     std::fs::write(
         receipts.join(format!("claude-{U2}.json")),
         format!(
-            "{{\"row_name\":\"roster-only\",\"short_id\":\"{U2}\",\"harness\":\"claude\",\"harness_session_id\":\"{U2}\",\"reaped_at\":\"2026-09-16T00:00:00Z\"}}"
+            "{{\"row_name\":\"roster-only\",\"short_id\":\"{U2}\",\"harness\":\"claude\",\"harness_session_id\":\"{U2}\",\"removed_by\":\"gc-sweep\",\"removal_trigger\":\"unattended\",\"reaped_at\":\"2026-09-16T00:00:00Z\"}}"
         ),
     )
     .unwrap();
@@ -468,6 +469,43 @@ exit 2
     println!("door 3 (squad prune): {d3}");
     fleet.assert_live_stays("after all doors");
     fleet.assert_property("after all doors");
+
+    // Every door's receipt names its writer. A fourth door added
+    // later fails here without anyone remembering to write it a test.
+    let receipt_files: Vec<std::path::PathBuf> = std::fs::read_dir(&receipts)
+        .expect("reap-receipts exists after the doors ran")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        !receipt_files.is_empty(),
+        "the three doors staged no receipts at all"
+    );
+    for f in receipt_files {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap())
+            .unwrap_or_else(|e| panic!("{} unreadable: {e}", f.display()));
+        let by = v["removed_by"].as_str().unwrap_or_else(|| {
+            panic!(
+                "{} carries no removed_by: {v}",
+                f.file_name().unwrap().to_string_lossy()
+            )
+        });
+        assert!(
+            !by.is_empty(),
+            "{} is unstamped: {v}",
+            f.file_name().unwrap().to_string_lossy()
+        );
+        assert!(
+            matches!(
+                v["removal_trigger"].as_str(),
+                Some("unattended") | Some("session")
+            ),
+            "{} carries trigger {:?}: {v}",
+            f.file_name().unwrap().to_string_lossy(),
+            v["removal_trigger"]
+        );
+    }
 
     // The restart half: every door re-runs in fresh processes and must
     // change nothing.

@@ -322,7 +322,7 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
 def _isolated_graph(tmp_path, monkeypatch):
     """Point the graph read at an empty tmp graph for EVERY test in this file.
 
-    `_live_worked_entries` calls `read_graph(graph_json())` whenever a lane slot is
+    `_live_worked_entries` calls `read_graph_strict(graph_json())` whenever a lane slot is
     held, so a test with an isolated claims_root would otherwise read the
     developer's real ~/.fno/graph.json. Tests that need entries overwrite this
     file via `_seed_graph`.

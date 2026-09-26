@@ -20,7 +20,7 @@ Both lanes inject the message into the live session the same way; everything aft
 
 ## Prerequisites
 
-- `fno` CLI installed (`uv tool install /path/to/footnote/cli` or via the footnote plugin postinstall).
+- `fno` CLI installed (`uv tool install /path/to/footnote/cli` or via the footnote plugin, whose first session installs the CLI).
 - `claude` CLI 2.1.143+ on `$PATH`, signed in.
 - A Claude `--bg` session created via an earlier `fno agents spawn "<initial-prompt>" --name <name> --harness claude`.
 

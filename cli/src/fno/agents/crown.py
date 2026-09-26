@@ -24,7 +24,7 @@ deleted and was unreleased; re-crown such a row rather than merging spellings.
 from __future__ import annotations
 
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Optional
 
 #: The bottom rung. Kept as a bound rather than a magic number so the stored
@@ -272,7 +272,7 @@ def _member_rung(raw: str, canon: Optional[str], *, graph_entry=None) -> str:
     return f"{raw} (not a configured project or a known node)"
 
 
-def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
+def resolve_crown(scopes: list[str], *, graph_entry=None) -> "tuple[int, str]":
     """``scopes`` -> the (rung, stored scope) they imply, both derived together.
 
     ONE call rather than a derive-then-encode pair, because the two answers must
@@ -304,8 +304,8 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
         # ONE graph parse serves every per-member refusal below; a graph this
         # rung could not read answers None, and the per-call fallback keeps
         # the single-read behavior for that machine.
-        by_id = _graph_index()
-        entry_of = _graph_entry if by_id is None else by_id.get
+        by_id = None if graph_entry else _graph_index()
+        entry_of = graph_entry or (_graph_entry if by_id is None else by_id.get)
         if not projects:
             # Rung 2 rules a SET of epics, stored with the same separator: a
             # king over two epics at once is one crown, not a failed portfolio.
@@ -321,7 +321,7 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
     raw = members[0]
     if projects:
         return 1, projects[0]
-    return 2, _epic_or_refuse(raw)
+    return 2, _epic_or_refuse(raw, graph_entry=graph_entry)
 
 
 def derive_crown_level(scopes: list[str]) -> int:
@@ -588,13 +588,27 @@ def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     return _same_territory(held, requested)
 
 
+def crown_answers_to(held: Optional[str], requested: Optional[str]) -> bool:
+    """Does a live crown over ``held`` answer when ``requested`` is addressed?
+
+    Territory equality, plus one widening: a rung-2 epic set answers for any
+    subset of its members. Not ``scope_contains``: a project or portfolio crown
+    never answers for a narrower scope, because its court may hold that crown.
+    """
+    if crown_scope_matches(held, requested):
+        return True
+    asked = _canonical_members(requested)
+    return bool(asked) and _derived_level(held) == 2 and asked <= _canonical_members(held)
+
+
 def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
     """Every live row holding crown ``scope`` right now, by name, sorted.
 
     Read at send time, never off a handle a peer learned while that handle was
     crowned; a pointer written at abdication goes stale the second time the crown
     moves. Empty is vacant, one is the holder, more is the split crown
-    ``fno agents court`` already reports."""
+    ``fno agents court`` already reports. A rung-2 epic set answers for each
+    of its members."""
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
     rows = load_registry(path=registry_path) if registry_path else load_registry()
@@ -603,7 +617,7 @@ def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
             row.name
             for row in rows
             if getattr(row, "crown_level", None) is not None
-            and crown_scope_matches(getattr(row, "crown_scope", None), scope)
+            and crown_answers_to(getattr(row, "crown_scope", None), scope)
             and getattr(row, "status", None) not in TERMINAL_STATUSES
         }
     )
@@ -642,45 +656,105 @@ def settle_spawn_crown(
     rows: list,
     *,
     scope: str,
-    succession: bool,
-    succession_caller_name: Optional[str],
+    plan: dict,
     exclude_name: Optional[str] = None,
 ) -> "tuple[list, str, list]":
-    """The one-live-crown guard a crowned spawn runs, as a pure function over rows.
+    """Apply a pre-launch crown-settle PLAN under the registry lock.
 
-    One behavior the bg and pane spawn paths each hand-wrote, order kept: clear
-    terminal holders of ``scope``, collect live holders (skipping the row a
-    revive replaces), succession before refusal. Returns ``(rows, outcome,
-    vacated)``: outcome is ``granted`` | ``succeeded`` | ``declined`` (the
-    caller stamps its own row, dropping the crown fields when declined), and
-    ``vacated`` lists ``(row_before_clear, cause)`` to journal once the
-    registry write commits.
+    ``plan`` is the answer :func:`plan_spawn_crown` got from Rust before
+    launch. Rust checks its holder identities against the rows this write sees
+    and returns indexes to clear. If Rust is unavailable or its answer is
+    malformed, the spawn declines without changing any row. Returns
+    ``(rows, outcome, vacated)``: outcome is
+    ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
+    dropping the crown fields when declined), and ``vacated`` lists
+    ``(row_before_clear, cause)`` to journal once the write commits.
     """
-    from fno.agents.registry import TERMINAL_STATUSES
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
-    vacated: list = []
-    for index, row in enumerate(rows):
-        if row.crown_scope == scope and row.status in TERMINAL_STATUSES:
-            vacated.append((row, "holder_terminal"))
-            rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-    holders = [
-        row for row in rows
-        if row.name != exclude_name
-        and row.crown_scope == scope
-        and row.status not in TERMINAL_STATUSES
-    ]
-    outcome = "granted"
-    if succession and succession_caller_name and holders and all(
-        h.name == succession_caller_name for h in holders
-    ):
-        for index, row in enumerate(rows):
-            if row.crown_scope == scope and row.name == succession_caller_name:
-                vacated.append((row, "succession"))
-                rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-        outcome = "succeeded"
-    elif holders:
-        outcome = "declined"
+    try:
+        answer = spawn_overlay_call({
+            "kind": "crown-settle", "scope": scope, "exclude_name": exclude_name,
+            "plan": plan, "rows": [asdict(row) for row in rows],
+        })
+        outcome = answer["outcome"]
+        if outcome not in ("granted", "succeeded", "declined"):
+            raise ValueError("invalid crown-settle outcome")
+        marks = [(i, "holder_terminal") for i in answer["clear_terminal_rows"]]
+        marks += [(i, "succession") for i in answer["vacate_rows"]]
+        vacated = [(rows[i], cause) for i, cause in marks]
+    except (SpawnOverlayUnavailable, LookupError, TypeError, ValueError):
+        return rows, "declined", []
+    for index, _ in marks:
+        rows[index] = replace(rows[index], crown_level=None, crown_scope=None, crown_grantor=None)
     return rows, outcome, vacated
+
+
+def plan_spawn_crown(
+    scope: str,
+    caller_row,
+    succession: bool,
+    exclude_name: Optional[str] = None,
+) -> "tuple[Optional[str], Optional[dict]]":
+    """Decide, BEFORE launch, whether a crowned spawn is granted, transfers, or
+    refuses. Runs the same authority check both spawn doors ran inline
+    (:func:`grant_error`, same arguments), then asks Rust's ``crown-settle``
+    payload kind (``crown_settle::resolve``) for occupancy against a fresh
+    registry read. Returns ``(refusal, answer)``: a non-``None`` refusal means
+    refuse before launch; ``answer`` (the full crown-settle JSON) is the PLAN
+    :func:`settle_spawn_crown` applies again under the lock.
+
+    Fails closed: a crowned spawn with no occupancy answer must not launch, so
+    a missing/broken ``fno-agents`` binary refuses rather than proceeding
+    uncrowned.
+    """
+    grant_problem = grant_error(
+        scope, caller_row, allow_terminal_recovery=True, allow_succession=succession,
+    )
+    if grant_problem is not None:
+        return grant_problem, None
+    from fno.agents.registry import load_registry
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    caller_name = getattr(caller_row, "name", None)
+    caller = {"kind": "agent", "name": caller_name} if caller_name else {"kind": "human"}
+    try:
+        rows = load_registry()
+    except Exception as exc:
+        return f"cannot decide crown occupancy: the registry could not be read ({exc})", None
+    payload = {
+        "kind": "crown-settle",
+        "scope": scope,
+        "succession": succession,
+        "caller": caller,
+        "exclude_name": exclude_name,
+        "rows": [asdict(row) for row in rows],
+    }
+    try:
+        answer = spawn_overlay_call(payload)
+    except SpawnOverlayUnavailable as exc:
+        return f"cannot decide crown occupancy: {exc}", None
+    return answer.get("refusal"), answer
+
+
+def _widen_answer(scope: str, caller, target_name: str) -> dict:
+    """Rust's crown-widen answer; a missing/old binary answers ``{}`` (fails closed)."""
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    by_id = _graph_index() or {}
+    fields = ("name", "status", "crown_scope", "crown_grantor",
+              "harness_session_id", "cc_session_id")
+    member_ids = dict.fromkeys(split_scope(scope) + split_scope(getattr(caller, "crown_scope", None)))
+    try:
+        return spawn_overlay_call({
+            "kind": "crown-widen",
+            "requested": scope,
+            "target": target_name,
+            "caller": {f: getattr(caller, f, None) for f in fields},
+            "members": [by_id.get(m) for m in member_ids],
+        })
+    except SpawnOverlayUnavailable:
+        return {}
 
 
 def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
@@ -887,11 +961,11 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 arm_king_manifest(
                     scope,
                     getattr(target, "harness_session_id", None) or "",
-                    owner_pid=getattr(target, "pid", None),
                     owner_cwd=getattr(target, "cwd", None),
                     crown_level=level,
                     crown_scope=scope,
                     crown_grantor=returned_by,
+                    model=getattr(target, "requested_model", None),
                 )
                 is not None
             )
@@ -955,11 +1029,23 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
 
     # Resolved before update_registry, never inside _stamp: this reads the
     # registry itself, and the closure runs under its lock.
+    from fno.agents.registry import AgentResolutionError, TERMINAL_STATUSES, resolve_agent, update_registry
     caller = calling_agent_row()
+    try:
+        target_name = resolve_agent(handle).entry.name
+    except AgentResolutionError as exc:
+        raise CrownPromotionError(
+            f"{exc}. `fno agents list` shows every handle you can crown."
+        ) from exc
     denial = grant_error(scope, caller, allow_succession=True)
-    if denial is not None:
-        raise CrownPromotionError(denial)
-    grantor = "human" if caller is None else caller.name
+    widen = _widen_answer(scope, caller, target_name) if caller is not None else {}
+    if widen.get("widen") is not True and (denial is not None or (caller is not None and target_name == caller.name)):
+        raise CrownPromotionError(" ".join(filter(None, (denial, widen.get("hint"))))
+            or "crown self-edit refused: the crown-widen answer was unavailable")
+    if widen.get("widen") is True and target_name == caller.name and not widen.get("grantor"):
+        raise CrownPromotionError("crown self-edit admitted with no grantor in the answer; update the fno-agents binary (`fno doctor update --rust`)")
+    grantor_name = "human" if caller is None else caller.name
+    recorded_grantor = widen.get("grantor") or grantor_name
     # `grant_error` blesses an equal scope because SPAWN succession vacates the
     # caller and stamps the heir in one write; this path only stamps the target,
     # so letting it through would leave two live crowns and the holder scan
@@ -983,33 +1069,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # mid-call cannot bestow what it no longer holds.
     granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
-    from fno.agents.registry import (
-        AgentResolutionError,
-        TERMINAL_STATUSES,
-        resolve_agent,
-        update_registry,
-    )
-
-    try:
-        target_name = resolve_agent(handle).entry.name
-    except AgentResolutionError as exc:
-        raise CrownPromotionError(
-            f"{exc}. `fno agents list` shows every handle you can crown."
-        ) from exc
-
-    # Never self-declared: once a king may grant, the grantor recorded on the
-    # row could be the row itself. The succession refusal above fires only on
-    # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
-    # identity, not territory, is the test.
-    if caller is not None and target_name == grantor:
-        raise CrownPromotionError(
-            f"refusing to crown {target_name!r}: that is this session, and a "
-            "crown is stamped by a grantor, never self-declared. The row would "
-            "record itself as its own grantor, which is exactly the claim an "
-            "external reader cannot verify. Ask a king whose scope contains "
-            f"{scope!r}, or crown a different row."
-        )
-
     receipt: dict[str, Any] = {}
     vacated_manifest_owner = ""
     vacated_owner_cwd = ""
@@ -1017,7 +1076,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
-            live_caller = next((row for row in rows if row.name == grantor), None)
+            live_caller = next((row for row in rows if row.name == grantor_name), None)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
                 raise CrownPromotionError(
                     f"refusing to crown {target_name!r}: the grantor's STORED "
@@ -1085,7 +1144,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # caller is not a second ruler; every other RIVAL live row is. Rivalry
         # is ladder-aware, not bare overlap: a live portfolio over the scope's
         # project is the new king's court, not a second ruler of it.
-        delegating = {target.name} | ({grantor} if caller is not None else set())
+        delegating = {target.name} | ({grantor_name} if caller is not None else set())
         holder = next(
             (
                 row
@@ -1117,11 +1176,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             manifest_path = arm_king_manifest(
                 scope,
                 target.harness_session_id or target.cc_session_id or target.short_id or "",
-                owner_pid=target.pid,
                 owner_cwd=target.cwd,
                 crown_level=level,
                 crown_scope=scope,
-                crown_grantor=grantor,
+                crown_grantor=recorded_grantor,
+                model=getattr(target, "requested_model", None),
             )
         except (OSError, ValueError) as exc:
             raise CrownPromotionError(
@@ -1134,14 +1193,14 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                     row,
                     crown_level=level,
                     crown_scope=scope,
-                    crown_grantor=grantor,
+                    crown_grantor=recorded_grantor,
                 )
                 break
         receipt.update(
             crowned=target.name,
             level=level,
             scope=scope,
-            grantor=grantor,
+            grantor=recorded_grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
             king_loop_armed=manifest_path is not None,
@@ -1152,7 +1211,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # a post-release re-read could see a concurrent grant over the
     # just-freed scope and mislabel that heir as stranded.
     rows_after = update_registry(_stamp)
-    receipt["missions_armed"] = arm_crowned_missions(scope)
+    # Clear the vacated manifest BEFORE arming missions: a crown killed
+    # between the registry commit and a slow arm would otherwise leave the
+    # leftover on disk, listing as a phantom crown.
     if receipt.get("vacated_scope") and not _same_territory(
         receipt["vacated_scope"], scope
     ):
@@ -1163,6 +1224,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             owner_cwd=vacated_owner_cwd,
             expected_harness_session_id=vacated_manifest_owner,
         )
+    receipt["missions_armed"] = arm_crowned_missions(scope)
     try:
         receipt["stranded_subordinates"] = _stranded_subordinates(
             receipt["vacated_scope"], scope, target_name, rows_after
@@ -1189,7 +1251,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         verb = normalize_command(f"/fno:reign {scope}", target_harness or "")
     except DispatchResolveError:
         verb = f"/fno:reign {scope}"
-    receipt["reign_delivery"] = _send_reign_verb(address, verb)
+    if caller is not None and target_name == caller.name:
+        receipt["reign_delivery"] = "skipped: self-edit, this session already reigns"
+    else:
+        receipt["reign_delivery"] = _send_reign_verb(address, verb)
     return receipt
 
 

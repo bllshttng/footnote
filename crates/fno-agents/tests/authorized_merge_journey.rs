@@ -12,7 +12,9 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use fno_agents::authorized_merge::{run, Effect, Outcome, PrFacts, ProbeOutcome, Probes, Request};
+use fno_agents::authorized_merge::{
+    run, ChecksRead, Effect, Outcome, PrFacts, ProbeOutcome, Probes, Request,
+};
 
 const HEAD: &str = "c0ffee1234567890";
 
@@ -86,8 +88,28 @@ impl Probes for FakeGitHub {
     fn require_fresh_ci(&self, _cwd: &Path) -> bool {
         true
     }
-    fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
-        "green".to_string()
+    fn slot_holder(&self, _cwd: &Path, _base_ref: &str) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+    fn take_slot(&self, _cwd: &Path, _base_ref: &str, _pr: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn release_slot(&self, _cwd: &Path, _base_ref: &str, _pr: u64) {}
+    fn checks_read(&self, _cwd: &Path, _pr: u64) -> ChecksRead {
+        ChecksRead {
+            verdict: "green".to_string(),
+            github_block: None,
+            optional_unresolved: Some(Some(0)),
+            rerun_recovered: None,
+            rerun_failures: None,
+        }
+    }
+    fn fno_shell(
+        &self,
+        _cwd: &Path,
+        _args: &[String],
+    ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+        Ok((Some(0), Vec::new(), Vec::new()))
     }
     fn covered_head(&self, _cwd: &Path) -> Option<String> {
         Some(self.head.borrow().clone())
@@ -120,6 +142,13 @@ fn ask(effect: Effect) -> Request {
         require_checks: false,
         covered_head: None,
         decide_only: false,
+        authority: None,
+        accept_flake: false,
+        supplied_verdict: None,
+        supplied_counts: None,
+        supplied_rerun_recovered: None,
+        supplied_optional_unresolved: None,
+        supplied_github_blockers: None,
     }
 }
 

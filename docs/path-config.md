@@ -62,7 +62,7 @@ plans_dir = ".fno/plans/"   # the legacy default; unset it resolves to <space>/p
 # Per-resource overrides. TOML has no null: OMIT a key to derive it from
 # state_dir. Each line below names the default an omitted key resolves to.
 [paths]
-# graph_json      = ...   # default: <state_dir>/graph.json
+# graph_json      = ...   # default: <state_dir>/graph.json, the on-demand export (refresh with fno doctor graph export --now; the store is graph.db)
 # ledger_json     = ...   # default: <state_dir>/ledger.json
 # briefs_dir      = ...   # default: <state_dir>/briefs/
 # fleet_dir       = ...   # default: <state_dir>/fleet/
@@ -152,7 +152,7 @@ All paths derive from `~/.fno/`. This is also what `fno config setup migrate-pat
 For each accessor call (e.g. `paths.graph_json()`):
 
 1. If `config.paths.graph_json` is set in settings, resolve that value.
-2. Otherwise, derive from `state_dir` (e.g. `state_dir / "graph.json"`).
+2. Otherwise, derive from `state_dir`.
 3. Apply `$VAR` expansion, template substitution, `~` expansion, then `Path.resolve()`.
 
 Under `FNO_TEST_HERMETIC=1`, state accessors reject a resolved path outside the test sandbox. The fence reuses the events `HermeticEscapeError` and allowed-root calculation. `locks_dir()` is the deliberate config-free exception.
@@ -225,6 +225,14 @@ def test_my_feature(tmp_path, monkeypatch):
 ```
 
 The helper writes a minimal `config.toml` and sets `FNO_CONFIG`. The settings cache keys on that declaration, so no cache clearing is needed.
+
+### Sandbox a shell reproduction
+
+`FNO_HOME` does not sandbox the backlog. Config `state_dir` decides where the graph lives. A store write under `FNO_HOME` that targets the default store (`~/.fno`) is refused. Writes to explicit graph paths and to the FNO_CONFIG store are served. To sandbox a shell reproduction, write a `config.toml` that holds `schema_version = 1` and `state_dir = "<tmp dir>"`, then export `FNO_CONFIG=<that file>`.
+
+Confirm with a read before the first write: `fno backlog get <live node id>` must answer "No node matching". A read that returns the live node means the sandbox is not on. Do not write.
+
+Known leak: the graph.html render can still drop a file in `~/.fno` under this recipe, even though the store itself stays in the sandbox. A later fix retires this note.
 
 ## Settings cache key
 

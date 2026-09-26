@@ -212,3 +212,53 @@ fn reseat_refusals_mutate_nothing() {
         "the refusals never touched portal, attach, or tab state"
     );
 }
+
+/// The detach/resume identity join (spawn_journal::DetachedPane) must survive
+/// the registry backfill race: a detach inside the first tick captures no
+/// harness identity, and the member gains it only afterwards. The join
+/// narrows on the identity the SNAPSHOT carries, so an identity-less snapshot
+/// still pairs with the member it was created from.
+#[test]
+fn detached_pane_matches_member_after_identity_backfill() {
+    let identity_less = DetachedPane {
+        name: "keeper-worker".into(),
+        harness: None,
+        harness_session_id: None,
+        cwd: String::new(),
+        squad: 1,
+        squad_name: String::new(),
+        squad_key: String::new(),
+        origins: Vec::new(),
+        tab_name: None,
+    };
+    let enriched = crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: true,
+        tab_name: None,
+        cwd: None,
+        worker: Some("keeper-worker".into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some("keeper-session".into()),
+        pane_id: None,
+    };
+    assert!(
+        identity_less.matches_member(&enriched),
+        "an identity-less detach snapshot joins its backfilled member"
+    );
+    let named = DetachedPane {
+        harness: Some("codex".into()),
+        harness_session_id: Some("keeper-session".into()),
+        ..identity_less
+    };
+    assert!(named.matches_member(&enriched), "full identity still joins");
+    let foreign = DetachedPane {
+        harness: Some("claude".into()),
+        ..named
+    };
+    assert!(
+        !foreign.matches_member(&enriched),
+        "a snapshot's own identity still narrows against the member"
+    );
+}

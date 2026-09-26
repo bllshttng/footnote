@@ -23,7 +23,8 @@
 //! unit-testable in isolation.
 
 use crate::graph_store::WorkState;
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 /// The row verdict: retire now, or keep with a named reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,12 @@ pub struct GcRow {
     /// nothing, so a fresh mtime without a living writer is an artifact -
     /// but an absent or unanswerable pid never does: only ESRCH is death.
     pub pid_gone: bool,
+    /// The claude roster row exists, is non-terminal by state, and carries
+    /// no pid in a listing that carries pids (change 9): a stale
+    /// pre-death row. State alone reads live and lies; the hosted process
+    /// is the truth. False for every non-claude row and for a snapshot
+    /// that answered Unknown or carried warnings.
+    pub process_gone: bool,
     /// A `reap --release` ruling for THIS row: the release lifts
     /// the transcript-unresolved gate, so an absent transcript age retires
     /// instead of holding. Set only when the verb's ruling matched the row;
@@ -134,6 +141,19 @@ pub struct GcRow {
     /// ESRCH. The origin gate skips such a row, so it is judged like any
     /// other row; every downstream gate still applies.
     pub origin_corpse: bool,
+    /// The registry's own status reads terminal (`exited`,
+    /// `permanent-dead`): a sweep observed the exit and stamped it. Distinct
+    /// from `session_terminal` (the LIVE roster's state, which a session
+    /// old enough to have exited usually no longer appears in). The origin
+    /// gate reads it for the adopted-retire arm.
+    pub registry_terminal: bool,
+    /// The open-work window (change 2): how long an OPEN-work row may
+    /// sit transcript-quiet before its node stops counting as evidence of a
+    /// live session. Quiet past it, the row falls to the same grace gate a
+    /// done row takes; inside it, the keep names the pinning node. Resolved
+    /// from `agents.reap.open_work_retire_s`, defaulting well above the
+    /// ordinary grace.
+    pub open_work_retire_s: i64,
 }
 
 impl GcRow {
@@ -212,6 +232,11 @@ pub enum KeepReason {
     PlanningUnclosed { node: String, status: String },
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
+    /// Open work whose transcript is quiet INSIDE the open-work window
+    /// (change 2): the row keeps for now, but the keep has a clock -
+    /// quiet past the window falls to the grace gate - and it names the
+    /// stale node pinning it, so an operator can act on the node.
+    OpenWorkStale { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
     /// live in the only sense the law allows. A terminal harness state
     /// overrides it (the roster's `done` is not a turn boundary), and so
@@ -230,6 +255,12 @@ pub enum KeepReason {
     /// `merge_status` not `merged`): a retirement here strands the PR with
     /// nothing left to drive it. The remedy is merge, not reap.
     OpenPr { node: String, pr: u64 },
+    /// The node reads in_progress and the row's claude roster row is a
+    /// stale pre-death row (non-terminal state, no pid): the worker died
+    /// with uncommitted work on the node (law d-71d03643: resumed, never
+    /// stranded). The keep holds the row so the nudge ladder's Resume rung
+    /// can run `fno agents resume` on it.
+    DeadOpenWork { node: String },
 }
 
 impl KeepReason {
@@ -248,11 +279,15 @@ impl KeepReason {
                 "planning assignment not finished by this session"
             }
             KeepReason::OpenWork { .. } => "open work",
+            KeepReason::OpenWorkStale { .. } => {
+                "open work inside the retire window: the stale node pins the row"
+            }
             KeepReason::Active { .. } => "active",
             KeepReason::TranscriptUnresolved => "transcript unresolved",
             KeepReason::GraphUnreadable => "graph unreadable",
             KeepReason::OpenDoRow { .. } => "open do row on done node",
             KeepReason::OpenPr { .. } => "open pr",
+            KeepReason::DeadOpenWork { .. } => "dead open work",
         }
     }
 }
@@ -289,10 +324,25 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     // fact about a session, and done-plus-quiet does not make it fno's to
     // remove - unless the row is provably a registry corpse, in which case
     // there is no session left to own it and the row is judged like any
-    // other: every downstream gate still applies.
+    // other: every downstream gate still applies. An adopted row whose
+    // status reads terminal and that holds no open PR is a finished session
+    // nobody owns anymore: it takes the same grace gate a spawned row takes
+    // instead of keeping forever as a phantom. The graph's node mentions do
+    // NOT pin it: a terminal adopted session drives nothing, and its
+    // sessions[] rows are history from before the adopt (a recycled
+    // blueprinter is named on dozens of still-open nodes it will never
+    // touch again). An open PR is different - retiring here must not be
+    // readable as the PR's remedy - so an open-PR row keeps. A live adopted
+    // row keeps exactly as before.
     if row.origin.as_deref() != Some("spawn") && !row.origin_corpse {
-        let origin = row.origin.clone().unwrap_or_default();
-        return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
+        let adopted_finished = row.origin.as_deref() == Some("adopted")
+            && row.registry_terminal
+            && row.open_pr.is_none();
+        if !adopted_finished {
+            let origin = row.origin.clone().unwrap_or_default();
+            return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
+        }
+        return grace_gate(row, grace_secs);
     }
     // The cascade's holds relay through here so every keep is named by the
     // policy: a conflict between witnesses, or PR evidence contradicting a
@@ -308,7 +358,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // fno never stopped the row. The grace gate supplies the quiet
             // conjunct, so a done-and-quiet row with no node releases, and
             // a row that never reported done keeps exactly as before.
-            if row.turn_ended {
+            if row.turn_ended || row.session_released() {
                 grace_gate(row, grace_secs)
             } else {
                 (GcAction::Keep, Some(KeepReason::NoProvenance))
@@ -346,14 +396,12 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                     // nothing left to plan), and the planner halted (its
                     // last inside-leg report reads done: the turn ended
                     // with no plan, and it is not waiting on anything).
-                    let unfinished = assignments.iter().find(|(n, s)| {
-                        let moved_on = PLANNING_MOVED_ON_STATUSES.contains(&s.as_str());
-                        let marked = row.planning_closed.contains(n)
-                            || row.planning_plan_written.contains(n);
-                        let complete = PLANNING_COMPLETE_STATUSES.contains(&s.as_str()) && marked;
-                        !(moved_on || complete || row.turn_ended)
-                    });
-                    return match unfinished {
+                    return match crate::planning_lane::unfinished(
+                        assignments,
+                        &row.planning_closed,
+                        &row.planning_plan_written,
+                        row.turn_ended,
+                    ) {
                         None => grace_gate(row, PLANNING_IDLE_RETIRE_SECS),
                         Some((n, s)) => (
                             GcAction::Keep,
@@ -381,6 +429,23 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                     );
                 }
             }
+            // Law d-71d03643: a node that lost its worker is resumed,
+            // never stranded. A stale pre-death roster row on in_progress
+            // work keeps under this reason BEFORE the session-shaped
+            // releases below, so a roster `failed` state does not retire
+            // open work, and the nudge ladder's Resume rung is its owner.
+            // A live newer peer on the node still releases: that peer is
+            // the successor this row must not double-drive.
+            if status == "in_progress"
+                && row.process_gone
+                && row.superseded_by_live_peer.is_none()
+                && !row.node_merged
+            {
+                return (
+                    GcAction::Keep,
+                    Some(KeepReason::DeadOpenWork { node: node.clone() }),
+                );
+            }
             // changes 1, 3, 6, 8: open NODE state alone is not
             // evidence a SESSION is alive. Four positive facts say this
             // row's own story is over, and each falls through to the same
@@ -394,13 +459,31 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             if row.session_released() {
                 return grace_gate(row, grace_secs);
             }
-            (
-                GcAction::Keep,
-                Some(KeepReason::OpenWork {
-                    node: node.clone(),
-                    status: status.clone(),
-                }),
-            )
+            // change 2: open NODE state alone is not evidence a
+            // SESSION is alive, and inside this window neither is an open
+            // node plus quiet. A row quiet past the open-work window falls
+            // to the same grace gate a released row takes; a row inside it
+            // keeps, and the keep names the node pinning it, so an operator
+            // can act on the node rather than on the row. An UNRESOLVED
+            // transcript has no clock to age past anything, so it keeps
+            // under the unchanged open-work reason.
+            match row.transcript_age_s {
+                Some(age) if age > row.open_work_retire_s => grace_gate(row, grace_secs),
+                Some(_) => (
+                    GcAction::Keep,
+                    Some(KeepReason::OpenWorkStale {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }),
+                ),
+                None => (
+                    GcAction::Keep,
+                    Some(KeepReason::OpenWork {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }),
+                ),
+            }
         }
         WorkState::AllDone { .. } => grace_gate(row, grace_secs),
     }
@@ -447,7 +530,28 @@ pub fn tree_action(row: &GcRow) -> TreeAction {
 /// resolves a row by short_id or by name, so the fallback is a real handle,
 /// not a display string. Written once so the sweep never probes under one
 /// name and reports under another.
-pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
+pub fn row_handle(e: &crate::state::RegistryEntry) -> String {
+    // The session id resolves for BOTH populations (`fno agents truth`
+    // answers a full harness session id for registry and roster rows alike);
+    // an fno short id resolves for registry rows only, so a roster-only
+    // row probed under its short id always answered not-found and the
+    // sweep built for it could never age one.
+    if let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) {
+        return sid.to_string();
+    }
+    if e.short_id.is_empty() {
+        e.name.clone()
+    } else {
+        e.short_id.clone()
+    }
+}
+
+/// The label a sweep REPORTS a row under: the short id, falling back to the
+/// name - the operator-facing identity every summary bucket, hold, and
+/// release ruling keys on. change 1 split this from [`row_handle`],
+/// the PROBE handle: the probe must ask the harness session id, while the
+/// report keeps the handle an operator (and `reap --release`) already holds.
+pub fn row_label(e: &crate::state::RegistryEntry) -> String {
     if e.short_id.is_empty() {
         e.name.clone()
     } else {
@@ -462,7 +566,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
 /// max +240 h). A handle the probe cannot resolve is absent from the map, and
 /// the sweep reads absence as `None`: an unresolved transcript is never a
 /// quiet one.
-pub(crate) fn probe_entry_ages(
+pub fn probe_entry_ages(
     entries: &[&crate::state::RegistryEntry],
 ) -> std::collections::HashMap<String, Option<i64>> {
     let handles: Vec<String> = entries.iter().map(|e| row_handle(e)).collect();
@@ -473,16 +577,6 @@ pub(crate) fn probe_entry_ages(
         .into_iter()
         .map(|(handle, probe)| (handle, probe.last_activity_age_s.map(|a| a as i64)))
         .collect()
-}
-
-/// Per-row arm of the same seam, for the reapers whose loop shape predates the
-/// batch: one single-flighted probe answers this row only. `pub` because the
-/// client binary's pair leg rides it too.
-pub fn probe_row_age(entry: &crate::state::RegistryEntry) -> Option<i64> {
-    probe_entry_ages(&[entry])
-        .get(&row_handle(entry))
-        .copied()
-        .flatten()
 }
 
 // --- the sweep shells -------------------------------------------------------
@@ -543,7 +637,8 @@ pub fn gc_sweep(
     // wrote, so a filled row reads closed and its session falls through to
     // the ordinary quiet and receipt gates. A refused settle leaves the row
     // kept under its existing reason.
-    let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
+    let (settled, mut refused) = gc_sweep::settle_stale_do_rows(home);
+    refused.extend(crate::phase_close::settle_ship_rows(home));
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
     let mut summary = gc_sweep::run(
         home,
@@ -613,9 +708,10 @@ pub fn gc_sweep_release(
 pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSummary {
     // The settle plan is read-only, and the rehearsal subtracts it from the
     // graph read so the report shows the outcome the real pass would produce.
-    let planned = gc_sweep::plan_stale_do_rows(home);
+    let mut pr_reader = crate::additional_prs::gh_pr_state_reader();
+    let (planned, stamps) = crate::additional_prs::plan_settle(home, &mut pr_reader);
     let read = |h: &AgentsHome| {
-        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned))
+        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &stamps))
     };
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped),
     // so an unused placeholder path satisfies the shared signature.
@@ -644,7 +740,11 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         .map(|row| (row.node, row.harness, row.session_id))
         .collect();
     // The ladder's DRY-RUN plan: decisions only, no effect, no state write.
-    summary.open_pr_nudge = crate::pr_nudge::plan(home, &summary.open_pr_rows, grace_secs);
+    // The ladder's input is the concatenation: open-PR rows first, then the
+    // dead-worker rows, in one slice so `cleanup_state_files` sees both.
+    let mut ladder_rows = summary.open_pr_rows.clone();
+    ladder_rows.extend(summary.dead_work_rows.iter().cloned());
+    summary.open_pr_nudge = crate::pr_nudge::plan(home, &ladder_rows, grace_secs);
     summary
 }
 
@@ -996,12 +1096,20 @@ pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_re
 
 /// The production roster sweep the retire arm runs: the real enumeration
 /// and removal, `dry_run` false, at the scope the caller resolved.
+/// The production dead-crown sweep the retire arm runs: apply on. The
+/// manual verb calls `crown_reap::sweep` itself so a dry run can report
+/// without applying.
+pub fn production_crown_sweep(home: &AgentsHome, cwd: &Path) -> crate::crown_reap::CrownReap {
+    crate::crown_reap::production_sweep(home, cwd, true)
+}
+
 pub fn production_roster_sweep(
     home: &AgentsHome,
+    cwd: &Path,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
 ) -> crate::roster_reap::RosterReapSummary {
-    crate::roster_reap::roster_reap(home, grace_secs, scope, false)
+    crate::roster_reap::roster_reap(home, cwd, grace_secs, scope, false)
 }
 
 pub fn maybe_retirement_sweep(
@@ -1015,9 +1123,11 @@ pub fn maybe_retirement_sweep(
     tab_sweep: fn() -> crate::reap_render::MuxSweep,
     roster_sweep: fn(
         &AgentsHome,
+        &Path,
         i64,
         crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary,
+    crown_sweep: fn(&AgentsHome, &Path) -> crate::crown_reap::CrownReap,
 ) {
     if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -1031,19 +1141,45 @@ pub fn maybe_retirement_sweep(
         let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
+        // The dead-crown sweep runs BEFORE the registry sweep: a vacated
+        // crown frees the territory this tick, so the registry pass reads a
+        // world that already answers for it.
+        let crowns = crown_sweep(&home, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         // Locked Decision 5: the nudge ladder rides the daemon's retire arm
         // only, after the sweep that classified the open-PR rows. A manual
-        // verb run never nudges; its dry run only prints the plan.
-        crate::pr_nudge::run_ladder(&home, &emitter, &summary.open_pr_rows, grace_secs);
+        // verb run never nudges; its dry run prints the plan. The ladder's
+        // input is the concatenation: open-PR rows first, then the
+        // dead-worker rows, in one slice so `cleanup_state_files` sees both.
+        let mut ladder_rows = summary.open_pr_rows.clone();
+        ladder_rows.extend(summary.dead_work_rows.iter().cloned());
+        crate::pr_nudge::run_ladder(&home, &emitter, &ladder_rows, grace_secs);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // The roster sweep runs AFTER the registry sweep: a row the registry
         // sweep retires this pass is already gone from the registry the
         // roster sweep loads. A session the roster sweep removes becomes a
         // corpse for the NEXT registry pass, through `origin_corpse`.
         let scope = crate::agents_config::roster_scope(&grace_cwd);
-        let roster = roster_sweep(&home, grace_secs, scope);
+        let roster = roster_sweep(&home, &grace_cwd, grace_secs, scope);
         let scope_off = scope == crate::agents_config::RosterScope::Off;
+        let mut builds_reclaimed = 0usize;
+        let mut builds_bytes = 0u64;
+        let mut builds_unread = false;
+        for root in crate::daemon::worktree_sweep::registry_repo_roots(&home) {
+            let root = Path::new(&root);
+            if crate::cargo_build_dirs::workspace_manifests(root).is_empty() {
+                continue;
+            }
+            let report = crate::cargo_build_dirs::reclaim_idle_trees(root, true, SystemTime::now());
+            builds_reclaimed += report.reclaimed;
+            builds_bytes += report.reclaimed_bytes;
+            builds_unread |= report.unread.is_some();
+        }
+        let builds_detail = if builds_unread {
+            "builds=unread".to_string()
+        } else {
+            format!("builds=reclaimed {builds_reclaimed} bytes {builds_bytes}")
+        };
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
         // cadence, so the operator never runs the manual
@@ -1061,20 +1197,30 @@ pub fn maybe_retirement_sweep(
             "unreadable".to_string()
         } else {
             format!(
-                "retired {} kept {} refused {}",
+                "enumerated {} retired {} kept {} refused {}",
+                roster.enumerated,
                 roster.retired.len(),
                 roster.kept.len(),
                 roster.refused.len()
             )
         };
+        let crowns_detail = if crowns.unread.is_some() {
+            "crowns=unreadable".to_string()
+        } else {
+            format!(
+                "crowns=vacated {} kept {}",
+                crowns.vacated.len(),
+                crowns.kept.len()
+            )
+        };
         let detail = format!(
-            "roster={roster_detail} {mux_detail} held={}",
+            "roster={roster_detail} {mux_detail} {crowns_detail} {builds_detail} held={}",
             summary.holds.len()
         );
         // `acted` counts BOTH sweeps' retirements: the registry sweep's and
         // the roster sweep's. A tick that retired only roster sessions reads
         // acted>0, never a held zero.
-        let acted = summary.retired.len() + roster.retired.len();
+        let acted = summary.retired.len() + roster.retired.len() + builds_reclaimed;
         // A zero-acted tick says which zero it was: a sweep that could not
         // read its registry, nothing classified, or work judged and held.
         let skip_reason = if acted == 0 {
@@ -1143,10 +1289,17 @@ mod tests {
     /// live claude roster.
     fn noop_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
         crate::roster_reap::RosterReapSummary::default()
+    }
+
+    /// Same stub for the crown seam: the arm wiring is under test, never
+    /// the dead-crown sweep body.
+    fn noop_crown_sweep(_home: &AgentsHome, _cwd: &Path) -> crate::crown_reap::CrownReap {
+        crate::crown_reap::CrownReap::default()
     }
 
     use super::*;
@@ -1169,17 +1322,30 @@ mod tests {
     }
 
     fn count_retire_rows(path: &std::path::Path) -> usize {
-        std::fs::read_to_string(path)
-            .map(|content| {
-                content
-                    .lines()
-                    .filter(|l| {
-                        l.contains("\"type\":\"control_plane_tick\"")
-                            && l.contains("\"arm\":\"retire\"")
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        // Committed rows, not journal bytes: the store cutover stopped journal
+        // appends, so emitted ticks live only in the store beside the journal.
+        let _ = crate::event_store::import_all(path);
+        crate::event_store::query_events(
+            path,
+            &crate::event_store::EventQuery {
+                types: vec!["control_plane_tick".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.line)
+                .ok()
+                .and_then(|row| {
+                    row.get("data")
+                        .and_then(|d| d.get("arm"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|arm| arm == "retire")
+                })
+                .unwrap_or(false)
+        })
+        .count()
     }
 
     fn wait_for_retire_row(path: &std::path::Path) -> usize {
@@ -1233,6 +1399,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             // A second tick inside the window is refused by the elapsed
             // check: no second run can start until the window closes.
@@ -1246,6 +1413,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             let rows = wait_for_retire_row(&home.events_jsonl());
             assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
@@ -1295,10 +1463,10 @@ mod tests {
                 interval,
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             wait_for_retire_row(&home.events_jsonl());
-            let row = std::fs::read_to_string(home.events_jsonl())
-                .unwrap()
+            let row = crate::events::committed_journal_text(&home.events_jsonl())
                 .lines()
                 .filter(|l| {
                     l.contains("\"type\":\"control_plane_tick\"")
@@ -1311,6 +1479,13 @@ mod tests {
                 row["data"]["interval_s"],
                 interval.as_secs(),
                 "the arms row must carry the interval the guard compared"
+            );
+            assert!(
+                row["data"]["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("builds=reclaimed 0 bytes 0"),
+                "the retire receipt names the build reclaim pass: {row}"
             );
             // The body handed back the NEXT window's interval, resolved
             // under the same env: the handoff loop is closed.
@@ -1352,6 +1527,7 @@ mod tests {
         tab_sweep: fn() -> crate::reap_render::MuxSweep,
         roster_sweep: fn(
             &AgentsHome,
+            &std::path::Path,
             i64,
             crate::agents_config::RosterScope,
         ) -> crate::roster_reap::RosterReapSummary,
@@ -1374,13 +1550,13 @@ mod tests {
                 Duration::from_secs(300),
                 tab_sweep,
                 roster_sweep,
+                noop_crown_sweep,
             );
             // The production seams probe staged rows through real
             // subprocesses; in a sandbox without a transcript store those
             // probes run out their whole timeout before the tick lands.
             wait_for_retire_row_within(&home.events_jsonl(), 30);
-            std::fs::read_to_string(home.events_jsonl())
-                .unwrap()
+            crate::events::committed_journal_text(&home.events_jsonl())
                 .lines()
                 .filter(|l| {
                     l.contains("\"type\":\"control_plane_tick\"")
@@ -1464,6 +1640,7 @@ mod tests {
     /// reads back what the arm handed the sweep.
     fn recording_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
@@ -1483,6 +1660,7 @@ mod tests {
     /// enumeration-failed shape the arm must name on the tick.
     fn unreadable_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
@@ -1493,6 +1671,7 @@ mod tests {
                 node: None,
                 reason: "roster unreadable: test stub".to_string(),
                 retired: false,
+                class: "contested",
             }],
             ..Default::default()
         }
@@ -1530,7 +1709,7 @@ mod tests {
             row["data"]["detail"]
                 .as_str()
                 .unwrap()
-                .contains("roster=retired 0 kept 0 refused 0"),
+                .contains("roster=enumerated 0 retired 0 kept 0 refused 0"),
             "{:?}",
             row["data"]["detail"]
         );
@@ -1765,6 +1944,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             // The production age probe pays a real subprocess on this
             // fixture (two probes, seconds apiece under load), so the tick
@@ -1772,8 +1952,7 @@ mod tests {
             wait_for_line(&home.events_jsonl(), "\"arm\":\"retire\"", 90);
             wait_for_line(&home.events_jsonl(), "\"type\":\"retire_holds\"", 90);
         });
-        let holds_row = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        let holds_row = crate::events::committed_journal_text(&home.events_jsonl())
             .lines()
             .find(|l| l.contains("\"type\":\"retire_holds\""))
             .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1790,7 +1969,10 @@ mod tests {
     }
 
     /// AC5-EDGE: a tick with zero holds writes NO `retire_holds`
-    /// row, even when the pass kept a row under a hold-free bucket.
+    /// row, even when the pass kept a row under a hold-free bucket. The
+    /// fixture is an origin-unrecorded row (the NotSpawn keep is the one
+    /// hold-free keep); a terminal ADOPTED row now takes the adopted-retire
+    /// carve-out and lands in a hold-carrying bucket instead.
     #[test]
     fn a_tick_with_zero_holds_writes_no_retire_holds_event() {
         let _env = crate::claims::test_env_lock()
@@ -1800,14 +1982,14 @@ mod tests {
         let registry = serde_json::json!({
             "schema_version": 10,
             "agents": [{
-                "name": "target-x-1-adopted",
+                "name": "target-x-1-foreign",
                 "cwd": dir.display().to_string(),
                 "status": "exited",
                 "created_at": "2026-09-06T00:00:00Z",
                 "harness": "claude",
-                "harness_session_id": "sess-adopted",
+                "harness_session_id": "sess-foreign",
                 "short_id": "abc123",
-                "origin": "adopted",
+                "origin": null,
             }],
         });
         std::fs::create_dir_all(home.root()).unwrap();
@@ -1822,8 +2004,7 @@ mod tests {
             || crate::reap_render::MuxSweep::Skipped,
             noop_roster_sweep,
         );
-        let count = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        let count = crate::events::committed_journal_text(&home.events_jsonl())
             .lines()
             .filter(|l| l.contains("\"type\":\"retire_holds\""))
             .count();
@@ -1836,10 +2017,7 @@ mod tests {
     fn wait_for_line(path: &std::path::Path, needle: &str, secs: u64) {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
-            if std::fs::read_to_string(path)
-                .map(|c| c.contains(needle))
-                .unwrap_or(false)
-            {
+            if crate::events::committed_journal_text(path).contains(needle) {
                 return;
             }
             if Instant::now() >= deadline {
@@ -1895,11 +2073,11 @@ mod tests {
         assert!(!claim.exists());
         let quiet = state_file_sweep(&home, &emitter, &cwd);
         assert_eq!(quiet.totals.scanned, 0);
-        let lines: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let lines: Vec<serde_json::Value> =
+            crate::events::committed_journal_text(&home.events_jsonl())
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
         assert_eq!(lines.len(), 2, "each periodic pass must emit one event");
         let event = &lines[0];
         assert_eq!(event["type"], "state_reap");
@@ -1998,7 +2176,7 @@ mod tests {
         let summary = state_file_sweep(&home, &emitter, &cwd);
 
         assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
-        let raw = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let raw = crate::events::committed_journal_text(&home.events_jsonl());
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "state_reap");
         assert_ne!(event["type"], "event_payload_too_large");
@@ -2130,11 +2308,30 @@ mod tests {
         // hold it back anyway.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(0), None);
         assert_eq!(reaped, 0);
-        // orphan_reap_sweep is ephemeral-class, so retention routing lands the
-        // row in the .ephemeral sibling, never in the journal proper.
-        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
-        assert!(line.contains("\"skipped\":true"), "{line}");
-        assert!(line.contains("\"candidates\":0"), "{line}");
+        // orphan_reap_sweep is ephemeral-class: the store keeps the row in the
+        // same journal with retention_class ephemeral; the sibling is never
+        // created.
+        let rows =
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].retention_class, "ephemeral");
+        assert!(
+            rows[0].line.contains("\"skipped\":true"),
+            "{}",
+            rows[0].line
+        );
+        assert!(
+            rows[0].line.contains("\"candidates\":0"),
+            "{}",
+            rows[0].line
+        );
+        assert!(!PathBuf::from(format!(
+            "{}{}",
+            path.display(),
+            crate::event_store::EPHEMERAL_SUFFIX
+        ))
+        .exists());
     }
 
     /// A pid that changed identity between the table read and the signal is
@@ -2178,10 +2375,25 @@ mod tests {
         // A threshold no live process can reach, so the sweep finds nothing.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), Some(&[]));
         assert_eq!(reaped, 0);
-        // Same retention routing as above: the sweep row lives in the sibling.
-        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
-        assert!(line.contains(ORPHAN_SWEEP_EVENT), "{line}");
-        assert!(line.contains("\"reaped\":0"), "{line}");
+        // Same store routing as above: the sweep row is committed with
+        // retention_class ephemeral and no sibling journal is ever created.
+        let rows =
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].retention_class, "ephemeral");
+        assert!(
+            rows[0].line.contains(ORPHAN_SWEEP_EVENT),
+            "{}",
+            rows[0].line
+        );
+        assert!(rows[0].line.contains("\"reaped\":0"), "{}", rows[0].line);
+        assert!(!PathBuf::from(format!(
+            "{}{}",
+            path.display(),
+            crate::event_store::EPHEMERAL_SUFFIX
+        ))
+        .exists());
     }
 
     /// The process table read is one `ps` for the whole machine: a sweep whose
@@ -2224,19 +2436,136 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }
 
-    /// The planning lane (AC3-HP): a blueprinter named on a node that reached
+    /// The planning lane (AC3-HP): a blueprint session named on a node that reached
     /// ready has FINISHED its assignment - the plan was written, the node
     /// moved on, and THIS session's own blueprint row carries `ended_at`.
     /// Quiet past the 1200 s planner grace (d-81c6da7e), not the 900 s
     /// default, retires it without closing the feature or inventing a node.
+    /// An adopted row the harness finished: registry status terminal, no
+    /// open PR. Stale graph mentions do not pin it. It takes the same grace
+    /// gate a spawned row takes instead of keeping forever as a phantom.
+    fn adopted_finished() -> GcRow {
+        GcRow {
+            origin: Some("adopted".into()),
+            registry_terminal: true,
+            work: WorkState::NoProvenance,
+            transcript_age_s: Some(GRACE + 1),
+            ..retiring()
+        }
+    }
+
+    #[test]
+    fn an_exited_adopted_row_with_no_open_work_retires_after_grace() {
+        assert_eq!(
+            gc_decide(&adopted_finished(), GRACE),
+            (GcAction::Retire, None),
+            "quiet past the grace window, a finished adopted row retires"
+        );
+        // Inside the window the session keeps, exactly like a spawned row.
+        let young = GcRow {
+            transcript_age_s: Some(GRACE - 1),
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::Active { age_s: GRACE - 1 })
+            ),
+            "inside the grace window the row is not retired yet"
+        );
+        // An unresolvable transcript is never quiet: keep, never retire.
+        let unaged = GcRow {
+            transcript_age_s: None,
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&unaged, GRACE),
+            (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
+        );
+    }
+
+    #[test]
+    fn a_live_adopted_row_still_keeps_as_not_spawn() {
+        // Terminality is the registry's own status here; a LIVE adopted row
+        // keeps on the origin gate exactly as before.
+        let live = GcRow {
+            registry_terminal: false,
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&live, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+        // So does an adopted row whose status never went terminal at all.
+        let untouchable = GcRow {
+            origin: Some("adopted".into()),
+            registry_terminal: false,
+            work: WorkState::AllDone { nodes: vec![] },
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&untouchable, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+    }
+
+    #[test]
+    fn an_adopted_row_still_driving_work_keeps() {
+        // Stale graph mentions do NOT pin a terminal adopted row: its
+        // sessions[] rows are history from before the adopt (a recycled
+        // blueprinter is named on dozens of still-open nodes it will never
+        // touch again), and a terminal session drives nothing. So being
+        // named on an open node still retires, quiet past the grace.
+        let named_on_open_node = GcRow {
+            work: WorkState::Open {
+                node: "x-open".into(),
+                status: "in_progress".into(),
+            },
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&named_on_open_node, GRACE),
+            (GcAction::Retire, None)
+        );
+        // An open PR is the one hold that survives: retiring here must not
+        // be readable as the PR's remedy - the remedy is merge, not reap.
+        let open_pr = GcRow {
+            open_pr: Some(("x-open".into(), 42)),
+            ..adopted_finished()
+        };
+        assert_eq!(
+            gc_decide(&open_pr, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn {
+                    origin: "adopted".into()
+                })
+            ),
+        );
+    }
+
     #[test]
     fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
         let planner = GcRow {
@@ -2313,7 +2642,7 @@ mod tests {
             gc_decide(&unplannable, GRACE),
             (
                 GcAction::Keep,
-                Some(KeepReason::OpenWork {
+                Some(KeepReason::OpenWorkStale {
                     node: "x-cccc".into(),
                     status: "ready".into(),
                 })
@@ -2912,6 +3241,27 @@ mod tests {
             gc_decide(&open, GRACE),
             (
                 GcAction::Keep,
+                Some(KeepReason::OpenWorkStale {
+                    node: "N3".into(),
+                    status: "in_review".into()
+                })
+            )
+        );
+        // change 2: an open row with NO transcript age has no clock,
+        // so it keeps under the unchanged open-work reason - it can never
+        // age past the window, and absence is never quiet.
+        let unclocked = GcRow {
+            work: WorkState::Open {
+                node: "N3".into(),
+                status: "in_review".into(),
+            },
+            transcript_age_s: None,
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&unclocked, GRACE),
+            (
+                GcAction::Keep,
                 Some(KeepReason::OpenWork {
                     node: "N3".into(),
                     status: "in_review".into()
@@ -3143,7 +3493,7 @@ mod tests {
         }
         assert!(matches!(
             gc_decide(&open_row("in_review"), GRACE),
-            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+            (GcAction::Keep, Some(KeepReason::OpenWorkStale { .. }))
         ));
     }
 
@@ -3253,8 +3603,87 @@ mod tests {
         let row = open_row("in_review");
         assert!(matches!(
             gc_decide(&row, GRACE),
-            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+            (GcAction::Keep, Some(KeepReason::OpenWorkStale { .. }))
         ));
+    }
+
+    /// change 2, AC2-EDGE: an Open row quiet PAST the open-work
+    /// window falls to the grace gate and retires; the same row INSIDE the
+    /// window keeps, and the keep names its pinning node.
+    #[test]
+    fn an_open_row_past_the_open_work_window_retires() {
+        let row = GcRow {
+            transcript_age_s: Some(crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64 + 1),
+            ..open_row("in_progress")
+        };
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+        let inside = GcRow {
+            transcript_age_s: Some(crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64 - 1),
+            ..open_row("in_progress")
+        };
+        assert_eq!(
+            gc_decide(&inside, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenWorkStale {
+                    node: "N1".into(),
+                    status: "in_progress".into()
+                })
+            )
+        );
+    }
+
+    /// change 2, AC2-HP: a NoProvenance row whose SESSION carries a
+    /// terminal state but which never reported a finished turn reaches the
+    /// grace gate - a quiet row past the grace retires instead of keeping
+    /// forever on the missing turn marker.
+    #[test]
+    fn a_terminal_session_releases_a_no_provenance_row_without_turn_ended() {
+        let row = GcRow {
+            work: WorkState::NoProvenance,
+            session_terminal: Some("done".into()),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+        // The release still lands in the grace gate: the turn-ended release
+        // keeps its quiet conjunct, so a row inside the grace keeps as
+        // active (the terminal override, not this widened arm, is what
+        // retires a young terminal row).
+        let young = GcRow {
+            work: WorkState::NoProvenance,
+            turn_ended: true,
+            transcript_age_s: Some(10),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 }))
+        );
+    }
+
+    /// change 1: the handle a row is probed under prefers the
+    /// harness session id - `fno agents truth` resolves a full session id
+    /// for registry AND roster rows alike, while a short id resolves for
+    /// registry rows only. A registry row with no session id falls back to
+    /// its short id, so the registry sweep keeps answering as it does today
+    /// (AC1-EDGE).
+    #[test]
+    fn row_handle_prefers_the_session_id_and_falls_back_to_short_id() {
+        let roster_only = crate::state::RegistryEntry::new(
+            Some("11111111-2222-4333-8444-555555555555".to_string()),
+            crate::state::Lineage::unproven("test"),
+        );
+        assert_eq!(
+            crate::gc::row_handle(&roster_only),
+            "11111111-2222-4333-8444-555555555555"
+        );
+        let mut e = crate::state::RegistryEntry::default();
+        e.harness_session_id = None;
+        e.short_id = "ab12cd34".into();
+        assert_eq!(crate::gc::row_handle(&e), "ab12cd34");
+        e.short_id = String::new();
+        e.name = "worker-1".into();
+        assert_eq!(crate::gc::row_handle(&e), "worker-1");
     }
 
     /// An adopted orphan row named on no node survives the sweep:
@@ -3281,11 +3710,14 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -3314,11 +3746,14 @@ mod tests {
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
+            process_gone: false,
             release_quiet: false,
             open_pr: Some((node.into(), pr)),
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            registry_terminal: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }
 

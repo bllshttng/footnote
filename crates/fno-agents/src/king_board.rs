@@ -40,9 +40,11 @@
 pub(crate) mod budget;
 mod claims;
 mod classify;
+pub mod pr_closure;
 pub(crate) mod prs;
 mod queues;
 pub(crate) mod scope;
+mod stranded;
 
 pub(crate) use queues::not_read_status;
 
@@ -59,9 +61,10 @@ pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
 };
 pub(crate) use scope::{
-    autonomous_merge_enabled, blocked_child_grace_minutes, expand_home, graph_json_path,
-    home_dot_fno, operator_lane_path, parse_manifest, project_map,
+    autonomous_merge_enabled, blocked_child_grace_minutes, graph_json_path, home_dot_fno,
+    operator_lane_path, parse_manifest, project_map,
 };
+pub(crate) use stranded::{read_stranded_trees, stranded_candidates, STRANDED_GRACE_MINUTES};
 
 /// Priorities a king treats as its own work. Lower bands are the operator's.
 pub(crate) const KING_PRIORITIES: [&str; 2] = ["p0", "p1"];
@@ -71,6 +74,22 @@ pub(crate) const DEAD_CLAIM_STATES: [&str; 2] = ["stale", "corrupted"];
 
 pub(crate) const TERMINAL_RUNGS: [&str; 2] = ["done", "superseded"];
 pub(crate) const LEGACY_DEFER_PREFIX: &str = "deferred:";
+
+/// The one terminal test every reader of a row agrees on: a terminal status
+/// stamp, a supersession pointer, or a completed stamp (legacy deferrals
+/// excepted). Gate, board, and PR classification share it so they can never
+/// disagree about what is live.
+pub(crate) fn is_terminal(entry: &Value) -> bool {
+    s_str(entry, "status")
+        .map(|s| TERMINAL_RUNGS.contains(&s))
+        .unwrap_or(false)
+        || entry.get("superseded_by").is_some_and(|v| !v.is_null())
+        || entry
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
+            .unwrap_or(false)
+}
 
 /// The literal commands a reader can re-run; they ARE the checkability
 /// property, so they sit beside the readers (board.py spelled them identically).
@@ -110,6 +129,35 @@ fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
         .flatten()
         .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
         .collect()
+}
+
+/// Split held nodes out of the ready feed: an open question whose `blocks`
+/// names a node keeps it off the board's ready list and under the `held`
+/// source with the question id. Pure so the split is testable; the
+/// held map is `needs::held_nodes` over the question journals. A ready feed
+/// that never answered passes through untouched - the split never reads an
+/// unreadable source as held-free.
+fn partition_held(
+    ready: SourceRead,
+    held: &std::collections::BTreeMap<String, String>,
+) -> (SourceRead, Vec<Value>) {
+    if held.is_empty() || !ready.is_ok() {
+        return (ready, Vec::new());
+    }
+    let (mut kept, mut held_rows) = (Vec::new(), Vec::new());
+    for mut row in ready.rows() {
+        let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+        match held.get(id) {
+            Some(qid) => {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("question_id".to_string(), json!(qid));
+                }
+                held_rows.push(row);
+            }
+            None => kept.push(row),
+        }
+    }
+    (SourceRead::ok(Value::Array(kept)), held_rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +229,19 @@ pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
+}
+
+/// node -> the node claim's acquired_at (epoch ms) for the distress
+/// staleness compare. A row without a `node:`-prefixed key, or whose
+/// acquired_at is absent or non-numeric, contributes nothing.
+pub(crate) fn claim_acquired_at_by_node(claim_rows: &[Value]) -> HashMap<String, i64> {
+    claim_rows
+        .iter()
+        .filter_map(|row| {
+            let node = s_str(row, "key")?.strip_prefix("node:")?;
+            Some((node.to_string(), s_i64(row, "acquired_at")?))
+        })
+        .collect()
 }
 
 /// Python `bool()` over a JSON value: null/false/empty-string/zero/empty
@@ -308,15 +369,25 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // binding, and crown scope. It asks the store (`backlog::api::rows`),
     // never the file: the store applies the same defaults the Python board's
     // `read_graph_strict` runs, and a read failure surfaces as a warning the
-    // same way an unreadable file did.
+    // same way an unreadable file did. It is also the one IN-PROCESS source,
+    // so it takes its slice check up front like every subprocess source: with
+    // no time left it is marked unreadable and skipped, never run unbudgeted
+    // (the collector measured 40,776ms against a 30,000ms
+    // budget, and an unbounded in-process read cannot honor a deadline).
     let graph_path = graph_json_path(&cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    let entries: Option<Vec<Value>> = match crate::backlog::api::rows(&store) {
-        Ok(e) => Some(e),
-        Err(e) => {
-            warnings.push(format!("graph unreadable: {}", e.0));
+    let entries: Option<Vec<Value>> = match budget.source_deadline() {
+        None => {
+            warnings.push("graph not read: board budget exhausted".to_string());
             None
         }
+        Some(_) => match crate::backlog::api::rows(&store) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warnings.push(format!("graph unreadable: {}", e.0));
+                None
+            }
+        },
     };
 
     let spent = |sources: &mut Map<String, Value>, name: &str, budget: &Budget| {
@@ -343,6 +414,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_worked = budget.start(SRC_WORKED);
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
+    let s_truth = budget.start("truth probe");
     let s_blocked_child = budget.start(SRC_DISTRESS);
 
     // Mostly in-process: graph already read; claims scan, claimed-node lookups,
@@ -371,22 +443,28 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             spent(&mut sources, "undispatched", &budget);
             SourceRead::err(budget.spent_error())
         }
-        Some(slice) => {
-            let mut cmd = fno_py_cmd();
-            cmd.extend([
-                "backlog".to_string(),
-                "undispatched".to_string(),
-                "--json".to_string(),
-            ]);
-            let read = run_json(cmd, &cwd, slice);
-            mark(&mut sources, "undispatched", &read, false);
-            let rows = read
-                .payload
-                .as_ref()
-                .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
-            match rows {
-                Some(rows) => SourceRead::ok(Value::Array(rows)),
-                None => read,
+        Some(dl) => {
+            let bound = Budget::spawn_bound(dl);
+            if bound.is_zero() {
+                spent(&mut sources, "undispatched", &budget);
+                SourceRead::err(budget.spent_error())
+            } else {
+                let mut cmd = fno_py_cmd();
+                cmd.extend([
+                    "backlog".to_string(),
+                    "undispatched".to_string(),
+                    "--json".to_string(),
+                ]);
+                let read = run_json(cmd, &cwd, bound);
+                mark(&mut sources, "undispatched", &read, false);
+                let rows = read
+                    .payload
+                    .as_ref()
+                    .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
+                match rows {
+                    Some(rows) => SourceRead::ok(Value::Array(rows)),
+                    None => read,
+                }
             }
         }
     };
@@ -430,7 +508,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             HashMap::new(),
         ),
         Some(_) => {
-            let (mut read, name_to_token) = read_driver_rows();
+            let (mut read, name_to_token) = read_driver_rows(entries.as_deref());
             let mut tokens: Vec<String> = Vec::new();
             if let Some(rows) = read.payload.as_mut().and_then(Value::as_array_mut) {
                 // PR-bound non-terminal nodes ride first: the cap spends the
@@ -468,6 +546,20 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
+    // The spent receipt is captured BEFORE the threads spawn: a source whose
+    // deadline is already past at its own spawn marks itself spent with the
+    // same wording the join-side gates use, and never spawns a child it
+    // would kill at once.
+    let spent_err = budget.spent_error();
+    // Held nodes: ONE fold over the question journals, computed once
+    // and read by the ready partition below. needs::held_map is the
+    // fail-open door (an unreadable journal is an empty map, the same
+    // posture the question scans elsewhere take).
+    let held_map = if budget.source_deadline().is_none() {
+        Default::default()
+    } else {
+        crate::needs::held_map(&home_dot_fno(), &cwd)
+    };
     let (
         prs,
         pr_nodes,
@@ -485,23 +577,28 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         // so it rides the concurrent section too: its join waits below, after
         // the other subprocess threads are already running, and only the
         // ready thread (its one consumer) waits for the result.
-        let t_worked = s_worked.map(|slice| {
+        let t_worked = s_worked.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                let bound = Budget::spawn_bound(dl);
+                if bound.is_zero() {
+                    return SourceRead::err(spent_err);
+                }
                 let mut cmd = fno_py_cmd();
                 cmd.extend([
                     "backlog".to_string(),
                     "worked".to_string(),
                     "--json".to_string(),
                 ]);
-                run_json(cmd, &cwd, slice)
+                run_json(cmd, &cwd, bound)
             })
         });
-        let t_prs = s_prs.map(|slice| {
+        let t_prs = s_prs.map(|dl| {
             let cwd = cwd_for_threads.clone();
-            let gate_slice = s_pr_gate;
+            let gate_dl = s_pr_gate;
             s.spawn(move || {
-                let (prs, pr_nodes, mut w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
+                let (prs, pr_nodes, mut w) = read_prs(&cwd, dl, opts.max_pr_reads, entries_ref);
                 // The gate read rides the same thread: its input is the
                 // listing's own narrowed candidates, so there is nothing to
                 // overlap until the listing lands.
@@ -510,7 +607,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     .iter()
                     .filter_map(|r| r.get("number").and_then(Value::as_i64))
                     .collect();
-                let (pr_gates, gate_w) = read_pr_gates(&cwd, &candidates, gate_slice);
+                let (pr_gates, gate_w) = read_pr_gates(&cwd, &candidates, gate_dl);
                 w.extend(gate_w);
                 let truncated = w.iter().any(|x| x.contains("hit its"));
                 (prs, pr_nodes, w, truncated, pr_gates)
@@ -533,16 +630,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 holders.push(t);
             }
         }
-        let t_ready = s_ready.map(|_slice| {
+        let t_ready = s_ready.map(|dl| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
             let worked_ids = worked_ids.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
                 // In-process now: the admission decision lives in this
                 // binary (backlog_ready::select) and reads the graph the
                 // board already loaded, so the source costs plan-document
                 // disk reads, not an interpreter cold start. The budget
-                // slice stays - the source still costs wall time.
+                // deadline still gates the START: a thread scheduled after
+                // the deadline marks itself spent instead of reading.
+                if Budget::spawn_bound(dl).is_zero() {
+                    return SourceRead::err(spent_err);
+                }
                 let Some(entries) = entries else {
                     return SourceRead::err("graph unreadable: no entries for ready selection");
                 };
@@ -580,40 +682,58 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 }
             })
         });
-        let t_outstanding = s_outstanding.map(|slice| {
+        let t_outstanding = s_outstanding.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                let bound = Budget::spawn_bound(dl);
+                if bound.is_zero() {
+                    return SourceRead::err(spent_err);
+                }
                 let mut cmd = fno_py_cmd();
                 cmd.extend(
                     ["inbox", "outstanding", "--json"]
                         .iter()
                         .map(|s| s.to_string()),
                 );
-                run_json(cmd, &cwd, slice)
+                run_json(cmd, &cwd, bound)
             })
         });
         // ONE batched truth probe for every holder the king cares about (the
         // single-transcript-reader constraint; a probe per holder would pay
-        // one interpreter cold start each).
-        let t_truth = if holders.is_empty() {
-            None
-        } else {
-            let tokens: Vec<String> = holders
-                .iter()
-                .map(|h| {
-                    h.split_once(':')
-                        .map(|(_, t)| t.to_string())
-                        .unwrap_or_else(|| h.clone())
-                })
-                .collect();
-            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_measured(&tokens)))
+        // one interpreter cold start each). It rides the board deadline like
+        // every other source: its own 20s-to-60s page bound is capped by what
+        // remains, and a page reached after the deadline is unmeasured, never
+        // no-evidence (the probe measured ~7s of overrun into every board).
+        let t_truth = match (holders.is_empty(), s_truth) {
+            (true, _) | (_, None) => None,
+            (false, Some(dl)) => {
+                let tokens: Vec<String> = holders
+                    .iter()
+                    .map(|h| {
+                        h.split_once(':')
+                            .map(|(_, t)| t.to_string())
+                            .unwrap_or_else(|| h.clone())
+                    })
+                    .collect();
+                Some(s.spawn(move || {
+                    crate::truth_probe::family1_truth_probe_many_measured_within(&tokens, Some(dl))
+                }))
+            }
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
         // ~7s on a busy fleet, which no longer sits on the critical path.
-        let t_needs = s_needs.map(|_slice| {
+        let t_needs = s_needs.map(|dl| {
             let cwd = cwd_for_threads.clone();
+            let spent_err = spent_err.clone();
             s.spawn(move || {
+                // In-process, but the deadline still gates the START: the
+                // refused-worker leg batch-probes the whole registry and
+                // measured ~7s on a busy fleet.
+                if Budget::spawn_bound(dl).is_zero() {
+                    return SourceRead::err(spent_err);
+                }
                 let home = crate::paths::AgentsHome::from_env();
                 let (mut event_paths, default_ledger) = default_needs_sources(&home);
                 // The canonical checkout's journal, exactly as `run_needs`
@@ -630,14 +750,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     }
                 }
                 let since = now_secs_board().saturating_sub(crate::needs::DEFAULT_WINDOW_SECS);
-                crate::needs::collect_needs_items(
+                let items = crate::needs::collect_needs_items(
                     &home,
                     &event_paths,
                     &default_ledger,
                     since,
                     crate::needs::DEFAULT_FIRES_FLOOR,
                     &cwd,
-                )
+                );
+                SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([])))
             })
         });
 
@@ -669,6 +790,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
         };
+        // An open question whose blocks names the node holds it out of ready
+        //; the held rows land under a `held` source beside `ready`.
+        let (ready, held_rows) = partition_held(ready, &held_map);
+        if !held_rows.is_empty() {
+            sources.insert(
+                "held".to_string(),
+                json!({
+                    "ok": true,
+                    "truncated": false,
+                    "error": "",
+                    "count": held_rows.len(),
+                    "rows": held_rows,
+                }),
+            );
+        }
         let outstanding = match t_outstanding {
             None => SourceRead::err(budget.spent_error()),
             Some(h) => h
@@ -688,14 +824,16 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             // place the difference survives.
             Some(h) => h
                 .join()
-                .map(|items| SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([]))))
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
         let (holder_activity, holder_activity_error): (
             HashMap<String, crate::truth_probe::TruthProbe>,
             Option<String>,
         ) = match t_truth {
-            None => (HashMap::new(), None),
+            // No deadline for a non-empty holder set is a spent board: the
+            // probe never ran, which reads unreadable, never ok-empty.
+            None if holders.is_empty() => (HashMap::new(), None),
+            None => (HashMap::new(), Some(spent_err.clone())),
             Some(h) => match h.join() {
                 Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None),
                 Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
@@ -857,112 +995,174 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             spent(&mut sources, "blocked_child", &budget);
             SourceRead::err(budget.spent_error())
         }
-        Some(slice) => {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let home = crate::paths::AgentsHome::from_env();
-                let journal = crate::daemon::global_events_path(&home);
-                match read_blocked_rows(&journal) {
-                    Err(e) => SourceRead::err(e),
-                    Ok(rows) => {
-                        let claim_rows = claims.rows();
-                        let claim_state_by_node: HashMap<String, String> = claim_rows
-                            .iter()
-                            .filter_map(|row| {
-                                let node = s_str(row, "key")?.strip_prefix("node:")?;
-                                Some((
-                                    node.to_string(),
-                                    s_str(row, "state").unwrap_or("").to_string(),
-                                ))
-                            })
-                            .collect();
-                        let status_by_node: HashMap<String, String> = entries
-                            .as_deref()
-                            .unwrap_or(&[])
-                            .iter()
-                            .filter_map(|n| {
-                                Some((
-                                    s_str(n, "id")?.to_string(),
-                                    s_str(n, "status").unwrap_or("").to_string(),
-                                ))
-                            })
-                            .collect();
-                        let candidates = queues::resolve_blocked_child_candidates(
-                            rows,
-                            &claim_state_by_node,
-                            &status_by_node,
-                            blocked_child_grace_minutes(&cwd),
-                            now_secs_board() as i64,
-                        );
-                        if candidates.is_empty() {
-                            SourceRead::ok(Value::Array(Vec::new()))
-                        } else {
-                            // A row keyed by its run id is never bus-addressed;
-                            // the node's live claim names the harness session
-                            // the bus does address.
-                            let claim_session_by_node: HashMap<String, String> = claim_rows
+        Some(dl) => {
+            if Budget::spawn_bound(dl).is_zero() {
+                spent(&mut sources, "blocked_child", &budget);
+                SourceRead::err(budget.spent_error())
+            } else {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let home = crate::paths::AgentsHome::from_env();
+                    let journal = crate::daemon::global_events_path(&home);
+                    match read_blocked_rows(&journal) {
+                        Err(e) => SourceRead::err(e),
+                        Ok(rows) => {
+                            let claim_rows = claims.rows();
+                            let claim_state_by_node: HashMap<String, String> = claim_rows
                                 .iter()
                                 .filter_map(|row| {
                                     let node = s_str(row, "key")?.strip_prefix("node:")?;
-                                    Some((node.to_string(), s_str(row, "session_id")?.to_string()))
+                                    Some((
+                                        node.to_string(),
+                                        s_str(row, "state").unwrap_or("").to_string(),
+                                    ))
                                 })
                                 .collect();
-                            let mail_candidates: Vec<(String, Option<String>, String)> = candidates
+                            let status_by_node: HashMap<String, String> = entries
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
-                                .map(|(row, _)| {
-                                    let holder = row
-                                        .node
-                                        .as_deref()
-                                        .and_then(|n| claim_session_by_node.get(n))
-                                        .cloned();
-                                    (row.session.clone(), holder, row.ts.clone())
+                                .filter_map(|n| {
+                                    Some((
+                                        s_str(n, "id")?.to_string(),
+                                        s_str(n, "status").unwrap_or("").to_string(),
+                                    ))
                                 })
                                 .collect();
-                            let answered =
-                                queues::mail_answered_since(&bus_live_log_path(), &mail_candidates);
+                            let candidates = queues::resolve_blocked_child_candidates(
+                                rows,
+                                &claim_state_by_node,
+                                &claim_acquired_at_by_node(&claim_rows),
+                                &status_by_node,
+                                blocked_child_grace_minutes(&cwd),
+                                now_secs_board() as i64,
+                            );
+                            if candidates.is_empty() {
+                                SourceRead::ok(Value::Array(Vec::new()))
+                            } else {
+                                // A row keyed by its run id is never bus-addressed;
+                                // the node's live claim names the harness session
+                                // the bus does address.
+                                let claim_session_by_node: HashMap<String, String> = claim_rows
+                                    .iter()
+                                    .filter_map(|row| {
+                                        let node = s_str(row, "key")?.strip_prefix("node:")?;
+                                        Some((
+                                            node.to_string(),
+                                            s_str(row, "session_id")?.to_string(),
+                                        ))
+                                    })
+                                    .collect();
+                                let mail_candidates: Vec<(String, Option<String>, String)> =
+                                    candidates
+                                        .iter()
+                                        .map(|(row, _)| {
+                                            let holder = row
+                                                .node
+                                                .as_deref()
+                                                .and_then(|n| claim_session_by_node.get(n))
+                                                .cloned();
+                                            (row.session.clone(), holder, row.ts.clone())
+                                        })
+                                        .collect();
+                                let answered = queues::mail_answered_since(
+                                    &bus_live_log_path(),
+                                    &mail_candidates,
+                                );
 
-                            let mut sessions: Vec<String> = Vec::new();
-                            for (session, holder, _) in &mail_candidates {
-                                for key in [Some(session.as_str()), holder.as_deref()]
-                                    .into_iter()
-                                    .flatten()
-                                {
-                                    if !sessions.iter().any(|s| s == key) {
-                                        sessions.push(key.to_string());
+                                let mut sessions: Vec<String> = Vec::new();
+                                for (session, holder, _) in &mail_candidates {
+                                    for key in [Some(session.as_str()), holder.as_deref()]
+                                        .into_iter()
+                                        .flatten()
+                                    {
+                                        if !sessions.iter().any(|s| s == key) {
+                                            sessions.push(key.to_string());
+                                        }
                                     }
                                 }
+                                let mut cmd = fno_py_cmd();
+                                cmd.extend([
+                                    "agents".to_string(),
+                                    "distress-verdicts".to_string(),
+                                    "--sessions".to_string(),
+                                    serde_json::to_string(&sessions)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                ]);
+                                let verdict_bound = Budget::spawn_bound(dl);
+                                let verdict_payload = if verdict_bound.is_zero() {
+                                    SourceRead::err(spent_err.clone())
+                                } else {
+                                    run_json(cmd, &cwd, verdict_bound)
+                                };
+                                let verdicts: HashMap<String, String> = mail_candidates
+                                    .iter()
+                                    .filter_map(|(session, holder, _)| {
+                                        queues::verdict_for(
+                                            verdict_payload.payload.as_ref(),
+                                            session,
+                                            holder.as_deref(),
+                                        )
+                                        .map(|v| (session.clone(), v))
+                                    })
+                                    .collect();
+                                SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
+                                    candidates, &answered, &verdicts,
+                                )))
                             }
-                            let mut cmd = fno_py_cmd();
-                            cmd.extend([
-                                "agents".to_string(),
-                                "distress-verdicts".to_string(),
-                                "--sessions".to_string(),
-                                serde_json::to_string(&sessions)
-                                    .unwrap_or_else(|_| "[]".to_string()),
-                            ]);
-                            let verdict_payload = run_json(cmd, &cwd, slice);
-                            let verdicts: HashMap<String, String> = mail_candidates
-                                .iter()
-                                .filter_map(|(session, holder, _)| {
-                                    queues::verdict_for(
-                                        verdict_payload.payload.as_ref(),
-                                        session,
-                                        holder.as_deref(),
-                                    )
-                                    .map(|v| (session.clone(), v))
-                                })
-                                .collect();
-                            SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
-                                candidates, &answered, &verdicts,
-                            )))
                         }
                     }
-                }
-            }));
-            let read = result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
-            mark(&mut sources, "blocked_child", &read, false);
-            read
+                }));
+                let read =
+                    result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
+                mark(&mut sources, "blocked_child", &read, false);
+                read
+            }
         }
     };
+
+    // The stranded-tree read: which linked worktrees hold uncommitted or
+    // unpushed work under an open king-priority node. Candidates come from
+    // the one graph read; repos from the workspace map plus this repo's
+    // canonical root, so a board run anywhere lands the same tree set.
+    let candidates = entries
+        .as_deref()
+        .map(|e| stranded_candidates(e))
+        .unwrap_or_default();
+    let repos = scope::project_repo_paths(&cwd);
+    let stranded = read_stranded_trees(&repos, &candidates, &mut budget);
+    mark(&mut sources, "stranded", &stranded, false);
+
+    // The fleet-task read: a local questions.jsonl fold, sub-millisecond,
+    // so it runs inline instead of taking a budget slice or a thread. An
+    // unreadable store degrades the queue, never the board; catch_unwind
+    // for the same reason held_nodes above wraps its fold - from_env
+    // panics under a test process with no declared root.
+    let tasks = std::panic::catch_unwind(|| {
+        let home = crate::paths::AgentsHome::from_env();
+        let store = crate::provider_cap::questions_path(&home);
+        match crate::fleet_task::open_tasks(&store) {
+            Ok(tasks) => SourceRead::ok(Value::Array(
+                tasks
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "id": t.id,
+                            "lane": t.lane,
+                            "key": t.key,
+                            "cwd": t.cwd,
+                            "text": t.text,
+                            "run": t.run,
+                            "node": t.node,
+                            "ts": t.ts,
+                        })
+                    })
+                    .collect(),
+            )),
+            Err(e) => SourceRead::err(e),
+        }
+    })
+    .unwrap_or_else(|_| SourceRead::err("tasks: reader panicked"));
+    mark(&mut sources, "tasks", &tasks, false);
 
     let inputs = BoardInputs {
         ready,
@@ -977,10 +1177,14 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         pr_gates,
         outstanding,
         needs,
+        tasks,
         lane,
+        repo_root: cwd.to_string_lossy().into_owned(),
         undispatched,
         blocked_child,
+        stranded,
         entries,
+        held: held_map,
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
         scope_ids,
@@ -997,16 +1201,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
 /// read of the shared registry (`state::load_registry`); a missing file is an
 /// empty roster (a store with no workers is a positive empty answer, not a
 /// fault), a corrupt one is a failed read the consuming queues render loudly.
-/// Also returns a name-to-token map over EVERY registry entry, whatever its
-/// status: the worked feed's worker labels are names, and an orphaned row's
-/// transcript can still answer for the worker it names.
-fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
+/// A row's node is its registry `node` stamp when it carries one, else the
+/// graph join (`graph_session_nodes`) over the entries the board already
+/// holds. Also returns a name-to-token map over EVERY registry entry,
+/// whatever its status: the worked feed's worker labels are names, and an
+/// orphaned row's transcript can still answer for the worker it names.
+fn read_driver_rows(entries: Option<&[Value]>) -> (SourceRead, HashMap<String, String>) {
     let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
         return (SourceRead::ok(json!([])), HashMap::new());
     };
     let path = home.registry_json();
     match crate::state::load_registry(&path) {
         Ok(registry) => {
+            let session_nodes = graph_session_nodes(entries);
             let mut name_to_token: HashMap<String, String> = HashMap::new();
             for e in &registry.entries {
                 name_to_token.entry(e.name.clone()).or_insert_with(|| {
@@ -1020,7 +1227,12 @@ fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
                 .iter()
                 .filter(|e| is_live_driver_status(e.status))
                 .filter_map(|e| {
-                    let node = e.node.as_deref()?;
+                    let node = e.node.as_deref().or_else(|| {
+                        e.harness_session_id
+                            .as_deref()
+                            .and_then(|sid| session_nodes.get(sid))
+                            .map(String::as_str)
+                    })?;
                     let token = e
                         .harness_session_id
                         .clone()
@@ -1035,6 +1247,73 @@ fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
             HashMap::new(),
         ),
     }
+}
+
+/// session id -> node id, joined from the graph entries the board already
+/// holds. The registry `node` stamp is the fast path and it is mostly
+/// absent: 6 of 31 rows carried it on 2026-09-17, so a join on it alone
+/// leaves the documented primary driver signal blind for four rows in five.
+///
+/// An OPEN phase row means the session is working that node. A CLOSED one
+/// means the session finished that PHASE, which is not the same claim as
+/// "this PR has no driver": the measured specimen (2026-09-17) closed its do
+/// row at 06:19Z and the same session drove PR 2126 for fourteen more hours.
+/// So a closed row still names the node when the node carries a PR, and
+/// never otherwise: a PR-less node whose planner closed its row must stay
+/// dispatchable (the closed-planner ruling pinned by
+/// cli/tests/unit/test_live_worked_nodes.py::test_xdead_a_closed_phase_row_skips_its_worker).
+/// A ship row is a PR-link event, never occupancy, and the existing readers
+/// skip it. The truth probe still decides Active vs Unmeasured downstream: a
+/// recovered row that probes dead folds to nothing, so a genuinely parked PR
+/// stays named.
+fn graph_session_nodes(entries: Option<&[Value]>) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    let Some(entries) = entries else {
+        return map;
+    };
+    // An OPEN phase row is positive occupancy and outranks a closed one: a
+    // session that closed its do row on one node and opened one on another
+    // must land on the open node, so open rows join first and the closed-row
+    // inference only fills sessions no open row claims.
+    let admissions = |want_open: bool, map: &mut HashMap<String, String>| {
+        for node in entries {
+            if TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or("")) {
+                continue;
+            }
+            let Some(node_id) = s_str(node, "id").map(str::to_string) else {
+                continue;
+            };
+            let pr_bound = node_has_pr(node);
+            for row in node
+                .get("sessions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(phase) = row.get("phase").and_then(Value::as_str) else {
+                    continue;
+                };
+                if phase == "ship" {
+                    continue;
+                }
+                let Some(session_id) = row
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                else {
+                    continue;
+                };
+                let open = crate::graph_store::is_open_phase_row(row, phase);
+                if open == want_open && (open || pr_bound) {
+                    map.entry(session_id.to_string())
+                        .or_insert_with(|| node_id.clone());
+                }
+            }
+        }
+    };
+    admissions(true, &mut map);
+    admissions(false, &mut map);
+    map
 }
 
 /// A registry row counts as a driver candidate only while its status sits in
@@ -1151,8 +1430,58 @@ mod tests {
         SourceRead::ok(payload)
     }
 
+    #[test]
+    fn held_partition_moves_the_row_and_names_the_question() {
+        //  acceptance: a ready node an open question blocks is absent
+        // from ready and present under held with the question id.
+        let ready = ok_read(json!([
+            {"id": "x-free", "priority": "p1", "title": "free"},
+            {"id": "x-hold", "priority": "p1", "title": "held one"}
+        ]));
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        let ids: Vec<String> = ready
+            .rows()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["x-free".to_string()]);
+        assert_eq!(held_rows.len(), 1);
+        assert_eq!(held_rows[0]["id"], json!("x-hold"));
+        assert_eq!(held_rows[0]["question_id"], json!("q-1"));
+    }
+
+    #[test]
+    fn held_partition_passes_through_when_nothing_is_held() {
+        let ready = ok_read(json!([{"id": "x-free"}]));
+        let held: std::collections::BTreeMap<String, String> = Default::default();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert_eq!(ready.rows().len(), 1);
+        assert!(held_rows.is_empty());
+    }
+
+    #[test]
+    fn held_partition_never_reads_an_unreadable_ready_as_held_free() {
+        // A failed ready read must stay a failed read: the split never
+        // manufactures an ok-empty feed out of an error.
+        let ready = SourceRead::err("ready: reader panicked");
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert!(!ready.is_ok());
+        assert!(held_rows.is_empty());
+    }
+
     fn inputs_with(ready: Value, claims: Value, claimed_nodes: Value) -> BoardInputs {
         BoardInputs {
+            tasks: SourceRead::ok(json!([])),
+            repo_root: String::new(),
             ready: ok_read(ready),
             claims: ok_read(claims),
             worked: ok_read(Value::Array(Vec::new())),
@@ -1168,7 +1497,9 @@ mod tests {
             blocked_child: ok_read(Value::Array(Vec::new())),
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
+            stranded: ok_read(Value::Array(Vec::new())),
             entries: None,
+            held: Default::default(),
             warnings: Vec::new(),
             autonomous_merge: false,
             scope_ids: None,
@@ -1307,6 +1638,157 @@ mod tests {
     }
 
     #[test]
+    fn the_fleet_task_queue_lists_open_tasks_report_only() {
+        // AC9-HP: open tasks list with their run commands, actionable false,
+        // beside an operator_question queue that keeps its own rows.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.outstanding = ok_read(json!({"questions": [
+            {"id": "q-1", "question": "a real ruling", "ts": "t", "session_id": "s"}
+        ]}));
+        inputs.tasks = ok_read(json!([
+            {"id": "ft-a", "lane": "heal", "cwd": "/x", "text": "rebase", "run": "fno do pr rebase 1", "node": "x-1", "ts": "t"},
+            {"id": "ft-b", "lane": "pr-nudge", "cwd": "/x", "text": "nudge", "run": "fno agents resume s", "node": "", "ts": "t"}
+        ]));
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        let task_q = queues
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap_or_else(|| panic!("no fleet_task queue: {board}"));
+        assert_eq!(task_q["status"], "ok");
+        assert_eq!(task_q["actionable"], json!(false));
+        assert_eq!(task_q["count"], json!(2));
+        assert_eq!(task_q["rows"][0]["run"], json!("fno do pr rebase 1"));
+        let op_q = queues
+            .iter()
+            .find(|q| q["name"] == "operator_question")
+            .unwrap();
+        assert_eq!(op_q["count"], json!(1));
+    }
+
+    #[test]
+    fn an_unreadable_task_store_reads_unreadable_never_ok_empty() {
+        // AC10-ERR: silence and a real answer are different boards.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.tasks = SourceRead::err("fleet task store unreadable");
+        let board = build_board(&inputs);
+        let task_q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap();
+        assert_eq!(task_q["status"], "unreadable");
+        assert_eq!(task_q["count"], Value::Null);
+    }
+
+    #[test]
+    fn a_task_for_another_repo_rides_the_note_not_the_rows() {
+        // AC18-EDGE: identity is lane + key + cwd; a task filed for another
+        // repo never lands in this repo's rows and never vanishes silently.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.repo_root = "/repo/a".into();
+        inputs.tasks = ok_read(json!([
+            {"id": "ft-mine", "lane": "heal", "cwd": "/repo/a/wt", "text": "t", "run": "r", "node": "", "ts": "t"},
+            {"id": "ft-theirs", "lane": "heal", "cwd": "/repo/b", "text": "t", "run": "r", "node": "", "ts": "t"}
+        ]));
+        let board = build_board(&inputs);
+        let task_q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap();
+        assert_eq!(task_q["count"], json!(1));
+        assert_eq!(task_q["rows"][0]["id"], json!("ft-mine"));
+        assert!(
+            task_q["note"]
+                .as_str()
+                .unwrap()
+                .contains("held for another repo"),
+            "{}",
+            task_q["note"]
+        );
+    }
+
+    fn write_hold_plan(dir: &std::path::Path, hold_frontmatter: &str) -> String {
+        let plan = dir.join("plan.md");
+        std::fs::write(
+            &plan,
+            format!("---\nstatus: ready\n{hold_frontmatter}---\n\n# Held\n"),
+        )
+        .unwrap();
+        plan.display().to_string()
+    }
+
+    #[test]
+    fn undriven_pr_skips_a_ruling_held_pr_node() {
+        // A crown dispatch_hold parks the node deliberately; it is not
+        // driverless, so undriven_pr must not name it (AC2-HP).
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = write_hold_plan(
+            dir.path(),
+            "dispatch_hold:\n  reason: waiting on legal\n  release_when: legal clears\n  review_on: 2099-01-01\n  set_by: operator\n",
+        );
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "plan_path": plan_path,
+        })]);
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "held work",
+            "pr_number": 1895,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        assert!(queue["rows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn undriven_pr_still_names_an_invalid_hold_pr_node() {
+        // A broken ruling (missing required field) fails CLOSED: the PR
+        // stays a row so a human notices (AC3-EDGE).
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = write_hold_plan(dir.path(), "dispatch_hold:\n  reason: waiting on legal\n");
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-pr3",
+            "priority": "p2",
+            "status": "in_review",
+            "plan_path": plan_path,
+        })]);
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr3",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "invalid hold work",
+            "pr_number": 1896,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        let rows = queue["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "x-pr3");
+    }
+
+    #[test]
     fn unplanned_note_names_the_batch_and_undispatched_names_the_target() {
         // a rule without a number is advice nobody applies; the
         // queue a king dispatches from names the verb, never the blueprint.
@@ -1320,7 +1802,7 @@ mod tests {
         let unplanned = queues.iter().find(|q| q["name"] == "unplanned").unwrap();
         let note = unplanned["note"].as_str().unwrap();
         assert!(!note.is_empty());
-        assert!(note.contains('3') || note.to_lowercase().contains("three"));
+        assert!(note.to_lowercase().contains("per king"));
         let undispatched = queues.iter().find(|q| q["name"] == "undispatched").unwrap();
         assert_eq!(undispatched["verb"], "/fno:target");
         assert!(!undispatched["note"]
@@ -1503,6 +1985,75 @@ mod tests {
         assert_eq!(rows.len(), 1, "{unheld}");
         assert_eq!(rows[0]["id"], "x-dddd");
         assert!(rows[0].get("claim_state").is_none(), "{:?}", rows[0]);
+    }
+
+    #[test]
+    fn stranded_tree_names_a_dirty_quiet_driverless_tree() {
+        // AC3-HP: a p1 ready node whose tree holds 1 modified file, no live
+        // claim or driver, and no write for 61 minutes is stranded, and the
+        // row carries the tree, the dirty count and the resume flag.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-dddd", "priority": "p1", "status": "ready",
+            "title": "stranded tree",
+        })]);
+        inputs.stranded = ok_read(json!([
+            {"id": "x-dddd", "tree": "/base/footnote/x-dddd", "branch": "feature/x-dddd",
+             "dirty": 1, "unpushed": 0, "idle_minutes": 61, "resumable": true},
+        ]));
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let stranded = queues
+            .iter()
+            .find(|q| q["name"] == "stranded_tree")
+            .unwrap();
+        let rows = stranded["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{stranded}");
+        assert_eq!(rows[0]["id"], "x-dddd");
+        assert_eq!(rows[0]["dirty"], 1);
+        assert_eq!(rows[0]["resumable"], true);
+    }
+
+    #[test]
+    fn stranded_tree_omits_fresh_work_a_live_claim_and_a_clean_tree() {
+        // AC3-LIVE: the same tree under a live claim, or last written 10
+        // minutes ago, or clean and fully pushed, is not stranded. A stranded
+        // row whose node left the graph also drops (the queue trusts the
+        // graph join, never names unattributable work).
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.claims = ok_read(json!([
+            {"key": "node:x-claimed", "state": "live", "holder": "session-1"},
+        ]));
+        inputs.entries = Some(vec![
+            json!({"id": "x-fresh", "priority": "p1", "status": "ready", "title": "wrote 10m ago"}),
+            json!({"id": "x-claimed", "priority": "p1", "status": "ready", "title": "live claim"}),
+            json!({"id": "x-clean", "priority": "p1", "status": "ready", "title": "clean tree"}),
+        ]);
+        inputs.stranded = ok_read(json!([
+            {"id": "x-fresh", "dirty": 1, "unpushed": 0, "idle_minutes": 10, "resumable": true},
+            {"id": "x-claimed", "dirty": 2, "unpushed": 1, "idle_minutes": 90, "resumable": true},
+            {"id": "x-clean", "dirty": 0, "unpushed": 0, "idle_minutes": 90, "resumable": true},
+            {"id": "x-ghost", "dirty": 3, "unpushed": 0, "idle_minutes": 90, "resumable": false},
+        ]));
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let stranded = queues
+            .iter()
+            .find(|q| q["name"] == "stranded_tree")
+            .unwrap();
+        let rows = stranded["rows"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-fresh"),
+            "a tree written 10 minutes ago is not stranded: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-claimed"),
+            "a tree under a live claim is not stranded: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-clean"),
+            "a clean, fully pushed tree is not stranded: {rows:?}"
+        );
     }
 
     #[test]
@@ -2131,13 +2682,37 @@ mod tests {
     /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Restores the env values a test pinned, whatever way the body ends.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl EnvRestore {
+        fn take(vars: &[&'static str]) -> Self {
+            EnvRestore(vars.iter().map(|v| (*v, std::env::var_os(*v))).collect())
+        }
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (k, v) in self.0.iter() {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_driver_feed_projects_live_rows_only() {
         // A closed run (exited/failed/permanent_dead) whose transcript still
         // answers must never be a driver candidate: it would let a finished
         // worker suppress its node's undriven-PR row. Mirrors the
         // spawn_gate.LIVE_STATUSES vocabulary.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
         let agents_home = dir.path().join(".fno").join("agents");
@@ -2164,7 +2739,7 @@ mod tests {
             registry.entries.push(exited_row);
         })
         .unwrap();
-        let (read, name_to_token) = read_driver_rows();
+        let (read, name_to_token) = read_driver_rows(None);
         std::env::remove_var("FNO_AGENTS_HOME");
         assert!(read.is_ok(), "{read:?}");
         let rows = read.payload.unwrap().as_array().unwrap().clone();
@@ -2181,17 +2756,221 @@ mod tests {
         assert_eq!(nodes, vec!["x-live"], "{rows:?}");
     }
 
+    fn live_unstamped_row(name: &str, session: &str) -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: name.to_string(),
+            node: None,
+            status: crate::AgentStatus::Live,
+            harness: Some("claude".to_string()),
+            harness_session_id: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn phase_row(phase: &str, session: &str, ended_at: Option<&str>) -> Value {
+        let mut row = json!({
+            "phase": phase,
+            "harness": "claude",
+            "session_id": session,
+            "started_at": "2026-09-17T01:00:00Z",
+        });
+        if let Some(ended) = ended_at {
+            row["ended_at"] = json!(ended);
+        }
+        row
+    }
+
+    #[test]
+    fn an_unstamped_live_row_resolves_through_an_open_graph_row() {
+        // The stamp is absent on four registry rows in five (measured
+        // 2026-09-17: 6 of 31). A live row whose session id sits on a
+        // non-terminal entry's OPEN phase row is that entry's driver.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-open-worker", "uuid-open"));
+        })
+        .unwrap();
+        let entries = vec![json!({
+            "id": "x-open",
+            "status": "in_progress",
+            "sessions": [phase_row("do", "uuid-open", None)],
+        })];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-open"], "{rows:?}");
+    }
+
+    #[test]
+    fn a_closed_do_row_pins_only_a_pr_bound_node() {
+        // A closed phase row is "that PHASE finished", not "no driver": on a
+        // PR-bound node the same session kept driving for hours after the
+        // row closed (measured 2026-09-17, PR 2126). The PR keeps the join
+        // alive; a PR-less node whose planner closed its row stays
+        // dispatchable (the closed-planner ruling).
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-pr-worker", "uuid-closed"));
+            registry
+                .entries
+                .push(live_unstamped_row("t-plan-worker", "uuid-closed2"));
+        })
+        .unwrap();
+        let entries = vec![
+            json!({
+                "id": "x-pr",
+                "status": "in_review",
+                "pr_number": 2126,
+                "sessions": [phase_row("do", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
+            }),
+            json!({
+                "id": "x-nopr",
+                "status": "ready",
+                "sessions": [phase_row("think", "uuid-closed2", Some("2026-09-17T05:00:00Z"))],
+            }),
+        ];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-pr"], "{rows:?}");
+    }
+
+    #[test]
+    fn an_open_row_outranks_a_closed_one_on_another_node() {
+        // One live session closed its do row on a PR-bound node and opened
+        // one on another node: the join must land on the open node, so the
+        // abandoned node keeps its undriven_pr instead of borrowing a driver
+        // it no longer has.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-moved-worker", "uuid-move"));
+        })
+        .unwrap();
+        let entries = vec![
+            json!({
+                "id": "x-old",
+                "status": "in_review",
+                "pr_number": 2126,
+                "sessions": [phase_row("do", "uuid-move", Some("2026-09-17T06:19:07Z"))],
+            }),
+            json!({
+                "id": "x-now",
+                "status": "in_progress",
+                "sessions": [phase_row("do", "uuid-move", None)],
+            }),
+        ];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-now"], "{rows:?}");
+    }
+
+    #[test]
+    fn the_stamp_wins_over_the_graph_join() {
+        // A row that already carries `node` is never re-resolved: the stamp
+        // wins and the graph is not consulted for it.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry.entries.push(crate::state::RegistryEntry {
+                name: "t-stamped-worker".to_string(),
+                node: Some("x-stamped".to_string()),
+                status: crate::AgentStatus::Live,
+                harness: Some("claude".to_string()),
+                harness_session_id: Some("uuid-stamp".to_string()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let entries = vec![json!({
+            "id": "x-graph",
+            "status": "in_progress",
+            "sessions": [phase_row("do", "uuid-stamp", None)],
+        })];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-stamped"], "{rows:?}");
+    }
+
     #[test]
     fn the_board_answers_inside_a_tight_budget_with_every_queue_present() {
         // An isolated HOME + cwd: no graph, no claims, no lane - the degraded
-        // machine. The board must still answer with all thirteen queues
+        // machine. The board must still answer with all fourteen queues
         // (plus nothing else), the unreadable actionable ones counted, and
         // exit 1.
         // A declared hermetic root: blocked_child's collection resolves
         // ~/.fno/agents via AgentsHome, which panics under test with no
         // declared root (paths.rs) - this test already pins HOME, so it also
         // pins FNO_AGENTS_HOME under the same tempdir to declare one.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join(".fno").join("agents"));
@@ -2202,7 +2981,7 @@ mod tests {
         });
         std::env::remove_var("FNO_AGENTS_HOME");
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 14, "{payload}");
+        assert_eq!(queues.len(), 16, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -2219,9 +2998,11 @@ mod tests {
                 "unheld_progress",
                 "blocked_child",
                 "undriven_pr",
+                "stranded_tree",
                 "mergeable_pr",
                 "stale_claim",
                 "operator_question",
+                "fleet_task",
                 "carveout_pending",
                 "capture_pending",
                 "failed_verdict",
@@ -2238,7 +3019,13 @@ mod tests {
 
     #[test]
     fn the_scope_error_queue_is_actionable_and_loud() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
@@ -2259,7 +3046,13 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_scope_is_a_scope_error() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nfno_id: k1\n---\n").unwrap();
@@ -2272,5 +3065,171 @@ mod tests {
         });
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
         assert_eq!(queues[0]["error"], "king manifest has no scope");
+    }
+
+    #[test]
+    fn a_slow_source_is_killed_inside_the_whole_board_budget() {
+        // A scripted `fno` that sleeps 5 seconds under a
+        // 2,000ms board budget must be killed at its deadline-derived spawn
+        // bound, so the collector returns inside ~2.75s and the over-budget
+        // source reads as unreadable - never the measured 40,776ms-against-
+        // 30,000ms overrun, and never the 4.9s the captured-slice shape
+        // accepted.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        // Hermetic state roots: the board reads resolve through pinned env.
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("HOME", dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
+        let script =
+            crate::write_exec_stub(dir.path(), "sleepy-fno-py", "#!/bin/sh\nexec sleep 5\n");
+        let prev = std::env::var_os("FNO_PY");
+        std::env::set_var("FNO_PY", &script);
+        let start = std::time::Instant::now();
+        // The cwd too: from the crate dir the needs fold reads the canonical
+        // checkout's live journal, which measured 20s in a debug build.
+        let payload = read_board(&BoardOpts {
+            budget_ms: 2_000,
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        });
+        let elapsed = start.elapsed();
+        match prev {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        // The kill bound is the SLEEP length: an unbounded read would blow
+        // past 5s, and a spawn after the in-process work would land past the
+        // budget; the deadline-derived bound must keep the whole board under
+        // budget plus the serialization reserve.
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_750),
+            "board took {elapsed:?} against a 2,000ms budget with a 5s sleep source"
+        );
+        let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
+        assert!(
+            parsed.unreadable_sources,
+            "the killed source must read as unreadable"
+        );
+    }
+
+    #[test]
+    fn a_slow_truth_batch_is_capped_by_the_board_budget_and_reads_unmeasured() {
+        // The truth probe's own 20s-to-60s page bound used to run OUTSIDE the
+        // board budget. With a holder seeded (a stale claim) and a `fno` stub
+        // whose truth batch sleeps 30s, the board must cap the batch at what
+        // remains of its own 2,000ms budget, return inside ~2.75s, and read
+        // the holder UNMEASURED - never no-evidence.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "HOME",
+            "FNO_CLAIMS_ROOT",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("HOME", dir.path());
+        // Declared directly, not through the skip-if-unset pin: a parallel
+        // test's leaked root must not send the claims scan at a dead dir.
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
+        // ONE stale claim: off-host holder with an expired TTL reads stale,
+        // and a dead-stated holder is exactly the token the board probes.
+        let now_ms = crate::claims::now_ms();
+        let lock = crate::claims::claim_path("node:king-truth-holder", Some(dir.path())).unwrap();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lock,
+            serde_json::json!({
+                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
+                "key": "node:king-truth-holder",
+                "holder": "claude:t-2440-truth",
+                "acquired_at": now_ms - 3_600_000,
+                "host": "board-test-off-host",
+                "pid_unavailable": true,
+                "expires_at": now_ms - 1_800_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The truth batch shells to bare `fno` on PATH; stub it to sleep 30s.
+        let stub_dir = dir.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub = crate::write_exec_stub(
+            &stub_dir,
+            "fno",
+            "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
+        );
+        let prev_py = std::env::var_os("FNO_PY");
+        let prev_path = std::env::var_os("PATH");
+        std::env::set_var("FNO_PY", &stub); // non-truth fno-py reads answer at once
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.display(),
+                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
+            ),
+        );
+
+        let start = std::time::Instant::now();
+        let payload = read_board(&BoardOpts {
+            budget_ms: 2_000,
+            // Pin the board to the temp space: the unset default reads the
+            // test process's cwd, whose real journals and canonical checkout
+            // the needs fold would sync whole, unbudgeted.
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        });
+        let elapsed = start.elapsed();
+
+        match prev_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_750),
+            "board took {elapsed:?} against a 2,000ms budget with a 30s truth stub"
+        );
+        let err = payload["sources"]["holder_activity"]["error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            err.contains("timed out"),
+            "the holder must read unmeasured, got holder_activity error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn claim_acquired_at_map_skips_non_node_keys_and_bad_values() {
+        // The staleness compare reads this map; a role-prefixed key or an
+        // absent/non-numeric acquired_at contributes nothing, never an
+        // error.
+        let rows = vec![
+            serde_json::json!({"key": "node:x-1", "acquired_at": 1_760_000_000_000i64}),
+            serde_json::json!({"key": "node:x-2"}),
+            serde_json::json!({"key": "node:x-3", "acquired_at": "oops"}),
+            serde_json::json!({"key": "pane:x-9", "acquired_at": 7}),
+        ];
+        let m = claim_acquired_at_by_node(&rows);
+        assert_eq!(m.get("x-1"), Some(&1_760_000_000_000));
+        assert!(!m.contains_key("x-2"), "absent acquired_at: skip");
+        assert!(!m.contains_key("x-3"), "non-numeric acquired_at: skip");
+        assert_eq!(m.len(), 1, "a role-prefixed key is not a node");
     }
 }

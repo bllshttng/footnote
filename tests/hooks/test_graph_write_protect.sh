@@ -143,15 +143,26 @@ expect "unrelated Edit approved" approve \
 # canonical operator audit event rather than the legacy event shape.
 _DRIVE_STUB=$(mktemp -d)
 _DRIVE_EVENTS="$_DRIVE_STUB/events.jsonl"
+export _DRIVE_EVENTS
+# The store commit is the acknowledgement, so the audited envelope never
+# lands in journal bytes: the stub captures the payload the guard hands the
+# native binary, and the assert below reads exactly that line back.
 cat > "$_DRIVE_STUB/fno" <<'SH'
 #!/usr/bin/env bash
+if [[ "$1:$2" == "doctor:event" && "$3" == "emit-envelope" ]]; then
+  cat >> "$_DRIVE_EVENTS"
+  exit 0
+fi
 printf '%s\n' '{"sessions":[{"short_id":"drive-test"}]}'
 SH
 chmod +x "$_DRIVE_STUB/fno"
 _DRIVE_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/artifacts/proof.md","old_string":"a","new_string":"b"}}' \
   | PATH="$_DRIVE_STUB:$PATH" FNO_AGENTS_SELF_SHORT_ID=drive-test EVENTS_FILE="$_DRIVE_EVENTS" bash "$GUARD" 2>/dev/null)
 if [[ "$_DRIVE_OUT" == "{}" ]] \
-  && jq -e 'select(.type == "operator_initiated" and .source == "hook" and .data.action_type == "artifact_edited_operator_initiated" and .data.file_path == "/proj/.fno/artifacts/proof.md")' "$_DRIVE_EVENTS" >/dev/null 2>&1; then
+  && _ROWS_BIN="${FNO_BIN:-${REPO_ROOT}/crates/fno/target/debug/fno}" \
+  && [[ -x "$_ROWS_BIN" ]] \
+  && "$_ROWS_BIN" doctor event rows --events "$_DRIVE_EVENTS" 2>/dev/null \
+     | jq -e '.[] | fromjson | select(.type == "operator_initiated" and .source == "hook" and .data.action_type == "artifact_edited_operator_initiated" and .data.file_path == "/proj/.fno/artifacts/proof.md")' >/dev/null 2>&1; then
   pass "artifact edit emits canonical operator audit"
 else
   fail "artifact edit canonical operator audit: verdict=$_DRIVE_OUT events=$(cat "$_DRIVE_EVENTS" 2>/dev/null)"
@@ -186,6 +197,18 @@ expect "P1 quoted redirect \$HOME blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"echo x > \"$HOME/.fno/graph.json\""}}'
 expect "P1 quoted tee ./ blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"tee \"./.fno/target-state.md\""}}'
+# A substitution closer (`)` or a backtick) after the path is a right bound
+# too, or the write slips the adjacency match inside $( ) and `( )`.
+expect "subst redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(echo x > ~/.fno/graph.json)"}}'
+expect "backtick redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=`echo x > ~/.fno/graph.json`"}}'
+expect "subst tee graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(echo x | tee ~/.fno/graph.json)"}}'
+expect "subshell redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"(echo x > ~/.fno/graph.json)"}}'
+expect "subst read graph.json approved" approve \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(cat ~/.fno/graph.json)"}}'
 # P1: separator-equivalent paths (// and /./) resolve to the same protected file.
 expect "P1 double-slash redirect blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"echo x > ~/.fno//graph.json"}}'

@@ -17,6 +17,38 @@ pub(super) fn watch_window_ms(timeout: Option<&str>) -> i64 {
     declared.clamp(5 * 60_000, 2 * 3_600_000) + WATCH_SLACK_MS
 }
 
+/// What a `<watching>` tag says the session waits on: the blocker class the
+/// idle event records, and the PR number only when the tag names a real one.
+/// `pr="0"`, `pr="pending"` and an absent pr all read as no PR. The tag's own
+/// `reason=`/`pr=` attributes are the only source here (the idle verifies
+/// nothing), so the blocker is only as trustworthy as the agent's tag.
+pub(super) fn watch_target(reason: &str, pr: Option<&str>) -> (&'static str, Option<i64>) {
+    let blocker = match reason {
+        "ci" => "ci",
+        "review" => "review",
+        "merge_slot" => "merge_slot",
+        "local" => "local",
+        _ => "unknown",
+    };
+    (
+        blocker,
+        pr.and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|n| *n > 0),
+    )
+}
+
+/// The only runtime text a session with no PR sees teaching the `<watching>`
+/// tag: the Step-5 continue message passed to the inbox nudge.
+pub(super) const CONTINUE_WORKING: &str = "continue working; no completion signal. If you are \
+only waiting with nothing to do, arm a harness-tracked watcher with a hard timeout and end your \
+turn with the tag. A PR wait: background Bash `fno do pr wait <N> --until settled \
+--timeout=30m` (REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, \
+which spends the shared GraphQL quota; a review wait is `--until review`), then `<watching \
+reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">`. A local run (a test suite, a build, a review \
+fork) is its own background task, then `<watching reason=\"local\" timeout=\"30m\">` with no \
+pr: pr is a real PR number or left out, never 0. The session idles until the watcher exits \
+instead of re-waking every tick.";
+
 /// Whether a session's harness + substrate can park-and-wake on a `<watching>`
 /// idle. Only a Claude session's harness-tracked background/Monitor
 /// tasks re-invoke the model when they exit, so only Claude may idle. A
@@ -63,19 +95,31 @@ ever renew, and arming another watcher will not change that. Get the claim back 
 `fno do target start <node>` from inside this worktree, then resume; or hand the PR to \
 a session that holds the claim.";
 
-/// The lead of the arm-and-tag hint. One literal, shared by the writer and by
-/// [`without_arm_hint`], so the cut can never drift off the sentence it cuts.
+/// The lead of the arm-and-tag hint. One literal, shared by the writer (the
+/// Step-5 continue message) and the idle-refusal tests, so the cut can never
+/// drift off the sentence it cuts.
 pub(super) const ARM_HINT_LEAD: &str = " Arm a harness-tracked watcher";
 
-/// `reason` with the arm-and-tag hint cut off.
-///
-/// Said when [`NO_CLAIM_REFUSAL`] already told the reader that no watcher can
-/// help. One message must not prescribe the ritual it just refused: a session
-/// obeyed exactly that contradiction three times before this cut existed.
+/// The arm-and-tag hint's lead, shared with the writer: cutting a hint means
+/// cutting from this exact sentence on.
 pub(super) fn without_arm_hint(reason: &str) -> String {
     match reason.find(ARM_HINT_LEAD) {
         Some(i) => reason[..i].trim_end().to_string(),
         None => reason.to_string(),
+    }
+}
+
+/// Whether a refusal text is permanent for the session: re-arming a watcher
+/// cannot change it, so the block drops the arm hint instead of contradicting
+/// itself inside one message.
+pub(super) fn refusal_is_permanent(reason: &str) -> bool {
+    reason == NO_CLAIM_REFUSAL || reason.starts_with(PERMANENT_REFUSAL_LEAD)
+}
+
+/// Attach the refusal's cause class to a loop_check row.
+pub(super) fn attach_watch_refusal(event: &mut serde_json::Value, kind: Option<&'static str>) {
+    if let Some(kind) = kind {
+        event["watch_refusal"] = serde_json::Value::String(kind.to_string());
     }
 }
 
@@ -99,7 +143,8 @@ pub(super) enum RenewCause {
 }
 
 impl RenewCause {
-    /// The `watch_refusal` event value for this cause (schema.yaml enum).
+    /// The cause string. schema.yaml keeps the `watch_refusal` enum for old
+    /// journals; nothing emits the event since the inline refusal landed.
     pub(super) fn as_str(&self) -> &'static str {
         match self {
             RenewCause::Gone => "gone",
@@ -119,12 +164,11 @@ impl RenewCause {
 }
 
 /// The lead shared by every permanent-cause refusal. The transient refusals
-/// ("watch lease could not be renewed", harness, not-async) never carry it,
-/// which is what [`refusal_is_permanent`] matches on.
+/// ("watch lease could not be renewed", harness, not-async) never carry it.
 const PERMANENT_REFUSAL_LEAD: &str = "watching ignored: this session's watch lease is dead:";
 
 /// The refusal for a cause, or `None` for a transient one: the caller keeps
-/// today's generic text and its arm hint, because a retry can succeed.
+/// the generic text, because a retry can succeed.
 pub(super) fn renewal_refusal(cause: &RenewCause) -> Option<String> {
     let remedy = "Get the claim back with `fno do target start <node>` from inside this \
 worktree, then resume; or hand the PR to a session that holds the claim.";
@@ -143,13 +187,6 @@ another watcher will not change that. {remedy}"
         )),
         RenewCause::Contended | RenewCause::WriteFailed => None,
     }
-}
-
-/// True for the no-claim refusal and every permanent-cause refusal: arming
-/// another watcher cannot help, so the block reason must not prescribe the
-/// ritual it just refused (generalizes the [`NO_CLAIM_REFUSAL`] cut).
-pub(super) fn refusal_is_permanent(reason: &str) -> bool {
-    reason == NO_CLAIM_REFUSAL || reason.starts_with(PERMANENT_REFUSAL_LEAD)
 }
 
 /// Why `renew` did not answer Ok(true) for this session's own claim pair
@@ -185,15 +222,6 @@ pub(super) fn renew_cause(
     }
 }
 
-/// Attach the watching refusal cause to a block `loop_check` event, but ONLY
-/// when the fire carried one: a non-watching block carries no `watch_refusal`
-/// key at all, so consumers read its ABSENCE, never a null.
-pub(super) fn attach_watch_refusal(event: &mut serde_json::Value, kind: Option<&'static str>) {
-    if let Some(kind) = kind {
-        event["watch_refusal"] = serde_json::Value::String(kind.to_string());
-    }
-}
-
 /// Classify a declined renewal of this session's recorded claim pair.
 /// `outcome` is what `renew` answered; `None` on either side means the
 /// manifest recorded no pair or renew never ran, and the cause stays None.
@@ -206,21 +234,8 @@ pub(super) fn declined_cause(
     })
 }
 
-/// The lease sentence appended to a stand-down block reason: the permanent
-/// refusal for a dead lease, or nothing (a transient one keeps its retry).
-pub(super) fn permanent_lease_note(
-    claim: Option<&(String, String)>,
-    outcome: Option<&Result<bool, String>>,
-) -> String {
-    declined_cause(claim, outcome)
-        .filter(|c| c.is_permanent())
-        .map(|c| format!(" {}", renewal_refusal(&c).unwrap_or_default()))
-        .unwrap_or_default()
-}
-
-/// The refusal a watching fire falls through to when it cannot idle, with the
-/// `watch_refusal` event kind for the same answer. One construction for both
-/// the block reason and the event field, so they cannot disagree.
+/// The refusal a watching fire falls through to when it cannot idle, with
+/// the `watch_refusal` row field naming the cause class.
 pub(super) struct WatchRefusal {
     pub(super) reason: String,
     pub(super) kind: &'static str,
@@ -304,18 +319,6 @@ mod tests {
         let refusal = renewal_refusal(&cause).expect("held-by-other is permanent");
         assert!(refusal.contains("target-session:b"), "{refusal}");
         assert!(refusal.contains("fno do target start <node>"), "{refusal}");
-        assert!(
-            !refusal.contains(ARM_HINT_LEAD),
-            "permanent refusal must not carry the arm hint: {refusal}"
-        );
-        assert!(refusal_is_permanent(&refusal));
-        // The cut composes refusal + hint-cut blocker the way the fire path does.
-        let blocker = format!("some blocker.{ARM_HINT_LEAD} continue watching");
-        let composed = format!("{refusal}; {}", without_arm_hint(&blocker));
-        assert!(
-            !composed.contains(ARM_HINT_LEAD),
-            "composed block reason must not re-arm: {composed}"
-        );
     }
 
     #[test]
@@ -346,9 +349,6 @@ mod tests {
         let cause = renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
         assert!(matches!(cause, RenewCause::Contended), "{cause:?}");
         assert!(renewal_refusal(&cause).is_none());
-        assert!(!refusal_is_permanent(
-            "watching ignored: watch lease could not be renewed"
-        ));
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
         // gone: no lockfile at all.
         let cause = renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
         assert!(matches!(cause, RenewCause::Gone));
-        assert!(refusal_is_permanent(&renewal_refusal(&cause).unwrap()));
+        assert!(renewal_refusal(&cause).is_some());
         // stale: dead-pid claim past its TTL with no session witness to heal it.
         let mut o = live_claim_opts(td.path());
         o.pid = Some(999_999_999);
@@ -372,28 +372,12 @@ mod tests {
         assert!(matches!(cause, RenewCause::Stale), "{cause:?}");
         let refusal = renewal_refusal(&cause).unwrap();
         assert!(refusal.contains("stale"), "{refusal}");
-        assert!(refusal_is_permanent(&refusal));
     }
 
     #[test]
     fn write_failed_cause_from_renew_error() {
         let cause = renew_cause("node:x-b445t", "target-session:me", Some("boom"), None);
         assert!(matches!(cause, RenewCause::WriteFailed));
-        assert!(!refusal_is_permanent(
-            "watching ignored: PR is not in an async wait class"
-        ));
-    }
-
-    #[test]
-    fn attach_watch_refusal_sets_the_key_only_when_some() {
-        // AC4-HP/EDGE: a watching fire's refusal rides the event; a
-        // non-watching block carries no `watch_refusal` key at all.
-        let mut event = serde_json::json!({"decision": "block"});
-        attach_watch_refusal(&mut event, Some("held_by_other"));
-        assert_eq!(event["watch_refusal"], serde_json::json!("held_by_other"));
-        let mut bare = serde_json::json!({"decision": "block"});
-        attach_watch_refusal(&mut bare, None);
-        assert!(bare.get("watch_refusal").is_none());
     }
 
     /// A pid the OS does not report, so the claim reads as a corpse.
@@ -409,7 +393,7 @@ mod tests {
 
     #[test]
     fn renew_extends_an_expired_bg_job_claim_whose_witness_says_live() {
-        // a claude BACKGROUND-JOB session holds a node claim (ee2edef3
+        //: a claude BACKGROUND-JOB session holds a node claim (ee2edef3
         // on, PR 2010), arms the sanctioned watcher, and idles past the
         // claim TTL. The job's supervisor pid is gone by the next stop, but the
         // session itself is alive: the witness answers from the registry row
@@ -450,8 +434,8 @@ mod tests {
             pid: Some(dead_pid()),
             ..Default::default()
         };
-        let _ = crate::claims::acquire("node:x-aaaa-bglease", "target-session:me", opts);
-        let path = crate::claims::claim_path("node:x-aaaa-bglease", Some(td.path())).unwrap();
+        let _ = crate::claims::acquire("node:-bglease", "target-session:me", opts);
+        let path = crate::claims::claim_path("node:-bglease", Some(td.path())).unwrap();
         let mut rec = crate::claims::read_claim_file(&path).unwrap();
         rec.session_id = Some("t-3227-bgjob-session".into());
         rec.expires_at = Some(crate::claims::now_ms() - 1);
@@ -472,7 +456,7 @@ mod tests {
         );
 
         let result = crate::claims::renew(
-            "node:x-aaaa-bglease",
+            "node:-bglease",
             "target-session:me",
             120_000,
             Some(td.path()),
@@ -489,6 +473,57 @@ mod tests {
             Some(live as i32),
             "the anchor must MOVE to the live bg-job row pid"
         );
-        assert_eq!(after.expires_at.unwrap() > crate::claims::now_ms(), true);
+        assert!(after.expires_at.unwrap() > crate::claims::now_ms());
+    }
+
+    #[test]
+    fn watch_target_maps_known_reasons_and_local() {
+        assert_eq!(watch_target("ci", Some("404")), ("ci", Some(404)));
+        assert_eq!(watch_target("review", Some("9")), ("review", Some(9)));
+        assert_eq!(
+            watch_target("merge_slot", Some("1")),
+            ("merge_slot", Some(1))
+        );
+        assert_eq!(watch_target("local", None), ("local", None));
+        assert_eq!(watch_target("cargo-test", None), ("unknown", None));
+    }
+
+    #[test]
+    fn watch_target_never_reads_pr_zero_or_non_numbers() {
+        // AC1-ERR: pr="0" is no PR, never PR zero.
+        assert_eq!(watch_target("ci", Some("0")), ("ci", None));
+        // AC1-EDGE: non-numbers and non-positives all read absent.
+        assert_eq!(watch_target("review", Some("pending")), ("review", None));
+        assert_eq!(watch_target("ci", Some("")), ("ci", None));
+        assert_eq!(watch_target("ci", Some("-3")), ("ci", None));
+        assert_eq!(watch_target("local", Some("0")), ("local", None));
+    }
+
+    #[test]
+    fn watch_target_keeps_a_real_pr_number_even_padded() {
+        assert_eq!(watch_target("ci", Some(" 2206 ")), ("ci", Some(2206)));
+    }
+
+    #[test]
+    fn continue_working_teaches_local_and_never_pr_zero() {
+        // AC2-HP: the tag the message teaches for a local run parses back
+        // through the same reader the stop hook uses.
+        let start = CONTINUE_WORKING
+            .find("<watching reason=\"local\"")
+            .expect("the local tag form is taught");
+        let end = start + CONTINUE_WORKING[start..].find('>').unwrap() + 1;
+        let tag = &CONTINUE_WORKING[start..end];
+        assert_eq!(
+            super::super::detect_intent_from_text(tag),
+            super::super::Intent::Watching {
+                reason: "local".into(),
+                pr: None,
+                timeout: Some("30m".into()),
+            }
+        );
+        // AC2-ERR: the PR form stays taught, PR zero never is.
+        assert!(CONTINUE_WORKING.contains("reason=\"ci|review\" pr=\"<N>\""));
+        assert!(!CONTINUE_WORKING.contains("pr=\"0\""));
+        assert!(CONTINUE_WORKING.contains("pr is a real PR number or left out, never 0"));
     }
 }

@@ -49,13 +49,9 @@ def _stub_git_root(monkeypatch, module, root):
 
 
 def _rows(log, kind):
-    if not log.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in log.read_text().splitlines()
-        if json.loads(line).get("type") == kind
-    ]
+    from tests._event_rows import event_rows
+
+    return [row for row in event_rows(log) if row.get("type") == kind]
 
 
 MERGED = json.dumps({"state": "MERGED", "headRefName": "feature/x", "url": ""})
@@ -125,14 +121,12 @@ def test_a_confirmed_merge_still_mints_its_request(tmp_path, monkeypatch):
     # instrument, the same journal, one request row and no skip row.
     import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh(monkeypatch, M, ok=True, stdout=MERGED)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     manifest = _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     monkeypatch.setattr(
         E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
     )
@@ -154,7 +148,6 @@ def test_the_request_stamps_the_prs_merged_at_not_the_emission_time(
     # would mean the bug is back, never a coincidence.
     import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     merged_fixture = json.dumps({
@@ -167,7 +160,6 @@ def test_the_request_stamps_the_prs_merged_at_not_the_emission_time(
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     manifest = _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     monkeypatch.setattr(
         E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
     )
@@ -202,6 +194,34 @@ def test_a_raising_mint_speaks_emit_failed_and_the_merge_stands(tmp_path, monkey
     assert skipped[0]["data"]["reason"] == "emit-failed"
     assert skipped[0]["data"]["detail"] == "RuntimeError"
     assert _rows(log, "merge_cleanup_requested") == []
+
+
+def test_the_request_row_names_the_ambient_session_when_no_manifest_exists(
+    tmp_path, monkeypatch
+):
+    # A canonical checkout is not a session, so it has no manifest; the
+    # merging process (here: the king's shell) names itself instead.
+    import fno.agents.events as E
+    import fno.pr._merge as M
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh(monkeypatch, M, ok=True, stdout=MERGED)
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setattr(
+        E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
+    )
+
+    M._emit_merge_cleanup_request(
+        11, str(tmp_path), str(tmp_path / ".fno" / "target-state.md"), []
+    )
+
+    requested = _rows(log, "merge_cleanup_requested")
+    assert len(requested) == 1
+    data = requested[0]["data"]
+    assert data["session_id"] == "sess-king"
+    assert data["harness"] == "claude"
 
 
 def test_an_unknown_reason_is_refused_rather_than_written(tmp_path, monkeypatch):

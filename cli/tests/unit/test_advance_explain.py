@@ -11,6 +11,7 @@ sets FNO_EVENTS_PATH to a per-test tmp journal anyway, so a future emitter
 cannot reach the live file from here.
 """
 from __future__ import annotations
+from fno.graph.store import read_graph_strict
 
 # ---------------------------------------------------------------------------
 # --explain --epic: the daemon's lane-fill cascade (task 5.1, LD5)
@@ -272,48 +273,47 @@ def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
                 "key": "agents.max_fleet_cpu_share",
                 "note": "spawn-gate: the fleet's CPU share cannot be decided",
             },
-            {
-                "name": "load-backstop",
-                "measured": "45.0",
-                "threshold": "480.0",
-                "verdict": "pass",
-                "key": "agents.hard_max_load_per_cpu",
-            },
         ],
     }
     rows = {g.name: g for g in explain.gates_for(None, probe=answer)}
     assert rows["cpu-share"].verdict == "refuse"
     assert "cannot be decided" in (rows["cpu-share"].note or "")
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
-    assert rows["load-backstop"].measured == "45.0"
-    assert rows["load-backstop"].threshold == "480.0"
-    assert rows["load-backstop"].verdict == "pass"
 
 
-def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
-    """The dry run passes no gate the real spawn would refuse on. The
-    preview reads the ONE gate's probe answer."""
-    _lane_fill_world(monkeypatch, [_ready_node("x-win")])
+def test_preview_keeps_gate_refusal_visible_without_axis_stop(monkeypatch):
     from fno.agents import spawn_gate
     from fno.backlog.explain import build_lane_fill_report
 
-    answer = {
-        "verdict": "accepted",
-        "rows": [
-            {
-                "name": "cpu-share",
-                "measured": "2.10/12.00 cores",
-                "threshold": "50%",
-                "verdict": "refuse",
-                "key": "agents.max_fleet_cpu_share",
-                "note": "spawn-gate: cannot decide",
-            }
-        ],
+    gate_row = {
+        "name": "gate-verdict",
+        "measured": "fleet-stop",
+        "threshold": "accepted",
+        "verdict": "refuse",
+        "note": "fleet incident stop is active",
     }
-    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: answer)
-    report = build_lane_fill_report(epic="x-epic")
-    assert report["selection"]["stop"] == "load-refused"
-    assert report["decision"]["would_dispatch"] == ["x-win"]
+    cpu_row = {
+        "name": "cpu-share", "measured": "2.10/12.00 cores", "threshold": "50%",
+        "verdict": "refuse", "key": "agents.max_fleet_cpu_share",
+        "note": "spawn-gate: cannot decide",
+    }
+    cases = [
+        ([_ready_node("x-win")], gate_row, "cap-full"),
+        ([], gate_row, None),
+        ([], cpu_row, None),
+    ]
+    for ready, row, expected_stop in cases:
+        _lane_fill_world(monkeypatch, ready, max_lanes=0)
+        monkeypatch.setattr(
+            spawn_gate,
+            "probe_capacity",
+            lambda *a, **k: {"verdict": "refused", "rows": [row]},
+        )
+        report = build_lane_fill_report(epic="x-epic")
+        assert report["selection"]["stop"] == expected_stop
+        rendered = next(g for g in report["gates"] if g["name"] == row["name"])
+        assert rendered["measured"] == row["measured"]
+        assert rendered["verdict"] == "refuse"
 
 # ---------------------------------------------------------------------------
 # ROUTING derives the slot from the node's verb (x-4890)
@@ -349,7 +349,6 @@ def _slot_world(monkeypatch):
         )
 
     monkeypatch.setattr(route_resolve, "resolve_inventory", lambda: object())
-    monkeypatch.setattr(route_resolve, "runtime_capacity", lambda inventory=None: {})
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     return calls
 
@@ -438,8 +437,7 @@ _AB_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
 
 
 def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
-    """A hermetic graph with ONE node whose only open do row names `sid`,
-    plus a real fixture transcript for that session."""
+    """A hermetic graph with ONE node whose only open do row names `sid`."""
     g = tmp_path / "graph.json"
     g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
@@ -455,6 +453,9 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
 
     monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
 
     stamp = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     root = tmp_path / "projects" / "-some-worktree"
@@ -470,12 +471,13 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
 
     monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
 
+    started_at = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     g.write_text(_json.dumps({"entries": [{
         "id": node_id, "title": "abandoned arm", "priority": "p2",
         "project": "fno", "domain": "code", "cwd": "/some/worktree",
         "status": "in_progress",
         "sessions": [{"phase": "do", "harness": "claude", "session_id": sid,
-                      "started_at": "2026-09-09T15:46:29Z"}],
+                      "started_at": started_at}],
     }]}))
     return g
 
@@ -495,17 +497,18 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
     tmp_path, monkeypatch
 ):
     """AC1-HP + AC2-HP: quiet transcript past the bar -> the apply receipt
-    reads row_removed true with status_after idea, and advance --explain
+    reads row_closed true with status_after idea, and advance --explain
     answers with a candidate line, never `never a candidate`. A planless
     idea with no intake difficulty now reads as an attributed selection
     drop, so the answer narrates the drop instead of an eligible rank."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_GONE, age_hours=72)
     result = _ab_maintain_apply(monkeypatch)
-    assert "row_removed true" in result.output
+    assert "row_closed true" in result.output
     assert "status_after idea" in result.output
 
-    entries = _json.loads(g.read_text())["entries"]
-    assert entries[0]["sessions"] == []
+    entries = read_graph_strict(g)
+    assert len(entries[0]["sessions"]) == 1
+    assert entries[0]["sessions"][0]["ended_at"]
     assert entries[0]["status"] == "idea"
 
     from fno.cli import app
@@ -521,19 +524,17 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
 
 
 def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
-    """AC3-HP: a last event inside the bar holds the row - report stamps held
-    with the active-transcript reason, and the node still carries the open do
-    row for that exact session."""
+    """AC3-HP: a row inside the idle bound stays open for that session."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_LIVE, age_hours=0)
     result = _ab_maintain_apply(monkeypatch)
     assert "held" in result.output
-    assert "transcript active" in result.output
+    assert "row idle 0h, inside the 24h bound" in result.output
 
-    entries = _json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     rows = entries[0]["sessions"]
     assert len(rows) == 1
     assert rows[0]["session_id"] == _AB_SID_LIVE
-    assert "ended_at" not in rows[0]
+    assert rows[0].get("ended_at") is None
     assert entries[0]["status"] == "in_progress"
 
 

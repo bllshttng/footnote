@@ -66,8 +66,9 @@ def test_apply_emits_triage_applied_with_drop_count(tmp_graph, events_file, tmp_
     # Partial apply (one entry dropped) exits 3 by design.
     assert r.exit_code == 3, r.output
 
-    lines = [ln for ln in events_file.read_text().splitlines() if ln.strip()]
-    events = [json.loads(ln) for ln in lines]
+    from tests._event_rows import event_rows
+
+    events = event_rows(events_file)
     applied_events = [e for e in events if e["type"] == "triage_applied"]
     assert len(applied_events) == 1
     data = applied_events[0]["data"]
@@ -92,5 +93,7 @@ def test_apply_emit_failure_never_breaks_apply(tmp_graph, tmp_path, monkeypatch)
 
     r = runner.invoke(app, ["backlog", "triage", "apply", str(proposal)])
     assert r.exit_code == 0, r.output  # clean apply, emit failure swallowed
-    graph = json.loads(tmp_graph.read_text())
-    assert graph["entries"][0]["priority"] == "p1"
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(tmp_graph)
+    assert graph[0]["priority"] == "p1"

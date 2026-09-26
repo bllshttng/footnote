@@ -504,7 +504,6 @@ def _protect_process_path(ctx: typer.Context) -> None:
     """Put the quota proxy in PATH for subprocesses spawned by this command."""
     from fno.setup.github_cli import (
         PROXY_DEPTH_ENV,
-        fallback_proxy_dir,
         worker_environment,
     )
 
@@ -514,7 +513,9 @@ def _protect_process_path(ctx: typer.Context) -> None:
     keys = ("PATH", "FNO_GH_PROXY_DIR", "FNO_REAL_GH", PROXY_DEPTH_ENV)
     original = {key: os.environ.get(key) for key in keys}
     base = dict(os.environ)
-    base["FNO_GH_PROXY_DIR"] = str(fallback_proxy_dir())
+    # Never honor an inherited dir: a requested dir re-raises on a failed
+    # install, and a parent's temp pin would win PATH over the durable home.
+    base.pop("FNO_GH_PROXY_DIR", None)
     protected = worker_environment(base)
     changed = False
     for key in keys:
@@ -920,6 +921,12 @@ def main() -> None:
         ):
             exc.msg = f"{exc.msg or ''}{_reinstall_hint(exc.name)}"
         raise
+    except (RuntimeError, ValueError) as exc:
+        refusal = getattr(exc, "fno_refusal", None)
+        if refusal is None:
+            raise
+        print(f"Error: {refusal}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

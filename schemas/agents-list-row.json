@@ -9,6 +9,7 @@
     "thread_id",
     "current_session_id",
     "node",
+    "node_reason",
     "predecessor_session_ids",
     "forked_from_session_id",
     "short_id",
@@ -55,6 +56,7 @@
     "thread_id": "The row's stable `fno_id` (v13): one worker keeps it across session-id succession. It is the THREAD key, never the current harness address - a renderer that presented it as the current session would resurrect a retired id, which is why it is emitted beside `current_session_id` rather than instead of it.",
     "current_session_id": "The row's `harness_session_id`: the address delivery (mail, inject, pane send) follows NOW. Emitted as its own positive key so the succession contract is assertable - after A->B succession this is B and never A, the `fno_id`, or a predecessor.",
     "node": "The backlog node this registry row works, stamped at spawn from resolved provenance and never inferred from the row name. Null means the mint could not know; the key remains present so declared-but-unwritten and projection-dropped are distinguishable. Both serializers emit it or the parity asserts fail.",
+    "node_reason": "The sibling receipt: why the row works no node WHEN the spawn named one - the seed's verb argument read as a node id but resolved to no readable backlog row. Null in the two honest states (the node resolved; the spawn named none), so the three states stay distinguishable. Both serializers emit it or the parity asserts fail.",
     "predecessor_session_ids": "Ordered, deduplicated succession history (v18): every retired id the current session succeeded, oldest first. Empty for a worker never re-minted. A predecessor id still ADDRESSES the row (mail naming A lands on the row that now answers as B), but only a full-id resume may consume it exactly.",
     "forked_from_session_id": "The immediate origin of a BRANCH row (v18): the live session this parallel fork split from. None on every non-branch row, including a succession successor - succession is one row plus a chain, never a fork edge. A branch renders as its own row; this key is the visible edge between the two live workers.",
     "provider": "The registry's spawn-stamped model vendor (v15+ axis), never inferred from `harness`. Restored to the projection by x-f273: the pre-v15 alias that carried the HARNESS value under this name was removed for lying, and that removal kept hiding the real vendor axis the rename had just created, so `fno agents list` answered null for a field the writer stored (30 of 31 live rows lost, 2026-08-22). `observed_model` remains the transcript-derived reading of what actually answered; this key answers which vendor's lane the row was minted for. Both serializers emit it or the parity asserts fail.",
@@ -124,9 +126,11 @@
       "mcp_channel_id",
       "messaging_socket_path",
       "model_name",
+      "pending_session_row",
       "pid_start_time",
       "related_session_id",
       "requested_effort",
+      "requested_permission_mode",
       "requested_provider",
       "resolved_sandbox",
       "route_provider_id",
@@ -139,8 +143,42 @@
       "spawned_by_cwd",
       "spawned_by_harness",
       "spawned_by_session",
-      "stop"
+      "stop",
+      "turn_policy_source"
     ]
   },
-  "known_gaps": {}
+  "known_gaps": {},
+  "population_contract": {
+    "$comment": "A zero population on a snapshot is not a dead writer when a code path writes the field only under conditions this row type rarely meets, or only while a runtime state is active. Each entry declares: mode (conditional = event-scoped, transient = active-runtime-scoped), surface (which coverage readings the entry covers), the writer that proves the field is wired, and the behavior test that exercises it. Zero is valid ONLY for a named mode; it never means the field was removed or unwired. The live coverage evaluator partitions contract-covered zeroes into conditional_zero and transient_zero instead of dead_fields; a field absent from this contract stays a dead-field finding.",
+    "forked_from_session_id": {
+      "mode": "conditional",
+      "surface": "persisted_and_projected",
+      "writer": "record_session_observation branch classification and RegistryEntry::fork_for_session",
+      "test": "cli/tests/agents/test_session_lineage.py"
+    },
+    "predecessor_session_ids": {
+      "mode": "conditional",
+      "surface": "persisted_and_projected",
+      "writer": "record_session_observation succession classification and fork_lineage.predecessor_ids",
+      "test": "cli/tests/agents/test_session_lineage.py"
+    },
+    "live_status": {
+      "mode": "conditional",
+      "surface": "projected",
+      "writer": "read.py Claude supervisor enrichment; Rust list preserves null by design",
+      "test": "cli/tests/agents/test_read.py"
+    },
+    "live_status_basis": {
+      "mode": "conditional",
+      "surface": "projected",
+      "writer": "row_contradiction.project_row when a fired falsifier supersedes a supervisor token",
+      "test": "cli/tests/agents/test_read.py"
+    },
+    "delivery_policy": {
+      "mode": "transient",
+      "surface": "persisted_and_projected",
+      "writer": "fno agents mail hold while a busy-mode hold is active",
+      "test": "cli/tests/unit/test_mail_hold.py"
+    }
+  }
 }

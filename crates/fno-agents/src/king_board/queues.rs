@@ -1,15 +1,16 @@
-//! The operator lane parser and the thirteen-queue board build (pure; no I/O).
+//! The operator lane parser and the fourteen-queue board build (pure; no I/O).
 use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
-use super::prs::derived_status;
+use super::prs::{derived_status, node_pr_refs, nodes_binding_pr};
 use super::scope::operator_lane_path;
 use super::{
-    as_int, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX, SRC_CLAIMS,
-    SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE, SRC_PR_NODES, SRC_QUESTIONS,
-    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    as_int, is_terminal, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES,
+    LEGACY_DEFER_PREFIX, SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE,
+    SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, STRANDED_GRACE_MINUTES,
+    TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Per-project rows rendered for the capture stream; the count stays whole.
@@ -80,15 +81,16 @@ pub(crate) struct BlockedRow {
     pub(crate) evidence: Option<String>,
 }
 
-/// Every `type: "blocked"` row in one journal file, oldest-line-first (the
-/// file is append-only). A missing file reads as an honest empty list - a
-/// king board with nothing blocked yet must not read as unreadable.
+/// Every `type: "blocked"` row in one journal, oldest-first (the reader
+/// returns committed rows in commit order). A journal with neither a live
+/// file nor a store reads as an honest empty list - a king board with
+/// nothing blocked yet must not read as unreadable.
 pub(crate) fn read_blocked_rows(path: &Path) -> Result<Vec<BlockedRow>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
+    let text = crate::event_store::journal_text_checked(
+        path,
+        &crate::event_store::EventQuery::of_types(&["blocked"]),
+    )
+    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut out = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -125,11 +127,14 @@ pub(crate) fn read_blocked_rows(path: &Path) -> Result<Vec<BlockedRow>, String> 
 /// exactly the split `build_board` uses for every other queue's inputs.
 /// "Released" reads the CURRENT claim only: this scan carries no prior
 /// holder to diff against, so gone or dead-stated counts as released and
-/// still-live does not. Returns `(row, age_minutes)` - the survivors still
+/// still-live does not. A row whose node's claim was acquired strictly after
+/// the row's own ts is stale: the hand that raised it has left. An unparsable
+/// ts never convicts. Returns `(row, age_minutes)` - the survivors still
 /// need the ONE batched mail-answered check the caller makes.
 pub(crate) fn resolve_blocked_child_candidates(
     rows: Vec<BlockedRow>,
     claim_state_by_node: &HashMap<String, String>,
+    claim_acquired_at_by_node: &HashMap<String, i64>,
     status_by_node: &HashMap<String, String>,
     grace_minutes: i64,
     now_s: i64,
@@ -161,9 +166,25 @@ pub(crate) fn resolve_blocked_child_candidates(
         if closed || claim_released {
             continue;
         }
-        let row_epoch = crate::tick_ledger::parse_rfc3339_unix(&row.ts)
-            .map(|s| s as i64)
-            .unwrap_or(now_s);
+        // A claim taken after the row is a new hand; the raising worker's
+        // distress does not bind it. Strictly after keeps a same-second row
+        // (a worker can claim and hit distress inside one second). Fail
+        // open: an unparsable ts never convicts. acquired_at is epoch
+        // MILLISECONDS; row ts is seconds.
+        let row_epoch_opt = crate::tick_ledger::parse_rfc3339_unix(&row.ts).map(|s| s as i64);
+        let stale_holder = match (
+            row_epoch_opt,
+            row.node
+                .as_deref()
+                .and_then(|n| claim_acquired_at_by_node.get(n)),
+        ) {
+            (Some(row_s), Some(acq_ms)) => acq_ms / 1000 > row_s,
+            _ => false,
+        };
+        if stale_holder {
+            continue;
+        }
+        let row_epoch = row_epoch_opt.unwrap_or(now_s);
         let age_minutes = (now_s - row_epoch) / 60;
         if age_minutes < grace_minutes {
             continue;
@@ -311,7 +332,7 @@ fn verdict_rows_from(outstanding: &Value) -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Board construction: the thirteen queues
+// Board construction: the fourteen queues
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Queue {
@@ -413,6 +434,14 @@ pub(crate) struct BoardInputs {
     pub(crate) pr_gates: SourceRead,
     pub(crate) outstanding: SourceRead,
     pub(crate) needs: SourceRead,
+    /// The open fleet tasks, folded in-process off questions.jsonl. A
+    /// report-only queue for kings; an unreadable store degrades this
+    /// queue, never the board.
+    pub(crate) tasks: SourceRead,
+    /// The board's repo root: a task whose cwd is empty or inside it lists;
+    /// the rest ride the queue note so a task filed for another repo is
+    /// never silently dropped.
+    pub(crate) repo_root: String,
     pub(crate) lane: SourceRead,
     pub(crate) undispatched: SourceRead,
     /// Pre-computed blocked_child candidates: one row per session with an
@@ -423,9 +452,17 @@ pub(crate) struct BoardInputs {
     /// needs already live; this queue only scope-filters and renders, the
     /// same split `undispatched` uses for its Python-computed selection.
     pub(crate) blocked_child: SourceRead,
+    /// The stranded-tree read: per-repo worktree scans joined to the graph's
+    /// king-priority candidates. Rows carry
+    /// `{id, tree, branch, dirty, unpushed, idle_minutes, resumable}`.
+    pub(crate) stranded: SourceRead,
     /// The graph entries (None = unreadable); one read shared with scope
     /// compile, undispatched classify, and claimed-node lookups.
     pub(crate) entries: Option<Vec<Value>>,
+    /// Held nodes: node -> the open question id that holds it. The
+    /// ready feed has already partitioned them out; the undispatched queue
+    /// reads the same map so a held node never reads as stuck work.
+    pub(crate) held: std::collections::BTreeMap<String, String>,
     pub(crate) warnings: Vec<String>,
     pub(crate) autonomous_merge: bool,
     pub(crate) scope_ids: Option<HashSet<String>>,
@@ -630,6 +667,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             .rows()
             .into_iter()
             .filter(|node| KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")))
+            .filter(|node| {
+                // A held node has a named question, not a missing dispatch
+                //; it renders under held, never here.
+                !node
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| inputs.held.contains_key(id))
+            })
             .filter(|node| {
                 in_scope(
                     "undispatched",
@@ -985,6 +1030,15 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .iter()
         .filter(|r| r.get("actionable").and_then(Value::as_bool) == Some(true))
         .count() as i64;
+    // An unread gate (exit 4, a failed call, an exhausted slice) leaves
+    // `ready` null: that is no evidence of a driverless PR, so the number is
+    // never filed under undriven_pr. The row stays visible under mergeable_pr
+    // with the read_pr_gates warning naming it.
+    let gate_unread: HashSet<i64> = pr_rows
+        .iter()
+        .filter(|r| r.get("ready") == Some(&Value::Null))
+        .filter_map(|r| r.get("number").and_then(Value::as_i64))
+        .collect();
 
     // Undriven PR: the complement of stalled_holder, the second half of ONE
     // predicate. Fail CLOSED on an unreadable claim list: every node would
@@ -1010,6 +1064,15 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|e| s_str(e, "contained_in").is_some_and(|c| !c.is_empty()))
         .filter_map(|e| s_str(e, "id").map(str::to_string))
         .collect();
+    // A ruling hold (crown's dispatch_hold) parks the node deliberately;
+    // it is not driverless, so undriven_pr must not name it.
+    let by_id: BTreeMap<String, Value> = inputs
+        .entries
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|e| s_str(e, "id").map(|id| (id.to_string(), e.clone())))
+        .collect();
     if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
         for node in &inputs.pr_nodes.rows() {
             // No priority filter: a PR is finished work at any band, so a p2
@@ -1017,20 +1080,23 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }
-            let terminal = s_str(node, "status")
-                .map(|s| TERMINAL_RUNGS.contains(&s))
-                .unwrap_or(false)
-                || node.get("superseded_by").is_some_and(|v| !v.is_null())
-                || node
-                    .get("completed_at")
-                    .and_then(Value::as_str)
-                    .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
-                    .unwrap_or(false);
-            if terminal {
+            if is_terminal(node) {
                 continue;
             }
             let status = derived_status(node);
             if status == "deferred" || status == "blocked" {
+                continue;
+            }
+            // pr_nodes rows carry no `plan_path` (that lives on the graph
+            // entry, per the contained_ids comment above); look the node up
+            // in `by_id` so the hold reader sees the entry that actually
+            // carries the plan.
+            let hold_entry = s_str(node, "id")
+                .and_then(|id| by_id.get(id))
+                .unwrap_or(node);
+            if crate::backlog_ready::dispatch_hold_verdict(hold_entry, &by_id)
+                .is_some_and(|v| v.held)
+            {
                 continue;
             }
             let (state, _claim) = node_driver(
@@ -1044,9 +1110,47 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             if state != "none" {
                 continue;
             }
+            // A driver on ANOTHER node that binds one of this node's PRs is
+            // still a driver: the crown dispatched the worker elsewhere and
+            // bound the PR there (`fno backlog update <node> --add-pr`). The
+            // resume gate reads the same binding.
+            let bound_entry = s_str(node, "id")
+                .and_then(|id| by_id.get(id))
+                .unwrap_or(node);
+            let shared_prs: Vec<i64> = node_pr_refs(bound_entry).iter().map(|(n, _)| *n).collect();
+            if !shared_prs.is_empty() {
+                let entries = inputs.entries.as_deref().unwrap_or(&[]);
+                let driven_elsewhere = shared_prs.iter().any(|pr| {
+                    nodes_binding_pr(entries, *pr).iter().any(|other| {
+                        if s_str(node, "id").is_some_and(|id| id == *other) {
+                            return false;
+                        }
+                        let Some(other_entry) = by_id.get(*other) else {
+                            return false;
+                        };
+                        let (other_state, _) = node_driver(
+                            other_entry,
+                            &claim_by_node,
+                            &inputs.holder_activity,
+                            inputs.scope_ids.as_ref(),
+                            Some(&inputs.worked),
+                            Some(&inputs.drivers),
+                        );
+                        other_state != "none"
+                    })
+                });
+                if driven_elsewhere {
+                    continue;
+                }
+            }
             let pr_number = node.get("pr_number").and_then(Value::as_i64);
             if let Some(n) = pr_number {
                 if mergeable_numbers.contains(&n) {
+                    continue;
+                }
+                // Applied whatever `autonomous_merge` says: an unread gate is
+                // not evidence of a driverless PR.
+                if gate_unread.contains(&n) {
                     continue;
                 }
             }
@@ -1088,6 +1192,36 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .collect()
         })
         .unwrap_or_default();
+
+    // The fleet-task queue: report-only. A task whose cwd is empty or
+    // inside the board's repo root lists; the rest ride the note, so a task
+    // filed for another repo is never silently dropped.
+    let repo_root = std::path::Path::new(&inputs.repo_root);
+    let mut held_for_other_repo: usize = 0;
+    let fleet_task_rows: Vec<Value> = inputs
+        .tasks
+        .rows()
+        .into_iter()
+        .filter(|t| {
+            let cwd = t.get("cwd").and_then(Value::as_str).unwrap_or("");
+            let keep = cwd.is_empty() || std::path::Path::new(cwd).starts_with(repo_root);
+            if !keep {
+                held_for_other_repo += 1;
+            }
+            keep
+        })
+        .map(|t| {
+            json!({
+                "id": t.get("id"),
+                "lane": t.get("lane"),
+                "text": t.get("text"),
+                "run": t.get("run"),
+                "node": t.get("node"),
+                "cwd": t.get("cwd"),
+                "ts": t.get("ts"),
+            })
+        })
+        .collect();
 
     let carveout_stream = outstanding
         .get("carveouts")
@@ -1171,6 +1305,69 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     let lane_source = format!("cat {}", operator_lane_path(Path::new(".")).display());
 
+    // Stranded trees: local work at risk. A row survives only when the tree
+    // holds work (dirty or unpushed), the tree has gone quiet past the grace
+    // window, and nobody drives the node - the same `node_driver` verdict
+    // `unheld_progress` trusts. Report-only: the remedy is dispatch, which
+    // `undispatched`/`unheld_progress` already drive and which now resumes
+    // in the tree, so the queue never keeps a king working by itself.
+    let stranded_ok = inputs.stranded.is_ok()
+        && inputs.entries.is_some()
+        && inputs.claims.is_ok()
+        && inputs.drivers.is_ok()
+        && inputs.holder_activity_error.is_none();
+    let stranded_rows: Vec<Value> = if stranded_ok {
+        let entry_by_id: HashMap<String, &Value> = inputs
+            .entries
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|e| s_str(e, "id").map(|id| (id.to_string(), e)))
+            .collect();
+        inputs
+            .stranded
+            .rows()
+            .into_iter()
+            .filter(|row| {
+                let dirty = row.get("dirty").and_then(Value::as_i64).unwrap_or(0);
+                let unpushed = row.get("unpushed").and_then(Value::as_i64).unwrap_or(0);
+                if dirty <= 0 && unpushed <= 0 {
+                    return false;
+                }
+                let idle = row.get("idle_minutes").and_then(Value::as_i64).unwrap_or(0);
+                if idle < STRANDED_GRACE_MINUTES {
+                    return false;
+                }
+                let Some(id) = s_str(row, "id") else {
+                    return false;
+                };
+                let Some(node) = entry_by_id.get(id) else {
+                    return false;
+                };
+                let (state, _claim) = node_driver(
+                    node,
+                    &claim_by_node,
+                    &inputs.holder_activity,
+                    inputs.scope_ids.as_ref(),
+                    Some(&inputs.worked),
+                    Some(&inputs.drivers),
+                );
+                if state != "none" {
+                    return false;
+                }
+                in_scope(
+                    "stranded_tree",
+                    false,
+                    node.get("id").unwrap_or(&Value::Null),
+                    row,
+                    &mut out_of_scope,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut queues = vec![
         queue(
             "operator_lane",
@@ -1234,7 +1431,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             },
             unplanned_rows,
             true,
-            "batch: up to 3 blueprints per session; merge same-shape nodes into one waved plan".to_string(),
+            "one blueprint per king at a time, and only while plans ready are fewer than the king's worker slots; merge same-shape nodes into one waved plan".to_string(),
             "/fno:blueprint",
             None,
         ),
@@ -1331,6 +1528,36 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             None,
         ),
         queue(
+            "stranded_tree",
+            "git worktree list --porcelain + git status --porcelain + git rev-list --count HEAD --not --remotes".to_string(),
+            &if stranded_ok {
+                SourceRead::ok(Value::Null)
+            } else {
+                SourceRead::err(
+                    inputs
+                        .stranded
+                        .error
+                        .clone()
+                        .or_else(|| {
+                            if inputs.entries.is_none() {
+                                Some("graph unreadable".to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default(),
+                )
+            },
+            stranded_rows,
+            false,
+            "a tree holding uncommitted or unpushed work that no live session drives; dispatch the node and every node-keyed door resumes in it (resumable=false: run fno do target start <id> from inside the tree); never remove it".to_string(),
+            "/fno:target",
+            None,
+        ),
+        queue(
             "mergeable_pr",
             format!("{SRC_PRS} + {SRC_PR_GATE}"),
             &inputs.prs,
@@ -1372,6 +1599,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             question_rows,
             false,
             "report-only: a human answers these, so counting them would hold the loop open forever".to_string(),
+            "",
+            None,
+        ),
+        queue(
+            "fleet_task",
+            SRC_QUESTIONS.to_string(),
+            &inputs.tasks,
+            fleet_task_rows,
+            false,
+            if held_for_other_repo > 0 {
+                format!(
+                    "report-only: a lane runs each row's command; the row closes when its condition clears or its node closes; {held_for_other_repo} held for another repo"
+                )
+            } else {
+                "report-only: a lane runs each row's command; the row closes when its condition clears or its node closes".to_string()
+            },
             "",
             None,
         ),
@@ -1495,11 +1738,15 @@ mod tests {
             pr_gates: SourceRead::ok(json!([])),
             outstanding: empty.clone(),
             needs: empty.clone(),
+            tasks: empty.clone(),
+            repo_root: String::new(),
             lane: empty.clone(),
             undispatched: SourceRead::ok(json!([])),
             blocked_child: empty.clone(),
+            stranded: SourceRead::ok(json!([])),
             worked: empty,
             entries: None,
+            held: Default::default(),
             warnings: Vec::new(),
             autonomous_merge: true,
             scope_ids: Some(HashSet::from(["x-in".to_string()])),
@@ -1589,6 +1836,158 @@ mod tests {
         );
     }
 
+    fn active_probe(token: &str) -> (String, crate::truth_probe::TruthProbe) {
+        (
+            token.to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                provider_refusal: None,
+                harness_title: None,
+                reachability: Some("reachable".to_string()),
+                basis: Some("transcript".to_string()),
+                last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+            },
+        )
+    }
+
+    #[test]
+    fn a_worker_recovered_through_a_closed_row_never_reads_undriven() {
+        // The measured specimen (2026-09-17): a live worker's do row closed
+        // and the same session drove PR 2126 for fourteen more hours, yet
+        // undriven_pr named the node - the drivers feed joined on the
+        // registry `node` stamp alone, and the stamp was absent. Post-join
+        // the feed emits the recovered row, so node_driver reads active
+        // through roster_verdict and the queue stops inviting a double
+        // dispatch.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([{
+                "id": "x-cccc",
+                "priority": "p1",
+                "status": "in_review",
+                "title": "driven mid-fix",
+                "pr_number": 2126,
+            }]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        // What read_driver_rows emits after the graph join: the unstamped
+        // live registry row resolved through the PR-bound entry's closed do
+        // row.
+        inputs.drivers = SourceRead::ok(json!([
+            {"name": "t-x-cccc-worker", "node": "x-cccc", "token": "uuid-cccc"},
+        ]));
+        let (token, probe) = active_probe("uuid-cccc");
+        inputs.holder_activity.insert(token, probe);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-cccc"),
+            "a driven PR was named undriven: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn undriven_pr_counts_a_driver_on_a_node_that_binds_the_pr() {
+        // AC7-HP first half: node A holds open PR P with no driver of its
+        // own; node B binds P through additional_prs and has a live driver.
+        // The PR has a driver, so A is not listed.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([
+                {"id": "x-aaaa", "priority": "p1", "status": "in_progress",
+                 "title": "driven through a bound node", "pr_number": 2187},
+                {"id": "x-bbbb", "priority": "p2", "status": "in_progress",
+                 "title": "the bound driver's node",
+                 "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}]},
+            ]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        inputs.entries = Some(vec![
+            json!({
+                "id": "x-aaaa", "status": "in_progress", "pr_number": 2187,
+            }),
+            json!({
+                "id": "x-bbbb", "status": "in_progress",
+                "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}],
+            }),
+        ]);
+        inputs.drivers = SourceRead::ok(json!([
+            {"name": "t-x-bbbb-worker", "node": "x-bbbb", "token": "uuid-bbbb"},
+        ]));
+        let (token, probe) = active_probe("uuid-bbbb");
+        inputs.holder_activity.insert(token, probe);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-aaaa"),
+            "a PR driven through a bound node was named undriven: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn undriven_pr_still_names_the_pr_when_the_bound_node_has_no_driver() {
+        // AC7-HP second half: the bound node has no driver either, so the PR
+        // stays undriven and x-aaaa is still listed.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([
+                {"id": "x-aaaa", "priority": "p1", "status": "in_progress",
+                 "title": "undriven", "pr_number": 2188},
+                {"id": "x-bbbb", "priority": "p2", "status": "in_progress",
+                 "title": "bound but driverless",
+                 "additional_prs": [{"number": 2188, "url": "https://example.com/pr/2188"}]},
+            ]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        inputs.entries = Some(vec![
+            json!({
+                "id": "x-aaaa", "status": "in_progress", "pr_number": 2188,
+            }),
+            json!({
+                "id": "x-bbbb", "status": "in_progress",
+                "additional_prs": [{"number": 2188, "url": "https://example.com/pr/2188"}],
+            }),
+        ]);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().any(|r| r["id"] == "x-aaaa"),
+            "a driverless PR lost its row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_prless_node_whose_worker_only_reached_a_closed_row_stays_none() {
+        // The closed-planner ruling, pinned on the board: on a node with no
+        // PR the closed row emits nothing, so the drivers feed carries no
+        // candidate and node_driver still reaches none - the node stays
+        // available to the queues that name a dead handoff.
+        let node = json!({
+            "id": "x-nopr",
+            "priority": "p1",
+            "status": "ready",
+        });
+        let drivers = SourceRead::ok(json!([]));
+        let worked = SourceRead::ok(json!([]));
+        let state = node_driver(
+            &node,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            Some(&worked),
+            Some(&drivers),
+        )
+        .0;
+        assert_eq!(state, "none");
+    }
+
     #[test]
     fn a_pr_without_a_gate_verdict_is_not_actionable() {
         // Fail closed: absent verdict means unknown, and unknown is never
@@ -1613,6 +2012,53 @@ mod tests {
             .find(|q| q["name"] == "mergeable_pr")
             .unwrap();
         assert_eq!(q["count"], json!(0), "{q}");
+    }
+
+    #[test]
+    fn an_unread_gate_is_never_filed_as_undriven() {
+        // AC8-HP: no gate row leaves `ready` null, which is no
+        // evidence of a driverless PR. The PR stays visible under
+        // mergeable_pr and out of undriven_pr.
+        let inputs = pr_board_inputs(
+            json!([
+                {"number": 1712, "title": "gate never answered"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1712}]),
+        );
+
+        let board = build_board(&inputs);
+
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(mergeable.len(), 1, "the row stays visible: {mergeable:?}");
+        assert_eq!(mergeable[0]["ready"], Value::Null);
+        let undriven = queue_rows(&board, "undriven_pr");
+        assert!(
+            undriven.iter().all(|r| r["id"] != "x-in"),
+            "an unread gate was filed as undriven: {undriven:?}"
+        );
+    }
+
+    #[test]
+    fn a_red_gate_verdict_keeps_the_pr_in_undriven() {
+        // AC9-EDGE: `ready: false` is a real verdict, not an unread
+        // gate; a driverless PR behind it still needs a driver named.
+        let mut inputs = pr_board_inputs(
+            json!([
+                {"number": 1713, "title": "gate answered: red"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1713}]),
+        );
+        inputs.pr_gates = SourceRead::ok(json!([
+            {"number": 1713, "ready": false, "ready_blockers": ["ci_red"]},
+        ]));
+
+        let board = build_board(&inputs);
+
+        let undriven = queue_rows(&board, "undriven_pr");
+        assert!(
+            undriven.iter().any(|r| r["id"] == "x-in"),
+            "a red gate verdict lost its undriven row: {undriven:?}"
+        );
     }
 
     #[test]
@@ -1791,8 +2237,14 @@ mod tests {
         let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-closed")];
         let mut status = HashMap::new();
         status.insert("x-closed".to_string(), "done".to_string());
-        let candidates =
-            resolve_blocked_child_candidates(rows, &HashMap::new(), &status, 30, 10_000_000_000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &HashMap::new(),
+            &HashMap::new(),
+            &status,
+            30,
+            10_000_000_000,
+        );
         assert!(
             candidates.is_empty(),
             "a done node must not need a mail spawn"
@@ -1804,8 +2256,14 @@ mod tests {
         let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-released")];
         let mut claims = HashMap::new();
         claims.insert("x-released".to_string(), "stale".to_string());
-        let candidates =
-            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, 10_000_000_000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            10_000_000_000,
+        );
         assert!(
             candidates.is_empty(),
             "a released claim must not need a mail spawn"
@@ -1820,8 +2278,14 @@ mod tests {
         claims.insert("x-live".to_string(), "live".to_string());
         let row_epoch =
             crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
-        let candidates =
-            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, row_epoch + 600);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            row_epoch + 600,
+        );
         assert!(
             candidates.is_empty(),
             "10 minutes old must not clear a 30-minute grace"
@@ -1839,6 +2303,7 @@ mod tests {
             rows,
             &claims,
             &HashMap::new(),
+            &HashMap::new(),
             30,
             row_epoch + 45 * 60,
         );
@@ -1855,7 +2320,14 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("x-a".to_string(), "live".to_string());
         let now = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T02:00:00Z").unwrap() as i64;
-        let candidates = resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, now);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            now,
+        );
         assert_eq!(
             candidates.len(),
             1,
@@ -1864,6 +2336,85 @@ mod tests {
         assert_eq!(
             candidates[0].0.ts, "2026-09-08T00:00:00Z",
             "the OLDEST row wins"
+        );
+    }
+
+    #[test]
+    fn a_claim_taken_after_the_row_reads_stale_not_blocked() {
+        // AC2-HP: a live claim acquired after the row ts is a new hand; the
+        // old worker's distress does not bind it, so the row stays off the
+        // board even past grace with a live claim.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-cccc")];
+        let mut claims = HashMap::new();
+        claims.insert("x-cccc".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        let row_s = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        acquired.insert("x-cccc".to_string(), (row_s + 1) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            30,
+            row_s + 45 * 60,
+        );
+        assert!(
+            candidates.is_empty(),
+            "a claim taken after the row is a new hand: {} candidate(s)",
+            candidates.len()
+        );
+    }
+
+    #[test]
+    fn a_claim_taken_before_the_row_keeps_it_on_the_board() {
+        // AC2-ERR + AC2-EDGE, the units guard: a claim acquired 1 second
+        // before the row is the SAME hand still holding, so the row
+        // survives. A raw milliseconds-against-seconds compare would read
+        // every claim as "after" and empty the queue.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        let row_s = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        acquired.insert("x-live".to_string(), (row_s - 1) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            30,
+            row_s + 45 * 60,
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the same hand 1s before the row never drops it"
+        );
+    }
+
+    #[test]
+    fn an_unparsable_row_ts_is_never_convicted_by_staleness() {
+        // AC2-EDGE2, fail open: if the staleness check read ts as
+        // unwrap_or(now_s), a claim acquired after now_s would convict a
+        // row whose ts does not parse. Grace 0 lets the row through every
+        // other filter, so only staleness could drop it here.
+        let rows = vec![blocked("not-a-timestamp", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        acquired.insert("x-live".to_string(), (10_000_000_000 + 600) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            0,
+            10_000_000_000,
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "an unparsable ts never convicts, whatever the claim's acquired_at"
         );
     }
 
@@ -2030,5 +2581,28 @@ mod tests {
         assert_eq!(verdict.as_deref(), Some("ghost"));
         let no_holder = verdict_for(Some(&payload), "20260915T033130Z-cl38242-b8e631", None);
         assert_eq!(no_holder, None);
+    }
+
+    #[test]
+    fn blocked_rows_read_a_store_committed_row() {
+        // AC4-HP
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let line = json!({"ts": "2026-09-17T12:00:00Z", "type": "blocked", "source": "agent",
+            "run": "run-1", "node": "x-1", "data": {"reason": "waiting on legal"}});
+        crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
+        let rows = read_blocked_rows(&journal).unwrap();
+        assert_eq!(rows.len(), 1, "the store-committed blocked row reads");
+        assert_eq!(rows[0].node.as_deref(), Some("x-1"));
+        assert_eq!(rows[0].reason, "waiting on legal");
+    }
+
+    #[test]
+    fn blocked_rows_err_on_a_broken_store() {
+        // AC4-ERR
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        std::fs::write(dir.path().join("events.db"), b"not a database").unwrap();
+        assert!(read_blocked_rows(&journal).is_err());
     }
 }

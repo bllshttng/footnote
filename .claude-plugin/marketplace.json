@@ -6,17 +6,30 @@
   },
   "metadata": {
     "description": "Set a target and walk away. Say f[no] to mostly done.",
-    "version": "0.3.2"
+    "version": "0.4.0"
   },
   "plugins": [
     {
       "name": "fno",
-      "source": "./",
+      "source": {
+        "source": "github",
+        "repo": "bllshttng/footnote",
+        "ref": "stable"
+      },
       "description": "Set a target and walk away. Say f[no] to mostly done.",
-      "version": "0.3.2",
       "category": "workflow",
-      "tags": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"],
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "tags": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"]
+    },
+    {
+      "name": "fno-nightly",
+      "source": {
+        "source": "github",
+        "repo": "bllshttng/footnote",
+        "ref": "nightly"
+      },
+      "description": "Footnote nightly: yesterday's green main, rolling and replaceable.",
+      "category": "workflow",
+      "tags": ["workflow", "nightly", "tdd", "planning", "autonomous", "target"]
     }
   ]
 }

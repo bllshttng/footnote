@@ -2,7 +2,7 @@
 
 Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
-This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
+This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/reign/references/cli-commands.md](../skills/reign/references/cli-commands.md).
 
 ## Is this page for you?
 
@@ -76,7 +76,7 @@ Three verbs, and they are not interchangeable.
 
 When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
 
-**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A session already in a terminal state is never injected into. An explicit message on one refuses instead of reporting `Done -> Done` with the payload dropped.
+**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A claude session that `claude agents` lists as `blocked`, `done`, `stopped` or `failed` takes the message. When its process has exited, resume revives it in place. It then injects the text in a container that names the sender. Exit 0 means the transcript shows it. A `working` session still refuses.
 
 ## A provider cap stranded my sessions: who brings them back?
 
@@ -100,7 +100,7 @@ A subagent fails the same way and gives you less to read. One finished at 23:13 
 
 Two channels, and they answer different questions.
 
-`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the text reached the pane, not that the agent read it. A `queued` result also prints hosted (`cli/src/fno/mail/cli.py:3139`). The message can sit until the agent looks up, or until a human presses ESC. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
+`fno agents mail send <name> "<text>"` can reach a **live** worker. Read its receipt. `delivered (hosted)` and `delivered (woken)` mean the inject was accepted. Neither proves the agent read it. A `queued` message waits until the agent looks up or a human presses ESC. Any other receipt means the worker still has its old instructions. A failed injection falls back to the durable queue, where the message can remain unread.
 
 `fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 
@@ -427,16 +427,6 @@ The same session had verified six claims that arrived from other people that day
 
 *Graduates to:* a review question asking, of any proposed hook, how many times it fired last week. Until a proposal has to carry that number, this stays a habit.
 
-## A claim reads unknown and my target refuses to start
-
-**Answer.** Read the same key again with `--no-roster`. That is the lock itself. The default read also consults the roster, and it returns `unknown` once it cannot resolve enough rows. Unknown blocks the start as firmly as held does. Repair the rows. Never bypass the claim.
-
-**Specimen.** On 2026-09-08 a codex worker sat blocked for twelve hours. It did everything right. It measured, refused to claim, emitted a help block, and mailed its parent king. Nobody came. The key read `unknown` roster-aware, basis `unresolved-roster-row`, with 64 of 129 rows unresolved. The same key with `--no-roster` read `free`. The lock was never held. Re-measured twelve hours later, unchanged.
-
-**The wider shape.** The rows that reader cannot resolve look like the rows two other readers cannot attribute. On the same day a stop hook linked no king to 12 live workers. The footprint reported 12 pidless rows as an attribution gap. Three symptoms, one unattributable-row family, worth one investigation rather than three.
-
-*Graduates to:* a claim reader that reports a degraded roster as its own condition, so `unknown` never blocks work the way `held` does.
-
 ## Does my reign still have a beat?
 
 **Answer.** Check it, do not assume it. List the scheduled jobs. An empty list means the check-in loop is gone and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
@@ -463,33 +453,11 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 *Graduates to:* a list whose rows name their base, or a list that follows a stack to its root.
 
-## My heir spawned with `--succeed` and holds no crown
-
-The sitting king must run that spawn from its own session. From an operator terminal, `--crown <scope> --succeed` cannot hand the crown over.
-
-A crowned spawn finds its caller with `calling_agent_row()` at `cli/src/fno/agents/dispatch.py:2528`. If that caller is the live holder of the scope, `settle_spawn_crown` at `cli/src/fno/agents/crown.py:673` treats the spawn as succession. A shell with no agent identity has no caller row. So the sitting king reads as a second live holder, and the outcome is `declined`. The spawn still launches the heir, with no crown.
-
-The only warning is one stderr line. The thread path prints it at `dispatch.py:1888` and the pane path at `mux_spawn.py:4883`:
-
-```
-spawn: crown declined (scope 'fno' already held by a live row); spawned uncrowned. The worker launched without a crown.
-```
-
-Specimen: an outgoing king gave the operator its own `--crown fno --succeed` spawn command, and the operator ran it in a terminal. The journal holds an `agent_spawned` row for the heir with `spawned_by_session: null`. It holds no `agent_crowned` row and no `agent_crown_vacated` row. The heir read `crown_scope: null` and stopped at its crown check, and the old king still held the scope.
-
-Recover in this order, because the crown verb refuses while a live row holds the scope:
-
-1. The sitting king runs `fno agents king done`.
-2. An attended shell runs `fno agents crown <heir> --scope <scope>`. A human can grant any scope, so the stamp lands on the empty scope.
-
-To prevent it, give the spawn command to the sitting king to run, not to the operator.
-
-*Graduates to:* a crowned spawn from a shell with no caller row that transfers the crown or refuses before launch. A human can grant any scope, so the transfer is safe. The authorization check at `dispatch.py:2524` already refuses before launch. Neither outcome launches an uncrowned heir.
-
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
 
+- **A claim reads unknown and my target refuses to start.** PR 1613. When an unresolved roster row's worktree names the node you asked about, the read turns unknown. Every other unresolved row leaves the read free, with `roster_coverage: degraded`.
 - **A hook fails Permission denied and the fix is already merged.** PR 2069. Session start now prints `[fno-checkout-behind]` and `[fno-checkout-ff-blocked]` for a stale main checkout, naming the uncommitted files that block the fast-forward.
 - **The merge gate refuses a real cross-model review.** PR 1595. The self lane counts any real review now, whatever produced it.
 - **My PR reads rounds 5 of 2.** PR 1426. A rebase or a fix under 100 interdiff lines carries its verdict now.
@@ -499,4 +467,4 @@ Closed gaps, newest first. Each line names the PR that closed it, so a reader ca
 - [troubleshooting.md](troubleshooting.md) for run-level failures
 - [architecture/coordination.md](architecture/coordination.md) for claims and the work-claim primitive
 - [architecture/fleet-watchdog.md](architecture/fleet-watchdog.md) for automated wake, reroute and reap
-- [../skills/king-for-a-day/references/court-operations.md](../skills/king-for-a-day/references/court-operations.md) for the court primitives
+- [../skills/reign/references/court-operations.md](../skills/reign/references/court-operations.md) for the court primitives

@@ -3,10 +3,17 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 19
+map_version = 21
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
+# LAUNCHER CHOICE LISTS. The mux composer's picker chips read these. Three
+# states: key ABSENT = no surface at all (the chip reads "not offered");
+# EMPTY list = the axis exists but the values are provider passthrough (the
+# picker offers free text); a filled list = the enumerable choices. Every
+# list is read off this harness's own mapper or `--help`, never from memory.
+efforts = ["low", "medium", "high", "xhigh", "max"]
+permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"]
 resume = "native-session"
 autonomous_pane = false
 route_on_pane = true
@@ -165,6 +172,16 @@ state = "native"
 
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
+# efforts: the keys of model_switch_strategy.effort_labels below.
+# permission_modes: the two shortcuts plus every <sandbox>:<approval> pair
+# resolve_thread_posture maps (codex_posture.rs).
+efforts = ["low", "medium", "high", "xhigh", "max"]
+permission_modes = [
+    "full-auto", "yolo",
+    "read-only:untrusted", "read-only:on-failure", "read-only:on-request", "read-only:never",
+    "workspace-write:untrusted", "workspace-write:on-failure", "workspace-write:on-request", "workspace-write:never",
+    "danger-full-access:untrusted", "danger-full-access:on-failure", "danger-full-access:on-request", "danger-full-access:never",
+]
 resume = "native-thread"
 # A codex thread lives on the SHARED `codex app-server daemon`, which owns it.
 # So it survives mux death AND `fno-agents-daemon` death: neither process
@@ -186,7 +203,7 @@ command_surface = "codex-skill"
 # spawn or dispatch reaches the TUI verb instead of a footnote skill that does
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
-native_verbs = ["/review", "/code-review", "/model", "/status", "/compact"]
+native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
 # The subset the shared app-server daemon maps to its review/start RPC. Every
 # other native verb has no prompt line on a daemon thread, and the mail lane
 # refuses it by name.
@@ -256,10 +273,6 @@ kind = "subcommand"
 pre_exec = ["codex", "app-server", "daemon", "start"]
 tokens = ["codex", "--remote", "unix://"]
 
-[harness.codex.resume_strategy.forms.interactive_resume]
-kind = "subcommand"
-tokens = ["codex", "resume", "{session_id}"]
-
 # `codex resume <id>` execs codex's OWN TUI on a thread the shared app-server
 # daemon holds. fno renders nothing.
 #
@@ -280,6 +293,19 @@ tokens = ["codex", "resume", "{session_id}"]
 # `{session_id}`, never `{short_id}`: a codex UUIDv7 head-8 is a ~65.5s clock
 # bucket, so siblings spawned in one minute collide and a short id would
 # attach the wrong worker.
+#
+# The resume row carries the SAME ownership assertion as attach (one
+# shared-daemon launch plan owns every persistent Codex path): a bare
+# `codex resume <id>` is the private-owner shape the explicit override has
+# to ask for by name, never a default.
+[harness.codex.resume_strategy.forms.interactive_resume]
+kind = "subcommand"
+pre_exec = ["codex", "app-server", "daemon", "start"]
+tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
+
+# Attach shares the resume row's ownership assertion and its measured
+# story; both doors go through the same daemon-started, `--remote unix://`
+# shape.
 [harness.codex.resume_strategy.forms.interactive_attach]
 kind = "subcommand"
 pre_exec = ["codex", "app-server", "daemon", "start"]
@@ -322,6 +348,9 @@ state = "native"
 
 [harness.gemini]
 permission_bypass = ["--yolo"]
+# No efforts key: the spawn refuses a gemini effort. permission_modes: the
+# `--approval-mode` choices off `gemini --help` plus the `--yolo` spelling.
+permission_modes = ["default", "auto_edit", "yolo", "plan"]
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
@@ -420,13 +449,18 @@ state = "capable"
 
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
+# efforts: agy's own `--effort (low|medium|high)`. permission_modes: exactly
+# the vocabulary permission_pane_tokens maps (codex_posture.rs).
+efforts = ["low", "medium", "high"]
+permission_modes = ["default", "skip", "accept-edits", "plan", "sandbox", "accept-edits+sandbox", "plan+sandbox"]
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
 # agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
 # shells the same loop-check, and `fno config setup` registers it in agy's
 # ~/.gemini/config/hooks.json under the `footnote` namespace key as a `Stop`
-# handler (_agy_install in cli/src/fno/setup/integration.py). agy's hooks carry
+# handler (crates/fno-agents/src/agy_hooks.rs is the writer; the Python setup
+# adapter is a transport door over it). agy's hooks carry
 # claude-shaped event names over a Gemini-family wire format, so the adapter
 # translates rather than reusing target-stop-hook.sh verbatim; the authority is
 # the same binary.
@@ -543,6 +577,9 @@ passthrough = ["*"]
 ready_marker = "? for shortcuts"
 headless_refusal = "agy's headless lane is unmeasured: `agy -p` prints and exits, and nothing has run it as an fno worker. Use --substrate thread for a persistent worker or --substrate pane for an attended one."
 bypass_flag = "--dangerously-skip-permissions"
+# bypass_always is the LANE DEFAULT, not a mandate: an explicit
+# --permission-mode replaces it (agy_launch.keeper_posture), and every launch
+# names the posture it ran with.
 bypass_always = true
 takes_model = true
 takes_effort = true
@@ -554,6 +591,10 @@ clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
+# efforts EMPTY: the door passes provider values through, so the picker
+# offers free text rather than a list.
+efforts = []
+permission_modes = ["auto"]
 resume = "native-session"
 # The serve lane is steerable through the same attach writer used at launch.
 # `POST /session` returns the full id, so this lane does not use opencode's
@@ -703,6 +744,9 @@ state = "native"
 # project-local FILES for a run, which is a different axis. So there is no
 # prompt to bypass and nothing honest to put here.
 permission_bypass = []
+# No efforts or permission_modes key: `pi --help` names no effort list, and
+# pi ships no permission popups (see permission_bypass above), so both axes
+# have no surface here.
 resume = "native-session"
 # TRUE, and the seven-step restart journey is the evidence
 # (cli/tests/agents/test_thread_keeper_journey.py, journey wk-x61bc, first
@@ -726,12 +770,16 @@ route_on_pane = false
 # right semantics and a positive marker rather than an absence. So pi's answer is
 # "extension", the same member opencode carries. The extension shipped (
 # a port of opencode's plugin: loop-check stays the sole completion authority
-# and the extension never fabricates a termination), so `loop_extension` names
+# and the extension never fabricates a termination), and it binds the
+# manifest's own session and renders verbs in pi's skill-command form, so a
+# foreign session is refused instead of re-driven. `loop_extension` names
 # the shipped artifact and a looping dispatch at pi resolves.
 loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
 command_surface = "slash"
-slash_prefix = ""
+# pi registers every skill as /skill:<name> and has no plugin
+# namespace, so the skill-command form is its only verb surface.
+slash_prefix = "skill:"
 # pi's in-TUI slash surface is composed at runtime from extensions, prompt
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
@@ -873,18 +921,19 @@ state = "native"
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
 
-# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The lane
-# driver appends pi's own provider/model pair, so every option that would ride
-# another lane's argv is refused by name and `carries` is empty.
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The route
+# owner (pi_route) carries the user's model, effort and tool axes onto the
+# thread lane the same way the pane arm does.
 [harness.pi.keeper]
 once_refusal = "--once is not supported on the pi thread lane (it is persistent); pi has no one-shot lane - its headless stance is unmeasured"
-carries = []
+carries = ["model", "effort", "tools", "deny_tools"]
 passthrough = ["*"]
 ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
 
 [harness.cursor-agent]
 permission_bypass = ["--force"]
+permission_modes = ["force", "yolo"]
 resume = "native-session"
 # TRUE, and the live journey is the evidence
 # (cli/scripts/smoke/cursor-agent-keeper-journey.py, journey wk-cursor, first
@@ -1103,11 +1152,9 @@ kind = "declared"
 authority = "{bin} --help"
 pattern = '(?i)\bacp\b'
 
-# grok joins on the same keeper lane pi and cursor-agent use. Its
-# drive transports (leader daemon on a unix socket, WebSocket listener, ACP
-# stdio) are built and unit-tested in the Python driver
-# (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
-# keeper-hosted TUI, and the row is a statement about THAT lane.
+# grok joins on the same keeper lane pi and cursor-agent use. The shared ACP
+# stdio client is in Rust at crates/fno-agents/src/acp_stdio.rs; this row still
+# describes the keeper-hosted TUI, not the separate ACP client.
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). `carries`
 # names the launch axes this lane has a measured spelling for; every other
@@ -1125,6 +1172,11 @@ takes_add_dir = true
 
 [harness.grok]
 permission_bypass = ["--always-approve"]
+# permission_modes: grok's own --help (1.0.13) names this set for
+# --permission-mode. efforts EMPTY: --reasoning-effort exists but the help
+# names no fixed choice list, so the picker offers free text.
+efforts = []
+permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"]
 resume = "native-session"
 # TRUE, and the live measurement is the evidence (2026-09-02, grok 1.0.13
 # [stable], worktree pty sessions): `grok --session-id <uuid>` adopted the
@@ -1179,8 +1231,8 @@ session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, ti
 # bypass - a one-shot grok wrote a file outside its cwd. The --sandbox
 # <PROFILE> axis exists but is opt-in (env GROK_SANDBOX unset on this
 # machine), so the keeper child is an ordinary user process with the
-# operator's own reach. headless stays unmeasured: one -p probe ran, but no
-# fno one-shot lane is built and nothing has ever spawned there.
+# operator's own reach. Headless needs a signed-in live journey before it is
+# declared measured.
 pane = "unsandboxed"
 thread = "unsandboxed"
 headless = "unmeasured"
@@ -1228,9 +1280,8 @@ tokens = ["grok", "--resume", "{session_id}"]
 kind = "unsupported"
 tokens = []
 
-# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but
-# no fno one-shot lane is built on it; the forms stay unsupported until that
-# lane ships and state_root_grant.headless stops reading unmeasured.
+# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but the
+# live create-and-resume journey is unavailable until operator auth is present.
 [harness.grok.resume_strategy.forms.headless_create]
 kind = "unsupported"
 tokens = []
@@ -1260,11 +1311,89 @@ state = "native"
 # spent `--session-id` is a grok refusal, never a resume, so the arm refuses
 # `spawn --resume` rather than render a create form with a used id.
 [harness.grok.keeper]
-once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok has no one-shot lane - its headless stance is unmeasured"
+once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok's headless one-shot is unmeasured"
 carries = ["model", "yolo", "permission_mode", "effort"]
 passthrough = ["*"]
 ready_marker = "Shift+Tab:mode"
 resume_refusal = "is not supported on the grok thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than spawning a fresh session."
+headless_refusal = "grok's headless lane is unmeasured: a signed-in live create-and-resume journey is required before it can be enabled"
 bypass_flag = "--always-approve"
 takes_model = true
 takes_effort = true
+
+# PANE-TO-THREAD CONVERSION (`fno agents resume <name> --substrate thread`).
+# One stanza per harness naming HOW a live pane becomes a persistent thread.
+# Code branches on `strategy` only, never on a harness name; a harness with
+# no stanza reads `unsupported` (the accessor supplies that default). Every
+# supported row's basis is measured, named beside it, and the same matrix is
+# mirrored in docs/architecture/thread-lanes.md. A harness may not KEEP a
+# supported strategy without a live receipt: a `FNO_CONVERT_LIVE` run that
+# cannot complete demotes the row in the same commit that records the
+# failure.
+#
+#   keeper-rebind  the child process NEVER stops. The keeper's socket moves
+#                  from mux/panes/ to mux/threads/, the mux server drops its
+#                  subscriber seat, and the daemon's keeper sweep already
+#                  rebinds rows by socket path. Same pid, same session id.
+#                  Basis: the pane and thread keepers are the same binary
+#                  (fno-agents-worker --keeper | --pane) and the daemon sweep
+#                  keys on the socket path alone (daemon.rs keeper_registry_sweep).
+#   server-resume  the pane TUI owns its rollout in-process and must EXIT
+#                  before the daemon resumes the SAME rollout id through the
+#                  shared app-server (ensure_codex_thread_handle). Basis: the
+#                  workspace-restore proof - a Codex SIGKILLed mid-session
+#                  resumed under its own id (docs/architecture/workspace-restore.md).
+#   client-resume  the pane process stops, then the client re-launches the
+#                  session detached (`claude --bg --resume <id>`). The id is
+#                  preserved per measurement on claude 2.1.272 (reentry.rs
+#                  records the measurement) and is READ BACK from the roster
+#                  at runtime, never promised blind.
+#   unsupported    no conversion. `refusal` carries the operator-facing why.
+[harness.claude.conversion]
+strategy = "client-resume"
+preserves_id = true
+
+[harness.codex.conversion]
+strategy = "server-resume"
+preserves_id = true
+
+[harness.gemini.conversion]
+strategy = "unsupported"
+preserves_id = false
+refusal = "gemini is deprecated in favor of agy; there is nothing to convert"
+
+[harness.agy.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.opencode.conversion]
+strategy = "unsupported"
+preserves_id = false
+refusal = "the opencode serve lane carries model only and its thread-lane honesty is an open question (docs/architecture/thread-lanes.md); refusing rather than forking a new session"
+
+[harness.pi.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.cursor-agent.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.grok.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.codex.provider_actions.compact]
+transport = "app-server"
+method = "thread/compact/start"
+proof = "context-compaction"
+
+[harness.codex.provider_actions.goal_get]
+transport = "app-server"
+method = "thread/goal/get"
+proof = "goal-active"
+
+[harness.codex.provider_actions.goal_set]
+transport = "app-server"
+method = "thread/goal/set"
+proof = "goal-active"

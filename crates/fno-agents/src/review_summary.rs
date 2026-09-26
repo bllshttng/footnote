@@ -121,8 +121,11 @@ pub fn run_review_summary(args: &[String]) -> i32 {
         return 0;
     };
     let events_path = parsed.events.unwrap_or_else(default_events_path);
-    let Ok(events_text) = std::fs::read_to_string(events_path) else {
-        return 0;
+    // SQL authority: the store's committed rows are the ledger; a missing or
+    // unreadable store is the same deliberate silence a missing file was.
+    let events_text = match crate::loopcheck::event_lines(&events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return 0,
     };
     if let Some(line) = summary_line(&events_text, &parsed.branch, &parsed.head) {
         println!("{line}");

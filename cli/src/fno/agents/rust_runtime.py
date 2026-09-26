@@ -85,7 +85,7 @@ FOLDED_AGENT_SUBCOMMANDS: dict = {
 #: Verbs the bundled ``fno-agents`` client implements end-to-end: the daemon
 #: request verbs in ``client.rs`` ``build_request`` plus the directly-dispatched
 #: verbs (``drive``, ``status``, and the client-side ``drive-authority``,
-#: ``trace``, ``ping``, ``resume``, ``attach``, ``logs`` ported in).
+#: ``trace``, ``ping``, ``resume``, ``attach``, ``logs`` ported in ).
 #: The ``auto`` (default) runtime routes all of these to Rust except the verbs
 #: Python still owns (see :data:`PYTHON_AGENT_VERBS`). Kept in sync with
 #: ``crates/fno-agents/src/bin/client.rs`` by a test that parses that file, so
@@ -141,24 +141,24 @@ RUST_CLIENT_VERBS = frozenset(
         "registry-json",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
         #; spawn a mux-hosted pane with `spawn --substrate pane`.
-        # Stop-hook decision verb (control-plane collapse wedge).
+        # Stop-hook decision verb (control-plane collapse wedge, ).
         # The bash shim in hooks/target-stop-hook.sh calls the binary DIRECTLY
         # (explicit resolution order, no Python routing); this entry exists so
         # `fno agents loop-check` also works for manual/diagnostic invocation
         # and so the client.rs<->router parity test stays in sync.
         "loop-check",
-        # Unified driver loop verb (step 5). Dispatched directly
+        # Unified driver loop verb (step 5, ). Dispatched directly
         # in client.rs before build_request (no daemon RPC); this entry keeps
         # the client.rs<->router parity test in sync and lets `fno agents loop
         # run ...` route for manual invocation.
         "loop",
-        # Terminal-only side-effect WRITER (control-plane step 6).
+        # Terminal-only side-effect WRITER (control-plane step 6, ).
         # Like loop-check, the bash stop-hook shim calls the binary DIRECTLY on a
         # terminal-allow decision (no Python routing); this entry exists so the
         # client.rs<->router parity test stays in sync.
         "finalize",
         # Eliminate-don't-vendor folds (packaging EPIC, US1
-        #): Rust ports of the deleted scripts/lib/kill-criteria.sh
+        # ): Rust ports of the deleted scripts/lib/kill-criteria.sh
         # and scripts/lib/verify-event-evidence.sh. Both dispatch DIRECTLY in
         # client.rs before build_request (no daemon RPC). The Python `fno do phase
         # kill-check` wrapper resolves the binary and invokes its verb
@@ -209,6 +209,7 @@ RUST_CLIENT_VERBS = frozenset(
         # ALL sessions, emitting review_wedged / budget_stop items. Dispatched in
         # client.rs before build_request (no daemon RPC, no Python impl).
         "needs",
+        "select-read",
         # Activity feed projection: questions.jsonl + graph.json ->
         # ordered rows carrying the node id + session id the mux deep link
         # resolves. Dispatched in client.rs before build_request (no daemon
@@ -274,9 +275,6 @@ RUST_CLIENT_VERBS = frozenset(
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",
-        # The territory feed (status/deliver/repair) the backlog supervisor's
-        # blueprinter tick shells; native to the binary's territory fact set.
-        "blueprint-feed",
         # The harness-keyed spawn-defaults resolver: payload JSON in,
         # the answer out; Python calls it via fno.agents.spawn_overlay_client.
         "spawn-overlay",
@@ -285,7 +283,7 @@ RUST_CLIENT_VERBS = frozenset(
         # Python calls it via fno.agents.spawn_axes_client. A `node_seed`
         # field routes the payload to the node-seed decision instead.
         "spawn-axes",
-        # The failover chain walk (budget port): payload JSON in, the
+        # The failover chain walk: payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
         # The one authorized merge operation: payload JSON in, one receipt out.
@@ -312,11 +310,16 @@ RUST_CLIENT_VERBS = frozenset(
         # binary directly (`fno-agents compaction mark`). Parity-synced.
         "compaction",
         # Read leaves over the packaged capability table and the merge-posture
-        # family table (change 2): the successors to the retired
+        # family table: the successors to the retired
         # dispatch capabilities/family query leaves (d-496680aa). Direct dispatch
         # in client.rs (no daemon RPC); hidden `fno agents` surface. Parity-synced.
         "capabilities",
         "target-family",
+        # The permission-posture and sandbox-verdict owners behind the
+        # spawn seam: payload JSON in via fno.rust_binary.verb_call, one
+        # answer envelope out; no Python impl, no `fno agents` routing.
+        "permission-tokens",
+        "sandbox-probe",
     }
 )
 
@@ -329,7 +332,7 @@ RUST_CLIENT_VERBS = frozenset(
 #:
 #: History: ``stop``/``rm`` (Task 2.1), ``list``/``reconcile`` (Task 3.1), and
 #: the six former Python-only verbs (``logs``/``ping``/``drive-authority``/
-#: ``attach``/``resume``/``trace``) all reached Rust stdout/JSON
+#: ``attach``/``resume``/``trace``, ) all reached Rust stdout/JSON
 #: parity and left this set. ``ask`` was the last holdout: claude shipped
 #: client-side in (PR #366), codex + the provider-conditional flip
 #: in (PR #371), and gemini + this UNCONDITIONAL flip in.
@@ -344,7 +347,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Human-attended in-place crown grant. Pure shared-registry transaction;
     # spawn-time grant and succession remain on the Rust-backed spawn path.
     "crown",
-    # the whole-court read (every live crown + registry/graph
+    #: the whole-court read (every live crown + registry/graph
     # agreement). Pure Python (fno.agents.court reads the registry and the
     # graph); no Rust client port, so it must never auto-route to the daemon.
     "court",
@@ -363,7 +366,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Pure Python (fno.agents.peek reads the JSONL directly); no Rust port, so
     # it must never auto-route to the daemon.
     "newest-assistant-text",
-    "distress-verdicts",  # blocked_child's verdict lookup; no Rust port.
+    "distress-verdicts", #: blocked_child's verdict lookup; no Rust port.
     # The stop hook's read-only spawn-gate capacity probe. Pure Python (the
     # gate lives in fno.agents.spawn_gate); no Rust port, so it must never
     # auto-route to the daemon.
@@ -373,25 +376,19 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # ~/.claude/sessions via fno.agents.discover); no Rust port, so it
     # must never auto-route — Rust invokes it with FNO_AGENTS_RUNTIME=python.
     "discovered-json",
-    # P2: internal helper the Rust loop-check shells out to on a
-    # `block` decision for the loop-boundary inbox nudge. Pure Python (reads the
-    # bus via fno.agents.nudge); no Rust port.
-    "nudge-peek",
-    # the shared bg-dispatch guard verb. Pure-Python orchestration of
+    #: the shared bg-dispatch guard verb. Pure-Python orchestration of
     # `fno agents claim` (Guard 1 node-claim probe + Guard 2 dispatch:<id> reservation)
     # called by both dispatch-node.sh and spawn.sh. There is NO `spawn-guard` on
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
     "spawn-guard",
-    # the canonical agent-name bridge, the shell twin of the Python
+    #: the canonical agent-name bridge, the shell twin of the Python
     # dispatchers' direct `fno.agents.naming` import. Pure Python and purely
     # computational (no daemon state); there is NO `name` on the Rust client, so
     # it must never auto-route. The daemon stays the name VALIDATOR at the spawn
     # boundary and must not become the generator - truncating there would make
     # the name a caller reasons about differ from the one the runtime registers.
     "name",
-    # Pane retasking remains Python-owned orchestration. Label rename went the
-    # other way: the Rust client carries it over the daemon RPC.
     "retask",
     # The cadence-deadline silence backstop. Pure Python: it reads the registry
     # and each row's transcript truth through fno.agents.sweep, writes nothing,
@@ -402,22 +399,22 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Pure Python (fno.agents.history + the shared ledger matcher); there is no
     # Rust port, so it must never auto-route to the daemon.
     "history",
-    # the registry-miss healer the Rust lifecycle verbs shell out to.
+    #: the registry-miss healer the Rust lifecycle verbs shell out to.
     # Pure Python (fno.agents.store_fallback); no Rust port. Staying out of
     # RUST_CLIENT_VERBS is the recursion guard for that shellout, so listing it
     # here is documentary — AUTO_ROUTE_VERBS already excludes it.
     "heal-token",
-    # "what is MY registered mesh name?" — reads FNO_AGENT_SELF + the
+    #: "what is MY registered mesh name?" — reads FNO_AGENT_SELF + the
     # registry, read-only. Pure Python (fno.agents.whoami); there is NO
     # `whoami` on the Rust client, so it must never auto-route to the daemon.
     # Listing it here is defensive/documentary: whoami is not in
     # RUST_CLIENT_VERBS, so AUTO_ROUTE_VERBS already excludes it.
     "whoami",
-    # the spawn-gate audit surface — every live worker process with
+    #: the spawn-gate audit surface — every live worker process with
     # RSS via psutil, over the same union the gate counts. Python-only by
     # design (LD8): no daemon involvement, no Rust port, never auto-routes.
     "top",
-    # the read-only observe leg (twin of `fno agents mail send`). Reads a
+    #: the read-only observe leg (twin of `fno agents mail send`). Reads a
     # peer's on-disk transcript / status events via fno.agents.peek. No Rust
     # client port, so it must never auto-route to the daemon.
     "peek",
@@ -425,11 +422,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # writes an idle roster row (register_existing_session). Pure Python, no Rust
     # client port, so it must never auto-route to the daemon.
     "register",
-    # the transcript-tail supervision classifier (`fno agents truth`).
+    #: the transcript-tail supervision classifier (`fno agents truth`).
     # Read-only, pure Python (fno.agents.session_truth reads the transcript via
     # peek); no Rust client port, so it must never auto-route to the daemon.
     "truth",
-    # the poisoned-registry repair verb (`fno agents registry-repair`).
+    #: the poisoned-registry repair verb (`fno agents registry-repair`).
     # Pure Python (fno.agents.registry holds the lock, asserts no row carries a
     # newer-schema field, backs up, and replaces atomically). No Rust client
     # port, so it must never auto-route. Routing it would also be backwards:
@@ -441,18 +438,18 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # hook calls it synchronously. Routing it to the daemon would make a sweep
     # for stray processes lazy-start a process. No Rust client port.
     "orphans",
-    # the pane/registry identity cross-check. Pure Python (one pane ls
+    #: the pane/registry identity cross-check. Pure Python (one pane ls
     # subprocess + load_registry + a ps probe); a mismatch is a READING, never
     # a repair, and the daemon holds no such verb, so it must never auto-route
     # to the daemon.
     "pane-identity",
-    # the codex late-bind helper `late_bind_codex_sessions` (Rust,
+    #: the codex late-bind helper `late_bind_codex_sessions` (Rust,
     # fno-agents daemon) shells out to for one pane's rollout session id.
     # Pure Python (fno.agents.mux_spawn._codex_session_id_for_pid, reads the
     # pane's open rollout fd); no Rust port, so it must never auto-route to
     # the daemon.
     "codex-session-for-pid",
-    # the external fleet watchdog. Pure Python (transcript tail reads +
+    #: the external fleet watchdog. Pure Python (transcript tail reads +
     # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
     # port, so it must never auto-route to the daemon.
     "watchdog",
@@ -508,28 +505,29 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "status": "Report daemon liveness and the control-plane arms table (one row per scheduled arm, red when its last tick is stale); --json for the machine payload with `arms`.",
     "reap": "Retire finished agent rows (every node the session is named on is done AND its transcript is quiet past agents.retire_grace_s); stages a resume receipt, prunes a clean merged worktree, --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, with its age and escalation), --release <row> to apply a ruling to one escalated hold (refuses a fresh hold or open work by name). Also sweeps the mux tab sideline via `fno mux workspace prune --tabs-only --include-used-shells` and reports it as the receipt's `mux` half (ran/unread/skipped). --no-mux skips that half.",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
-    "loops": "Global pause-all sentinel: paused|status --json, pause-all --who <w> [--ttl-ms N] --json, or resume-all --json.",
+    "loops": "Global pause-all sentinel: paused|status --json, pause-all --who <w> [--ttl <dur>|--ttl-ms N] [--reason <text>] --json (also holds this session's mail for the same window via `fno agents mail hold`), or resume-all --json (also lifts the mail hold).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno do phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 only when every row is PASS - exit 0 with no output reads SKIP, not pass. Rows carry verdict (PASS FAIL BLOCKED SKIP), an optional ` # claim` comment from the declaration, and bounded captured output. Shelled by the close verbs for close_probes and by prove-it for runtime evidence.",
     "honesty-sweep": "Declared-vs-measured sweep over declared populations: --population harness-capabilities (the default) sweeps the compiled capability table, --population king-manifests sweeps the space's king manifests, --rows-json <path|-> [--rows-key <key>] [--name <label>] sweeps piped or filed JSON rows. Four passes: uniform fields, uniform among declarers, negative-claim counts, and (harness-capabilities only) negative claims paired with harness-named exported definitions plus hardcoded harness-name lists. Exit 2 unmeasured (unreadable source, <2 rows, invalid JSON), 0 otherwise - a finding is a candidate, never a verdict.",
-    "prove-it-verdicts": "Read terminal prove-it records : walks every node's `<plan>.artifacts/` tree, takes each report's LAST non-empty line when it carries the `fno-prove-it:` JSON record, and emits one row per unretired FAIL plus the newest PASS/FAIL record as the node's headline (a PASS retires a FAIL only when its claim states the FAIL claim, optionally scoped by a `retires` report path; SKIP/BLOCKED retire nothing). --json emits {read_at, rows, unreadable}; --route writes the one progress note per open, unrouted FAIL (never changes node status - a king rules). Retire a FAIL with a newer PASS whose claim states the FAIL claim, or a decision naming the report.",
+    "prove-it-verdicts": "Read terminal prove-it records: walks every node's `<plan>.artifacts/` tree, takes each report's LAST non-empty line when it carries the `fno-prove-it:` JSON record, and emits one row per unretired FAIL plus the newest PASS/FAIL record as the node's headline (a PASS retires a FAIL only when its claim states the FAIL claim, optionally scoped by a `retires` report path; SKIP/BLOCKED retire nothing). --json emits {read_at, rows, unreadable}; --route writes the one progress note per open, unrouted FAIL (never changes node status - a king rules). Retire a FAIL with a newer PASS whose claim states the FAIL claim, or a decision naming the report.",
     "test-run": "Native test-suite process-group owner: --timeout SECS [--claims-root PATH] -- ARGV...; admits under the machine-wide test:suite claim, spawns ARGV as the leader of a fresh session, and always kills the group after. Invoked directly by cli/src/fno/test_runner.py's run_suite_bounded, not `fno agents` routing.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
     "digest": "Catch-up 'while you were gone' fold over events + ledger for a session: --session <s> --since <ts> [--json].",
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
+    "select-read": "One bounded backlog read (next|undispatched) under [auto_continue] select_timeout_s; prints an ok/unmeasured/error receipt JSON.",
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
-    "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter : --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
+    "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter: --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",
-    "recover": "Restore a recorded claude session under its account and route : <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
+    "recover": "Restore a recorded claude session under its account and route: <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
     "graph-get": "Batch graph.json read by id; invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
-    "backlog-note": "The native note action : bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
+    "backlog-note": "The native note action: bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
     "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback; the migration runbook drives it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
@@ -539,20 +537,21 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; --verdict selects the reign tenure verdict read (assembles its own inputs natively: crown, manifest, config, graph scope, window, delivery split); invoked directly by `fno agents king history` and `fno agents king verdict`, which pass every journal paths.event_journals resolves.",
     "evals-macro": "The macro-eval failure-pattern leaderboard fold: --events <journal.jsonl> [--events ...] [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json]; invoked directly by `fno doctor evals macro`, which resolves the journal defaults.",
     "king-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
-    "reign-ledger": "The reign ledger page renderer: --court-json <court.json|-> --graph <graph.json> --generated <ts> --out <reign.html>, where - reads the court JSON on stdin; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
+    "reign-ledger": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
-    "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; a `node_seed` field instead answers the node-verb check. Invoked by fno.agents.spawn_axes_client and the spawn seam, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by fno.update.running_components, not `fno agents` routing.",
-    "fleet-incident": "Durable fleet incident breaker : stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
-    "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts (audience/landed/pending/woken/unreachable/late). The public surface is `fno agents mail team`; hooks call the binary directly.",
+    "fleet-incident": "Durable fleet incident breaker: stop --reason T [--hold spawns,tests,merges] / clear --reason T write the machine-wide record (no --hold holds all three); status [--json] reads it with its typed holds/admits reach (exit 0 clear, 1 stopped or unavailable); check [--scope spawns|tests|merges] is one scope's admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches, and the merge primitive refuses while merges are held. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
+    "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts. The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
-    "capabilities": "One harness's config-independent capability contract : <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
-    "target-family": "Merge-posture family test : --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
+    "capabilities": "One harness's config-independent capability contract: <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
+    "target-family": "Merge-posture family test: --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
+    "permission-tokens": "The permission-posture owner: payload {provider, mode, substrate} in, the {mappable, tokens} answer out; invoked by the spawn seam via fno.rust_binary.verb_call, not `fno agents` routing.",
+    "sandbox-probe": "The codex sandbox verdict owner: payload {cwd, mode} in, the {verdict, blocked, note} envelope out; invoked by fno.agents.sandbox_probe, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises. Every other
@@ -563,7 +562,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
 #: dispatch or the RUST_CLIENT_VERBS routing set.
 RUST_ONLY_ADVERTISED: frozenset[str] = frozenset({"status"})
 
-#: Verbs retired at G4 : the grid, the WebSocket ``drive`` surface, and
+#: Verbs retired at G4: the grid, the WebSocket ``drive`` surface, and
 #: the interactive daemon PTY hosting behind ``host``/``promote`` moved to the
 #: mux. They are NOT in :data:`RUST_CLIENT_VERBS` (no routable client verb) and
 #: NOT in :data:`RUST_ONLY_VERB_HELP` (not advertised in ``--help``), but
@@ -596,6 +595,16 @@ def runtime_mode() -> str:
     if val == "python":
         return "python"
     return "auto"
+
+
+def rust_runtime_enabled() -> bool:
+    """True iff the caller *forced* the Rust runtime via ``FNO_AGENTS_RUNTIME=rust``.
+
+    Note this is narrower than "the Rust binary will run": under the default
+    ``auto`` mode an installed binary also runs, but only for supported verbs.
+    """
+    return runtime_mode() == "rust"
+
 
 
 #: Verbs other than `spawn` that build a worker argv and therefore need the
@@ -685,7 +694,10 @@ def _refuse_codex_spawn_with_unreachable_tools(args: Sequence[str]) -> None:
         return
     from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE, probe_codex_sandbox
 
-    probe = probe_codex_sandbox(Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()))
+    probe = probe_codex_sandbox(
+        Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()),
+        mode=_spawn_flag_value(args, "--permission-mode"),
+    )
     if probe.verdict == "unknown":
         print(f"sandbox-probe: could not judge the codex sandbox ({probe.note}); launching unprobed",
               file=sys.stderr)
@@ -737,16 +749,32 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
-    """Project the seam's facts to ``fno-agents node-seed`` and apply the
-    answer before any lane is chosen. Only an explicit ``--node`` triggers
-    the call; a refusal exits 2 before ``inject_spawn_defaults`` runs.
-    Returns ``(args, node_verb)``: the verb word on a ``profile`` answer.
-    """
+    """Project the seam's facts to the node-seed verb and apply the answer pre-route."""
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    if not node:
+        from fno.rust_binary import VerbUnavailable, verb_call
+        try:
+            answer = verb_call("spawn-axes", {"node_seed": {
+                "family": list(_TARGET_FAMILY_VERBS),
+                "crown": _is_crown_bearing_spawn("spawn", args),
+                "resume": _is_resume_bearing_spawn("spawn", args),
+                "argv": list(args),
+            }}, VerbUnavailable)
+        except VerbUnavailable as exc:
+            print(f"fno agents spawn: {exc}; seed-node derivation skipped", file=sys.stderr)
+        else:
+            if answer.get("action") == "compose":
+                args = [str(tok) for tok in answer.get("argv") or list(args)]
+                node = (_spawn_flag_value(args, "--node") or "").strip()
+                if not node and (reason := _spawn_flag_value(args, "--node-reason")):
+                    os.environ["FNO_NODE_REASON"] = reason
+                    del args[args.index("--node-reason") : args.index("--node-reason") + 2]
+            elif answer.get("action") == "refuse":
+                print("fno agents spawn: binary predates seed-node derivation; spawning nodeless", file=sys.stderr)
     if not node:
         return list(args), None
 
@@ -929,7 +957,7 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
 
 def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` on the ``thread`` substrate naming a keeper-lane
-    harness (review round 1).
+    harness.
 
     The Rust client's thread match handles claude/codex/opencode and refuses
     every other name, while the keeper arms (``_lane_b_thread_spawn``: pi,
@@ -1001,7 +1029,7 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     Detecting it here lets the call fall through to the Python runtime, which
     owns the single source of truth for the routing policy.
 
-    ``-r`` is NOT a role alias anymore (reassigned it to ``--resume``);
+    ``-r`` is NOT a role alias anymore;
     role is long-form only here.
     """
     if verb != "spawn":
@@ -1138,7 +1166,7 @@ def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--resume`` / ``-r`` (/).
+    """True for a ``spawn`` carrying ``--resume`` / ``-r``.
 
     The front-door normalizer rewrites ``-r <id>`` into ``--resume <full-uuid>``,
     and the Rust spawn parser does not (yet) know ``--resume``, so a resume-bearing
@@ -1337,7 +1365,7 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     """
     account = _spawn_flag_value(args, "--account")
     if not account:
-        # an inherited FNO_LAUNCH_ACCOUNT (set by the PARENT worker's
+        #: an inherited FNO_LAUNCH_ACCOUNT (set by the PARENT worker's
         # own --account spawn) must not outlive that spawn. The Rust mint reads
         # it first, so a stale value would stamp the parent's account onto a
         # child that pinned none. Clearing here keeps the three-valued read
@@ -1360,7 +1388,7 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     for var in _account_env.SCRUB_AUTH_VARS:
         os.environ.pop(var, None)
     os.environ.update(overlay.env)
-    # the account ID has no argv carrier on the Rust route (the binary
+    #: the account ID has no argv carrier on the Rust route (the binary
     # has no --account flag), so publish it on the env for the row mint to
     # stamp as launch_account. Set at the same seam as the overlay for the
     # same reason: this is the one edit both runtimes see. An id, never a
@@ -1437,7 +1465,7 @@ def env_scrub_spawn_warning(
     else:
         from fno.harness_identity import resolve_harness_identity
 
-        # READ-ONLY (LD5): branches on the ambient harness to pick a
+        # READ-ONLY: branches on the ambient harness to pick a
         # default provider. Nothing durable carries this value.
         provider = resolve_harness_identity(env).harness or "claude"
     from fno.agents.model_routing import env_scrub_warning
@@ -1590,7 +1618,7 @@ def _make_rust_only_command(
     reached -- i.e. under ``FNO_AGENTS_RUNTIME=python`` (no Python implementation
     exists for these verbs) or in a checkout with no *installed* binary.
 
-    ``hidden`` (tiering) keeps the verb invocable but off the advertised
+    ``hidden`` keeps the verb invocable but off the advertised
     ``fno agents --help`` listing - the display-only counterpart of the Python
     commands' ``@agents_app.command(..., hidden=True)``.
     """
@@ -1629,7 +1657,7 @@ def _make_rust_only_command(
 
 
 def _make_retired_command(verb: str, pointer: str) -> "click.Command":
-    """A Click command for a verb retired at G4 : print a one-line mux
+    """A Click command for a verb retired at G4: print a one-line mux
     pointer to stderr and exit non-zero, never a silent no-op (AC5-EDGE)."""
     import click
 

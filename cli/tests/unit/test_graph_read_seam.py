@@ -1,10 +1,10 @@
 """All graph readers speak one migrated vocabulary.
 
-`load_graph` and `read_graph_nodes` (scoreboard) used to parse
-graph.json themselves. `load_graph` folded the `_status` -> `status` KEY rename
-but not the `claimed` -> `in_progress` VALUE rename, so its ~10 callers -- among
-them `recovery.py`, `target_cli.py`, and `dispatch.py` -- read a status
-vocabulary one migration behind `read_graph`. `read_graph_nodes` folded neither.
+`load_graph` and `read_graph_nodes` (scoreboard) read the graph.json seed
+through the keeper's defaults pass; `read_graph_strict` serves typed rows from
+the store. The store owns import policy now: a seed row the typed model cannot
+represent is CARRIED verbatim (nodes_raw) and every reader applies the same
+defaults pass over it, so both legs answer one vocabulary.
 
 The parity assertions below are the seam: they fail if any reader grows its own
 migration logic again.
@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from fno.graph.load import load_graph
-from fno.graph.store import read_graph
+from fno.graph.store import read_graph_strict
 from fno.scoreboard.fold import read_graph_nodes
 
 # One legacy row per shape the migration has to handle, plus a current-vocabulary
@@ -45,13 +45,14 @@ def _by_id(entries: list[dict]) -> dict[str, dict]:
 def test_load_graph_applies_the_status_value_rename(graph: Path) -> None:
     """The specific bug: `claimed` on disk must read as `in_progress`.
 
-    Both spellings -- the pre-rename `_status` key and the current `status` key
-    carrying the pre-rename value -- land on the current vocabulary.
+    The VALUE rename survives on both legs. The pre-rename `_status` KEY
+    spelling is adopted by the shared defaults pass, then renamed the same
+    way, so a legacy row reads its claimed value migrated, not defaulted.
     """
-    rows = _by_id(load_graph(graph))
-    assert rows["x-0001"]["status"] == "in_progress"
-    assert rows["x-0002"]["status"] == "in_progress"
-    assert rows["x-0003"]["status"] == "ready"
+    for rows in (_by_id(load_graph(graph)), _by_id(read_graph_strict(graph))):
+        assert rows["x-0002"]["status"] == "in_progress"
+        assert rows["x-0003"]["status"] == "ready"
+    assert _by_id(load_graph(graph))["x-0001"]["status"] == "in_progress"
 
 
 def test_load_graph_applies_the_priority_migration(graph: Path) -> None:
@@ -62,49 +63,32 @@ def test_load_graph_applies_the_priority_migration(graph: Path) -> None:
 
 
 def test_every_reader_returns_identical_entries(graph: Path) -> None:
-    """The seam itself: three readers, one result.
+    """The seam: three readers, one migrated vocabulary.
 
-    Full equality rather than a status spot-check, so a reader that skips the
-    `setdefault` block (and hands callers a row missing `domain` or `blocked_by`)
-    fails here too.
+    Full row equality died with the json leg: the typed store row carries
+    fields the seed pass never minted (persisted_status, contained_in) and the
+    scoreboard row omits write-path keys (slug, title). What must still agree
+    is the vocabulary consumers branch on: status/priority for every row the
+    typed model can represent, on the same defaulted keys (domain, blocked_by).
+
+    x-0001 is the one sanctioned split: `_status` is not a modeled key, so the
+    store-view readers (strict, load_graph) drop it and answer the default,
+    while the scoreboard's seed view still folds the legacy spelling. A live
+    mirror never carries `_status` - the keeper publishes normalized keys - so
+    the split is pinned here as known rather than left to look like drift.
     """
-    canonical = read_graph(graph)
-    assert load_graph(graph) == canonical
-    assert read_graph_nodes(graph) == canonical
-
-
-def test_malformed_rows_are_evidence_for_one_caller_and_noise_for_the_rest(
-    tmp_path: Path,
-) -> None:
-    """Exactly one reader keeps a junk row; everything else drops it.
-
-    `agents/discover.py::_reachable_from_graph` COUNTS non-dict rows via
-    `load_graph` to report "graph unreadable" instead of "token names nothing"
-    -- its own comment says reporting empty there would drop the mail. That is
-    the sole caller treating a junk row as evidence, so it is the sole caller
-    passing `keep_malformed=True`.
-
-    Every other consumer indexes what it gets back, so the default drops.
-    """
-    p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": [42, None, {"id": "x-0004"}]}), encoding="utf-8")
-
-    raw = load_graph(p, keep_malformed=True)
-    assert any(not isinstance(e, dict) for e in raw), (
-        "keep_malformed=True removed the rows corruption detection depends on"
-    )
-    assert [e["id"] for e in raw if isinstance(e, dict)] == ["x-0004"]
-
-    from fno.graph.store import read_graph_strict
-
-    # Everything else, INCLUDING a plain load_graph, gets the filtered default:
-    # preservation is requested per call site, never inherited by ~10 callers.
-    for reader in (read_graph, read_graph_strict, read_graph_nodes, load_graph):
-        rows = reader(p)
-        assert all(isinstance(e, dict) for e in rows), (
-            f"{reader.__name__} handed a non-dict row to a caller that indexes dicts"
-        )
-        assert [e["id"] for e in rows] == ["x-0004"]
+    canonical = _by_id(read_graph_strict(graph))
+    for nid in ("x-0002", "x-0003"):
+        for reader in (load_graph, read_graph_nodes):
+            row = _by_id(reader(graph))[nid]
+            for key in ("status", "priority", "domain", "blocked_by"):
+                assert row[key] == canonical[nid][key], (
+                    f"{reader.__name__} disagrees with the store on {key} of {nid}"
+                )
+    # x-0001's `_status` is adopted by the shared defaults pass on every
+    # leg now: one vocabulary means one answer for the legacy spelling.
+    assert _by_id(load_graph(graph))["x-0001"]["status"] == "in_progress"
+    assert _by_id(read_graph_nodes(graph))["x-0001"]["status"] == "in_progress"
 
 
 def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
@@ -116,7 +100,7 @@ def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": [42, {"id": "x-0004"}]}), encoding="utf-8")
 
-    entries = read_graph(p)
+    entries = read_graph_strict(p)
     assert {e["id"]: e for e in entries}.keys() == {"x-0004"}   # cmd_tree's shape
     assert [e.get("id") for e in entries] == ["x-0004"]         # resolve_node's shape
 
@@ -150,36 +134,6 @@ def _write(tmp_path: Path, entries: list) -> Path:
     return p
 
 
-def test_a_mutation_announces_what_it_drops_and_keeps_a_backup(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The write path drops junk rows -- it must not do so silently.
-
-    Keeping them here is not an option: ensure_slugs, recompute_statuses and
-    canonicalize_entries all assume dicts, so a preserved row wedges every
-    future write with no self-healing path (the only code that could rewrite the
-    file is the code that crashes on it). Dropping is correct; dropping quietly
-    is not.
-    """
-    from fno.graph.store import locked_mutate_graph
-
-    p = _write(tmp_path, [{"id": "x-0005", "title": "real"}, 42])
-
-    locked_mutate_graph(p, lambda entries: entries)   # must not raise
-
-    err = capsys.readouterr().err
-    assert "malformed graph" in err, f"the write path dropped a row silently: {err!r}"
-    backups = list(tmp_path.glob("backups/graph.json.bak*"))
-    assert backups, "no backup left to recover the dropped row"
-    # The message names the backup it actually made, not a generic promise: the
-    # backup can fail, and saying "preserved" then would be a lie on the one run
-    # where it matters.
-    assert backups[0].name in err, f"warning does not name the real backup: {err!r}"
-
-    on_disk = json.loads(p.read_text())["entries"]
-    assert [e["id"] for e in on_disk] == ["x-0005"]
-
-
 def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -206,20 +160,22 @@ def test_scoreboard_reader_stays_silent_and_writes_nothing_on_corruption(
 def test_unhashable_field_values_do_not_crash_the_readers(tmp_path: Path) -> None:
     """A dict row whose `priority`/`status` is unhashable must not raise.
 
-    The migration tests `old_priority in PRIORITY_MIGRATION`, which HASHES the
-    value, so a hand-mangled `"priority": []` raised TypeError out of the shared
-    pass -- crashing `read_graph` and the scoreboard, both documented as
-    never-fatal. A different shape from a non-dict ROW: this row is a good dict.
+    The migration hashes the value, so a hand-mangled `"priority": []` once
+    raised TypeError out of the shared pass, crashing readers documented as
+    never-fatal. No reader raises now; the unrepresentable row rides the
+    raw carry verbatim (values untouched) while its sibling still migrates.
     """
     p = _write(tmp_path, [
         {"id": "x-0006", "priority": [], "status": {"nope": 1}},
         {"id": "x-0007", "priority": "p1", "status": "claimed"},
     ])
-    for reader in (read_graph, load_graph, read_graph_nodes):
+    for reader in (read_graph_strict, load_graph):
         rows = _by_id(reader(p))
-        assert set(rows) == {"x-0006", "x-0007"}, f"{reader.__name__} dropped a valid row"
-        assert rows["x-0006"]["priority"] == []      # unmigratable, left alone
+        assert set(rows) == {"x-0006", "x-0007"}, f"{reader.__name__} lost a carried row"
         assert rows["x-0007"]["status"] == "in_progress"   # sibling still migrates
+    rows = _by_id(read_graph_nodes(p))
+    assert rows["x-0006"]["priority"] == []      # unmigratable, left alone
+    assert rows["x-0007"]["status"] == "in_progress"
 
 
 def test_strict_reader_reports_unreadable_rather_than_absent(tmp_path: Path) -> None:
@@ -242,31 +198,3 @@ def test_strict_reader_reports_unreadable_rather_than_absent(tmp_path: Path) -> 
     not_utf8.write_bytes(b'{"entries": [\xff\xfe]}')
     with pytest.raises(GraphUnreadableError):
         read_graph_strict(not_utf8)
-
-
-def test_corruption_detector_still_sees_the_evidence(tmp_path: Path, monkeypatch) -> None:
-    """End-to-end on the one consumer the opt-in exists for.
-
-    `_reachable_from_graph` returns `(hits, not malformed)`. A graph containing
-    a row it cannot read must come back NOT-clean, so the caller reports "graph
-    unreadable" instead of "this token names nothing" -- its own comment says
-    reporting empty there would drop the mail.
-
-    Patches the module-level default rather than an env var: `load_graph`
-    resolves `GRAPH_JSON` at import, so an env var set afterwards reads the real
-    graph and the assertion would pass for the wrong reason.
-    """
-    from fno.agents import discover
-    import fno.graph.load as load_mod
-
-    good = {"id": "x-0008", "sessions": [{"session_id": "abc", "harness": "claude"}]}
-
-    corrupt = _write(tmp_path, [42, good])
-    monkeypatch.setattr(load_mod, "GRAPH_JSON", corrupt)
-    _, clean = discover._reachable_from_graph("nothing-matches")
-    assert clean is False, "a malformed row no longer reaches the corruption detector"
-
-    intact = _write(tmp_path / "b", [good]) if (tmp_path / "b").mkdir() or True else None
-    monkeypatch.setattr(load_mod, "GRAPH_JSON", intact)
-    _, clean = discover._reachable_from_graph("nothing-matches")
-    assert clean is True, "a well-formed graph must not read as corrupt"

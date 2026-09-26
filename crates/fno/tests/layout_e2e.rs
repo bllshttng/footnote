@@ -970,12 +970,14 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
                 binding: LayoutBinding::Anchor,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
             LayoutSlot {
                 name: "fresh".into(),
                 binding: LayoutBinding::Shell,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
         ],
     };
@@ -1033,12 +1035,14 @@ fn layout_graft_refuses_unavailable_fno_and_duplicate_binding() {
                 binding: LayoutBinding::Anchor,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
             LayoutSlot {
                 name: "b".into(),
                 binding: LayoutBinding::Fno("no-such-session".into()),
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
         ],
     };

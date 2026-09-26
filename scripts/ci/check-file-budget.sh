@@ -33,7 +33,9 @@
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR
 # exception with the file-budget-exception label; agents never apply it, and
-# it waives the tree tally alone, never a per-file grow.
+# it waives the tree tally alone, never a per-file grow. One case needs no
+# label: a king-approved blocking-bug repair to existing Python, no new verb,
+# flag or feature, within the thirty-added-line budget.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget
@@ -43,12 +45,16 @@
 #
 # Env (all optional):
 #   FILE_BUDGET_LINES  per-file line budget. Default 5000.
-#   PY_TREE_ALLOWANCE  net lines cli/src/fno Python may grow per change.
-#                      Default 100.
+#   PY_ADDED_BUDGET    added lines cli/src/fno Python may add per change.
+#                      Deletions do not offset. Resolution: this env, then
+#                      `fno config get blueprint.python_repair_added_lines`,
+#                      then 30.
 #   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
-#                      waives the tree allowance (guards.yml passes it only
-#                      when the PR carries the label). Waives the tree tally
-#                      alone. Default: empty.
+#                      waives the tree allowance. Waives the tree tally alone.
+#                      Default: empty.
+#   FILE_BUDGET_LABEL_SHA  commit whose pull request carries the waiver;
+#                      when set, the gate reads the label live from GitHub
+#                      only if the tree is over the added-line allowance.
 #   PR_BASE_REF        base branch name, no remote prefix. Default: main.
 #   PR_REMOTE          remote holding the base. Default: origin.
 #   FILE_BUDGET_BASE_SHA  explicit base sha to diff instead of the merge base;
@@ -77,7 +83,23 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
 BUDGET="${FILE_BUDGET_LINES:-5000}"
-PY_ALLOWANCE="${PY_TREE_ALLOWANCE:-100}"
+# Added-line budget for the cli/src/fno Python tree. Deletions do not offset:
+# the repair law sets the ceiling on ADDED lines, never the net. Resolution
+# order: the env override, then the config key on a machine with fno, then
+# the law's starting value. An env override is caller configuration, so
+# garbage there is refused loudly; only the config read falls back silently.
+PY_ADDED_BUDGET="${PY_ADDED_BUDGET:-}"
+if [[ -n "$PY_ADDED_BUDGET" ]]; then
+    case "$PY_ADDED_BUDGET" in '' | *[!0-9]*)
+        echo "check-file-budget: PY_ADDED_BUDGET must be a number, got '$PY_ADDED_BUDGET'" >&2
+        exit 2 ;;
+    esac
+else
+    if command -v fno >/dev/null 2>&1; then
+        PY_ADDED_BUDGET="$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)"
+    fi
+    [[ "$PY_ADDED_BUDGET" =~ ^[0-9]+$ ]] || PY_ADDED_BUDGET=30
+fi
 # An env override is caller configuration, so garbage there is refused loudly -
 # under set -e a non-numeric value would otherwise kill the arithmetic test with
 # no output at all.
@@ -85,13 +107,23 @@ case "$BUDGET" in '' | *[!0-9]*)
     echo "check-file-budget: FILE_BUDGET_LINES must be a number, got '$BUDGET'" >&2
     exit 2 ;;
 esac
-case "$PY_ALLOWANCE" in '' | *[!0-9]*)
-    echo "check-file-budget: PY_TREE_ALLOWANCE must be a number, got '$PY_ALLOWANCE'" >&2
-    exit 2 ;;
-esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
 EXC_LABEL="${FILE_BUDGET_EXCEPTION_LABEL:-}"
+
+# The waiver lives on the PR, not in the event payload: a payload is a
+# snapshot, so a push run or a re-run after labeling never sees it there.
+label_live() {
+    local sha="${FILE_BUDGET_LABEL_SHA:-}" repo="${GITHUB_REPOSITORY:-}" out=""
+    [[ -n "$sha" ]] || return 1
+    if [[ -z "$repo" ]] || ! out="$(gh api "repos/$repo/commits/$sha/pulls" \
+            --jq '[.[].labels[].name] | index("file-budget-exception") != null' 2>&1)"; then
+        echo "check-file-budget: WARN could not read the file-budget-exception label for $sha (${out:-GITHUB_REPOSITORY is unset}); judging with no waiver" >&2
+        return 1
+    fi
+    [[ "$out" == "true" ]]
+}
+
 # The source types this gate measures. The diffs and the uncommitted-work check
 # read this one list, so a new type cannot reach one and miss the other.
 GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
@@ -155,6 +187,13 @@ else
             exit 2
         fi
     }
+    # A branch cut before main changed this gate measures with an older rule
+    # than the one CI runs on the merge commit. Warn and let the caller decide:
+    # the exit code never changes, and no copy is fetched or swapped.
+    if [[ "$(git rev-parse -q --verify "$BASE:scripts/ci/check-file-budget.sh" 2>/dev/null || true)" \
+            != "$(git rev-parse -q --verify "$BASE_TIP:scripts/ci/check-file-budget.sh" 2>/dev/null || true)" ]]; then
+        echo "check-file-budget: WARN this copy predates main's: main changed scripts/ci/check-file-budget.sh since your merge base. CI runs main's copy on the merge commit, and preflight runs canonical's. Merge origin/main, then re-run." >&2
+    fi
 fi
 
 _CACHED_COUNT=""
@@ -240,25 +279,25 @@ done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
 
 # The tree tally is its own pass because it needs no HEAD blob: a deleted
 # module banks its lines here. --no-renames counts a module moved into or out
-# of the tree as the growth or shrink it is.
+# of the tree as the growth or shrink it is. Only ADDED lines are summed:
+# the repair law's ceiling is on additions, so a branch cannot buy growth
+# with deletions.
 py_added=0
-py_deleted=0
 while IFS= read -r -d '' row; do
     added="${row%%$'\t'*}"; rest="${row#*$'\t'}"
     deleted="${rest%%$'\t'*}"; path="${rest#*$'\t'}"
     [[ "$added" == "-" ]] && continue
     is_test_path "$path" && continue
     py_added=$((py_added + added))
-    py_deleted=$((py_deleted + deleted))
 done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
-py_net=$((py_added - py_deleted))
 exc_waived=0
-if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
-    if [[ -n "$EXC_LABEL" ]]; then
+if [[ "$py_added" -gt "$PY_ADDED_BUDGET" ]]; then
+    if [[ -n "$EXC_LABEL" ]] || label_live; then
+        EXC_LABEL="${EXC_LABEL:-file-budget-exception}"
         exc_waived=1
     else
-        echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it." >> "$findings"
+        echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The ceiling is on ADDED lines; deletions do not offset it, so a branch cannot buy growth with a rewrite. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it. The label is read from the PR when the check runs, so re-run the check after labeling." >> "$findings"
         fails=1
     fi
 fi
@@ -280,6 +319,6 @@ fi
 if [[ "$QUIET" -eq 0 ]]; then
     waived=""
     [[ "$exc_waived" -eq 1 ]] && waived="; label $EXC_LABEL waives the tree allowance"
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE$waived)"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno added $(printf '%+d' "$py_added"), budget $PY_ADDED_BUDGET$waived)"
 fi
 exit 0

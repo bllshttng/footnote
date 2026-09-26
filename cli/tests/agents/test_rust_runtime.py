@@ -19,6 +19,42 @@ from typer.testing import CliRunner
 from fno import rust_binary
 from fno.agents import rust_runtime as rr
 
+
+@pytest.fixture(autouse=True)
+def _open_node_row(monkeypatch, tmp_path):
+    """The x-8d88 seam derives the node from a /target-family seed, so every
+    x-f370 seed here resolves against one open, /target-bearing row instead
+    of the real graph, where the historical node is long done and the
+    tightened guard would refuse the spawn before the behavior under test."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    row = {
+        "id": "x-f370",
+        "slug": "codex-seed",
+        "dispatch_verb": "/target",
+        "difficulty": "medium",
+        "status": "in_progress",
+        "plan_path": str(tmp_path / "p.md"),
+        "cwd": str(tmp_path),
+    }
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row])
+    # The verb reads the store itself for the nodeless derive: point its
+    # FNO_HOME at a fixture graph naming the same row.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-f370"}]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "fno.agents.cli._spawn_guard_decision",
+        lambda *a, **k: (
+            {
+                "verdict": "dispatchable",
+                "reservation_key": "dispatch:x-f370",
+                "reservation_holder": "test-holder",
+            },
+            0,
+        ),
+    )
+
 # Declared journal isolation: the conftest pin keys on this module's name
 # (see _PLAN_JOURNAL_PINNED_MODULES) and the guard
 # scripts/ci/check-tests-hermetic-events.sh proves this marker did not rot.
@@ -192,7 +228,7 @@ def test_agents_group_execs_when_opted_in(monkeypatch) -> None:
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(app, ["agents", "ask", "worker-A", "hi", "--harness", "codex"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert captured == [["ask", "worker-A", "hi", "--harness", "codex"]]
 
 
@@ -222,7 +258,7 @@ def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
     result = CliRunner().invoke(
         app, ["agents", "spawn", "--name", "worker-A", "hi", "--substrate", "bg"]
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     argv = captured[0]
     assert argv[0] == "spawn"
     assert "--harness" in argv and argv[argv.index("--harness") + 1] == "codex"
@@ -302,20 +338,20 @@ def test_codex_code_payload_after_provider_fence_is_checked() -> None:
     )
 
 
-def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
+def test_codex_code_spawn_in_a_repo_keeps_launch_path(
+    monkeypatch, tmp_path, loop_admission_ready
+) -> None:
     """A resolved grant is the positive control and must not refuse."""
     from fno.agents import sandbox_probe
     from fno.cli import app
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
-    called: list[list[str]] = []
-
-    def fake_route(args, **kw):
-        called.append(list(args))
-        raise SystemExit(0)
-
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
-    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._codex_thread_spawn",
+        lambda **kw: "fake-thread-id",
+    )
     monkeypatch.setattr(
         sandbox_probe, "probe_codex_sandbox", lambda cwd, **kw: sandbox_probe.SandboxProbe("reachable")
     )
@@ -334,24 +370,29 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
         ],
     )
 
-    assert result.exit_code == 0
-    assert called and called[0][0] == "spawn"
+    assert result.exit_code == 0, result.output
 
 
 @pytest.mark.parametrize("bypass", ["--yolo", "-Y"])
 def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path, bypass
+    monkeypatch, tmp_path, bypass, loop_admission_ready
 ) -> None:
+    """x-8d88: a derived node makes this a node-bearing spawn, which takes
+    the Python dispatch lane; the client exec is stubbed at its terminus."""
     from fno.cli import app
 
-    called: list[list[str]] = []
+    spawned: list[dict] = []
 
-    def fake_route(args, **kw):
-        called.append(list(args))
-        raise SystemExit(0)
+    def fake_thread_spawn(**kw):
+        spawned.append(dict(kw))
+        return "fake-thread-id"
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
-    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._permission_mappable", lambda *a, **k: True
+    )
+    monkeypatch.setattr("fno.agents.dispatch._codex_thread_spawn", fake_thread_spawn)
     result = CliRunner().invoke(
         app,
         [
@@ -368,8 +409,9 @@ def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
         ],
     )
 
-    assert result.exit_code == 0
-    assert called
+    assert result.exit_code == 0, result.output
+    assert len(spawned) == 1
+    assert spawned[0]["node"] == "x-f370"
 
 
 def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> None:
@@ -407,16 +449,18 @@ def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> No
     ],
 )
 def test_bounded_codex_code_spawn_is_probed_before_it_routes(
-    monkeypatch, tmp_path, verdict, blocked, routed, marker
+    monkeypatch, tmp_path, verdict, blocked, routed, marker, loop_admission_ready
 ) -> None:
+    """x-8d88: the derived node takes the Python dispatch lane, so the
+    routed branch is observed at the codex thread terminus."""
     from fno.agents import sandbox_probe
     from fno.cli import app
 
-    called: list[list[str]] = []
+    spawned: list[dict] = []
 
-    def fake_route(args, **kw):
-        called.append(list(args))
-        raise SystemExit(0)
+    def fake_thread_spawn(**kw):
+        spawned.append(dict(kw))
+        return "fake-thread-id"
 
     probed: list[Path] = []
 
@@ -427,8 +471,9 @@ def test_bounded_codex_code_spawn_is_probed_before_it_routes(
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
-    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
     monkeypatch.setattr(sandbox_probe, "probe_codex_sandbox", fake_probe)
+    monkeypatch.setattr("fno.agents.dispatch._codex_thread_spawn", fake_thread_spawn)
     result = CliRunner().invoke(
         app,
         [
@@ -445,9 +490,9 @@ def test_bounded_codex_code_spawn_is_probed_before_it_routes(
     )
 
     assert probed == [repo]
-    assert bool(called) is routed
+    assert bool(spawned) is routed
     if routed:
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
     else:
         assert result.exit_code == sandbox_probe.EXIT_SANDBOX_UNREACHABLE
         assert "remedy:" in result.output
@@ -480,18 +525,23 @@ def test_sandbox_probe_runs_only_for_bounded_codex_code_spawns(monkeypatch, tmp_
 
 
 def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, loop_admission_ready
 ) -> None:
+    """x-8d88: the derived node takes the Python dispatch lane."""
     from fno.cli import app
 
-    called: list[list[str]] = []
+    spawned: list[dict] = []
 
-    def fake_route(args, **kw):
-        called.append(list(args))
-        raise SystemExit(0)
+    def fake_thread_spawn(**kw):
+        spawned.append(dict(kw))
+        return "fake-thread-id"
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
-    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._permission_mappable", lambda *a, **k: True
+    )
+    monkeypatch.setattr("fno.agents.dispatch._codex_thread_spawn", fake_thread_spawn)
     result = CliRunner().invoke(
         app,
         [
@@ -509,8 +559,9 @@ def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
         ],
     )
 
-    assert result.exit_code == 0
-    assert called
+    assert result.exit_code == 0, result.output
+    assert len(spawned) == 1
+    assert spawned[0]["node"] == "x-f370"
 
 
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:
@@ -523,7 +574,7 @@ def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
     monkeypatch.setattr(rr, "route_to_rust", boom)
     result = CliRunner().invoke(app, ["agents", "--help"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "agent" in result.output.lower()
 
 
@@ -538,7 +589,7 @@ def test_agents_default_path_untouched_when_unset(monkeypatch) -> None:
     monkeypatch.setattr(rr, "route_to_rust", boom)
     # --help is enough to exercise the make_context path without a real spawn.
     result = CliRunner().invoke(app, ["agents", "--help"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -788,10 +839,13 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # `fno config plugin install`'s: both thin Python wrappers shell the
     # binary through resolve_binary, never auto-route.
     # `publish-review` is the reviewer lane's bot-identity producer: the emit
-    # chokepoint and the hidden `fno pr publish-review` verb shell it through
+    # chokepoint and the hidden `fno do pr publish-review` verb shell it through
     # verb_call, never auto-route.
     # `canonical-check` (x-a150) is the same shape: the post-merge sync shells
     # it through verb_call with a stdin JSON payload; an argv route would break.
+    # `sync-canonical` (x-85df) is the same shape again: the post-merge sync,
+    # its catch-up sweep and its staleness alarm all shell through verb_call
+    # with a stdin JSON payload, never an argv route.
     routable = arms | (
         specials
         - {
@@ -806,10 +860,18 @@ def test_rust_client_verbs_match_client_rs() -> None:
             "plugin-install",
             "publish-review",
             "canonical-check",
+            "sync-canonical",
             # The patch door (x-665f): resolve_binary-only, like board - the
             # client action list is shrink-only (d-fe66560a), so this arm is
             # never registered and never routed.
             "backlog-update",
+            # The provenance fold: `fno doctor intel` shells the binary
+            # through resolve_binary, never `fno agents intel` routing; the
+            # arm stays unregistered for the same shrink law.
+            "intel",
+            # `fno backlog session backfill` shells the binary through
+            # resolve_binary, never `fno agents` routing.
+            "session-backfill",
         }
     )
 
@@ -1053,7 +1115,7 @@ def test_rm_runtime_help_names_the_runtime_requirement(monkeypatch) -> None:
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     result = CliRunner().invoke(app, ["agents", "rm", "--help"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "Rust runtime only" in result.output
 
 
@@ -1115,7 +1177,7 @@ def test_agents_help_advertises_status_hides_plumbing() -> None:
 
     # `status` is the one advertised Rust-only verb; it appears in the listing.
     result = CliRunner().invoke(app, ["agents", "--help"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "status" in result.output
 
 

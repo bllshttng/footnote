@@ -79,6 +79,8 @@ Two modes, mutually exclusive per claim:
 
 **Hybrid arm (TTL claims that also record a pid).** A TTL claim past its clock is not unconditionally stale. A recorded pid that is live on this host (same host + `create_time` guards as PID-liveness) keeps the claim LIVE. This protects an idle or SIGSTOP-suspended session from peer reclaim past its TTL. A suspended process cannot run its own refresh, and plain TTL semantics cannot cover it. The arm is purely additive: it only ever extends liveness. A TTL claim with a transient, dead, missing, or off-host pid falls to STALE on expiry exactly as a plain TTL claim does. `node:<id>` target claims opt in by recording a durable session pid (see below). The retired megawalk walker recorded a transient pid, so the arm never fired for it. Its TTL park-exclusion is unchanged.
 
+**Blueprint-session claims are clock-only leases.** A `blueprint-session:` claim is a 60-minute lease. It runs from `acquired_at`, or from its explicit `expires_at`. Past the clock it reads STALE like a `review:branch:` hold, whatever the pid or session witness says. A native subagent planner shares its parent's pid and session id. Both outlive a planner stopped mid-close and hold the node for the parent's whole life. The manual `fno agents claim release --holder` is the fast path. The lease is the backstop that caps the strand at one hour.
+
 **Suspect state + skip-not-steal.** A TTL claim still *inside* its
 window whose recorded pid is not live classifies as `suspect`, not `live`.
 This is the respawned-worker case: a bg `/target` supervisor pid dies and the
@@ -221,13 +223,29 @@ a session whose gates are all false (it just started).
 
 Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its width from those same counters. It reads them through the same functions that `fno agents top` and `advance --explain` use. No two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second authority beside the real one. When the key is set, fno prints one deprecation line and ignores it. The key stays parseable for one release. Delete it from config.
 
+## Reservations: a lane slot held for a name
+
+A reservation is a lane slot held for a worker that has not spawned yet. A king can order the next freed slot to go to a named worker. Without enforcement the gate knows nothing about the promise. The reserved work loses the race to whatever spawns first, and obeying the order costs the slot. `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]` mints `worker:<name>` under the global claims root with `model_provider`, `reserved_by` and `reserved_reason` metadata. The claim is counted by `provider_live_slot_claims`. A reservation already spends a lane slot against every stranger before the worker exists.
+
+The gate refuses on that lane and names the reservation, in these words:
+
+```
+A reservation is held for a NAME: spawn with --name <that name> to redeem it.
+A reservation expires within 15 minutes, whatever happened to the session that made it.
+Slot order is otherwise first-come; read `fno agents gate-status` for the lane.
+```
+
+The gate skips the redeemer's own reservation in the provider count. It releases the reservation at admission, after every refusing axis has passed. An unrelated CPU or RAM refusal never burns it. Only a claim with the `reserved_by` key is redeemable. A live worker's plain slot claim carries no key. A spawn cannot skip or release it by borrowing the name. A reservation expires within 15 minutes. Nothing that happens to the minting session changes this. Only TTL expiry frees a claim, and pid death does not. A four-hour reservation with a dead holder once wedged the zai lane end to end. When the lane's reservations reach the lane cap, the reserve mode refuses to mint. At least one slot on every capped lane can never be reserved. First-come always has a lane to win. Slot order is otherwise first-come. Read `fno agents gate-status` for the lane. Its lane rows carry a `reserved` array beside `cap`, `live`, `counted` and `parked`.
+
 ## Per-territory team cap
 
 `check_territory_cap` (`crates/fno-agents/src/spawn_gate.rs`) is the one enforcement home for the per-territory team cap. The Rust client's own gate passes the node through, and the binary door (`fno-agents territory-verdict`) serves the readout surfaces. Nothing recomputes the verdict elsewhere. A binary or payload fault reads as `territory_unknown`, never as headroom, since an unreadable verdict must never count as free capacity.
 
 The cap refuses (never queues) at `territory_cap`. It stays enforced under `--force`: force speaks for the machine being busy, never for one territory overrunning its team. Waiting cannot help, since the team is full where the caller is standing, so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP` (86) separates this from the machine-wide cap so a caller can tell "the fleet is full" (queueable) from "this territory's team is over the line" (the other territories keep their headroom).
 
-Two CLI verbs read the same Rust territory projection so no two surfaces disagree. `fno config active-backlog` (`config_cli.py`) passes through the `active-backlog-receipt` binary call: territories resolved from the graph, the crown registry, the workspace map, and `config.active_backlog`. It is read-only and exit 1 names the unreadable source. `fno config active-backlog-territories` (hidden) passes through `territory-rows`: one row per scope, with its missions, king or kingless state, and live count against the cap. The row also names the standing blueprinter's handle. Both verbs are read-only.
+A node counts for the deepest live crown whose scope holds it, then the lowest canonical scope on a tie (`territory::node_owners`). A node that no live crown holds counts for its project's loose territory. The court's owned counts read the same rule. A spawn refusal and the court readout can never disagree about whose node a worker is on. Where the L1 fno crown and live L2 crowns coexist, an L2 node's worker counts for that L2 territory. It never counts for the fno root.
+
+Two CLI verbs read the same Rust territory projection so no two surfaces disagree. `fno config active-backlog` (`config_cli.py`) passes through the `active-backlog-receipt` binary call: territories resolved from the graph, the crown registry, the workspace map, and `config.active_backlog`. It is read-only and exit 1 names the unreadable source. `fno config active-backlog-territories` (hidden) passes through `territory-rows`: one row per scope, with its missions, king or kingless state, and live count against the cap. Both verbs are read-only.
 
 ## A dispatch outcome is dispatched, skipped, or failed
 
@@ -299,7 +317,7 @@ free, no row resolved to this node (N scanned, M unresolved); ... Confirm with: 
 free, roster not consulted (<reason>)
 ```
 
-The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`.
+The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`. The finished-session clause is a rider: it is appended to any of these outcomes it can coexist with, not only the clean-roster one.
 
 `roster_rows_unresolved` is the count of scanned rows whose worktree manifest or ledger did not resolve a node. If a worktree basename matches, the reader reports a candidate with `fno agents peek <name>`. It never acquires or infers a claim. `state: free` remains the claim answer.
 
@@ -487,9 +505,8 @@ into a registry row someone would have to go read.
 Reach for **`fno agents spawn`** when any of these hold: the work must
 outlive its spawner; someone other than the spawner must observe, message,
 or drive it; it must be handed to a successor king; it holds a `node:`
-claim, since the registry row is what makes the claim attributable; it must
-join king-mediated review, which is mail-shaped and therefore needs a
-handle; or it needs its own worktree or branch.
+claim, since the registry row is what makes the claim attributable; or it
+needs its own worktree or branch. Review does not require a spawned session.
 
 Neither primitive is always correct.
 "Always spawn" discards the limb's real advantages; "always subagent"
@@ -566,3 +583,7 @@ An overlapping or unevaluated band is never narrowed. Two bands sharing a file c
 Three facts worth recording, because an earlier dispatch brief planned against all three. First, the retained-row store already ships. The GC sweep persists one `ReapReceipt` per reaped row at `~/.fno/reap-receipts/<harness>-<session id>.json` (PR 1326). It carries the row's own fields, a resume command from the capability table, and ledger enrichment where the ledger has the row. The brief's premise that reaping without a new store destroys the resume handle is false. `build_reap_receipt` refuses a row with no session identity or no declared resume form. A refused row is HELD in the registry (`kept_no_receipt`) instead of reaped. Unknown never reaps, so a reap cannot destroy a resume handle. Second, the identity gate is closed. PR 1278 put a resolvable `harness_session_id` on every row at spawn, whatever the harness. The receipt gate has something to build from on every lane. Third, what was actually missing was a reader and an expiry, and both are the same verb. `fno agents history` is the reading. `config.agents.reap_receipts.retain_days` (default 7) is the pruning, expired by the same GC sweep that writes new receipts. A receipt whose `reaped_at` is missing or unparseable is kept and named in the sweep summary. A failed read is not evidence of age.
 
 Every miss names its source. Ledger coverage measured 2026-09-01 over 3647 rows: `session_id` on 3526, `model` on 800, `provider` on about 130, `harness` on none. An explicit `node_id_unrecoverable: true` marks 11 more. The uuid write path never backfilled, so a lookup against an old row legitimately finds nothing. The verb prints `not recorded` with the reason. An empty answer reads, to a stranger, as an absence of work.
+
+## commit_rows compares per-row versions
+
+The whole-graph write names its base with `base_version` and the per-row versions its begin returned. Every graph.db `nodes` and `nodes_raw` row carries a `version` column. The statement that writes the row bumps it, and nothing else writes it. `begin` returns the map `{id: version}` under the historical key `base_digests`. The client sends the touched ids back to `commit_rows` under the same key. Under its write gate the keeper reads `nodes.version` for the touched ids and conflicts on each one whose version moved. A row absent at begin and absent now is a new node, and it never conflicts. A row present now and absent from the map is one another writer created, and it conflicts. The json rollback backend has no row versions, and a client can send no map. Both fall back to the whole-graph compare: `base_version` must equal the current version, or every touched id conflicts. The publish then runs through `locked_mutate` with the current version as its fence, which covers writers outside this keeper. The trust model changed. The old keeper refused a client digest echo and recomputed digests from its own in-memory snapshot ring. The exec lane builds a fresh keeper state per request, so that ring missed on every exec-lane commit. A version stored in graph.db is the only base the keeper has across processes. A client that sends a false version can suppress a real conflict, the same trust `base_version` already carries. The ring, the digests and `base_plan_rungs` on `commit_rows` are gone (2026-09-24). The sqlite publish takes its write lock IMMEDIATE, so a deferred read window cannot refuse it. A busy store retries through one shared helper. Its refusal names attempts, elapsed, and the read-back command.

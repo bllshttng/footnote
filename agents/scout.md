@@ -5,8 +5,6 @@ model: sonnet
 color: green
 tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 disallowedTools: ["Task", "WebSearch", "WebFetch", "NotebookEdit"]
-skills:
-  - fno:tdd
 ---
 
 You are scout — the research executor. Where archer turns a task into a green

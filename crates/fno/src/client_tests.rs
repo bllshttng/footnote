@@ -2,7 +2,10 @@ use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]
 mod chrome_hit_helpers;
-use crate::client::keys_modal::build_keys_modal;
+use crate::client::{
+    input_folds::MAX_ESC_CARRY,
+    keys_modal::{build_keys_modal, keys_modal_mouse},
+};
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
 
@@ -10,12 +13,20 @@ use chrome_hit_helpers::{chrome_hit_label, cmds};
 // file is shrink-only under the file-budget gate.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
+
+#[path = "client/tests/sideline_table_tests.rs"]
+mod sideline_table_tests;
 #[path = "client/tests/sweep_both_tests.rs"]
 mod sweep_both_tests;
 
 // The x-9fd0 portal-placement-picker family lives in its own module too.
 #[path = "client/tests/portal_pick_tests.rs"]
 mod portal_pick_tests;
+
+// The attach-placement picker family (p, cursor-vs-here commits) and the
+// picker arrow-twin guarantees live in their own module too.
+#[path = "client/tests/placement_picker_tests.rs"]
+mod placement_picker_tests;
 
 // The status-glyph family joined the nav family. The rename-overlay family
 // (tab, squad, agent targets) lives in its own module too.
@@ -24,6 +35,11 @@ mod glyph_tests;
 
 #[path = "client/tests/rename_tests.rs"]
 mod rename_tests;
+
+// The sideline new-agent composer family: editor, focus, submit
+// refusals, and update correlation.
+#[path = "client/tests/agent_launcher_tests.rs"]
+mod agent_launcher_tests;
 
 #[test]
 fn config_says_off_matches_only_trimmed_off() {
@@ -186,31 +202,9 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
 #[path = "client/tests/agent_hit_tests.rs"]
 mod agent_hit_tests;
 
-#[tokio::test]
-async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
-    let mut view = two_pane_view();
-    let mut layout = two_squad_layout(1);
-    let mid = mission_meta(9, "mux-squad  1/1").id;
-    layout.missions.push(mission_meta(9, "mux-squad  1/1"));
-    view.set_layout(layout);
-    let squads = view.attach_dst_squads();
-    view.open_attach_place("job1".into(), Some(mid), squads);
-    let picker = view.attach_place.expect("picker opened");
-    assert_ne!(
-        picker.target(),
-        Some(mid),
-        "target must not be the virtual mission id"
-    );
-    assert!(
-        !picker.squads.contains(&mid),
-        "the mission id must not be offered as a placement choice"
-    );
-    assert_eq!(
-        picker.target(),
-        Some(1),
-        "falls back to the active real squad"
-    );
-}
+// Where a live paneless thread row must appear (finder and fold).
+#[path = "client/tests/paneless_row_tests.rs"]
+mod paneless_row_tests;
 
 fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
     SquadMeta {
@@ -228,19 +222,6 @@ fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
         active_tab,
         // One pane per tab is the test fixture's shape (each tab is a leaf).
         panes: tabs,
-    }
-}
-
-/// A synthetic mission-squad `SquadMeta` shaped like the server mints it:
-/// no tabs, no cwd, high-bit id.
-fn mission_meta(id: u64, name: &str) -> SquadMeta {
-    SquadMeta {
-        id: crate::proto::MISSION_SQUAD_BASE | id,
-        name: name.into(),
-        canonical_cwd: String::new(),
-        tabs: Vec::new(),
-        active_tab: 0,
-        panes: 0,
     }
 }
 
@@ -398,6 +379,8 @@ fn tab_label_text_collapses_only_the_exact_ordinal() {
 // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
 fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -427,9 +410,11 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -630,14 +615,14 @@ pub(super) fn two_pane_view() -> View {
             area: (29, 72),
             agents: vec![],
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
     view.frames.insert(11, text_frame(29, 36, 'b'));
+    // Pin the row shape: these helpers assert display-row geometry, and the
+    // card default (ambient config or no config at all) inserts a detail
+    // line per agent and moves every row index.
+    view.sideline_layout = sideline_color::SidelineLayout::List;
     view
 }
 
@@ -672,176 +657,11 @@ fn client_compose_places_panes_divider_and_chrome() {
     assert!(frame.cursor_visible);
 }
 
-#[test]
-fn pane_id_reveal_labels_each_id_inside_its_own_rectangle() {
-    let mut view = two_pane_view();
-    let t0 = Instant::now();
-    view.reveal_pane_ids_at(t0);
-    let frame = view.compose_at(t0 + Duration::from_millis(100));
-    let cols = view.term.1 as usize;
-    for (pid, rect) in &view.layout.panes {
-        let label = format!("pane {pid}");
-        let start =
-            view.panel_w() as usize + rect.x as usize + rect.cols as usize - label.chars().count();
-        let row = TAB_BAR_ROWS as usize + rect.y as usize;
-        let painted: String = label
-            .chars()
-            .enumerate()
-            .map(|(offset, _)| frame.cells[row * cols + start + offset].c)
-            .collect();
-        assert_eq!(painted, label, "pane {pid} label is not in its rectangle");
-        assert!(start >= view.panel_w() as usize + rect.x as usize);
-        assert!(
-            start + label.chars().count()
-                <= view.panel_w() as usize + rect.x as usize + rect.cols as usize
-        );
-    }
-}
+#[path = "client_tests/pane_id_reveal_tests.rs"]
+mod pane_id_reveal_tests;
 
-#[test]
-fn pane_id_reveal_tracks_tab_layout_and_expires_without_layout_space() {
-    let mut view = two_pane_view();
-    let t0 = Instant::now();
-    view.reveal_pane_ids_at(t0);
-    let first = frame_text(&view.compose_at(t0 + Duration::from_millis(100)));
-    assert!(first.contains("pane 10"));
-    assert!(first.contains("pane 11"));
-
-    view.layout.panes = vec![
-        (
-            91,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 35,
-            },
-        ),
-        (
-            94,
-            Rect {
-                x: 36,
-                y: 0,
-                rows: 29,
-                cols: 36,
-            },
-        ),
-    ];
-    view.frames.insert(91, text_frame(29, 35, 'c'));
-    view.frames.insert(94, text_frame(29, 36, 'd'));
-    let second = frame_text(&view.compose_at(t0 + Duration::from_millis(200)));
-    assert!(second.contains("pane 91"));
-    assert!(second.contains("pane 94"));
-    assert!(!second.contains("pane 10"));
-    assert!(!second.contains("pane 11"));
-
-    let expired =
-        frame_text(&view.compose_at(t0 + PANE_ID_REVEAL_WINDOW + Duration::from_millis(1)));
-    assert!(!expired.contains("pane 91"));
-    assert!(!expired.contains("pane 94"));
-}
-
-#[test]
-fn pane_id_reveal_skips_only_a_rectangle_too_narrow_for_its_label() {
-    let mut view = two_pane_view();
-    view.layout.panes[1].1.cols = 5;
-    let t0 = Instant::now();
-    view.reveal_pane_ids_at(t0);
-    let frame = frame_text(&view.compose_at(t0 + Duration::from_millis(1)));
-    assert!(frame.contains("pane 10"));
-    assert!(!frame.contains("pane 11"));
-}
-
-#[test]
-fn focus_outline_accents_focused_pane_seams_and_moves_with_focus() {
-    // x-5a52 US1 / AC1-HP: the divider cells bounding the focused pane render
-    // in the lattice accent at full brightness; a seam between two unfocused
-    // panes stays DIM. Moving focus moves the accent in the same compose.
-    let view = three_pane_view(); // focus = pane 10
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let seam_10_11 = 28 + 23; // divider left of pane 11: borders focused 10
-    let seam_11_12 = 28 + 47; // divider between unfocused 11 and 12
-    let row = 5;
-    let accented = frame.cells[row * cols + seam_10_11];
-    assert_eq!(
-        accented.c, '│',
-        "the accented cell is still a divider glyph"
-    );
-    assert_eq!(accented.fg, LATTICE_ACCENT, "focused-pane seam is amber");
-    assert_eq!(
-        accented.flags & cell_flags::DIM,
-        0,
-        "focus outline is full-bright, never dimmed"
-    );
-    let dim = frame.cells[row * cols + seam_11_12];
-    assert_eq!(
-        dim.fg,
-        Color::Default,
-        "unfocused seam keeps the default fg"
-    );
-    assert_eq!(
-        dim.flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "unfocused seam stays the DIM chrome"
-    );
-
-    // Move focus to pane 12: the accent follows to its seam in the same
-    // frame, and the old seam reverts to DIM (AC1-HP "in the same frame").
-    let mut moved = three_pane_view();
-    moved.layout.focus = 12;
-    let frame = moved.compose();
-    assert_eq!(
-        frame.cells[row * cols + seam_11_12].fg,
-        LATTICE_ACCENT,
-        "accent follows focus to pane 12"
-    );
-    assert_eq!(
-        frame.cells[row * cols + seam_10_11].flags & cell_flags::DIM,
-        cell_flags::DIM,
-        "the previously-focused seam reverts to DIM"
-    );
-}
-
-#[test]
-fn single_pane_tab_paints_no_focus_outline() {
-    // x-5a52 AC5-EDGE: one pane fills the content area, so there are no
-    // interior seams and nothing paints the accent - the sideline markers
-    // alone carry the "you are here" state.
-    let mut view = three_pane_view();
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            10,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 10,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
-    });
-    let frame = view.compose();
-    // The sideline still marks the active squad, so scope the check to the
-    // content area (col >= panel_w) where the outline would live.
-    let cols = frame.cols as usize;
-    let panel_w = view.panel_w() as usize;
-    let outline_in_content = (0..frame.rows as usize)
-        .any(|r| (panel_w..cols).any(|c| frame.cells[r * cols + c].fg == LATTICE_ACCENT));
-    assert!(
-        !outline_in_content,
-        "a single-pane tab paints no accent outline in the content area"
-    );
-}
+#[path = "client/tests/focus_outline_tests.rs"]
+mod focus_outline_tests;
 
 // A 2x2 grid over two_pane_view's geometry: A|B on top, C|D below, meeting
 // at a `┼` junction. focus = A (pane 10).
@@ -892,10 +712,6 @@ fn four_pane_view() -> View {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view
 }
@@ -937,6 +753,8 @@ fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
 // An agent row hosting a given pane, under squad 1.
 pub(super) fn focus_agent(pane: u64) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -966,9 +784,11 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -992,16 +812,19 @@ fn sideline_lane_color_and_deviation_token_render_on_the_row() {
     glm_row.account = Some("makers".into());
     view.layout.agents.push(codex_row);
     view.layout.agents.push(glm_row);
+    // The deviation token rides the name cell; give the columns room for it.
+    view.sideline_width = 100;
     let frame = view.compose();
     let cols = frame.cols as usize;
     let panel_w = view.panel_w() as usize;
+    let name_x = sideline_column_rects((panel_w - 1) as u16)[1].x as usize;
     let line = |row: usize| -> (String, Color) {
         let start = row * cols;
         let end = start + panel_w.min(cols);
         let text: String = frame.cells[start..end].iter().map(|c| c.c).collect();
         // A name cell, not the row lead: the focused row's band and the
         // selector own the first columns.
-        let fg = frame.cells[start + 3].fg;
+        let fg = frame.cells[start + name_x].fg;
         (text, fg)
     };
     // Row 1: the codex row - lane color from the built-in table (blue),
@@ -1044,50 +867,43 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
     // Display row 1 -> outer row 1: the focused agent row is a full-width
-    // INVERSE band, and the `▎` gutter glyph is gone.
+    // accent band, and the `▎` gutter glyph is gone.
     let lead = frame.cells[cols]; // outer row 1, col 0
     assert_ne!(
         lead.c, '▎',
         "the ▎ gutter is retired; the band is the signal"
     );
     assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row carries the standing INVERSE band"
+        lead.bg, LATTICE_ACCENT,
+        "the focused row carries the standing accent band"
     );
-    // The band fills the panel width (a right-edge text cell is still INVERSE).
+    // The band fills the panel width (a right-edge text cell is still banded).
     assert_eq!(
-        frame.cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        frame.cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "the focus band fills the panel width"
     );
 }
 
 #[test]
-fn active_marker_composes_with_selection_inverse() {
-    // x-4374 / AC3-UI: when the selector sits on the focused row, the XOR
-    // de-inverts its standing band so the selection reads under the cursor -
-    // the same grammar the old header bands used - instead of band and cursor
-    // masking each other.
+fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
+    // x-4374 / AC3-UI, restated for explicit bands: when the selector sits on
+    // the focused row, the chosen accent band wins - the cursor never masks
+    // the "you are here" signal (the card contract, list mode too).
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11));
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
     let lead = frame.cells[cols]; // outer row 1, col 0
-    assert_eq!(
-        lead.flags & cell_flags::INVERSE,
-        0,
-        "the selector de-inverts the focused row's band so the cursor reads"
-    );
+    assert_eq!(lead.bg, LATTICE_ACCENT, "the chosen band wins on selection");
 }
 
 #[test]
 fn xf331_focus_band_and_selector_are_distinct_treatments() {
     // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
-    // selector parked on a DIFFERENT row is a plain-INVERSE bar in the default
-    // colour - three-distinguishable, and the distinction is colour (survives
-    // weak-BOLD themes), not weight.
+    // selector parked on a DIFFERENT row is the palette-following hover band -
+    // the distinction is colour (survives weak-BOLD themes), not weight.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
     view.selector = Some(3); // notes squad header, a different actionable row
@@ -1097,24 +913,19 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
 
     let focus_cell = frame.cells[cols]; // display row 1: the focus band
     assert_eq!(
-        focus_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focus row still wears a band"
-    );
-    assert_eq!(
-        focus_cell.fg, LATTICE_ACCENT,
-        "the focus band wears the accent colour"
+        focus_cell.bg, LATTICE_ACCENT,
+        "the focus row still wears the accent band"
     );
 
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
-        sel_cell.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the selector row is an inverse bar"
+        sel_cell.bg,
+        Color::Indexed(0),
+        "the selector row is the palette-following cursor band"
     );
     assert_ne!(
-        sel_cell.fg, LATTICE_ACCENT,
-        "the selector bar is NOT the focus accent - the two read as distinct"
+        sel_cell.bg, LATTICE_ACCENT,
+        "the selector band is NOT the focus accent - the two read as distinct"
     );
 }
 
@@ -1270,7 +1081,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
     view.selector = Some(1);
     view.sel_hover_armed = true;
     view.hover_row = Some(1);
-    let before = view.sideline_offset;
+    let before = view.sideline_offset();
     view.scroll_sideline(true);
     assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
     assert_eq!(
@@ -1278,7 +1089,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
         "the wheel does not walk a hover-armed selector"
     );
     assert_eq!(
-        view.sideline_offset,
+        view.sideline_offset(),
         before + 1,
         "the wheel scrolls the list instead of moving the cursor"
     );
@@ -1456,10 +1267,6 @@ fn stacked_view() -> View {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view
 }
@@ -1652,10 +1459,6 @@ fn layout_change_ends_a_drag_whose_seam_is_gone() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert!(
         view.seam_drag.is_none(),
@@ -1702,10 +1505,6 @@ fn drag_ends_when_a_split_lands_between_its_panes() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert!(
         view.seam_drag.is_none(),
@@ -1740,10 +1539,6 @@ fn drag_survives_a_layout_push_that_keeps_its_pair() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert!(view.seam_drag.is_some(), "the drag survives its own resize");
     assert!(view.notice.is_none(), "a normal resize is not an error");
@@ -2169,10 +1964,6 @@ fn seam_at_refuses_an_ambiguous_crossing() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     // Outer (1+14, 28+35) = (15, 63) is the crossing: both axes resolve.
     assert_eq!(view.seam_at(15, 63), None);
@@ -2212,10 +2003,6 @@ fn three_pane_view() -> View {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view
 }
@@ -2566,196 +2353,9 @@ fn layout_push_clears_stale_hover_row() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert_eq!(view.hover_row, None);
 }
-
-#[test]
-fn chrome_hit_card_opens_confirm_with_node() {
-    // change #4: a work-queue card click resolves to a Confirm carrying the
-    // node id and its display label (slug preferred), not a silent dispatch.
-    let mut view = two_pane_view();
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            11,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 11,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-        backlog: vec![BacklogCard {
-            id: "x-a496".into(),
-            slug: "hover-cards".into(),
-            priority: "p2".into(),
-            state: CardState::Ready,
-            pane_id: None,
-            attach_id: None,
-            where_hint: None,
-            project: None,
-            lane: None,
-            plan_path: None,
-            head: false,
-        }],
-        backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
-        backlog_stale: false,
-        missions: Vec::new(),
-    });
-    view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
-                                 // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
-                                 // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
-                                 // sideline owns row 0, so outer row == display index).
-    match view.chrome_hit(3, 5) {
-        Some(ChromeHit::Confirm(a)) => {
-            assert!(
-                matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
-                "confirm dispatches the card's node"
-            );
-            assert_eq!(a.label, "hover-cards");
-        }
-        other => panic!("expected Confirm, got {}", chrome_hit_label(&other)),
-    }
-}
-
-#[test]
-fn chrome_hit_non_ready_card_is_notice_not_confirm() {
-    // A blocked/in-flight card is NOT dispatchable (codex peer review): the
-    // click is a local notice, never a Confirm that would start work prefix+g
-    // would skip. Two cards under the work-queue header.
-    let mut view = two_pane_view();
-    let card = |id: &str, state| BacklogCard {
-        id: id.into(),
-        slug: String::new(),
-        priority: "p2".into(),
-        state,
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    };
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            11,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 11,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-        backlog: vec![
-            card("x-blk", CardState::Blocked),
-            card("x-fly", CardState::InFlight),
-        ],
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
-    });
-    view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
-                                 // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
-    assert!(
-        matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
-        "blocked card -> notice, not confirm"
-    );
-    assert!(
-        matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
-        "in-flight card -> notice, not confirm"
-    );
-}
-
-#[test]
-fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
-    // x-54fa: an in-flight card is no longer a dead-end. Route priority
-    // (plan Locked 5): a pane in this session focuses; a paneless bg
-    // worker attaches (same command the agents-row click sends, so the
-    // v14 server gates apply); nothing routable says WHERE the work is
-    // (the server's where_hint), never a bare "already dispatching".
-    let mut view = two_pane_view();
-    let card =
-        |id: &str, pane: Option<u64>, attach: Option<&str>, hint: Option<&str>| BacklogCard {
-            id: id.into(),
-            slug: String::new(),
-            priority: "p2".into(),
-            state: CardState::InFlight,
-            pane_id: pane,
-            attach_id: attach.map(str::to_owned),
-            where_hint: hint.map(str::to_owned),
-            project: None,
-            lane: None,
-            plan_path: None,
-            head: false,
-        };
-    view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1)],
-        active_squad: 1,
-        panes: vec![(
-            11,
-            Rect {
-                x: 0,
-                y: 0,
-                rows: 29,
-                cols: 72,
-            },
-        )],
-        focus: 11,
-        area: (29, 72),
-        agents: vec![],
-        focus_node: None,
-        backlog: vec![
-            // Pane beats attach when the server sent both (it never does,
-            // but the client must not attach when a local pane exists).
-            card("x-aaa", Some(11), Some("deadbee1"), None),
-            card("x-bbb", None, Some("deadbee2"), None),
-            card("x-ccc", None, None, Some("in flight - worked by t:abc")),
-            card("x-ddd", None, None, None),
-        ],
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
-    });
-    view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
-                                 // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
-    assert_eq!(cmds(view.chrome_hit(3, 5)), vec![Command::FocusPane(11)]);
-    assert_eq!(
-        cmds(view.chrome_hit(4, 5)),
-        vec![Command::attach_agent("deadbee2")]
-    );
-    match view.chrome_hit(5, 5) {
-        Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
-        other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
-    }
-    match view.chrome_hit(6, 5) {
-        Some(ChromeHit::Notice(msg)) => {
-            assert_eq!(msg, "card in flight - no session visible here")
-        }
-        other => panic!("expected default notice, got {}", chrome_hit_label(&other)),
-    }
-}
-
-// A left click on the tab bar switches to the clicked tab, opens a new one on
-// the `+`, and does nothing on the inert squad-name label.
 #[test]
 fn chrome_hit_tab_bar_routes_tabs_and_new_tab() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
@@ -2818,18 +2418,18 @@ fn chrome_hit_sideline_squad_rows() {
 }
 
 #[test]
-fn chrome_hit_adds_sideline_offset_when_scrolled() {
+fn chrome_hit_adds_offset_when_scrolled() {
     // Regression (codex P2): a click must invert draw_sideline's scroll
     // offset, so a click on a scrolled row activates the row painted there,
     // not the unscrolled row at the same terminal cell.
     // Rows (x-cd67 US1 owns row 0; US3 Blank spacer at 1): [squad1(0),
     // Blank(1), squad2(2), footer(3)]. display index == terminal row.
-    let mut v = two_pane_view();
+    let v = two_pane_view();
     // Unscrolled: terminal row 2 -> display index 2 -> squad2.
     assert_eq!(cmds(v.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
     // Scrolled by 1: terminal row 1 -> display index 2 -> squad2 (without the
     // offset it would resolve to index 1, the Blank spacer).
-    v.sideline_offset = 1;
+    v.set_sideline_offset(1);
     assert_eq!(
         cmds(v.chrome_hit(1, 4)),
         vec![Command::SelectSquad(2)],
@@ -2850,10 +2450,6 @@ fn two_squad_layout(active_squad: u64) -> LayoutView {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     }
 }
 
@@ -2927,6 +2523,8 @@ fn set_layout_prunes_dead_squad_ids_from_expanded() {
 // (squad, exited) matter; badge/seen round out a plausible row.
 fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -2956,9 +2554,11 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3077,10 +2677,6 @@ fn pull_sections_default_collapsed() {
     let view = two_pane_view();
     assert_eq!(
         view.section_view(&SectionKey::Elsewhere),
-        SectionView::Collapsed
-    );
-    assert_eq!(
-        view.section_view(&SectionKey::WorkQueue),
         SectionView::Collapsed
     );
     crate::view_store::clear_test_path();
@@ -3489,75 +3085,6 @@ fn idle_fold_row_action_toggles_idle() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// A mission squad can never hold an agent (its id is a high-bit sentinel
-// nothing is assigned), so it renders as a progress line under the
-// `~ missions` band rather than a workspace section an operator would expect
-// to hold sessions. The band header cycles locally; no per-mission row ever
-// reaches SelectSquad (a mission has no server-side squad to select).
-#[test]
-fn mission_renders_under_the_missions_band_not_as_a_workspace() {
-    let mut view = two_pane_view();
-    let mut layout = two_squad_layout(1);
-    layout.missions.push(mission_meta(3, "mux-squad  2/2"));
-    view.set_layout(layout);
-    let rows = view.display_rows();
-    assert_eq!(
-        rows.iter()
-            .filter(|r| matches!(r, DisplayRow::Sel(_)))
-            .count(),
-        2,
-        "only the two real workspaces render as sections"
-    );
-    let band = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ missions"))
-        .expect("a `~ missions` band");
-    assert!(
-        rows.iter()
-            .any(|r| matches!(r, DisplayRow::Sub(s) if s == "mux-squad  2/2")),
-        "the mission's name renders as a band line"
-    );
-    assert!(
-        matches!(
-            view.row_action(band),
-            Some(ChromeHit::CycleSection(SectionKey::Missions))
-        ),
-        "the missions band cycles locally, never SelectSquad"
-    );
-}
-
-#[test]
-fn section_toggles_hide_the_missions_and_backlog_bands() {
-    // config.mux.show_missions / show_backlog (default on) drop the bands
-    // entirely - an operator who runs no epics hides the empty missions band
-    // rather than collapsing it each session.
-    let mut view = two_pane_view();
-    let mut layout = two_squad_layout(1);
-    layout.missions.push(mission_meta(3, "epic  0/4"));
-    layout.backlog = vec![bcard("x-rdy", CardState::Ready)];
-    layout.backlog_lanes = vec![("ready".into(), 1)];
-    view.set_layout(layout);
-    view.section_view
-        .insert(SectionKey::WorkQueue, SectionView::Expanded);
-    let has = |v: &View, lbl: &str| {
-        v.display_rows()
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Header { label, .. } if *label == lbl))
-    };
-    assert!(has(&view, "~ missions"), "missions band shown by default");
-    assert!(has(&view, "~ backlog"), "backlog band shown by default");
-    view.show_missions = false;
-    view.show_backlog = false;
-    assert!(
-        !has(&view, "~ missions"),
-        "show_missions=false hides the band"
-    );
-    assert!(
-        !has(&view, "~ backlog"),
-        "show_backlog=false hides the band"
-    );
-}
-
 // AC3-HP: acting on the active squad row cycles locally - with no dead
 // rows the cycle is binary, so two clicks round-trip - and apply_hit's
 // CycleSection arm does no I/O (AC1-FR is structural: cycle_section never
@@ -3604,6 +3131,8 @@ fn client_compose_active_squad_glyph_in_both_caret_states() {
 // tri-state filtering tests below.
 fn view_with_dead_interleaved() -> View {
     let row = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -3633,9 +3162,11 @@ fn view_with_dead_interleaved() -> View {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3668,7 +3199,7 @@ fn cycle_section_tri_state_filters_then_collapses_then_restores() {
     let mut view = view_with_dead_interleaved();
     assert_eq!(
         agent_names(&view),
-        vec!["live-a", "dead-a", "live-b", "dead-b"],
+        ["live-a", "live-b", "dead-a", "dead-b"], // active sort: live first, exited last
         "expanded shows every row"
     );
 
@@ -3749,60 +3280,10 @@ fn caret_glyph_distinguishes_all_three_view_states() {
 // The Backlog section is binary in both directions: a card has no exited state,
 // so LiveOnly would be meaningless there.
 #[test]
-fn work_queue_section_is_binary_and_hides_cards_when_collapsed() {
-    let mut view = two_pane_view();
-    view.layout.backlog = vec![BacklogCard {
-        id: "x-0001".into(),
-        slug: "a-card".into(),
-        state: CardState::Ready,
-        priority: "p2".into(),
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    }];
-    let cards = |v: &View| {
-        v.display_rows()
-            .iter()
-            .filter(|r| matches!(r, DisplayRow::Card(_)))
-            .count()
-    };
-    // (x-c5ee) The queue now defaults Collapsed (AC2-HP): no cards until the
-    // operator expands it.
-    assert_eq!(
-        view.section_view(&SectionKey::WorkQueue),
-        SectionView::Collapsed,
-        "queue defaults collapsed"
-    );
-    assert_eq!(cards(&view), 0, "collapsed by default hides the cards");
-
-    // Binary cycle: Collapsed -> Expanded, never through LiveOnly (a card
-    // has no exited state).
-    view.cycle_section(SectionKey::WorkQueue);
-    assert_eq!(
-        view.section_view(&SectionKey::WorkQueue),
-        SectionView::Expanded
-    );
-    assert_eq!(cards(&view), 1, "expanded shows the card");
-
-    view.cycle_section(SectionKey::WorkQueue);
-    assert_eq!(
-        view.section_view(&SectionKey::WorkQueue),
-        SectionView::Collapsed,
-        "binary: straight back to collapsed, never LiveOnly"
-    );
-    assert_eq!(cards(&view), 0, "collapsed hides the cards");
-}
-
-// A `~` section header is CLICKABLE (it cycles its own view) but stays
-// inert to the selector cursor - the x-260a "cursor never rests on a
-// label" invariant is preserved, not widened.
-#[test]
 fn section_header_is_clickable_but_never_selector_selectable() {
     let view = view_with_agents(vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -3832,9 +3313,11 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -3923,10 +3406,6 @@ fn persisted_state_survives_the_real_attach_path() {
             area: (0, 0),
             agents: Vec::new(),
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     // The server's first real push.
@@ -3938,10 +3417,6 @@ fn persisted_state_survives_the_real_attach_path() {
         area: (28, 72),
         agents: Vec::new(),
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: vec![mission_meta(3, "epic  0/4")],
     });
 
     assert_eq!(
@@ -4003,10 +3478,6 @@ fn later_activation_still_expands_a_collapsed_squad() {
         area: (28, 72),
         agents: Vec::new(),
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert_eq!(
         view.squad_view(2),
@@ -4056,10 +3527,6 @@ fn same_named_squads_keep_separate_view_state() {
         area: (28, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view.set_squad_view(1, SectionView::Expanded);
     view.set_squad_view(2, SectionView::Collapsed);
@@ -4076,6 +3543,8 @@ fn same_named_squads_keep_separate_view_state() {
 #[test]
 fn elsewhere_section_live_only_hides_exited_orphans() {
     let orphan = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4105,9 +3574,11 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4142,6 +3613,8 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
 #[test]
 fn section_header_caret_tracks_all_three_states() {
     let orphan = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4171,9 +3644,11 @@ fn section_header_caret_tracks_all_three_states() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4227,10 +3702,6 @@ fn client_compose_zero_tab_active_squad() {
             area: (28, 72),
             agents: vec![],
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     let text = frame_text(&view.compose());
@@ -4267,6 +3738,8 @@ fn client_compose_status_row_squad_cell_multi_squad_only() {
 #[test]
 fn chrome_hit_agent_rows_focus_or_hint() {
     let hosted = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4296,9 +3769,11 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4309,6 +3784,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
     // dedicated thread pane (x-07c2); a row with no attach id reaches
     // BY NAME (Follow/Locate tiers).
     let bg_attach = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4338,9 +3815,11 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4350,6 +3829,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
     // A watch-only row with no attach target: its reach opens the
     // dedicated pane by name (Follow tails it, Locate explains it).
     let bg_plain = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4379,9 +3860,11 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -4435,6 +3918,8 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
     // top-K cap, so all 40 render and the list still reaches the bottom.
     let agents: Vec<AgentRow> = (0..40)
         .map(|i| AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -4464,9 +3949,11 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -4565,7 +4052,7 @@ fn client_status_row_shows_focus_node_provenance() {
         .last()
         .unwrap()
         .to_string();
-    assert!(bottom.contains("hjkl focus"), "hint takeover: {bottom:?}");
+    assert!(bottom.contains("esc cancel"), "hint takeover: {bottom:?}");
     assert!(!bottom.contains('⚑'), "hint hides the cell: {bottom:?}");
 }
 
@@ -4604,7 +4091,7 @@ fn client_status_off_leaves_bottom_row_as_content() {
     // A pending hint still transiently paints over that content row.
     view.hint = true;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
@@ -4616,51 +4103,27 @@ fn client_compose_hint_paints_over_bottom_row() {
     view.hint = true;
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
-    assert!(bottom.contains("hjkl focus"), "{bottom:?}");
+    assert!(bottom.contains("esc cancel"), "{bottom:?}");
     assert!(!bottom.contains("? for keys"), "{bottom:?}");
     view.status_on = false;
     let text = frame_text(&view.compose());
-    assert!(text.lines().last().unwrap().contains("hjkl focus"));
-}
-
-#[test]
-fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // x-8ccf US3: prefix+? opens the centered which-key modal (replacing the
-    // top-left poster) built from the single-source binding table.
-    let mut view = two_pane_view();
-    view.term = (40, 80);
-    view.open_keys_modal();
-    let text = frame_text(&view.compose());
-    assert!(text.contains("keybinds"), "modal title present");
-    assert!(text.contains("esc close"), "dismiss affordance present");
-    // Section headers + a sampling of bindings the table advertises.
-    assert!(text.contains("panes"), "section header");
-    assert!(text.contains("detach"), "the d binding's action");
-    assert!(
-        text.contains("find: goto squad/tab/pane/agent"),
-        "the f binding's action names every row class nav_rows emits"
-    );
-    // (x-cf97) The digit row names the gesture, its resolve doors, and the
-    // Alt form. The number jump is no longer capped at nine, so the old
-    // "first 9; f goes past" ceiling would now be the lie; what must stay
-    // is the honest description of an input path the scanner really runs.
-    assert!(
-        text.contains("jump to tab by number")
-            && text.contains("Enter")
-            && text.contains("Alt works too"),
-        "the digit row names the gesture and its resolve doors"
-    );
+    assert!(text.lines().last().unwrap().contains("esc cancel"));
 }
 
 #[test]
 fn client_keys_modal_execute_selected_maps_selected_row_to_its_chord() {
-    // The default selection is the first binding; row_events[selected] must
-    // be exactly the Event a direct chord of that key would produce (Locked
-    // 3 parity, at the modal boundary).
+    // The default selection is the first selectable row. The global
+    // (no prefix) section's rows are display-only (Enter on them BELs), so
+    // the first EXECUTABLE row is the first Global binding, and
+    // row_events[selected] must be exactly the Event a direct chord of that
+    // key would produce (Locked 3 parity, at the modal boundary).
     let m = build_keys_modal();
     let (ri, _) = m.popup.selected().expect("a selectable row");
-    let ev = m.row_events[ri].clone().expect("first row is executable");
-    // The first section is Global; its first binding is `w` -> OpenSelector.
+    let ev = m.row_events[ri..]
+        .iter()
+        .find_map(|e| e.clone())
+        .expect("a first executable row");
+    // That first executable row is Global's `w` -> OpenSelector.
     assert_eq!(ev, crate::keys::resolve_chord(b'w'));
 }
 
@@ -4996,6 +4459,8 @@ fn row_menu_entries_gate_by_agent_state() {
     // row gets focus and NO splits (already placed); an exited row gets
     // remove and no stop.
     let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -5025,9 +4490,11 @@ fn row_menu_entries_gate_by_agent_state() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -5379,8 +4846,8 @@ fn modal_esc_chips_cancel_name_and_confirm_states_without_outside_dismissal() {
     assert!(view.marks.contains("a-1"), "recruit cancel keeps its marks");
 
     view.confirm = Some(ConfirmAction {
-        action: ConfirmKind::Dispatch { node: "x-1".into() },
-        label: "dispatch".into(),
+        action: ConfirmKind::ReapAgents,
+        label: "reap".into(),
     });
     assert!(modal_mouse(
         &mut view,
@@ -5837,99 +5304,6 @@ async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
 }
 
 #[test]
-fn backlog_header_has_no_menu_and_stays_silent() {
-    // Cards have no exited state, so a notice there would imply "none right
-    // now" about a section that can never have any. (SectionKey::WorkQueue
-    // is the pre-rename identifier for the Backlog section.)
-    let mut v = view_with_agents(vec![]);
-    // The band only renders over a non-empty backlog, so the card is what
-    // makes this test non-vacuous - `.expect` keeps it that way.
-    v.layout.backlog = vec![BacklogCard {
-        id: "x-f300".into(),
-        slug: "a-card".into(),
-        priority: "p2".into(),
-        state: CardState::Ready,
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    }];
-    let hdr = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue))
-        .expect("a backlog card renders the Backlog band");
-    v.notice = None;
-    assert!(!v.open_row_menu(hdr, Anchor::Center));
-    assert!(v.notice.is_none(), "the Backlog section says nothing");
-}
-
-#[tokio::test]
-async fn clear_dead_is_scoped_to_its_own_section() {
-    // The load-bearing guarantee of a SECTION clear: a sibling workspace's
-    // dead rows are none of its business. Without this, "clear dead" on one
-    // squad silently reaps the whole session's tombstones.
-    let in_squad = |name: &str, squad: u64| {
-        let mut r = lifecycle_row(name, true, false);
-        r.squad = Some(squad);
-        r
-    };
-    let mut v = view_with_agents(vec![]);
-    v.set_layout(two_squad_layout(1));
-    v.layout.agents = vec![in_squad("dead-in-1", 1), in_squad("dead-in-2", 2)];
-    arm_clear_dead(&mut v, 1).await;
-    let mut buf: Vec<u8> = Vec::new();
-    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        decode_cmds(buf),
-        vec![Command::RemoveAgent {
-            harness_session_id: None,
-            name: "dead-in-1".into(),
-            pane_id: None,
-            measure: false,
-        }],
-        "the sibling squad's dead row is untouched"
-    );
-}
-
-#[tokio::test]
-async fn clear_dead_works_on_the_elsewhere_band_too() {
-    // A `~` band is a DisplayRow::Header, a different branch from a squad's
-    // Sel row - drift between the two would leave orphaned dead rows with no
-    // bulk path, the exact gap this closes.
-    let orphan = |name: &str, exited: bool| {
-        let mut r = lifecycle_row(name, exited, false);
-        r.squad = Some(99); // no such squad -> orphan
-        r
-    };
-    let mut v = view_with_agents(vec![
-        orphan("stray-live", false),
-        orphan("stray-dead", true),
-    ]);
-    let hdr = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
-        .expect("elsewhere band");
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        decode_cmds(buf),
-        vec![Command::RemoveAgent {
-            harness_session_id: None,
-            name: "stray-dead".into(),
-            pane_id: None,
-            measure: false,
-        }]
-    );
-}
-
-#[test]
 fn which_key_lists_the_dead_row_removal_verbs() {
     // (x-f300) The gap this node closed was discoverability: if the modal
     // stops naming these, removal is invisible again.
@@ -5998,6 +5372,8 @@ async fn row_menu_disambiguates_same_named_agents() {
     // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
     // never the other same-named row.
     let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -6027,9 +5403,11 @@ async fn row_menu_disambiguates_same_named_agents() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -6948,36 +6326,6 @@ async fn a_short_press_on_a_workspace_row_still_selects_it() {
 }
 
 #[tokio::test]
-async fn a_long_press_on_an_inert_row_says_so_instead_of_nothing() {
-    // A mission row is a `DisplayRow::Sub` label with no menu by
-    // construction (its synthetic squad id is absent from `session.squads`,
-    // so every squad verb would answer `no such squad`). The hold must still
-    // ANSWER - silence is the defect, and a menu of failing entries would be
-    // worse than none.
-    let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
-    // Seed a real mission squad: the fixture's own squads are ids 1 and 2,
-    // neither synthetic, so without this there is no `Sub` row and the test
-    // asserts nothing. An earlier version guarded on the row's existence and
-    // returned - a green test measuring nothing.
-    v.layout.missions.push(mission_meta(7, "epic  1/2"));
-    let sub = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Sub(_)))
-        .expect("the mission band renders its squad as an inert Sub row");
-    let id = v.row_identity(sub).expect("a Sub row has an identity");
-    v.press_hold = Some((sub, id, Instant::now() - Duration::from_millis(600)));
-    let mut buf: Vec<u8> = Vec::new();
-    release_left(&mut v, sub as u16, 5, &mut buf).await.unwrap();
-    assert!(v.row_menu.is_none(), "an inert row opens no menu");
-    assert_eq!(
-        v.notice.as_ref().map(|(t, _)| t.as_str()),
-        Some("no menu on the held row"),
-        "the hold answers rather than falling silent"
-    );
-}
-
-#[tokio::test]
 async fn a_hold_whose_row_moved_under_it_refuses_rather_than_acting() {
     // An INDEX is not a row. `display_rows()` is rebuilt on every layout
     // push, so a row dropped mid-hold slides its neighbour under the same
@@ -7217,7 +6565,7 @@ async fn x7683_m_anchor_lands_on_the_rows_screen_row() {
     // The m-key anchor still added TAB_BAR_ROWS to a geometry that dropped
     // that offset in x-cd67 (the sideline owns row 0), so the menu opened
     // one row below its row. The anchor is the row's screen row
-    // (index - sideline_offset).
+    // (index - the TableState offset).
     let mut v = unified_rows_view();
     let w = agent_row_at(&v, |a| a.name == "worker");
     v.selector = Some(w);
@@ -7243,8 +6591,9 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
     // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections; a short window scrolls them).
-    view.term = (64, 100);
+    // ride below the binding sections): the global section spent five rows
+    // and the V chord one more, so the pin moved from 64.
+    view.term = (73, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
@@ -7418,33 +6767,6 @@ fn x7683_a_motionless_hold_past_the_reaper_opens_its_menu() {
     });
     assert!(!v.open_drag_menu(), "a moved stale drag refuses the menu");
     assert!(v.row_menu.is_none());
-}
-
-#[tokio::test]
-async fn x7683_m_on_the_backlog_header_says_why_not_nothing() {
-    // The WorkQueue header is the one menu-less header by design, and
-    // open_row_menu refuses it without a notice; `m` used to fall through
-    // to the move notice. The key must not vanish silently.
-    let mut v = unified_rows_view();
-    let hdr = v
-        .display_rows()
-        .iter()
-        .position(|r| {
-            matches!(
-                r,
-                DisplayRow::Header {
-                    key: SectionKey::WorkQueue,
-                    ..
-                }
-            )
-        })
-        .expect("the backlog band header");
-    v.selector = Some(hdr);
-    v.notice = None;
-    let mut buf: Vec<u8> = Vec::new();
-    super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
-    assert!(v.row_menu.is_none(), "the backlog header has no menu");
-    assert!(v.notice.is_some(), "but m says why, never silence");
 }
 
 #[tokio::test]
@@ -7852,6 +7174,8 @@ async fn row_menu_mail_opens_the_same_peek_composer() {
 /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
 fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -7881,9 +7205,11 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -8167,7 +7493,7 @@ fn footer_menu_region_routes_a_click_to_the_sideline_menu() {
         .footer_menu_range(panel_w)
         .expect("a wide panel shows the menu button");
     // (x-cd67 US1) The sideline owns row 0, so outer row == display index - offset.
-    let trow = (footer - v.sideline_offset) as u16;
+    let trow = (footer - v.sideline_offset()) as u16;
     assert!(matches!(
         v.chrome_hit(trow, range.start as u16),
         Some(ChromeHit::OpenSidelineMenu { .. })
@@ -8252,7 +7578,7 @@ fn settings_theme_tab_lists_the_shipped_palettes() {
 
 #[test]
 fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
-    let (rows, actions) = build_prefix_settings_rows("C-b");
+    let (rows, actions) = settings_modal::build_prefix_settings_rows("C-b");
     assert!(matches!(
         rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-b"
@@ -8264,13 +7590,13 @@ fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
             _ => None,
         })
         .collect();
-    assert_eq!(specs, PREFIX_PICKS.map(String::from));
+    assert_eq!(specs, settings_modal::PREFIX_PICKS.map(String::from));
     assert!(rows.iter().any(|row| matches!(
         row,
         PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
     )));
 
-    let (custom_rows, _) = build_prefix_settings_rows("C-q");
+    let (custom_rows, _) = settings_modal::build_prefix_settings_rows("C-q");
     assert!(matches!(
         custom_rows.first(),
         Some(PopupRow::Header(header)) if header == "prefix: C-q"
@@ -8480,8 +7806,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // asserts each renders a border (positive marker) at the level its
     // anchor dictates (Centered -> Full, anchored -> Bare).
     //
-    // The full set of fourteen: family A (7) = keys modal, row menu, card
-    // menu, section menu, sideline MENU, mini-kanban, settings; family B
+    // The full set of twelve: family A (5) = keys modal, row menu,
+    // section menu, sideline MENU, settings; family B
     // (7) = the seven draw_lines_overlay callers (catch-up, needs-me,
     // move-pick, attach-place, connections, peek, navigator), verified by
     // draw_lines_overlay_centers_within_viewport and the chrome::frame tests.
@@ -8498,7 +7824,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // Centered (Full): keys modal, sideline MENU, settings.
     assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
     assert_chrome(
-        &build_sideline_menu(Anchor::Center, None).popup,
+        &build_sideline_menu(Anchor::Center, None, false).popup,
         chrome::Level::Full,
     );
     let v = two_pane_view();
@@ -8511,41 +7837,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     );
 }
 
-#[test]
-fn sideline_menu_names_the_sweep_entry_off_dead() {
-    let menu = build_sideline_menu(Anchor::Center, None);
-    let i = menu
-        .popup
-        .rows
-        .iter()
-        .position(|row| {
-            matches!(
-                row,
-                PopupRow::Entry { glyph, label, .. }
-                    if glyph == "♺" && label == "sweep threads"
-            )
-        })
-        .expect("sweep threads entry");
-    let action_i = menu
-        .popup
-        .rows
-        .iter()
-        .take(i + 1)
-        .filter(|row| matches!(row, PopupRow::Entry { .. }))
-        .count()
-        - 1;
-    assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
-    assert!(crate::popup::menu_glyph_is_bmp("♺"));
-    assert!(!crate::popup::menu_glyph_is_bmp("📄"));
-    assert_eq!(
-        menu.actions
-            .iter()
-            .filter(|action| **action == AuxAction::Detach)
-            .count(),
-        1,
-        "the global detach slot remains distinct"
-    );
-}
+#[path = "client/tests/backlog_pref_tests.rs"]
+mod backlog_pref_tests;
 
 #[tokio::test]
 async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {
@@ -8620,9 +7913,9 @@ async fn update_modal_footer_esc_close_click_closes() {
     v.term = (30, 100);
     v.aux = Some(build_update_modal(None));
     let r = v.aux.as_ref().unwrap().popup.render(v.term);
-    let footer = overlay_footer_cell(&OverlayLayout {
-        origin: r.origin,
-        framed: chrome::Framed {
+    let footer = overlay_footer_cell(&OverlayLayout::from_parts(
+        r.origin,
+        chrome::Framed {
             lines: r
                 .lines
                 .iter()
@@ -8634,7 +7927,7 @@ async fn update_modal_footer_esc_close_click_closes() {
                 .collect(),
             width: r.width,
         },
-    });
+    ));
     let mut buf: Vec<u8> = Vec::new();
     aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
         .await
@@ -8913,6 +8206,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         area: (29, 72),
         agents: vec![
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -8942,9 +8237,11 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8952,6 +8249,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -8981,9 +8280,11 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -8991,6 +8292,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9020,9 +8323,11 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9031,30 +8336,34 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
             },
         ],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
+                                 // Room for the status word and the identity suffixes (x-177c columns).
+    view.sideline_width = 60;
     let frame = view.compose();
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
     // Agents-first row order (x-0090; no tab rows): footnote (auto-expanded,
     // x-2f99), its two agent rows, a Blank spacer, notes squad, the footer
     // spacer, the "+ new workspace" footer, a spacer, the "~ elsewhere"
-    // header, the orphan row. (x-cd67 US1) The sideline owns row 0.
+    // header, the orphan row. (x-cd67 US1) The sideline owns row 0. The
+    // state glyph is the status WORD now: Blocked reads `Input`,
+    // exited reads `Stop` (x-177c).
     assert!(lines[0].contains("\u{25be}*footnote"), "{:?}", lines[0]);
     assert!(
-        lines[1].contains("\u{25b2} peer: perm prompt"),
+        lines[1].contains("Input") && lines[1].contains("peer"),
         "{:?}",
         lines[1]
     );
-    assert!(lines[2].contains("\u{2717} dead"), "{:?}", lines[2]);
+    assert!(
+        lines[2].contains("Stop") && lines[2].contains("dead"),
+        "{:?}",
+        lines[2]
+    );
     assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
     assert!(lines[6].contains("+ new workspace"), "{:?}", lines[6]);
     assert!(lines[8].contains("~ elsewhere"), "{:?}", lines[8]);
-    assert!(lines[9].contains("\u{25cf} bg-watch"), "{:?}", lines[9]);
+    assert!(lines[9].contains("bg-watch"), "{:?}", lines[9]);
     // The exited row is DIM (fact beats badge, visually too). "dead" is
     // display index 2 -> frame row 2 (no spacer before it).
     let cols = frame.cols as usize;
@@ -9068,33 +8377,31 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
     sel_view.selector = Some(4);
     let sel_frame = sel_view.compose();
     let sel_cell = sel_frame.cells[notes_row * cols + 2];
-    // (x-4374) The notes squad is a demoted header (no standing INVERSE); the
-    // selector TOGGLES INVERSE, so selecting it ADDS the band and the cursor
-    // row renders DIFFERENTLY from the unselected header.
+    // (x-4374) The notes squad is a demoted header (no standing band); the
+    // selector paints the explicit hover band, so the cursor row renders
+    // DIFFERENTLY from the unselected header.
     assert_ne!(
-        sel_cell.flags & cell_flags::INVERSE,
-        unsel_cell.flags & cell_flags::INVERSE,
+        sel_cell.bg, unsel_cell.bg,
         "selector highlight must visibly toggle the notes header"
     );
+    assert_eq!(sel_cell.bg, Color::Indexed(0), "hover band bg");
 }
 
 #[test]
 fn client_agent_row_renders_dnd_as_presence_not_liveness() {
     let held: AgentRow = serde_json::from_str(
-        r#"{"squad":1,"name":"dnd-worker","pane_id":10,
+        r#"{"squad":1,"name":"dnd","pane_id":10,
                 "badge":"working","reason":null,"exited":false,"dnd":true}"#,
     )
     .unwrap();
     let mut view = two_pane_view();
+    view.sideline_width = 60;
     view.layout.agents = vec![held];
     let text = frame_text(&view.compose());
-    let row = text
-        .lines()
-        .find(|line| line.contains("dnd-worker"))
-        .unwrap();
+    let row = text.lines().find(|line| line.contains("dnd")).unwrap();
     assert!(
-        row.contains("● [DND] dnd-worker"),
-        "DND leads the truncatable identity without replacing liveness: {row:?}"
+        row.contains("[DND]") && row.contains("Work"),
+        "DND rides the identity without replacing liveness: {row:?}"
     );
 }
 
@@ -9107,6 +8414,8 @@ fn squad_header_rollup_counts_in_every_view_state() {
     // all-exited squad keeps its ✗ count so dead agents stay discoverable.
     fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             portal: None,
             harness: None,
             model: None,
@@ -9136,9 +8445,11 @@ fn squad_header_rollup_counts_in_every_view_state() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -9165,10 +8476,6 @@ fn squad_header_rollup_counts_in_every_view_state() {
             ar(3, "gone", Some(AgentBadge::Blocked), true), // exited -> ✗
         ],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     let lines: Vec<String> = frame_text(&view.compose())
         .lines()
@@ -9270,10 +8577,6 @@ fn headers_demoted_and_focused_row_wears_the_band() {
         area: (29, 72),
         agents: vec![blocked_row("lb", 11, None)], // owns the focused pane 11
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
     let mut cells = vec![Cell::default(); rows * cols];
@@ -9287,14 +8590,13 @@ fn headers_demoted_and_focused_row_wears_the_band() {
     assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
     // Row 1 = the agent row owning the focused pane: the sole standing band.
     assert_eq!(
-        cells[cols].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "the focused row wears the full-width band"
+        cells[cols].bg, LATTICE_ACCENT,
+        "the focused row wears the full-width accent band"
     );
-    // The band spans the full width (a right-edge text cell is still INVERSE).
+    // The band spans the full width (a right-edge text cell is still banded).
     assert_eq!(
-        cells[cols + panel_w - 2].flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
+        cells[cols + panel_w - 2].bg,
+        LATTICE_ACCENT,
         "band fills the panel width"
     );
     // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =
@@ -9320,7 +8622,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
     let mut view = two_pane_view();
     let panes = view.layout.panes.clone();
     let mut footnote = meta(1, "footnote", 2, 0); // active tab = id 0
-    footnote.tabs[1].name = "reviews".into();
+    footnote.tabs[1].name = "rev".into();
     footnote.tabs[1].named = true;
     let here = AgentRow {
         portal: None,
@@ -9336,7 +8638,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         harness: None,
         model: None,
         route: None,
-        name: "elsewhere".into(),
+        name: "els".into(),
         tab: Some(1), // a background tab -> badge
         ..focus_agent(0)
     };
@@ -9348,12 +8650,8 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         area: (29, 72),
         agents: vec![here, elsewhere],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
-    let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
+    let (rows, cols, panel_w) = (29usize, 72usize, 60usize);
     let mut cells = vec![Cell::default(); rows * cols];
     view.draw_sideline(&mut cells, rows, cols, panel_w);
     let row_text =
@@ -9368,7 +8666,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         "the active-tab row drops the badge: {here_line:?}"
     );
     assert!(
-        elsewhere_line.contains("·reviews"),
+        elsewhere_line.contains("·rev"),
         "the background-tab row keeps its badge: {elsewhere_line:?}"
     );
 }
@@ -9400,14 +8698,10 @@ fn focus_change_scrolls_the_band_into_view() {
         area: (5, 72),
         agents,
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
     view.set_layout(layout(100, agents.clone()));
-    assert_eq!(view.sideline_offset, 0, "a top focus needs no scroll");
+    assert_eq!(view.sideline_offset(), 0, "a top focus needs no scroll");
     // Focus jumps to the last agent (pane 107), well below the fold.
     view.set_layout(layout(107, agents.clone()));
     let visible = view.sideline_visible_rows();
@@ -9417,20 +8711,20 @@ fn focus_change_scrolls_the_band_into_view() {
         .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(107)))
         .unwrap();
     assert!(
-        idx >= view.sideline_offset && idx < view.sideline_offset + visible,
+        idx >= view.sideline_offset() && idx < view.sideline_offset() + visible,
         "focused row {idx} is inside the window [{}, {})",
-        view.sideline_offset,
-        view.sideline_offset + visible
+        view.sideline_offset(),
+        view.sideline_offset() + visible
     );
     assert!(
-        view.sideline_offset > 0,
+        view.sideline_offset() > 0,
         "the sideline scrolled to reveal the off-screen focus"
     );
 }
 
 #[test]
 fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
-    // x-4374 (codex P2): an open selector owns the scroll - `clamp_sideline_offset`
+    // x-4374 (codex P2): an open selector owns the scroll - `clamp_sideline_scroll`
     // keeps that actionable cursor visible, and a focus change must NOT scroll
     // it off-screen (Enter/lifecycle keys would then act on an invisible row).
     let mut view = two_pane_view();
@@ -9455,24 +8749,20 @@ fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
         area: (5, 72),
         agents,
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     };
     view.set_layout(layout(100, agents.clone()));
     // Park the selector on the top agent row (display index 1) and pin the view.
     view.selector = Some(1);
-    view.clamp_sideline_offset();
+    view.clamp_sideline_scroll();
     let visible = view.sideline_visible_rows();
     // Focus jumps far below the fold - with a selector open, reveal must not fire.
     view.set_layout(layout(107, agents.clone()));
     let sel = view.selector.expect("selector still open");
     assert!(
-        sel >= view.sideline_offset && sel < view.sideline_offset + visible,
+        sel >= view.sideline_offset() && sel < view.sideline_offset() + visible,
         "the selector {sel} stays visible in [{}, {})",
-        view.sideline_offset,
-        view.sideline_offset + visible
+        view.sideline_offset(),
+        view.sideline_offset() + visible
     );
 }
 
@@ -9490,27 +8780,28 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     let at = |v: &View| {
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_sideline(&mut cells, rows, cols, panel_w);
-        cells[(footer - v.sideline_offset) * cols].flags
+        cells[(footer - v.sideline_offset()) * cols]
     };
 
     let rest = at(&view);
-    assert_eq!(rest & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(rest & cell_flags::DIM, 0, "DIM reads as disabled");
-    assert_eq!(rest & cell_flags::INVERSE, 0);
+    assert_eq!(rest.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(rest.flags & cell_flags::DIM, 0, "DIM reads as disabled");
+    assert_eq!(rest.flags & cell_flags::INVERSE, 0);
 
     // The `N marked ·R` variant rides the same row and the same style.
     let mut marked = two_pane_view();
     marked.term = (29, 72);
     marked.marks.insert("a1".to_string());
-    let marked_flags = at(&marked);
-    assert_eq!(marked_flags & cell_flags::BOLD, cell_flags::BOLD);
-    assert_eq!(marked_flags & cell_flags::DIM, 0);
+    let marked_cell = at(&marked);
+    assert_eq!(marked_cell.flags & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(marked_cell.flags & cell_flags::DIM, 0);
 
-    // Hover still toggles INVERSE on top of BOLD (the row is not inert).
+    // Hover paints the explicit hover band on the footer row (the row is
+    // actionable, not inert); the band's own pair replaces BOLD.
     view.hover_row = Some(footer);
     let hovered = at(&view);
-    assert_eq!(hovered & cell_flags::INVERSE, cell_flags::INVERSE);
-    assert_eq!(hovered & cell_flags::BOLD, cell_flags::BOLD);
+    assert_eq!(hovered.bg, Color::Indexed(0));
+    assert_eq!(hovered.flags & cell_flags::INVERSE, 0);
 }
 
 #[test]
@@ -9550,6 +8841,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
         area: (29, 72),
         agents: vec![
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9579,9 +8872,11 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9589,6 +8884,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9618,9 +8915,11 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9628,6 +8927,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9657,9 +8958,11 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9670,6 +8973,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             // load-bearing "attention is never dimmed" branch. The accent
             // must win over the external DIM modifier.
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9678,7 +8983,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
-                name: "z-extblocked".into(),
+                name: "z-extblk".into(),
                 pane_id: None,
                 portal: None,
                 badge: Some(AgentBadge::Blocked),
@@ -9699,9 +9004,11 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -9710,59 +9017,70 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             },
         ],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
+    view.sideline_width = 60;
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
-    // Locate each row by name and read its glyph cell (col 2) + DIM flag.
-    let probe = |needle: &str| -> (char, bool) {
+    // Locate each row by name and read its STATUS cell (x-177c: the glyph
+    // is a word now) + DIM flag.
+    let probe = |needle: &str| -> (String, bool) {
         let r = lines.iter().position(|l| l.contains(needle)).unwrap();
-        let cell = frame.cells[r * cols + 2];
-        (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
+        let status: String = frame.cells[r * cols..r * cols + 5]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        (
+            status,
+            frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
+        )
     };
-    // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
-    // moves a badgeless reading-less row to the marked absence `?` - the
-    // mux cannot see an external/fno live row's workload, so it says so.
-    // The external DIM modifier and the no-reading DIM coincide, and this
-    // is a KNOWN, accepted collision, not an oversight: a badgeless local
-    // row and a badgeless external row both paint `?` + DIM, where before
-    // they were a bright `○` and a dim `○`. What the glyph discriminates
-    // is STATE, never external-ness, and DIM only reinforces it - the
-    // earlier wording read as though the glyph told the two rows apart,
-    // which it does not. External-ness reads through the row's ACTIONS.
-    // Restoring the distinction here means giving `external` a channel of
-    // its own; DIM cannot carry it once the state is already dim, which
-    // was already true of `✗` before this branch. The exited precedence
-    // below is unchanged.
-    assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-    assert_eq!(probe("z-external"), ('?', true), "external: ? + DIM");
-    assert_eq!(
-        probe("z-fnolive"),
-        ('?', true),
-        "fno-live: ? + DIM (no reading; bright-idle is gone)"
+    // A badgeless reading-less row paints `?` + DIM; a badgeless local row
+    // and a badgeless external row collide there on purpose (the glyph
+    // discriminates STATE, never external-ness; DIM only reinforces it).
+    // External-ness reads through the row's ACTIONS, and the exited
+    // precedence below is unchanged.
+    let (word, dim) = probe("z-exited");
+    assert!(
+        word.trim_start().starts_with("Stop") && dim,
+        "exited: Stop + DIM: {word:?}"
     );
-    // AC1-UI: external + Blocked renders the amber `▲`, BOLD, and NOT dimmed
-    // even though it is external - the accent beats the external DIM.
-    let eb_row = lines
+    let (word, dim) = probe("z-external");
+    assert!(
+        word.trim_start().starts_with('?') && dim,
+        "external: ? + DIM: {word:?}"
+    );
+    let (word, dim) = probe("z-fnolive");
+    assert!(
+        word.trim_start().starts_with('?') && dim,
+        "fno-live: ? + DIM: {word:?}"
+    );
+    // AC1-UI: external + Blocked renders `Input` in the amber accent,
+    // BOLD, and NOT dimmed even though it is external - the accent beats the
+    // external DIM.
+    let eb_row = lines.iter().position(|l| l.contains("z-extblk")).unwrap();
+    let eb_status: String = frame.cells[eb_row * cols..eb_row * cols + 5]
         .iter()
-        .position(|l| l.contains("z-extblocked"))
-        .unwrap();
-    let eb = frame.cells[eb_row * cols + 2];
-    assert_eq!(eb.c, '\u{25b2}', "external-blocked: ▲");
-    assert_eq!(eb.fg, LATTICE_ACCENT, "external-blocked: amber accent");
+        .map(|c| c.c)
+        .collect();
+    assert!(
+        eb_status.starts_with("Input"),
+        "external-blocked: the attention word: {eb_status:?}"
+    );
     assert_eq!(
-        eb.flags & cell_flags::DIM,
+        frame.cells[eb_row * cols].fg,
+        LATTICE_ACCENT,
+        "external-blocked: amber accent"
+    );
+    assert_eq!(
+        frame.cells[eb_row * cols].flags & cell_flags::DIM,
         0,
         "external-blocked: attention is never dimmed"
     );
     assert_eq!(
-        eb.flags & cell_flags::BOLD,
+        frame.cells[eb_row * cols].flags & cell_flags::BOLD,
         cell_flags::BOLD,
         "external-blocked: BOLD"
     );
@@ -9834,14 +9152,14 @@ fn client_compose_agents_first_omits_tab_rows_and_highlights_squad() {
         "no active-tab row renders in the sideline"
     );
     // The selector row (squad 2, display index 2 -> frame row 2). squad 2 is
-    // an inactive header band (INVERSE+DIM); the selector TOGGLES INVERSE
-    // (x-6851 US1), so it must render DIFFERENTLY from the same row
-    // unselected rather than simply carrying INVERSE.
+    // an inactive header with no standing highlight; the selector paints the
+    // explicit hover band (x-6851 US1), so it must render DIFFERENTLY from
+    // the same row unselected.
     let cols = frame.cols as usize;
     let unsel_frame = two_pane_view().compose();
     assert_ne!(
-        frame.cells[2 * cols].flags & cell_flags::INVERSE,
-        unsel_frame.cells[2 * cols].flags & cell_flags::INVERSE,
+        frame.cells[2 * cols].bg,
+        unsel_frame.cells[2 * cols].bg,
         "selector cursor row must be visibly toggled"
     );
     // While the selector is open the terminal cursor hides.
@@ -9877,10 +9195,6 @@ fn client_compose_ignores_stale_frames_and_clips_overflow() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert!(view.frames.contains_key(&10));
     assert!(
@@ -9913,10 +9227,6 @@ fn client_compose_letterboxes_beyond_the_clamped_area() {
             area: (20, 50),
             agents: vec![],
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -9989,6 +9299,7 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
     // something this layer has no mapping for, so it is dropped rather than
     // silently acted on as an unmodified press.
     let mut esc = Vec::new();
+    assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;2D"), b"");
     assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5B"), Vec::<u8>::new());
 
     // Still split-safe: a parameterised sequence broken across reads leaks
@@ -10004,20 +9315,13 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
 
 #[test]
 fn every_escape_fold_swallows_an_unrecognised_sequence_whole() {
-    // PARITY over all four folds, deliberately not four separate tests.
-    // The leak-whole-sequence guarantee was only ever asserted against
-    // `fold_search_input`, and the two folds nobody tested were the two that
-    // leaked: `fold_selector_keys` and `fold_modal_keys` each dropped ONE
-    // byte after `ESC [` and let the tail out as plain keys.
-    //
-    // That was survivable while every overlay closed on a key it did not
-    // recognise. Giving the pickers cursors is what weaponised it, because
-    // the leaked bytes are exactly the ones that now commit: a digit commits
-    // a MoveTab, and `ESC [ 1 ; 5 H` ends in the `H` that commits an attach
-    // split. A capability upgrade turned a dormant defect destructive.
-    //
-    // Written as one sweep so a FIFTH fold added later inherits the
-    // guarantee instead of inheriting nothing.
+    // PARITY over all four folds in one sweep, so a fifth fold inherits
+    // the leak-whole-sequence guarantee instead of nothing: `fold_selector_keys`
+    // and `fold_modal_keys` each dropped ONE byte after `ESC [`, which was
+    // survivable while overlays closed on keys they did not recognise, and
+    // destructive once cursored pickers committed the leaked bytes (a digit
+    // commits a MoveTab; `ESC [ 1 ; 5 H` ends in the `H` that commits an
+    // attach split).
     let sequences: &[(&str, &[u8])] = &[
         ("ctrl-up", b"\x1b[1;5A"),
         ("ctrl-down", b"\x1b[1;5B"),
@@ -10166,10 +9470,6 @@ fn client_selector_rows_reanchor_on_catalog_shrink() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     // Display rows are now [notes squad (auto-expanded, no agents),
     // + new workspace] (x-0090: no tab rows): the cursor clamps to the last
@@ -10187,10 +9487,11 @@ fn client_selector_rows_reanchor_on_catalog_shrink() {
 /// x-cd67 US3 adds Blank spacers between groups and before the trailing
 /// headers since there are 2 squads):
 /// 0 sq1 · 1 hosted agent · 2 Blank · 3 sq2 · 4 "+ new workspace" ·
-/// 5 Blank · 6 "~ elsewhere" · 7 bg-attach · 8 bg-plain · 9 Blank ·
-/// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
+/// 5 Blank · 6 "~ elsewhere" · 7 bg-attach · 8 bg-plain.
 fn unified_rows_view() -> View {
     let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -10220,502 +9521,57 @@ fn unified_rows_view() -> View {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
         no_pane_reason: None,
         pane_activity: None,
     };
-    let card = |id: &str, state| BacklogCard {
-        id: id.into(),
-        slug: String::new(),
-        priority: "p2".into(),
-        state,
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    };
     let mut v = view_with_agents(vec![
         agent(Some(1), "worker", Some(10), None),
         agent(None, "bg-claude", None, Some("c19cd2c3")),
         agent(None, "bg-other", None, None),
     ]);
-    v.layout.backlog = vec![
-        card("x-rdy", CardState::Ready),
-        card("x-blk", CardState::Blocked),
-        card("x-fly", CardState::InFlight),
-    ];
-    // (x-c5ee) These tests exercise rows INSIDE `~ elsewhere` and `~ backlog`
-    // (peek, attach, selector nav, card actions), so expand both past their
-    // new Collapsed defaults - the collapse itself has its own AC test.
+    // (x-c5ee) These tests exercise rows INSIDE `~ elsewhere`
+    // (peek, attach, selector nav), so expand it past its
+    // Collapsed default - the collapse itself has its own AC test.
     v.section_view
         .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    v.section_view
-        .insert(SectionKey::WorkQueue, SectionView::Expanded);
     v
-}
-
-// ---- the Backlog section (x-1d91) --------------------------------------
-
-/// A view whose Backlog section holds `cards` out of `total` on the board
-/// (all in one lane unless the cards say otherwise).
-fn backlog_view(cards: Vec<BacklogCard>, total: usize) -> View {
-    let mut v = two_pane_view();
-    v.set_layout(backlog_layout(cards, total));
-    // (x-c5ee) `~ backlog` now defaults Collapsed; these tests assert on
-    // rendered card rows, so open it. The collapse has its own AC test.
-    v.section_view
-        .insert(SectionKey::WorkQueue, SectionView::Expanded);
-    v
-}
-
-fn backlog_layout(cards: Vec<BacklogCard>, total: usize) -> LayoutView {
-    let mut layout = two_squad_layout(1);
-    let lane = cards
-        .first()
-        .map(|c| card_lane(c).to_string())
-        .unwrap_or_else(|| crate::backlog_view::UNLANED.into());
-    layout.backlog = cards;
-    layout.backlog_lanes = vec![(lane, total)];
-    layout
-}
-
-fn bcard(id: &str, state: CardState) -> BacklogCard {
-    BacklogCard {
-        id: id.into(),
-        slug: format!("{id}-slug"),
-        priority: "p2".into(),
-        state,
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    }
-}
-
-fn sublines(v: &View) -> Vec<String> {
-    v.display_rows()
-        .into_iter()
-        .filter_map(|r| match r {
-            DisplayRow::Sub(s) => Some(s),
-            _ => None,
-        })
-        .collect()
-}
-
-#[test]
-fn section_header_reads_backlog() {
-    // AC1-HP: the section is titled "Backlog", not "work queue".
-    let v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    assert!(
-        v.display_rows()
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog"))),
-        "the section header names the Backlog"
-    );
-}
-
-#[test]
-fn card_attribution_subline_renders_present_halves_only() {
-    // AC1-HP: `project · lane` on line 2 - but an unscoped, unlaned card
-    // stays ONE row rather than emitting a blank subline, and either half
-    // alone renders without a dangling separator.
-    let with = |p: Option<&str>, l: Option<&str>| {
-        let mut c = bcard("x-a", CardState::Ready);
-        c.project = p.map(Into::into);
-        c.lane = l.map(Into::into);
-        c
-    };
-    assert_eq!(
-        card_attribution(&with(Some("fno"), Some("ready"))).as_deref(),
-        Some("fno · ready")
-    );
-    assert_eq!(
-        card_attribution(&with(Some("fno"), None)).as_deref(),
-        Some("fno")
-    );
-    assert_eq!(
-        card_attribution(&with(None, Some("ready"))).as_deref(),
-        Some("ready")
-    );
-    assert_eq!(card_attribution(&with(None, None)), None);
-    // And the subline actually reaches display_rows.
-    let v = backlog_view(vec![with(Some("fno"), Some("ready"))], 1);
-    assert!(sublines(&v).contains(&"fno · ready".to_string()));
-}
-
-#[test]
-fn overflow_line_states_the_exact_remainder() {
-    // AC5-EDGE: the count is total-minus-shown exactly, and no line appears
-    // when the whole board fits.
-    let cards = vec![
-        bcard("x-a", CardState::Ready),
-        bcard("x-b", CardState::Blocked),
-    ];
-    let v = backlog_view(cards.clone(), 57);
-    assert!(
-        sublines(&v).contains(&"+55 more".to_string()),
-        "57 on the board, 2 shown -> +55"
-    );
-    let exact = backlog_view(cards, 2);
-    assert!(
-        !sublines(&exact).iter().any(|s| s.ends_with("more")),
-        "nothing cut -> no remainder line"
-    );
-}
-
-#[tokio::test]
-async fn card_menu_float_sends_verb_and_arms_pending() {
-    // AC2-HP + AC3-UI: the menu's float entry sends BacklogVerb::RankTop for
-    // the pinned node and the card immediately wears the pending marker.
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    let i = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Card(_)))
-        .expect("a card row");
-    assert!(v.open_row_menu(i, Anchor::Center), "cards open the menu");
-    let mut wire = Vec::new();
-    row_menu_execute_selected(&mut v, &mut wire).await.unwrap();
-    let sent = String::from_utf8_lossy(&wire);
-    assert!(sent.contains("BacklogVerb") && sent.contains("RankTop") && sent.contains("x-a"));
-    assert!(v.card_pending("x-a"), "the card shows it dispatched");
-    assert!(v.row_menu.is_none(), "the menu closes after execute");
-}
-
-#[tokio::test]
-async fn card_menu_refuses_a_card_that_left_the_feed() {
-    // Concurrency: a card claimed/dispatched between menu-open and Enter is a
-    // notice, and NOTHING goes on the wire (no shellout for a gone node).
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    let i = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Card(_)))
-        .expect("a card row");
-    v.open_row_menu(i, Anchor::Center);
-    v.layout.backlog.clear(); // the card races out
-    let mut wire = Vec::new();
-    row_menu_execute_selected(&mut v, &mut wire).await.unwrap();
-    assert!(wire.is_empty(), "a stale card sends nothing");
-    assert!(v.notice.is_some(), "and says so");
-    assert!(!v.card_pending("x-a"), "no marker for a verb never sent");
-}
-
-#[test]
-fn second_dispatch_is_suppressed_until_the_first_resolves() {
-    // Concurrency: a double-press must not fire two shellouts (nor churn rank
-    // with a no-op second `--top`).
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    assert!(v.arm_backlog_pending("x-a", BacklogVerb::RankTop));
-    assert!(
-        !v.arm_backlog_pending("x-a", BacklogVerb::RankTop),
-        "one verb in flight at a time"
-    );
-}
-
-#[test]
-fn pending_clears_only_when_the_target_card_itself_moves() {
-    // AC3-UI + Concurrency: layouts push on every scrape tick, and claims
-    // churn OTHER cards constantly. Only the target card's own movement is
-    // confirmation - anything looser is a false confirm, which both lies to
-    // the operator and releases the single-flight guard mid-verb.
-    let cards = vec![
-        bcard("x-a", CardState::Ready),
-        bcard("x-b", CardState::Ready),
-    ];
-    let mut v = backlog_view(cards.clone(), 2);
-    v.arm_backlog_pending("x-a", BacklogVerb::RankTop);
-    let mut same = two_squad_layout(1);
-    same.backlog = cards.clone();
-    v.set_layout(same);
-    assert!(v.card_pending("x-a"), "an unchanged feed confirms nothing");
-    // Someone else's card gets claimed: the SET changed, this verb did not.
-    let mut other_churned = two_squad_layout(1);
-    let mut churn = cards.clone();
-    churn[1].state = CardState::InFlight;
-    other_churned.backlog = churn;
-    v.set_layout(other_churned);
-    assert!(
-        v.card_pending("x-a"),
-        "another card's churn is not this verb's confirmation"
-    );
-    let mut moved = two_squad_layout(1);
-    moved.backlog = vec![cards[1].clone(), cards[0].clone()];
-    v.set_layout(moved);
-    assert!(
-        !v.card_pending("x-a"),
-        "the reorder landed -> marker clears"
-    );
-}
-
-#[test]
-fn a_defer_confirms_by_the_card_leaving_the_feed() {
-    // A successful defer takes the node off the board, so absence is what
-    // confirmation looks like for that verb.
-    let cards = vec![
-        bcard("x-a", CardState::Ready),
-        bcard("x-b", CardState::Ready),
-    ];
-    let mut v = backlog_view(cards.clone(), 2);
-    v.arm_backlog_pending("x-a", BacklogVerb::Defer);
-    let mut gone = two_squad_layout(1);
-    gone.backlog = vec![cards[1].clone()];
-    v.set_layout(gone);
-    assert!(
-        !v.card_pending("x-a"),
-        "gone from the board is confirmation"
-    );
-}
-
-#[test]
-fn a_verb_verdict_settles_the_marker_instead_of_spinning() {
-    // AC3-UI: a FAILED verb reports via a notice. Without settling here the
-    // card kept its `…`, every further verb stayed blocked behind the
-    // single-flight guard, and the timeout later replaced the real reason
-    // with a generic one.
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    v.arm_backlog_pending("x-a", BacklogVerb::RankTop);
-    v.settle_backlog_pending_on_notice();
-    assert!(!v.card_pending("x-a"), "the verdict ends the wait");
-    assert!(
-        v.arm_backlog_pending("x-a", BacklogVerb::RankTop),
-        "and the next verb is not blocked behind a stale marker"
-    );
-}
-
-#[test]
-fn unconfirmed_verb_expires_loudly() {
-    // AC3-UI: a verb the feed never confirms clears with a notice - the row
-    // must never keep a `…` nothing will resolve, and silence would read as
-    // success.
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    v.arm_backlog_pending("x-a", BacklogVerb::Defer);
-    assert!(
-        v.backlog_pending_deadline().is_some(),
-        "the wait is bounded"
-    );
-    v.expire_backlog_pending();
-    assert!(!v.card_pending("x-a"));
-    assert!(v.notice.is_some(), "expiry is never silent");
-}
-
-#[test]
-fn float_hint_only_on_ready_cards() {
-    // Domain pitfall: floating a READY card to the top makes it the
-    // dispatcher's next pick, so that entry says so; a blocked card carries
-    // no such consequence and no such hint.
-    let hint_of = |state| {
-        let m = build_card_menu(
-            &bcard("x-a", state),
-            &crate::digest_overlay::ObsidianCfg::default(),
-            Anchor::Center,
-        );
-        match &m.popup.rows[2] {
-            PopupRow::Entry { hint, .. } => hint.clone(),
-            other => panic!("expected the float entry, got {other:?}"),
-        }
-    };
-    assert_eq!(hint_of(CardState::Ready), "may dispatch");
-    assert_eq!(hint_of(CardState::Blocked), "");
-}
-
-#[test]
-fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
-    let mut card = bcard("x-a", CardState::Ready);
-    let off = crate::digest_overlay::ObsidianCfg::default();
-    let on = crate::digest_overlay::ObsidianCfg {
-        enabled: true,
-        // Absolute, so resolution never depends on the test host's HOME.
-        vault: Some("/tmp/vault".into()),
-    };
-
-    // Obsidian disabled: the item cannot apply no matter what the operator
-    // does in this menu, so LD7 says absent, never greyed.
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &off, Anchor::Center);
-    assert_eq!(
-        m.popup.rows.len(),
-        4,
-        "no open-plan row when obsidian is off"
-    );
-    assert_eq!(
-        m.actions.len(),
-        2,
-        "no OpenPlan action when obsidian is off"
-    );
-
-    // No plan_path: state can change (a plan can be added later), so LD7
-    // says greyed with the reason, not absent.
-    card.plan_path = None;
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
-        PopupRow::Entry {
-            label,
-            hint,
-            enabled,
-            ..
-        } => {
-            assert_eq!(label, "Open plan");
-            assert_eq!(hint, "no plan");
-            assert!(!enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(
-        m.actions.len(),
-        2,
-        "a disabled entry contributes no action slot"
-    );
-
-    // Plan present and obsidian on: enabled, and the third action lines up
-    // with the third selectable target.
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
-        PopupRow::Entry { label, enabled, .. } => {
-            assert_eq!(label, "Open plan");
-            assert!(enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(m.actions.len(), 3);
-    assert_eq!(m.actions[2], MenuAction::OpenPlan);
-}
-
-#[test]
-fn stale_feed_keeps_its_cards_and_says_so() {
-    // AC7-FR: a failing graph read must never blank the section - it keeps
-    // the last-known cards under a header that admits they are memory.
-    let mut layout = backlog_layout(vec![bcard("x-a", CardState::Ready)], 1);
-    layout.backlog_stale = true;
-    let mut v = two_pane_view();
-    v.set_layout(layout);
-    v.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
-    let rows = v.display_rows();
-    assert!(
-        rows.iter()
-            .any(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("stale"))),
-        "the header admits the section is stale"
-    );
-    assert!(
-        rows.iter().any(|r| matches!(r, DisplayRow::Card(_))),
-        "and the cards are still there"
-    );
-}
-
-#[test]
-fn kanban_lanes_carry_true_counts_and_flag_what_was_cut() {
-    // AC5-EDGE: the header count is the lane's REAL size, so a lane whose
-    // cards were cut by the feed cap must say so rather than let the header
-    // silently disagree with the rows beneath it.
-    let laned = |id: &str, lane: &str| {
-        let mut c = bcard(id, CardState::Ready);
-        c.lane = Some(lane.into());
-        c
-    };
-    let cards = vec![laned("x-a", "ready"), laned("x-b", "triage")];
-    let counts = vec![("ready".to_string(), 9), ("triage".to_string(), 1)];
-    let k = build_kanban(&cards, &counts, Anchor::Center);
-    let headers: Vec<&str> = k
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Header(h) => Some(h.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(headers.contains(&"ready  9"), "lane states its true size");
-    assert!(headers.contains(&"triage  1"));
-    assert!(
-        headers.iter().any(|h| h.contains("+8 more")),
-        "a lane holding more than the feed carries says so"
-    );
-    // One action per rendered card, none for the headers.
-    assert_eq!(k.actions.len(), 2);
-}
-
-#[test]
-fn kanban_gives_unlaned_cards_a_home() {
-    // A card with no `_kanban_column` must still appear on the board rather
-    // than vanishing from it.
-    let cards = vec![bcard("x-a", CardState::Ready)];
-    let counts = vec![(crate::backlog_view::UNLANED.to_string(), 1)];
-    let k = build_kanban(&cards, &counts, Anchor::Center);
-    assert_eq!(
-        k.actions,
-        vec![AuxAction::BacklogGoto("x-a".into())],
-        "the unlaned card is reachable"
-    );
-}
-
-#[tokio::test]
-async fn kanban_goto_moves_the_selector_to_that_card() {
-    // AC6-FR: acting on a card in the overlay hands you back to its sideline
-    // row - the same feed, so the two views can never show different orders.
-    let mut v = backlog_view(
-        vec![
-            bcard("x-a", CardState::Ready),
-            bcard("x-b", CardState::Ready),
-        ],
-        2,
-    );
-    v.open_kanban(Anchor::Center);
-    assert!(v.aux.is_some(), "the overlay opens");
-    let mut wire = Vec::new();
-    execute_aux_action(&mut v, AuxAction::BacklogGoto("x-b".into()), &mut wire)
-        .await
-        .unwrap();
-    assert!(v.aux.is_none(), "and closes on act");
-    let landed = v.selector.expect("the selector moved");
-    assert!(
-        matches!(v.display_rows().get(landed), Some(DisplayRow::Card(c)) if c.id == "x-b"),
-        "onto the card that was picked"
-    );
-}
-
-#[tokio::test]
-async fn kanban_goto_on_a_vanished_card_notices_instead_of_jumping() {
-    // Concurrency: a card closed between opening the overlay and acting must
-    // not move the cursor somewhere arbitrary.
-    let mut v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
-    v.open_kanban(Anchor::Center);
-    v.layout.backlog.clear();
-    let mut wire = Vec::new();
-    execute_aux_action(&mut v, AuxAction::BacklogGoto("x-a".into()), &mut wire)
-        .await
-        .unwrap();
-    assert!(v.notice.is_some(), "says the card is gone");
-    assert!(wire.is_empty(), "and sends nothing");
 }
 
 #[test]
 fn selector_nav_skips_headers_and_clamps() {
-    // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
-    // section headers, and clamp (no wrap) at both ends.
-    // Blank spacers sit at 2, 4, 6, 10 (the 4 = footer spacer); footer at 5,
-    // headers at 7 and 11.
+    // AC2-UI + Boundaries: j/k stop on every actionable row, skip the
+    // section header, and clamp (no wrap) at both ends.
     let v = unified_rows_view();
+    let rows = v.display_rows();
+    let elsewhere = rows
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ elsewhere"))
+        .unwrap();
+    let footer = rows
+        .iter()
+        .position(|r| matches!(r, DisplayRow::NewSquad))
+        .unwrap();
+    let first_bg = elsewhere + 1;
+    let last = rows.len() - 1;
     assert_eq!(
-        v.selector_down(5),
-        8,
-        "j from the footer skips the spacer + '~ elsewhere'"
+        v.selector_down(footer),
+        first_bg,
+        "j skips the spacer + header"
     );
-    assert_eq!(v.selector_down(9), 12, "j skips the spacer + '~ backlog'");
-    assert_eq!(v.selector_down(14), 14, "clamp at the last row");
-    assert_eq!(v.selector_up(8), 5, "k skips '~ elsewhere' + spacer upward");
-    assert_eq!(v.selector_up(12), 9, "k skips '~ backlog' + spacer upward");
+    assert_eq!(v.selector_down(last), last, "clamp at the last row");
+    assert_eq!(
+        v.selector_up(first_bg),
+        footer,
+        "k skips the header + spacer"
+    );
     assert_eq!(v.selector_up(0), 0, "clamp at the top");
 }
 
@@ -10723,28 +9579,71 @@ fn selector_nav_skips_headers_and_clamps() {
 fn selector_anchor_steps_off_headers() {
     // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
     // forward first, and an out-of-range index clamps to the last row.
-    // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10).
     let v = unified_rows_view();
-    assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
-    assert_eq!(v.selector_anchor(11), Some(12), "header steps forward");
-    assert_eq!(v.selector_anchor(50), Some(14), "stale index clamps");
+    let rows = v.display_rows();
+    let elsewhere = rows
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ elsewhere"))
+        .unwrap();
+    assert_eq!(
+        v.selector_anchor(elsewhere),
+        Some(elsewhere + 1),
+        "header steps forward"
+    );
+    assert_eq!(
+        v.selector_anchor(50),
+        Some(rows.len() - 1),
+        "stale index clamps"
+    );
     assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
 }
 
 // (x-cd67 US3, AC2-UI) Section spacing: with more than one squad, exactly one
 // Blank separates each workspace group and precedes each trailing header -
 // never doubled; with a single squad there are no spacers at all.
+// The sidebar dropped the backlog lane: whatever the wire carries, no
+// header reads `~ backlog` and no row reads `scope:` (the operator's
+// 2026-09-21 ask). The wire fields stay so the server feed and the write
+// doors keep serving a future view.
+#[test]
+fn a_layout_with_backlog_cards_renders_no_backlog_rows() {
+    // Wire tolerance: a Layout that still carries cards (the still-live
+    // server feed) decodes; the client just binds it away.
+    let msg: ServerMsg = serde_json::from_str(
+        r#"{"Layout":{"squads":[],"active_squad":0,"panes":[],"focus":0,"area":[0,0],
+            "backlog":[{"id":"x-a","slug":"s","priority":"p2","state":"Ready","head":false}]}}"#,
+    )
+    .expect("the client decodes a Layout carrying backlog cards");
+    assert!(matches!(msg, ServerMsg::Layout { .. }));
+    let mut v = two_pane_view();
+    v.expand_pull_sections();
+    let rows = v.display_rows();
+    assert!(
+        !rows.iter().any(|r| matches!(
+            r,
+            DisplayRow::Header { label, .. } if label.starts_with("~ backlog")
+        )),
+        "no backlog header renders"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Sub(s) if s.starts_with("scope:"))),
+        "no scope subline renders"
+    );
+}
+
 #[test]
 fn blank_spacers_separate_groups_only_when_multi_squad() {
-    let v = unified_rows_view(); // 2 squads, orphan section, backlog
+    let v = unified_rows_view(); // 2 squads, orphan section
     let rows = v.display_rows();
     let blanks = rows
         .iter()
         .filter(|r| matches!(r, DisplayRow::Blank))
         .count();
     assert_eq!(
-        blanks, 4,
-        "one between the two groups + one before the footer + one before each of the two headers"
+        blanks, 3,
+        "one between the two groups + one before the footer + one before the header"
     );
     // Never two spacers in a row.
     assert!(
@@ -10774,10 +9673,6 @@ fn blank_spacers_separate_groups_only_when_multi_squad() {
             area: (28, 72),
             agents: vec![],
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     assert!(
@@ -10931,6 +9826,8 @@ fn peek_body_seq_guard_drops_stale() {
 #[test]
 fn peek_overlay_renders_loading_transcript_and_answerable() {
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -10960,9 +9857,11 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11383,6 +10282,8 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
     // AC4-EDGE (client half): x on a tombstone member row sends
     // DismissMember for its squad + attach_id (not a squad remove).
     let tomb = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -11412,9 +10313,11 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11443,6 +10346,8 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
 /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
 pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -11472,9 +10377,11 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -11768,10 +10675,6 @@ fn display_rows_footer_keeps_empty_session_actionable() {
             area: (28, 72),
             agents: vec![],
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     assert_eq!(v.display_rows().len(), 1, "footer only");
@@ -11815,65 +10718,6 @@ async fn selector_enter_reaches_bg_agent_thread_pane() {
         }
         other => panic!("expected AttachAgent, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn selector_p_opens_attach_placement_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    let picker = v.attach_place.as_ref().expect("placement picker opens");
-    assert_eq!(picker.id, "c19cd2c3");
-    assert_eq!(picker.target(), Some(1));
-    assert_eq!(picker.squads, vec![1, 2]);
-    // The footer must let each axis name its OWN keys, and must say which
-    // key acts on the `›` marker. The old footer listed the split
-    // directions as if they were list navigation, which was the mislabel
-    // half of the reported defect. This footer collapses it to two lines
-    // and spells the split row `shift+HJKL` so the shift relationship to
-    // lowercase hjkl reads in words, not just in case.
-    let overlay = v.attach_place_lines(picker).join("\n");
-    for label in [
-        "hjkl/arrows move",
-        "1-9 jump",
-        // enter/t send byte-identical new-tab messages; space/. send
-        // byte-identical here messages. Each pair is one footer entry.
-        "enter/t new tab in ›",
-        "shift+HJKL split",
-        "space/. here",
-        "cancel",
-    ] {
-        assert!(overlay.contains(label), "missing {label}: {overlay}");
-    }
-    assert!(buf.is_empty());
-    assert_eq!(v.selector, None);
-}
-
-#[tokio::test]
-async fn attach_placement_selects_target_and_direction() {
-    // The digit jumps the cursor; UPPERCASE commits with a split direction.
-    // Lowercase `h` here would now only move the cursor (see
-    // attach_placement_arrows_move_the_cursor_without_attaching).
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"2H", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(2),
-                split: Some(Dir::Left),
-                ..Default::default()
-            },
-        })
-    );
-    assert!(v.attach_place.is_none());
 }
 
 /// Replace a view's layout with `n` real workspaces (ids 1..=n), so a picker
@@ -11973,7 +10817,6 @@ async fn both_attach_picker_entry_paths_build_the_same_candidate_list() {
     // the only difference between them is which door gets opened.
     let widen = |v: &mut View| {
         widen_to_squads(v, 14);
-        v.layout.missions.push(mission_meta(5, "epic  0/4"));
     };
     let mut click = unified_rows_view();
     widen(&mut click);
@@ -12079,240 +10922,6 @@ async fn move_picker_out_of_range_digit_bels_and_keeps_the_picker() {
 }
 
 #[tokio::test]
-async fn attach_placement_keys_do_not_depend_on_cursor_history() {
-    // The hard constraint behind superseding x-fbb1: a key must mean the
-    // same thing whether or not the cursor has moved. The tempting cheap
-    // fix was "Enter means here on the starting row, and commits the cursor
-    // once moved", which is a hidden mode - the exact class this node
-    // closes. Enter on an UNMOVED cursor must still commit that cursor,
-    // never silently fall back to the route.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let start = v.attach_place.as_ref().unwrap().target().unwrap();
-    let mut buf = Vec::new();
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-            assert_eq!(
-                placement.target,
-                PaneTarget::SquadId(start),
-                "Enter commits the cursor even when it has never moved"
-            );
-            assert!(!placement.here, "and is not secretly the route");
-        }
-        other => panic!("expected AttachAgent, got {other:?}"),
-    }
-
-    // And the cursor's ROUTE to a row does not change what commits: digit
-    // and arrows landing on the same index must produce the same command.
-    let by_digit = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"4\r", &mut buf).await.unwrap();
-        buf
-    };
-    let by_arrows = {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj\r", &mut buf).await.unwrap();
-        buf
-    };
-    assert_eq!(
-        by_digit, by_arrows,
-        "how the cursor got there cannot matter"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
-    // A digit past the end of the list is a BEL, not a selection, and the
-    // notice says the row is not there rather than claiming the workspace is
-    // "no longer available" - it never was. The cursor stays put and the
-    // picker stays open, so the operator can just press the right key next.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "an out-of-range digit sends nothing");
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
-}
-
-#[tokio::test]
-async fn attach_placement_out_of_range_digit_drops_the_rest_of_the_batch() {
-    // The BEL alone is not enough. Terminal reads arrive in batches, so the
-    // keys typed AFTER a bad digit are already in the same buffer - and they
-    // were composed believing row 9 existed. `L` would commit a right split
-    // into whatever the cursor happened to be on, a placement the operator
-    // never chose, with only a beep between intent and commit. So the bad
-    // digit abandons the whole read: nothing is sent, the cursor is untouched
-    // and the picker stays open on screen the operator can now actually read.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
-    assert!(
-        buf.is_empty(),
-        "the trailing commit key must not reach the socket"
-    );
-    let picker = v.attach_place.as_ref().expect("picker stays open");
-    assert_eq!(picker.cursor, 0, "and the cursor never moved");
-    assert!(
-        v.notice.is_some(),
-        "the operator is told why nothing happened"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_arrows_move_the_cursor_without_attaching() {
-    // AC3-FR, the exact reported defect: `j` (and therefore Down, which
-    // fold_selector_keys rewrites to `j`) used to return
-    // Some(Some(Dir::Down)) and attach IMMEDIATELY. Scanning the list with
-    // the arrow keys finalized a placement the operator never chose. This is
-    // the test that had to fail before the fix.
-    for key in [b"j".as_slice(), b"\x1b[B".as_slice()] {
-        let mut v = unified_rows_view();
-        v.selector = Some(8); // bg-claude
-        let mut buf = Vec::new();
-        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        assert_eq!(v.attach_place.as_ref().unwrap().cursor, 0);
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "key {key:?} must send no AttachAgent");
-        let picker = v.attach_place.as_ref().expect("picker stays open");
-        assert_eq!(picker.cursor, 1, "key {key:?} moves the cursor");
-        assert_eq!(picker.target(), Some(2));
-    }
-    // ...and back up, clamped at the top rather than wrapping.
-    let mut v = unified_rows_view();
-    v.selector = Some(8);
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    attach_place_keys(&mut v, b"kk", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert_eq!(
-        v.attach_place.as_ref().unwrap().cursor,
-        0,
-        "clamped, no wrap"
-    );
-}
-
-#[tokio::test]
-async fn attach_placement_new_tab_and_cancel_are_distinct() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // `t` is Enter's named alias: both open a new tab in the
-    // cursor-marked workspace. Space and `.` are the separate "here" pair.
-    attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(1),
-                split: None,
-                ..Default::default()
-            },
-        })
-    );
-
-    v.selector = Some(8); // bg-claude
-    let mut cancelled = Vec::new();
-    selector_keys(&mut v, b"p", &mut cancelled).await.unwrap();
-    attach_place_keys(&mut v, b"q", &mut cancelled)
-        .await
-        .unwrap();
-    assert!(cancelled.is_empty());
-    assert!(v.attach_place.is_none());
-}
-
-#[tokio::test]
-async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
-    // SUPERSEDES x-fbb1's Enter-is-here ruling, which was correct while the
-    // picker had no cursor to contradict it. Adding a cursor removed its
-    // premise: the overlay drew a marker on one workspace and Enter
-    // attached to another, which is this node's own defect one layer up.
-    //
-    // This re-splits Enter and Space, which had been merged into one
-    // "new tab in ›" commit: Enter (and its alias `t`) always commits the
-    // cursor; Space (and its alias `.`) always attaches HERE. No key's
-    // meaning depends on cursor history either way.
-    let mut v = unified_rows_view();
-    widen_to_squads(&mut v, 14);
-    open_attach_by_click(&mut v).await;
-    let mut buf = Vec::new();
-    // Drive the cursor somewhere the digits cannot reach, which is the
-    // case the cursor exists for and the case the old Enter broke.
-    attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
-        .await
-        .unwrap();
-    assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
-    attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    let mut cur = std::io::Cursor::new(buf);
-    let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-    assert_eq!(
-        msg,
-        ClientMsg::Command(Command::AttachAgent {
-            id: "c19cd2c3".into(),
-            placement: PanePlacement {
-                target: PaneTarget::SquadId(10),
-                split: None,
-                ..Default::default()
-            },
-        }),
-        "Enter must attach to the marked workspace, not here"
-    );
-    assert!(v.attach_place.is_none());
-
-    // Space and `.` both ignore the cursor BY DESIGN rather than by
-    // accident - including after the cursor has moved, so their meaning
-    // is history-independent too.
-    for key in [b" ".as_slice(), b".".as_slice()] {
-        let mut v = unified_rows_view();
-        widen_to_squads(&mut v, 14);
-        open_attach_by_click(&mut v).await;
-        let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-                assert_eq!(placement.target, PaneTarget::CurrentRoute);
-                assert!(placement.here, "key {key:?} is route-anchored");
-            }
-            other => panic!("expected AttachAgent, got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn attach_placement_refuses_stale_target_without_sending() {
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf = Vec::new();
-    selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-    // Park the cursor on squad 2, then delete it out from under the open
-    // picker: the cursor guarantees an in-range index, never a live squad.
-    v.attach_place.as_mut().unwrap().cursor = 1;
-    v.layout.squads.retain(|s| s.id != 2);
-    attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
-    assert!(buf.is_empty());
-    assert!(v.notice.is_some());
-    assert!(v.attach_place.is_none());
-}
-
-#[tokio::test]
 async fn selector_enter_refusal_keeps_selector_open() {
     // AC1-ERR + AC2-ERR (locked 3): a refusal row (a DEAD paneless agent,
     // blocked card, in-flight card) shows a notice, sends nothing, and the
@@ -12325,9 +10934,8 @@ async fn selector_enter_refusal_keeps_selector_open() {
         .iter_mut()
         .find(|a| a.name == "bg-other")
         .unwrap()
-        .exited = true; // the dead paneless row
-                        // bg-other (9), blocked card (13), in-flight card (14).
-    for row in [9usize, 13, 14] {
+        .exited = true; // the dead paneless row (bg-other, row 9)
+    for row in [9usize] {
         v.selector = Some(row);
         v.notice = None;
         let mut buf: Vec<u8> = Vec::new();
@@ -12336,24 +10944,6 @@ async fn selector_enter_refusal_keeps_selector_open() {
         assert!(v.notice.is_some(), "refusal explains itself (row {row})");
         assert_eq!(v.selector, Some(row), "selector stays open (row {row})");
     }
-}
-
-#[tokio::test]
-async fn selector_enter_ready_card_opens_confirm() {
-    // AC2-HP: Enter on a Ready card closes the selector and arms the
-    // one-keypress dispatch confirm - nothing on the wire yet; the second
-    // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
-    // takes the action, so one dispatch at most).
-    let mut v = unified_rows_view();
-    v.selector = Some(12); // ready card
-    let mut buf: Vec<u8> = Vec::new();
-    selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
-    assert_eq!(v.selector, None);
-    assert!(
-        matches!(&v.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
-        "the Ready card's node is armed for dispatch"
-    );
 }
 
 #[tokio::test]
@@ -12385,10 +10975,8 @@ fn open_confirm_is_modal_over_keyboard_overlays() {
         cursor: 0,
     });
     view.open_confirm(ConfirmAction {
-        action: ConfirmKind::Dispatch {
-            node: "x-rdy".into(),
-        },
-        label: "x-rdy".into(),
+        action: ConfirmKind::ReapAgents,
+        label: "reap".into(),
     });
     assert!(view.selector.is_none(), "confirm clears an open selector");
     assert!(view.answers.is_none(), "confirm clears the answer overlay");
@@ -12399,31 +10987,27 @@ fn open_confirm_is_modal_over_keyboard_overlays() {
         "confirm clears an open navigator (x-653d)"
     );
     assert!(
-        matches!(&view.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
-        "the armed confirm carries the node"
+        matches!(
+            view.confirm.as_ref().unwrap().action,
+            ConfirmKind::ReapAgents
+        ),
+        "the armed confirm carries its kind"
     );
 }
 
 #[test]
 fn short_terminal_degrades_prompts_to_notices() {
     // sigma review x-260a: below MIN_ROWS_FOR_STATUS the bottom-row
-    // prompt cannot render, so a Ready card and the footer refuse with a
-    // notice instead of arming an invisible modal (which could dispatch
-    // blind on the next Enter).
-    // ready card at 12, footer at 5.
+    // prompt cannot render, so the footer refuses with a
+    // notice instead of arming an invisible modal.
     let mut v = unified_rows_view();
     v.term.0 = MIN_ROWS_FOR_STATUS - 1;
-    assert!(
-        matches!(v.row_action(12), Some(ChromeHit::Notice(_))),
-        "ready card refuses on a too-short terminal"
-    );
     assert!(
         matches!(v.row_action(5), Some(ChromeHit::Notice(_))),
         "footer refuses on a too-short terminal"
     );
-    // At the minimum height both act normally again.
+    // At the minimum height it acts normally again.
     v.term.0 = MIN_ROWS_FOR_STATUS;
-    assert!(matches!(v.row_action(12), Some(ChromeHit::Confirm(_))));
     assert!(matches!(v.row_action(5), Some(ChromeHit::OpenCreate)));
 }
 
@@ -12495,6 +11079,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
     let mut v = two_pane_view();
     v.layout.agents = vec![
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -12524,9 +11110,11 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -12534,6 +11122,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             pane_activity: None,
         },
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -12563,9 +11153,11 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             basis: None,
             last_activity_age_s: None,
             resumable: false,
@@ -12612,6 +11204,8 @@ fn squad_rollup_bare_pane_folds_to_idle() {
     // that path is covered by pane_activity_folds_*, this one pins the
     // rollup with a measured idle pane.)
     let row = |name: &str, pane, badge| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -12641,9 +11235,11 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12795,6 +11391,8 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
     // SelectSquad then FocusPane in order, and closes the navigator.
     let mut v = two_pane_view(); // active squad = 1 (footnote)
     v.layout.agents = vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -12824,9 +11422,11 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -12887,13 +11487,20 @@ async fn nav_goto_same_squad_is_a_bare_focus() {
 
 #[tokio::test]
 async fn nav_goto_refusal_keeps_navigator_open() {
-    // AC4-FR + Locked 6: Enter on a Blocked card shows a notice, sends
-    // nothing, and the navigator stays open.
+    // AC4-FR + Locked 6: Enter on a row whose only answer is a notice
+    // (the dead paneless row) shows a notice, sends nothing, and the
+    // navigator stays open.
     let mut v = unified_rows_view();
+    v.layout
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "bg-other")
+        .unwrap()
+        .exited = true;
     let idx = v
         .nav_rows()
         .iter()
-        .position(|r| r.label.starts_with("x-blk"))
+        .position(|r| r.label.contains("bg-other"))
         .unwrap();
     v.nav = Some(NavView {
         query: String::new(),
@@ -12941,10 +11548,16 @@ async fn nav_keys_bare_right_gotos_and_left_closes() {
     // sends nothing - the Notice path is nav_goto's, not new logic), and
     // bare Left closes like Esc. Bare arrows never leak to the pane.
     let mut v = unified_rows_view();
+    v.layout
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "bg-other")
+        .unwrap()
+        .exited = true;
     let idx = v
         .nav_rows()
         .iter()
-        .position(|r| r.label.starts_with("x-blk"))
+        .position(|r| r.label.contains("bg-other"))
         .unwrap();
     v.nav = Some(NavView {
         query: String::new(),
@@ -13072,26 +11685,26 @@ fn sideline_scroll_follows_cursor_and_maps_hit() {
     v.term = ((total - 1) as u16, 100); // visible = total - 1
     let visible = v.sideline_visible_rows();
     v.selector = Some(total - 1);
-    v.clamp_sideline_offset();
+    v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_offset(),
         total - visible,
         "offset follows the cursor"
     );
     assert!(
-        (total - 1) >= v.sideline_offset && (total - 1) < v.sideline_offset + visible,
+        (total - 1) >= v.sideline_offset() && (total - 1) < v.sideline_offset() + visible,
         "the cursor row is inside the visible window"
     );
     assert!(v.panel_w() > 1, "fixture panel is visible");
     assert_eq!(
         v.sideline_row_at(0, 0),
-        Some(v.sideline_offset),
+        Some(v.sideline_offset()),
         "the top drawn row (row 0) hit-tests to the scrolled index"
     );
 }
 
 #[test]
-fn wheel_scrolls_sideline_offset_when_no_selector() {
+fn wheel_scrolls_offset_when_no_selector() {
     // Fix 3: a wheel over a focused (overflowing) sideline nudges the scroll
     // offset directly when the selector is closed, and stays in range.
     let mut v = two_pane_view();
@@ -13100,18 +11713,18 @@ fn wheel_scrolls_sideline_offset_when_no_selector() {
     v.term = ((total - 1) as u16, 100); // one row below the fold
     let visible = v.sideline_visible_rows();
     v.selector = None;
-    v.sideline_offset = 0;
+    v.set_sideline_offset(0);
     v.scroll_sideline(true);
-    assert_eq!(v.sideline_offset, 1, "wheel-down advances one row");
+    assert_eq!(v.sideline_offset(), 1, "wheel-down advances one row");
     v.scroll_sideline(false);
-    assert_eq!(v.sideline_offset, 0, "wheel-up retreats one row");
+    assert_eq!(v.sideline_offset(), 0, "wheel-up retreats one row");
     v.scroll_sideline(false);
-    assert_eq!(v.sideline_offset, 0, "wheel-up saturates at the top");
+    assert_eq!(v.sideline_offset(), 0, "wheel-up saturates at the top");
     for _ in 0..total + 5 {
         v.scroll_sideline(true);
     }
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_offset(),
         total - visible,
         "wheel-down stops at the last full window"
     );
@@ -13144,9 +11757,9 @@ fn sideline_scroll_zero_when_rows_fit() {
         "catalog fits the window"
     );
     v.selector = Some(0);
-    v.sideline_offset = 9; // stale offset from a prior scrolled session
-    v.clamp_sideline_offset();
-    assert_eq!(v.sideline_offset, 0, "fits -> offset resets to 0");
+    v.set_sideline_offset(9); // stale offset from a prior scrolled session
+    v.clamp_sideline_scroll();
+    assert_eq!(v.sideline_offset(), 0, "fits -> offset resets to 0");
 }
 
 #[test]
@@ -13159,10 +11772,10 @@ fn sideline_scroll_never_past_last_row() {
     v.term = (total as u16, 100); // visible = total - 1
     v.selector = None;
     v.hover_row = None;
-    v.sideline_offset = 999; // absurd, e.g. after the catalog shrank
-    v.clamp_sideline_offset();
+    v.set_sideline_offset(999); // absurd, e.g. after the catalog shrank
+    v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_offset(),
         total - v.sideline_visible_rows(),
         "clamped to the last full window"
     );
@@ -13235,10 +11848,6 @@ fn nav_cursor_re_clamps_on_layout_shrink() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     let n = v.nav_rows().len();
     assert!(n < last + 1, "catalog shrank");
@@ -13266,6 +11875,8 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         },
     ];
     v.layout.agents = vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -13295,9 +11906,11 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -13441,8 +12054,44 @@ fn answerable(idx_labels: &[(&str, &str)], fp: u8) -> AnswerablePrompt {
     }
 }
 
-fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
+#[test]
+fn a_pr_row_names_the_session_driving_it() {
+    // The operator's ask: a PR row shows the attach handle with the short
+    // id of its driving session; no session id reads "no session".
+    // (Moved here when the backlog-lane test file went with the lane.)
+    let mut a = blocked_row("w1", 3, None);
+    a.pr = Some(9);
+    // The server joins the driving session's short id from the graph: the
+    // live claim holder's session, else the node's last do/ship session.
+    a.pr_session_short = Some("09234474".into());
+    let mut view = view_with_agents(vec![a]);
+    // The handle rides the message column; give it room to render.
+    view.term = (30, 140);
+    view.sideline_width = 80;
+    let frame = view.compose();
+    let text = frame_text(&frame);
+    assert!(
+        text.contains("attach 09234474"),
+        "the row carries the attach handle, got:\n{text}"
+    );
+
+    let mut b = blocked_row("w2", 4, None);
+    b.pr = Some(10);
+    b.pr_session_short = None;
+    let mut view = view_with_agents(vec![b]);
+    view.term = (30, 140);
+    view.sideline_width = 80;
+    let text = frame_text(&view.compose());
+    assert!(
+        text.contains("no session"),
+        "a PR row with no session says so, got:\n{text}"
+    );
+}
+
+pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -13472,9 +12121,11 @@ fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -13749,17 +12400,6 @@ fn missing_sort_values_stay_after_known_values_in_both_directions() {
 }
 
 #[test]
-fn status_sort_arrow_fits_inside_the_status_header_span() {
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let header = table_head_text(layout, AgentSort::Attention);
-    let status: String = header.chars().take(layout.status.width as usize).collect();
-    assert!(
-        status.contains('↑'),
-        "status header must show direction: {status:?}"
-    );
-}
-
-#[test]
 fn age_sort_arrow_survives_the_density_button_on_header_row() {
     let mut v = wide_view(vec![agent_row(
         "agent",
@@ -13777,16 +12417,6 @@ fn age_sort_arrow_survives_the_density_button_on_header_row() {
         first_line.contains("age↑"),
         "age header must remain visible: {first_line:?}"
     );
-}
-
-#[test]
-fn extended_pr_cell_shows_number_or_neutral_value() {
-    let mut known = agent_row("known", 4, Some(AgentBadge::Working), false);
-    known.pr = Some(482);
-    let unknown = agent_row("unknown", 5, Some(AgentBadge::Working), false);
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    assert!(table_row_text(&known, layout, 0, 0).contains("#482"));
-    assert!(table_row_text(&unknown, layout, 0, 0).contains('—'));
 }
 
 // The mux ranker's attention order, pinned to the shared fixture: the
@@ -13950,12 +12580,6 @@ fn extended_clamps_and_drops_columns_before_starving_panes() {
     let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
     set_density(&mut v, Density::Extended);
     assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    assert!(
-        layout.tail.is_some(),
-        "wide table includes the message cell"
-    );
-    assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
     // Narrow enough that the full table cannot fit beside a usable pane.
     v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
@@ -13966,30 +12590,14 @@ fn extended_clamps_and_drops_columns_before_starving_panes() {
         "the work pane keeps its minimum: term {} panel {w}",
         v.term.1
     );
-    // The message cell gives its space to the agent name, while age stays
-    // visible and right-anchored.
-    let layout = TableLayout::fitting(w - 1).unwrap();
-    assert!(layout.tail.is_none(), "message cell drops below its floor");
-    assert_eq!(layout.age.start + layout.age.width, layout.text_w);
+    // The columns now come from the constraint solver, which owns the
+    // drop-by-priority behavior the hand fitter used to approximate.
+    let _ = v.compose(); // the clamped paint must not panic
 
     // Narrower still: the panel hides rather than rendering a nameless table.
     v.term = (24, MIN_CONTENT_COLS + 4);
     assert_eq!(v.panel_w(), 0);
     assert!(v.content_dims().1 >= 1, "never a zero-width content area");
-}
-
-#[test]
-fn responsive_table_layout_anchors_age_and_shares_flexible_space() {
-    let narrow = TableLayout::fitting(MIN_EXTENDED_PANEL_W - 1).unwrap();
-    assert_eq!(narrow.agent.width, COL_MIN_NAME);
-    assert!(narrow.tail.is_none(), "message is omitted below its floor");
-    assert_eq!(narrow.age.start + narrow.age.width, narrow.text_w);
-
-    let wide = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let tail = wide.tail.unwrap();
-    assert_eq!(wide.agent.width + tail.width, 54);
-    assert!(wide.agent.width > COL_MIN_NAME);
-    assert!(tail.width > COL_MIN_TAIL);
 }
 
 #[test]
@@ -14006,7 +12614,6 @@ fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
     ]);
     let mut layout = two_squad_layout(1);
     layout.agents = v.layout.agents.clone();
-    layout.backlog = vec![bcard("x-ready", CardState::Ready)];
     v.set_layout(layout);
     v.section_view.insert(
         SectionKey::Squad("/code/notes".into()),
@@ -14014,8 +12621,6 @@ fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
     );
     v.section_view
         .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    v.section_view
-        .insert(SectionKey::WorkQueue, SectionView::Expanded);
     v.agent_sort = AgentSort::Squad;
     set_density(&mut v, Density::Extended);
 
@@ -14048,11 +12653,7 @@ fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
         .iter()
         .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ elsewhere"))
         .unwrap();
-    let backlog = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ backlog"))
-        .unwrap();
-    assert!(first_squad < second_squad && second_squad < elsewhere && elsewhere < backlog);
+    assert!(first_squad < second_squad && second_squad < elsewhere);
     let squad_names: Vec<_> = rows[first_squad..second_squad]
         .iter()
         .filter_map(|r| match r {
@@ -14064,12 +12665,9 @@ fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
     assert!(rows[second_squad..elsewhere]
         .iter()
         .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "notes-agent")));
-    assert!(rows[elsewhere..backlog]
+    assert!(rows[elsewhere..]
         .iter()
         .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "orphan-agent")));
-    assert!(rows[backlog..]
-        .iter()
-        .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
 }
 
 #[test]
@@ -14081,9 +12679,9 @@ fn table_header_click_sets_one_column_and_toggles_direction() {
         false,
     )]);
     set_density(&mut v, Density::Extended);
-    let layout = TableLayout::fitting(v.panel_w() - 1).unwrap();
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
     assert!(matches!(
-        v.chrome_hit(0, layout.agent.start),
+        v.chrome_hit(0, rects[1].x),
         Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
     ));
     v.set_agent_sort_column(AgentSortColumn::Agent);
@@ -14169,19 +12767,6 @@ fn selector_follows_the_agent_across_a_resort() {
 // 12 columns once the tail dropped, and the painter cut it - so the toggle
 // looked like a dead control exactly where the table is hardest to read.
 #[test]
-fn sort_label_survives_every_column_configuration() {
-    for text_w in [EXTENDED_PANEL_W - 1, MIN_EXTENDED_PANEL_W - 1] {
-        let layout = TableLayout::fitting(text_w).unwrap();
-        let head = table_head_text(layout, AgentSort::Squad);
-        assert_eq!(head.chars().map(glyph_cols).sum::<usize>(), text_w as usize);
-    }
-}
-
-// (codex P2) Slim is the explicitly NON-hidden density, so a narrow terminal
-// must clamp it, not make it vanish. Its admit floor is MIN_SLIM, so it
-// renders squished where a Regular tree - whose admit floor is PANEL_W -
-// instead auto-hides (x-2e86 preserves that per-density asymmetry).
-#[test]
 fn slim_clamps_on_a_narrow_terminal_instead_of_hiding() {
     let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
     set_density(&mut v, Density::Slim);
@@ -14213,34 +12798,6 @@ fn extended_zero_agents_states_the_empty_case() {
     assert!(frame_text(&v.compose()).contains("no agents"));
 }
 
-// (codex P2) The painter advances by DISPLAY columns (`glyph_cols`), so a
-// cell padded by scalar count occupies more columns than it reserved and
-// shoves every following cell out of alignment.
-//
-// Uses the trigram block, which is what `glyph_cols` actually treats as
-// wide. A CJK name does NOT reproduce this today: `glyph_cols` reports 1 for
-// it, so the painter and the padding agree - the sideline's width model is
-// trigram-only, which is a pre-existing gap this table neither introduced
-// nor fixes.
-#[test]
-fn table_cells_align_with_double_width_glyphs() {
-    let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
-    wide_name.pr = Some(7);
-    let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let a = table_row_text(&wide_name, layout, 0, 0);
-    let b = table_row_text(&plain, layout, 0, 0);
-    let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
-    assert_eq!(
-        width(&a),
-        width(&b),
-        "rows must occupy equal display width:\n{a:?}\n{b:?}"
-    );
-}
-
-// (codex P1) A scrape tick that flips one badge RE-ORDERS a status-sorted
-// table. Preserving only the numeric index would slide the cursor onto a
-// different agent, so the next Enter or lifecycle key hits the wrong worker.
 #[test]
 fn status_sorted_selector_follows_its_agent_across_a_layout_push() {
     let mut v = wide_view(vec![
@@ -14336,16 +12893,16 @@ fn resort_scrolls_the_selection_back_into_view() {
             .unwrap()
     };
     v.selector = Some(at(&v, "a39"));
-    v.clamp_sideline_offset();
+    v.clamp_sideline_scroll();
     v.toggle_agent_sort();
 
     let cur = v.selector.unwrap();
     let visible = v.sideline_visible_rows();
     assert!(
-        cur >= v.sideline_offset && cur < v.sideline_offset + visible,
+        cur >= v.sideline_offset() && cur < v.sideline_offset() + visible,
         "selection {cur} must stay inside the window [{}, {})",
-        v.sideline_offset,
-        v.sideline_offset + visible
+        v.sideline_offset(),
+        v.sideline_offset() + visible
     );
 }
 
@@ -14497,11 +13054,12 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
     // A partial crown (level set, scope None) must never panic: it orders at
     // its altitude and its badge scope degrades to `?`.
-    let v = view_with_agents(vec![
+    let mut v = view_with_agents(vec![
         crowned_row("dir", 2, Some(1), None),
         crowned_row("leaf", 3, None, None),
     ]);
     assert_eq!(agent_order(&v).first().map(String::as_str), Some("dir"));
+    v.sideline_width = 60;
     let text = frame_text(&v.compose());
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
@@ -14517,45 +13075,6 @@ fn agent_row(name: &str, pane: u64, badge: Option<AgentBadge>, seen: bool) -> Ag
     r.badge = badge;
     r.seen = seen;
     r
-}
-
-/// (x-d401) The top-K fold's target set after this branch split the old
-/// blind `Idle` three ways. Every non-attention state must still fold: on
-/// `origin/main` a badgeless row was `Idle` and folded, so folding only
-/// `Idle` would strand both a pristine shell AND every badgeless bg
-/// worker (`server.rs` hard-codes `pane_activity: None` on watch-only
-/// paneless rows), driving `idle_budget` to zero on any real fleet. The
-/// `?` glyph, not the fold, is what keeps a no-reading row honest.
-#[test]
-fn idle_fold_takes_every_non_attention_state() {
-    let with = |activity: Option<ShellActivity>| {
-        let mut r = agent_row("w", 1, None, true);
-        r.pane_activity = activity;
-        r
-    };
-    assert!(
-        is_idle_row(&with(Some(ShellActivity::Empty))),
-        "a pristine shell folds, else the fold cap dies on a shell-heavy squad"
-    );
-    assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
-    assert!(
-        is_idle_row(&with(Some(ShellActivity::Unmeasured))),
-        "an unmeasured row folds: the `?` glyph carries the honesty, not the cap"
-    );
-    assert!(
-        is_idle_row(&with(None)),
-        "a badgeless bg worker (pane_activity None) folds as it did before the split"
-    );
-    assert!(
-        !is_idle_row(&with(Some(ShellActivity::Running))),
-        "a running pane is attention, not fold"
-    );
-    let mut dead = with(Some(ShellActivity::Empty));
-    dead.exited = true;
-    assert!(
-        !is_idle_row(&dead),
-        "dead rows are the section view's business"
-    );
 }
 
 fn fold_item(kind: &str, name: &str, live: bool) -> crate::needs_overlay::FoldItem {
@@ -14646,14 +13165,17 @@ fn foreign_cwd_agent_gets_dim_inert_subline() {
     // The sub row paints DIM.
     let sub_cell = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(sub_cell.flags & cell_flags::DIM, cell_flags::DIM);
-    // AC1-UI: hover on the sub index paints no INVERSE bar.
+    // AC1-UI, restated for explicit bands: hovering the sub row paints the
+    // hover band, never an INVERSE bar.
     v.hover_row = Some(ai + 1);
     let frame = v.compose();
+    let hovered = frame.cells[(ai + 1) * cols + 4];
     assert_eq!(
-        frame.cells[(ai + 1) * cols + 4].flags & cell_flags::INVERSE,
+        hovered.flags & cell_flags::INVERSE,
         0,
-        "an inert sub row is never highlighted"
+        "never an INVERSE bar"
     );
+    assert_eq!(hovered.bg, Color::Indexed(0), "the hover band is explicit");
 }
 
 // (x-6851 US3) AC3-HP count: squad "footnote" with a same-project agent A and
@@ -15351,10 +13873,6 @@ fn needs_reanchor_keeps_cursor_and_stays_open_when_empty() {
         area: v.layout.area,
         agents,
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     };
     // "b" drops -> its identity is gone, so the cursor clamps to the new last.
     let l1 = with(&v, vec![blocked_row("a", 1, None)]);
@@ -15797,18 +14315,17 @@ async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
 }
 
 #[tokio::test]
-async fn xf331_selector_r_on_a_non_squad_row_notices_not_beeps() {
-    // x-f331 US3/AC1-ERR: a refused sideline action prints a notice naming
-    // why, never a bare beep. `r` (rename workspace) on an agent row refuses.
+async fn xf331_selector_r_on_an_agent_row_opens_rename() {
     let mut v = unified_rows_view();
     let mut buf: Vec<u8> = Vec::new();
     let idx = agent_row_at(&v, |a| a.pane_id == Some(10));
     v.selector = Some(idx);
     selector_keys(&mut v, b"r", &mut buf).await.unwrap();
-    assert!(v.rename.is_none(), "r on an agent row opens no rename");
+    assert!(buf.is_empty(), "opening the overlay sends nothing");
+    assert_eq!(v.selector, None, "the selector closes");
     assert!(
-        v.notice.is_some(),
-        "the refusal is a visible notice, not a bare beep"
+        matches!(v.rename, Some((RenameTarget::Agent(_), _))),
+        "r opens the agent rename overlay"
     );
 }
 
@@ -16046,10 +14563,6 @@ fn set_layout_follows_the_reordered_squad() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     assert_eq!(v.selector, Some(2), "cursor follows squad 1 to its new row");
 }
@@ -16130,10 +14643,6 @@ async fn selector_m_opens_move_picker_on_a_squad_row() {
         area: (29, 72),
         agents: vec![],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     v.selector = Some(0);
     selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
@@ -16142,11 +14651,7 @@ async fn selector_m_opens_move_picker_on_a_squad_row() {
 
 #[tokio::test]
 async fn selector_m_picker_lists_only_real_workspaces() {
-    // A mission rides its own lane and never reaches `squads`, so the tab-move
-    // destination list is real workspaces by construction. An active mission
-    // present alongside them changes nothing about what the picker offers.
     let mut v = two_pane_view(); // squads 1 (footnote) + 2 (notes)
-    v.layout.missions.push(mission_meta(5, "epic  0/4"));
     v.selector = Some(0); // squad 1
     selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
     let dsts = v
@@ -16224,10 +14729,6 @@ fn row_menu_pane_row_omits_move_to_workspace_with_one_squad() {
         area: (29, 72),
         agents: vec![pane_hosted_row("only", 10)],
         focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-        missions: Vec::new(),
     });
     let idx = agent_row_at(&v, |a| a.name == "only");
     assert!(v.open_row_menu(idx, Anchor::Center));
@@ -16681,8 +15182,8 @@ fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
     // (x-d6a8, codex P2) The row-0 density button overlays a scrolled agent
     // row; a press on the button must cycle density (chrome_hit), not start a
     // row drag on the agent underneath.
-    let mut view = view_with_agents(vec![focus_agent(10)]);
-    view.sideline_offset = 1; // scroll so an agent row paints at row 0
+    let view = view_with_agents(vec![focus_agent(10)]);
+    view.set_sideline_offset(1); // scroll so an agent row paints at row 0
     let pw = view.panel_w() as usize;
     let Some(range) = view.density_button_range(pw) else {
         return; // panel too narrow for the button; the guard is moot
@@ -17585,10 +16086,6 @@ fn shot_view(term: (u16, u16), squads: Vec<SquadMeta>, agents: Vec<AgentRow>) ->
             area: (rows - 1, cols - 28),
             agents,
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     view.frames
@@ -18147,3 +16644,6 @@ mod confirm_tests;
 
 #[path = "client_tests/lineage_paint_tests.rs"]
 mod lineage_paint_tests;
+
+#[path = "client_tests/composer_fullscreen_tests.rs"]
+mod composer_fullscreen_tests;

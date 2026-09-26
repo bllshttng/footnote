@@ -307,9 +307,11 @@ cat > "$PLAN_SEMANTIC" <<'HEREDOC'
 status: ready
 created: 2026-07-25
 project: fno
+node: x-a11b003
 consolidation:
   outcome: proceed_alone
   proceed_alone_against: []
+  decisions_acknowledged: []
 surface:
   question: "Does the semantic execution contract validate?"
   sweep: "bash tests/test-validate-plan.sh"
@@ -322,9 +324,18 @@ surface:
       emits: "exit 0 with the semantic execution contract valid receipt"
   count: 1
   count_after: 1
+code_index:
+  main_sha: 9817805bf5e
+  providers: []
 ---
 
 # Semantic plan
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| the semantic validator exists | code | exists at scripts/validate-plan.sh:166 | `_semantic_validate` |
 
 ## Execution Strategy
 
@@ -342,7 +353,24 @@ tasks:
     acceptance: [AC7]
 ```
 HEREDOC
-OUTPUT=$(bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
+# A keyed plan activates the stage-law gate, so AC7a runs it against a stub
+# that lists zero laws; the fixture must keep producing zero warnings.
+SEMLAWBIN="$TMPDIR_BASE/semlawbin"
+mkdir -p "$SEMLAWBIN"
+cat > "$SEMLAWBIN/fno-agents" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n"}}}'
+    exit 0
+fi
+if [[ "${1:-}" == "surface-check" ]]; then
+    # A clean surface receipt: zero findings, nothing on stdout.
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$SEMLAWBIN/fno-agents"
+OUTPUT=$(FNO_AGENTS_BIN="$SEMLAWBIN/fno-agents" bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
 if ! grep -q "WARN:" <<< "$OUTPUT"; then
     pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
 else
@@ -806,9 +834,18 @@ surface:
       reason: "calls the Python verdict, never reads the row itself"
   count: 2
   count_after: 2
+code_index:
+  main_sha: abc1234
+  providers: []
 ---
 
 # Covered walk fixture
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| row_ref_valid exists | code | exists at src/reader.py:1 | `row_ref_valid(row)` |
 HEREDOC
 OUTPUT=$(cd "$WALK_DIR" && bash "$VALIDATE" "$PLAN_WALK_COVERED" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if [[ $EXIT_CODE -eq 0 ]] && grep -q "readers by tree python 1, rust 1" <<< "$OUTPUT"; then
@@ -837,6 +874,66 @@ if [[ $EXIT_CODE -eq 0 ]] && grep -q "surface block NOT CHECKED (no fno-agents b
     pass "AC10o: No reachable binary warns NOT CHECKED with no pass receipt"
 else
     fail "AC10o: Missing binary should warn-only without a receipt (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC10p (AC5-HP): a two-write help probe is captured without pipefail turning
+# a successful installed-CLI capability check into the stale-CLI refusal.
+HELP_ROOT="$TMPDIR_BASE/helpprobe"
+HELP_BIN="$HELP_ROOT/bin"
+mkdir -p "$HELP_ROOT/scripts" "$HELP_BIN"
+cp "$VALIDATE" "$HELP_ROOT/scripts/validate-plan.sh"
+cat > "$HELP_BIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "do plan validate --help" ]]; then
+    echo "  --execution  validate execution"
+    sleep 0.3
+    echo "  --json       emit JSON"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "do plan validate" ]]; then
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$HELP_BIN/fno"
+OUTPUT=$(cd "$HELP_ROOT" && env -u FNO_AGENTS_BIN PATH="$HELP_BIN:/usr/bin:/bin" FNO_PYTHON=/usr/bin/python3 \
+    bash "$HELP_ROOT/scripts/validate-plan.sh" "$PLAN_SEMANTIC" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -ne 2 ]] && ! grep -q "predates semantic plan validation" <<< "$OUTPUT"; then
+    pass "AC10p: two-write help probe stays a successful capability check"
+else
+    fail "AC10p: help probe was misread as stale CLI (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC10q (AC5-EDGE): a large quick-plan frontmatter is read to completion, so
+# the kind marker survives past the pipe buffer and the graduated surface gate
+# remains a warning.
+PLAN_LARGE_QUICK="$TMPDIR_BASE/large-quick.md"
+{
+    cat <<'EOF'
+---
+kind: quick-plan
+status: ready
+created: 2026-09-10
+difficulty: low
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+EOF
+    pad_line=0
+    while (( pad_line < 3000 )); do
+        printf '# pad for the frontmatter completion probe: %080d\n' "$pad_line"
+        pad_line=$((pad_line + 1))
+    done
+    printf '%s\n' '---'
+    sed -n '/^# Quick fixture/,$p' "$PLAN_SURFACE_QUICK"
+} > "$PLAN_LARGE_QUICK"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_LARGE_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "no surface: block (quick plan)" <<< "$OUTPUT" \
+    && ! grep -q "no surface: block in frontmatter" <<< "$OUTPUT"; then
+    pass "AC10q: large quick-plan frontmatter stays on the quick-plan path"
+else
+    fail "AC10q: large frontmatter was misclassified (exit $EXIT_CODE): $OUTPUT"
 fi
 
 # --- AC11: No New Python row gate ---
@@ -958,6 +1055,10 @@ mkdir -p "$STUBBIN"
     echo '    echo "no decision carries it"'
     echo '    exit 0'
     echo 'fi'
+    echo 'if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then'
+    echo '    echo 30'
+    echo '    exit 0'
+    echo 'fi'
     if [[ -n "$REAL_FNO" ]]; then
         printf 'exec %q "$@"\n' "$REAL_FNO"
     else
@@ -978,7 +1079,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-1234abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1001,7 +1102,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-9999abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-9999abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1149,6 +1250,627 @@ if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
     pass "AC11k: acknowledged stage law prints nothing"
 else
     fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
+fi
+
+# AC11l (AC2-HP): the stage-law receipt compares acknowledged ids without
+# spawning a piped grep, including an uppercase id from the plan.
+STUB_AGENTS_HP="$STUBBIN/fno-agents-hp"
+cat > "$STUB_AGENTS_HP" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_HP"
+PLAN_NNPY_L="$TMPDIR_BASE/nnpy_l.md"
+cat > "$PLAN_NNPY_L" <<'EOF'
+---
+claims: x-a11b003
+created: 2099-01-01
+consolidation:
+  outcome: proceed_alone
+  rejected: []
+  decisions_acknowledged:
+    - decision_id: D-A11B0002
+      reason: "fixture acknowledgment"
+    - decision_id: D-A11B0003
+      reason: "fixture acknowledgment"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_HP" bash "$VALIDATE" "$PLAN_NNPY_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "stage-law check: 2 law(s) listed, 2 acknowledged" <<< "$OUTPUT" \
+    && ! grep -q "stage-law.*ERROR\|decisions_acknowledged is missing d-a11b000" <<< "$OUTPUT"; then
+    pass "AC11l: stage-law receipt counts uppercase acknowledgments"
+else
+    fail "AC11l: expected a clean stage-law receipt (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC11m (AC2-ERR): an unread stage scope is NOT CHECKED, while a listed law
+# that is not acknowledged still fails closed.
+STUB_AGENTS_UNREAD="$STUBBIN/fno-agents-unread"
+cat > "$STUB_AGENTS_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nUnread: the node'"'"'s epic and project (graph: invalid graph)\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_UNREAD"
+PLAN_NNPY_M="$TMPDIR_BASE/nnpy_m.md"
+sed 's/x-a11b003/x-a11b004/; /D-A11B0003/{N;d;}' "$PLAN_NNPY_L" > "$PLAN_NNPY_M"
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_UNREAD" bash "$VALIDATE" "$PLAN_NNPY_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] \
+    && grep -q "stage-law check NOT CHECKED (the node's epic and project (graph: invalid graph)" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged is missing d-a11b0003" <<< "$OUTPUT"; then
+    pass "AC11m: stage-law unread is named and missing law still errors"
+else
+    fail "AC11m: expected unread warning plus missing-law ERROR (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC11n (AC3-HP): capture the complete decisions output before matching it, so
+# a two-write LIVE response cannot be mistaken for a broken ruling read.
+STUB_FNO_SLOW_DIR="$TMPDIR_BASE/stub-slow"
+mkdir -p "$STUB_FNO_SLOW_DIR"
+STUB_FNO_SLOW="$STUB_FNO_SLOW_DIR/fno"
+cat > "$STUB_FNO_SLOW" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    sleep 0.3
+    echo "    rationale: stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_SLOW"
+OUTPUT=$(PATH="$STUB_FNO_SLOW_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11n: two-write LIVE ruling is captured before matching"
+else
+    fail "AC11n: two-write LIVE ruling should be clean: $NNPY_OUT"
+fi
+
+# AC11o (AC3-ERR): a nonzero decisions read is named as unread, not as a
+# completed read with no LIVE line.
+STUB_FNO_UNREAD_DIR="$TMPDIR_BASE/stub-unread"
+mkdir -p "$STUB_FNO_UNREAD_DIR"
+STUB_FNO_UNREAD="$STUB_FNO_UNREAD_DIR/fno"
+cat > "$STUB_FNO_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "database is locked" >&2
+    exit 1
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_UNREAD"
+OUTPUT=$(PATH="$STUB_FNO_UNREAD_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "could not be read (exit 1: database is locked)" <<< "$NNPY_OUT" \
+    && ! grep -q "reads no LIVE line" <<< "$NNPY_OUT"; then
+    pass "AC11o: failed decisions read is named unread"
+else
+    fail "AC11o: expected the unread Grant finding: $NNPY_OUT"
+fi
+
+# AC11p (AC3-EDGE): exit 0 with empty stdout is a completed non-live read.
+STUB_FNO_EMPTY_DIR="$TMPDIR_BASE/stub-empty"
+mkdir -p "$STUB_FNO_EMPTY_DIR"
+STUB_FNO_EMPTY="$STUB_FNO_EMPTY_DIR/fno"
+cat > "$STUB_FNO_EMPTY" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "no decision carries it" >&2
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_EMPTY"
+OUTPUT=$(PATH="$STUB_FNO_EMPTY_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "reads no LIVE line" <<< "$NNPY_OUT" && ! grep -q "could not be read" <<< "$NNPY_OUT"; then
+    pass "AC11p: empty successful decisions read stays not-live"
+else
+    fail "AC11p: expected the not-live Grant finding: $NNPY_OUT"
+fi
+
+# AC11q (AC3-CACHE): duplicate Grant rows share one decisions subprocess.
+STUB_FNO_CACHE_DIR="$TMPDIR_BASE/stub-cache"
+mkdir -p "$STUB_FNO_CACHE_DIR"
+STUB_FNO_CACHE="$STUB_FNO_CACHE_DIR/fno"
+cat > "$STUB_FNO_CACHE" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    printf '%s\n' "${3:-}" >> "$DECISION_LOG"
+    echo "LIVE  LAW  ${3:-}  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_CACHE"
+PLAN_NNPY_Q="$TMPDIR_BASE/nnpy_q.md"
+cat > "$PLAN_NNPY_Q" <<'EOF'
+---
+claims: x-nnpyq
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
+| `cli/src/fno/other/cli.py` | Grant d-1234abcd +5 |
+EOF
+DECISION_LOG="$TMPDIR_BASE/decision-calls" PATH="$STUB_FNO_CACHE_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_Q" >/dev/null 2>&1 || true
+if [[ "$(wc -l < "$TMPDIR_BASE/decision-calls" | tr -d ' ')" == 1 ]]; then
+    pass "AC11q: duplicate Grant rows read one decision once"
+else
+    fail "AC11q: expected one decisions subprocess call"
+fi
+
+# AC11r (AC3-BUDGET): a failed budget read warns and uses the default ceiling.
+STUB_FNO_BUDGET_DIR="$TMPDIR_BASE/stub-budget"
+mkdir -p "$STUB_FNO_BUDGET_DIR"
+STUB_FNO_BUDGET="$STUB_FNO_BUDGET_DIR/fno"
+cat > "$STUB_FNO_BUDGET" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo "config unavailable" >&2
+    exit 1
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_BUDGET"
+OUTPUT=$(PATH="$STUB_FNO_BUDGET_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "grant budget NOT READ (exit 1), using the default 30" <<< "$OUTPUT" \
+    && ! grep -q "against a budget of" <<< "$OUTPUT"; then
+    pass "AC11r: failed Grant budget read warns and uses 30"
+else
+    fail "AC11r: expected the default-budget warning: $OUTPUT"
+fi
+
+# AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
+# key in the frontmatter binds to nothing and mutes both id-keyed gates, and
+# every gate skip must say NOT CHECKED instead of reading green.
+PLAN_BIND_A="$TMPDIR_BASE/20990101-binding-a-x-dcc5.md"
+cat > "$PLAN_BIND_A" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does" <<< "$OUTPUT"; then
+    pass "AC12a: filename id with no frontmatter key errors naming the id"
+else
+    fail "AC12a: expected the binding ERROR: $OUTPUT"
+fi
+
+# AC12b: the same plan carrying the key is clean of binding findings and of
+# the two NOT CHECKED warnings.
+PLAN_BIND_B="$TMPDIR_BASE/20990101-binding-b-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nnode: x-dcc5\ndecisions_acknowledged: []/' "$PLAN_BIND_A" > "$PLAN_BIND_B"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if ! grep -q "filename names x-dcc5" <<< "$OUTPUT" \
+    && ! grep -q "no node:/claims: id in frontmatter" <<< "$OUTPUT"; then
+    pass "AC12b: keyed plan prints no binding error and no NOT CHECKED warning"
+else
+    fail "AC12b: expected a clean binding section: $OUTPUT"
+fi
+
+# AC12c: an id-less filename with no key stays legal but warns NOT CHECKED
+# from both id-keyed gates.
+PLAN_BIND_C="$TMPDIR_BASE/20990101-binding-c.md"
+sed 's/binding-a-x-dcc5\.md/binding-c.md/' "$PLAN_BIND_A" > "$PLAN_BIND_C"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_C" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT" \
+    && grep -q "stage-law check NOT CHECKED" <<< "$OUTPUT" \
+    && ! grep -q "filename names" <<< "$OUTPUT"; then
+    pass "AC12c: key-less id-less plan warns NOT CHECKED from both gates"
+else
+    fail "AC12c: expected both NOT CHECKED warnings and no binding finding: $OUTPUT"
+fi
+
+# AC12d: a pre-gate plan warns with its created date instead of erroring.
+PLAN_BIND_D="$TMPDIR_BASE/20990101-binding-d-x-dcc5.md"
+sed 's/binding-a-x-dcc5\.md/binding-d-x-dcc5.md/; s/^created: 2099-01-01$/created: 2020-01-01/' "$PLAN_BIND_A" > "$PLAN_BIND_D"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_D" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does (created 2020-01-01, before the" <<< "$OUTPUT" \
+    && ! grep -q "ERROR.*filename names" <<< "$OUTPUT"; then
+    pass "AC12d: pre-gate plan warns with its created date"
+else
+    fail "AC12d: expected the pre-gate WARN: $OUTPUT"
+fi
+
+# AC12f: a Grant row declaring over the budget errors naming the count, the
+# budget and the config key.
+PLAN_BIND_F="$TMPDIR_BASE/20990101-binding-f.md"
+cat > "$PLAN_BIND_F" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +101 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +101 added cli/src/fno lines against a budget of 30 (config blueprint.python_repair_added_lines)" <<< "$OUTPUT"; then
+    pass "AC12f: over-budget Grant errors naming count, budget and key"
+else
+    fail "AC12f: expected the budget ERROR: $OUTPUT"
+fi
+
+# AC12g: a Grant row with no +N errors naming the missing size.
+PLAN_BIND_G="$TMPDIR_BASE/20990101-binding-g.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd/' "$PLAN_BIND_F" > "$PLAN_BIND_G"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_G" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "with no declared size - write the row as Grant d-1234abcd +N" <<< "$OUTPUT"; then
+    pass "AC12g: unsized Grant errors naming the +N remedy"
+else
+    fail "AC12g: expected the missing-size ERROR: $OUTPUT"
+fi
+
+# AC12h: Grant rows are summed - one plan is one PR and the ceiling is the PR's.
+PLAN_BIND_H="$TMPDIR_BASE/20990101-binding-h.md"
+cat > "$PLAN_BIND_H" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +20 |
+| `cli/src/fno/mail/send.py` | Grant d-1234abcd +20 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +40 added cli/src/fno lines against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12h: Grant rows sum against the budget"
+else
+    fail "AC12h: expected the summed budget ERROR: $OUTPUT"
+fi
+
+# AC12i: a missing config key falls back to 30, so the gate still bites.
+FAILBIN="$TMPDIR_BASE/failbin"
+mkdir -p "$FAILBIN"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
+    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'exit 1'
+} > "$FAILBIN/fno"
+chmod +x "$FAILBIN/fno"
+PLAN_BIND_I="$TMPDIR_BASE/20990101-binding-i.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd +31/' "$PLAN_BIND_F" > "$PLAN_BIND_I"
+OUTPUT=$(PATH="$FAILBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12i: unreadable config falls back to the 30-line budget"
+else
+    fail "AC12i: expected the fallback-budget ERROR: $OUTPUT"
+fi
+
+# AC12j: a malformed frontmatter id mutes the id-keyed gates exactly like an
+# absent one, so the binding check warns instead of printing a clean OK.
+PLAN_BIND_J="$TMPDIR_BASE/20990101-binding-j-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nclaims: [one, two]/' "$PLAN_BIND_A" > "$PLAN_BIND_J"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the node:/claims: id in frontmatter is malformed" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT"; then
+    pass "AC12j: malformed id warns from the binding check and the decisions gate"
+else
+    fail "AC12j: expected the malformed-id warnings: $OUTPUT"
+fi
+
+# --- AC13: Code Index Audit ---
+echo ""
+echo "--- AC13: Code Index Audit ---"
+
+# Section-scoped assertions, same as AC11: other gates may also fire on the
+# sparse fixtures, so only this section's lines prove this check.
+cia() {
+    sed -n '/^--- Code Index Audit ---/,/^--- /p' <<< "$1" | sed '1d' | grep -v '^--- ' || true
+}
+
+# A fixture repo holding .codegraph so detection prints codegraph. Not a git
+# repo: the gate falls back to the plan's own directory as the repo root.
+CIA_REPO="$TMPDIR_BASE/cia-repo"
+mkdir -p "$CIA_REPO/.codegraph"
+printf 'stub\n' > "$CIA_REPO/.codegraph/db"
+
+# AC13a (AC3-HP): a post-gate plan that records codegraph answered and opens
+# with the audit table -> clean section.
+PLAN_CIA_A="$CIA_REPO/cia_a.md"
+cat > "$PLAN_CIA_A" <<'EOF'
+---
+claims: x-ciaa
+created: 2099-01-01
+code_index:
+  main_sha: abc1234
+  providers:
+    - name: codegraph
+      role: symbol
+      status: answered
+      fresh: yes
+---
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| the send verb exists | code | exists at src/m.rs:1 | `fno send` answers |
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `src/m.rs` | Modify |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13a: a recorded provider and an audit table leave the section clean"
+else
+    fail "AC13a: expected a clean section: $CIA_OUT"
+fi
+
+# AC13b (AC3-ERR): the same repo, providers: [] -> ERROR naming the present
+# index; exit 1.
+PLAN_CIA_B="$CIA_REPO/cia_b.md"
+sed -e 's/^  main_sha: abc1234$/  main_sha: abc1234/' -e '/^    - name: codegraph$/,/^      fresh: yes$/d' \
+    -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_B"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13b: an unrecorded present index errors and the plan exits 1"
+else
+    fail "AC13b: expected the present-index ERROR (exit $EXIT_CODE): $CIA_OUT"
+fi
+
+# AC13c (AC4-ERR): no code_index block at all -> ERROR on a post-gate plan,
+# WARN and no error on a pre-gate one.
+sed -e '/^code_index:$/,/^      fresh: yes$/d' "$PLAN_CIA_A" > "$CIA_REPO/cia_c.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_c.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "frontmatter carries no code_index: block" <<< "$CIA_OUT" \
+    && grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13c: a missing block errors on a post-gate plan"
+else
+    fail "AC13c: expected the missing-block ERROR: $CIA_OUT"
+fi
+sed -e 's/^created: 2099-01-01$/created: 2026-09-10/' "$CIA_REPO/cia_c.md" > "$CIA_REPO/cia_c2.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_c2.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "WARN" <<< "$CIA_OUT" && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13c2: the same gap warns on a pre-gate plan and adds no error"
+else
+    fail "AC13c2: expected a warn-only section: $CIA_OUT"
+fi
+
+# AC13d (AC4-ERR): the first ## heading is not the audit -> ERROR post-gate.
+sed 's/^## Existence audit$/## Context/' "$PLAN_CIA_A" > "$CIA_REPO/cia_d.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_d.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "the first ## heading is '## Context'" <<< "$CIA_OUT"; then
+    pass "AC13d: a missing audit heading errors on a post-gate plan"
+else
+    fail "AC13d: expected the heading ERROR: $CIA_OUT"
+fi
+
+# AC13e (AC4-ERR): an absent row whose evidence lacks 'after' -> ERROR
+# post-gate, warn pre-gate.
+sed -e 's/| exists at src\/m.rs:1 | `fno send` answers |/| absent | nothing found |/' \
+    "$PLAN_CIA_A" > "$CIA_REPO/cia_e.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_e.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "reads absent but its evidence names no confirming search" <<< "$CIA_OUT"; then
+    pass "AC13e: an absent row without a confirming search errors"
+else
+    fail "AC13e: expected the absent-row ERROR: $CIA_OUT"
+fi
+sed -e 's/^created: 2099-01-01$/created: 2026-09-10/' "$CIA_REPO/cia_e.md" > "$CIA_REPO/cia_e2.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_e2.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "reads absent but its evidence names no confirming search" <<< "$CIA_OUT" \
+    && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13e2: the same absent row warns pre-gate and adds no error"
+else
+    fail "AC13e2: expected a warn-only section: $CIA_OUT"
+fi
+
+# AC13f (AC4-EDGE): a repo where detection prints nothing and a plan with
+# providers: [] and a one-row audit -> clean section.
+CIA_EMPTY="$TMPDIR_BASE/cia-repo-empty"
+mkdir -p "$CIA_EMPTY"
+PLAN_CIA_F="$CIA_EMPTY/cia_f.md"
+sed -e 's/^  main_sha: abc1234$/  main_sha: abc1234/' -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_F"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13f: no index detected with providers: [] and an audit table is clean"
+else
+    fail "AC13f: expected a clean section: $CIA_OUT"
+fi
+
+# AC13g: an undated fixture warns instead of erroring.
+sed -e '/^created: 2099-01-01$/d' -e '/^code_index:$/,/^      fresh: yes$/d' "$PLAN_CIA_A" > "$CIA_REPO/cia_g.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_g.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "frontmatter carries no code_index: block" <<< "$CIA_OUT" \
+    && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13g: an undated fixture warns and adds no error"
+else
+    fail "AC13g: expected a warn-only section: $CIA_OUT"
+fi
+
+# AC13h: a recorded name with regex metachars errors even when a well-formed
+# entry precedes it - the metachar must not reuse that entry's slice.
+PLAN_CIA_H="$CIA_REPO/cia_h.md"
+sed -e 's/^    - name: codegraph$/    - name: x*\n    - name: codegraph/' "$PLAN_CIA_A" > "$PLAN_CIA_H"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "provider x\* in code_index.providers is not a valid provider name" <<< "$CIA_OUT"; then
+    pass "AC13h: a metachar provider name errors naming the name"
+else
+    fail "AC13h: expected the bad-name ERROR: $CIA_OUT"
+fi
+
+# AC13i/j/k: the audit reads the checkout of the plan's node, not the plan
+# directory's repo. A stub fno answers the strict node lookup hermetically;
+# the fixture plan sits in a git-init'd vault dir holding no index, the
+# shape that used to pass clean while checking nothing.
+CIA_STUB="$TMPDIR_BASE/cia-stub"
+mkdir -p "$CIA_STUB"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" == "backlog get x-cixa --strict --field _resolved_cwd" ]] && [[ -n "${CIA_STUB_CWD:-}" ]]; then'
+    echo '    printf "%s\n" "$CIA_STUB_CWD"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'exit 1'
+} > "$CIA_STUB/fno"
+chmod +x "$CIA_STUB/fno"
+
+CIA_VAULT="$TMPDIR_BASE/cia-vault"
+mkdir -p "$CIA_VAULT"
+git -C "$CIA_VAULT" init -q
+CIA_NODE_REPO="$TMPDIR_BASE/cia-node-repo"
+mkdir -p "$CIA_NODE_REPO/.codegraph"
+printf 'stub\n' > "$CIA_NODE_REPO/.codegraph/db"
+
+PLAN_CIA_I="$CIA_VAULT/cia_i.md"
+sed -e 's/^claims: x-ciaa$/claims: x-cixa/' \
+    -e '/^    - name: codegraph$/,/^      fresh: yes$/d' \
+    -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_I"
+
+# AC13i (AC2-HP): the node's cwd holds .codegraph -> the section errors on
+# the unrecorded index and the plan exits 1, though the vault repo is empty.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" CIA_STUB_CWD="$CIA_NODE_REPO" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13i: a vault plan audits its node's checkout"
+else
+    fail "AC13i: expected the node-cwd present-index ERROR (exit $EXIT_CODE): $CIA_OUT"
+fi
+
+# AC13j (AC2-EDGE): an unreadable node lookup keeps the plan-directory
+# fallback - the empty vault repo detects nothing, so the section is clean.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13j: a failed node lookup falls back to the plan directory"
+else
+    fail "AC13j: expected a clean section: $CIA_OUT"
+fi
+
+# AC13k (AC2-ERR): a node whose cwd does not exist warns with the node, the
+# path and the fallback, and never errors on a present index.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" CIA_STUB_CWD="$TMPDIR_BASE/cia-gone" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "node x-cixa names cwd $TMPDIR_BASE/cia-gone, which is not a directory" <<< "$CIA_OUT" \
+    && ! grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13k: a dead node cwd warns and falls back"
+else
+    fail "AC13k: expected the dead-cwd WARN without a present-index ERROR: $CIA_OUT"
+fi
+
+# AC13l/m: finalize re-serializes the frontmatter through PyYAML, where a
+# bare yes round-trips as true, so the gate reads the value finalize wrote.
+PLAN_CIA_L="$CIA_REPO/cia_l.md"
+sed 's/^      fresh: yes$/      fresh: true/' "$PLAN_CIA_A" > "$PLAN_CIA_L"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13l: a finalized fresh: true leaves the section clean"
+else
+    fail "AC13l: expected a clean section: $CIA_OUT"
+fi
+
+PLAN_CIA_M="$CIA_REPO/cia_m.md"
+sed 's/^      fresh: yes$/      fresh: maybe/' "$PLAN_CIA_A" > "$PLAN_CIA_M"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "provider codegraph has no readable fresh" <<< "$CIA_OUT"; then
+    pass "AC13m: an unreadable fresh value still errors"
+else
+    fail "AC13m: expected the fresh ERROR: $CIA_OUT"
 fi
 
 # --- Summary ---

@@ -19,20 +19,21 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
+pub(crate) use crate::agents_event::append_agents_event;
 use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, ManifestIdentity};
-use crate::pane_relaunch::{
-    build_resume_argv, mesh_identity_assignments, mux_pane_run_argv, pane_relaunch_target,
-};
+use crate::pane_relaunch::{build_resume_argv, mesh_identity_assignments};
 use crate::paths::AgentsHome;
+use crate::resume_route::ResumeRoute;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -1307,16 +1308,9 @@ fn derived_short_id(session_id: &str) -> String {
     crate::identity::canonical_handle(session_id.trim())
 }
 
-/// Derivable, stable row name for a synthesized entry so re-adopting upserts one
-/// row (the upsert keys on `harness_session_id`; the name is for display + name
-/// addressing). `t-` is the bridge's manual form: no provenance.
-fn synthesized_name(short: &str) -> String {
-    format!("t-{short}")
-}
-
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
-/// generic ([`crate::claude_adopt::mint_adopted_entry`] is claude+RosterWorker-
-/// specific): the harness-appropriate session id comes from the manifest, claude
+/// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
+/// the harness-appropriate session id comes from the manifest, claude
 /// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
 /// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
 /// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
@@ -1347,7 +1341,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // Synthesized from an identity that arrived without a row; the lane
         // it ran on is unobserved, so the substrate stays unknown.
         substrate: None,
-        name: synthesized_name(&short),
+        name: crate::claude_adopt::synthesized_entry_name(&session, &id.fno_id, &short),
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
         // "adopted" says that; it is not a claim that no human is sitting in
@@ -1555,34 +1549,6 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
     persist_manifest_identity(&id, home).map(Some)
 }
 
-fn interactive_resume_supported(provider: &str) -> bool {
-    crate::harness_capabilities::HarnessContract::packaged()
-        .ok()
-        .and_then(|contract| {
-            contract.capabilities(provider).ok().and_then(|caps| {
-                caps.resume_strategy
-                    .forms
-                    .get("interactive_resume")
-                    .map(|form| form.kind != "unsupported")
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
-/// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
-/// never reach `claude --resume` (Failure Modes / Boundaries).
-fn is_uuid_shaped(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.chars()
-                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-        })
-}
-
 /// The shared liveness reader's answer. One stable vocabulary for
 /// every caller that has to know whether a registry row's WORKER is running,
 /// replacing per-caller liveness derivations that each read a different
@@ -1620,7 +1586,10 @@ pub enum RowLiveness {
 ///    probe answered `Unknown` for the codex majority of the registry forever.
 /// 3. **Transcript truth state** (claude rows): `working`, `watching` or
 ///    `your-move` is life. `done` is a TURN state, not a process state, and
-///    answers nothing here.
+///    answers nothing here. The rung is silent on an exit-proven row (an
+///    exit stamp or a stored `Exited`): a transcript tail reads `working`
+///    for up to two hours after its worker stops, so it would resurrect the
+///    row. Rung 4 makes the same trade.
 /// 4. **Codex rollout freshness** (codex rows): the session's rollout
 ///    jsonl under `~/.codex/sessions/` written within
 ///    [`CODEX_ROLLOUT_FRESH_SECS`] proves the worker is still advancing. The
@@ -1637,31 +1606,17 @@ pub enum RowLiveness {
 /// proves nothing - it falls through to `Unknown`, which keeps. The window
 /// only decides whether the sweep NAMES the row live; absence never
 /// authorizes a reap, so no value here can open a removal path.
-const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
+pub(crate) const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
 
-/// The codex home the way codex itself resolves it: `$CODEX_HOME` when set,
-/// else `~/.codex` (the `codex_app_server_socket_path` convention). Both codex
-/// store readers - rung 4's freshness index and `HarnessStoreIndex`'s
-/// existence index - must resolve the same home, or one of them reads a store
-/// the worker never writes.
-// codex store helpers (codex_home, codex_rollout_matches, codex_rollout_index)
-// moved to `codex_store.rs`; the re-export below keeps every existing caller.
-pub(crate) use crate::codex_store::{codex_home, codex_rollout_index, codex_rollout_matches};
+// codex store helpers moved to `codex_store.rs`; the re-export keeps every
+// existing caller.
+pub(crate) use crate::codex_store::{
+    codex_home, codex_rollout_fresh, codex_rollout_index, codex_rollout_matches,
+};
 
 // sessions_socket_index and the row_liveness family moved to
 // `claude_sessions.rs`; the re-export keeps every existing caller.
 pub use crate::claude_sessions::{row_liveness, sessions_socket_index};
-
-/// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
-/// rollout for `session_id` written within the window proves the worker is
-/// advancing. Fail closed: an absent or unreadable store built no index, and
-/// a miss inside one is not-fresh - both read `Unknown`, which keeps.
-pub(crate) fn codex_rollout_fresh(index: &[(String, u64)], session_id: &str, now: u64) -> bool {
-    index.iter().any(|(name, mtime)| {
-        codex_rollout_matches(name, session_id)
-            && now.saturating_sub(*mtime) <= CODEX_ROLLOUT_FRESH_SECS
-    })
-}
 
 /// [`row_liveness`] with the truth-state read injected, mirroring
 /// `claude_resume_argv_with_truth`'s seam so tests can stage transcript reads
@@ -1754,7 +1709,10 @@ where
             return RowLiveness::Alive;
         }
     }
-    if let Some(handle) = crate::daemon::row_truth_handle(entry) {
+    // A drive-eligible row is not exit-proven by a stamp a revive left behind.
+    let exit_proven = entry.status == crate::AgentStatus::Exited
+        || (entry.exited_at.is_some() && !entry.status.is_drive_eligible());
+    if let Some(handle) = crate::daemon::row_truth_handle(entry).filter(|_| !exit_proven) {
         if matches!(
             truth_fn(&handle).as_deref(),
             Some("working" | "watching" | "your-move")
@@ -1864,16 +1822,8 @@ where
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live && !short_id.is_empty() {
-        // Deliberately silent on mechanism: the caller (`run_resume`) decides
-        // AFTER this returns whether the row gets --print-command'd, the
-        // Python headless wake-and-verify delegation, or (a mux pane row
-        // never reaches this arm, so that leaves) nothing else -- an
-        // "attaching" claim printed here was true when this arm always led
-        // to a bare `claude attach` exec, and stayed on the screen after the
-        // delegation replaced that exec with a wake that never attaches at
-        // all. The caller's own downstream output (the printed command, or
-        // fno-py's before -> after line) is what actually describes what
-        // happened.
+        // The caller decides whether to print the command, deliver through
+        // control.sock, or use a mux pane; downstream output names the action.
         eprintln!("fno agents resume: {name} is live");
         let argv = crate::harness_capabilities::render_session_argv_with_ids(
             "claude",
@@ -2098,55 +2048,6 @@ pub(crate) fn which_on_path(name: &str) -> bool {
     std::env::split_paths(&path).any(|dir| is_exec(&dir.join(name)))
 }
 
-/// Append one event line to `state_dir/events.jsonl` with the Python-agents
-/// envelope (`{...fields, ts, kind}`, compact). Best-effort: on a write error
-/// it warns to stderr and returns, mirroring `agents.events.emit` so a failed
-/// telemetry write never blocks the primary command (AC1-FR).
-///
-/// Deliberately a free function (not a `.emit()` method) so the crate's
-/// production-emit-kind scanner (which keys on `.emit(`/`.emit_fields(`) does
-/// not treat these Python-side audit kinds as Rust daemon event kinds.
-pub(crate) fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut parts: Vec<String> = fields
-        .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}:{}",
-                serde_json::to_string(k).unwrap_or_default(),
-                serde_json::to_string(v).unwrap_or_default()
-            )
-        })
-        .collect();
-    parts.push(format!(
-        "\"ts\":{}",
-        serde_json::to_string(&ts).unwrap_or_default()
-    ));
-    parts.push(format!(
-        "\"kind\":{}",
-        serde_json::to_string(kind).unwrap_or_default()
-    ));
-    let line = format!("{{{}}}\n", parts.join(","));
-
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = events_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        use std::io::Write;
-        let mut fh = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path)?;
-        fh.write_all(line.as_bytes())
-    })();
-    if let Err(exc) = result {
-        eprintln!(
-            "fno agents: warning: events.emit('{kind}') to {}: {exc}",
-            events_path.display()
-        );
-    }
-}
-
 /// Read the registry rows for the subprocess-exec verbs. Thin alias over
 /// [`load_registry_entries`] (the validation + `"agents"`/`"entries"` key
 /// handling lives there) so resume/attach/logs and trace share one reader.
@@ -2162,7 +2063,7 @@ pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 /// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
 /// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
 /// arm; every other arm already returns `Err` before this is checked.
-fn should_delegate_claude_live_attach(
+pub(crate) fn should_delegate_claude_live_attach(
     harness: &str,
     claim_uuid: &Option<String>,
     mux_session: &Option<String>,
@@ -2170,31 +2071,28 @@ fn should_delegate_claude_live_attach(
     harness == "claude" && claim_uuid.is_none() && mux_session.is_none()
 }
 
+#[cfg(test)]
+use crate::resume_wake::MUX_RESUME_CLAIM_TTL_MS;
 /// Pure parse of `resume`'s argv (`NAME [--print-command] [--message|-m VALUE]`),
 /// extracted so the flag grammar is unit-testable without a registry fixture;
 /// `--message` must be ACCEPTED here or a `--message` resume dies at argv
 /// before the claude live-attach delegation that consumes it is ever reached.
-use crate::resume_args::parse_resume_args;
-use crate::resume_wake::{
-    acquire_resume_session_claim, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
-};
+use crate::resume_wake::{acquire_resume_session_claim, is_uuid_shaped, run_and_confirm_respawn};
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
-    let (name, print_command, message, cross_project, cwd_override, account) =
-        match parse_resume_args(rest) {
-            Ok(v) => v,
-            Err(code) => return code,
-        };
-
-    if let Some(path) = cwd_override.as_deref() {
-        if !Path::new(path).is_dir() {
-            eprintln!(
-                "fno agents resume: replacement cwd {} is not an existing directory.",
-                py_repr_str(path)
-            );
-            return 13;
-        }
-    }
+    let crate::resume_args::ResumeArgs {
+        name,
+        print_command,
+        message,
+        message_already_queued,
+        cross_project,
+        cwd: cwd_override,
+        account,
+        ..
+    } = match crate::resume_args::parse_and_validate(rest) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     let scope_cwd = cwd_override.as_deref().map(Path::new);
 
     let entries = match read_registry_entries(&home.registry_json()) {
@@ -2235,8 +2133,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                     if crate::resume_receipt::maybe_hint_preserved_session(home, &name) {
                         return 13;
                     }
+                    let next_step = if is_uuid_shaped(&name.to_ascii_lowercase()) {
+                        format!("or run `fno agents adopt {name}` to register it first")
+                    } else {
+                        "or pass a full session id to resume an orphaned session".to_string()
+                    };
                     eprintln!(
-                        "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",
+                        "fno agents resume: {}. Use `fno agents list` to see registered agents, {next_step}.",
                         err.message()
                     );
                     return 13;
@@ -2259,6 +2162,54 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .or_else(|| entry.get("provider").and_then(Value::as_str))
         .unwrap_or("");
+    let contract = match crate::harness_capabilities::HarnessContract::packaged() {
+        Ok(contract) => contract,
+        Err(error) => {
+            eprintln!("fno agents resume: resume contract is unavailable: {error}");
+            return 13;
+        }
+    };
+    let has_mux_ref = entry.get("mux").is_some_and(|mux| {
+        mux.get("session")
+            .and_then(Value::as_str)
+            .is_some_and(|session| !session.is_empty())
+            && mux.get("pane_id").and_then(Value::as_u64).is_some()
+    });
+    let route = crate::resume_route::resume_route(
+        harness,
+        entry.get("substrate").and_then(Value::as_str),
+        has_mux_ref,
+        std::io::stdin().is_terminal(),
+        &name,
+        resume_session_id(entry, harness),
+        &contract,
+    );
+    if has_mux_ref {
+        if let ResumeRoute::Refused(line) = &route {
+            eprintln!("{line}");
+            return 13;
+        }
+    }
+    if print_command {
+        return crate::resume_route::print_resume_command(
+            &name,
+            entry,
+            harness,
+            resume_session_id(entry, harness),
+            cwd_override.as_deref(),
+            home,
+            &contract,
+            &route,
+        );
+    }
+    if let ResumeRoute::Refused(line) = &route {
+        eprintln!("{line}");
+        return 13;
+    }
+    // Codex route args belong after the executable token. Keep terminal argv
+    // raw until route resolution; composing pre_exec first would put those
+    // args into the outer `sh -c` invocation.
+    let codex_terminal_exec = harness == "codex" && matches!(&route, ResumeRoute::TerminalExec);
     // the account flag is parsed so a wake never exits 2 at argv. The
     // ROW's recorded launch account stays the binding authority on this path -
     // a wake continues a transcript that lives under the config dir it was
@@ -2274,7 +2225,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             .get("launch_account")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if harness == "claude" && acct != recorded {
+        if matches!(&route, ResumeRoute::ClientResume) && acct != recorded {
             if let Err(reason) = crate::reentry::shell_account_binding(acct) {
                 eprintln!(
                     "fno agents resume: --account {acct:?} does not resolve: {reason}. \
@@ -2291,7 +2242,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // from where the transcript actually is; other harnesses keep the recorded.
     let resolved_cwd = if let Some(override_cwd) = cwd_override.clone() {
         override_cwd
-    } else if harness == "claude" {
+    } else if matches!(&route, ResumeRoute::ClientResume) {
         let claude_uuid = entry
             .get("claude_session_uuid")
             .and_then(Value::as_str)
@@ -2306,27 +2257,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let session_id = resume_session_id(entry, harness);
 
     if cwd.is_empty() {
-        if !session_id.is_empty() {
-            eprintln!(
-                "fno agents resume: agent {} has no recorded cwd. \
-                 the row is the resume handle and still carries the session id: the harness \
-                 itself can reach the session directly (e.g. claude --resume <id>). To re-drive \
-                 it under fno, rm this row and `fno agents adopt <id>` rebinds a fresh one \
-                 with a live cwd - that pair spends the recorded route bindings. rm alone just \
-                 deletes the handle.",
-                py_repr_str(&name)
-            );
-        } else {
-            // Neither cwd nor session id: nothing to resume and nothing to
-            // rebind. Do not claim an id the row does not carry.
-            eprintln!(
-                "fno agents resume: agent {} has no recorded cwd and no session id. \
-                 The row holds nothing resumable; rm it and re-spawn is the honest cleanup, \
-                 and nothing is lost.",
-                py_repr_str(&name)
-            );
-        }
-        return 13;
+        return crate::resume_gate::missing_cwd_refusal(&name, session_id);
     }
 
     // claude gets the liveness-probed smart fork (US1/US2): a live
@@ -2335,13 +2266,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // support before session_id so an unknown harness surfaces "not supported",
     // then check identity before rendering so a supported harness with no bound
     // session reports the missing binding instead of an invalid argv.
-    let (mut argv, mut claim_uuid) = if harness == "claude" {
+    let (mut argv, claim_uuid) = if matches!(&route, ResumeRoute::ClientResume) {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
         }
     } else {
-        if !interactive_resume_supported(harness) {
+        if !crate::resume_route::interactive_resume_supported(harness) {
             eprintln!(
                 "fno agents resume: harness {} resume not supported by this fno version.",
                 py_repr_str(harness)
@@ -2356,7 +2287,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return 13;
         }
-        let v = match build_resume_argv(harness, session_id, Some(cwd)) {
+        let v = match if codex_terminal_exec {
+            crate::pane_relaunch::build_resume_argv_tokens_split(
+                harness,
+                session_id,
+                Some(cwd),
+                true,
+            )
+        } else {
+            build_resume_argv(harness, session_id, Some(cwd))
+        } {
             Some(v) => v,
             None => {
                 eprintln!(
@@ -2369,16 +2309,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         (v, None)
     };
 
-    // a routed codex row re-resolves its route from TODAY's config,
-    // spliced eagerly so the print and launch shapes carry the tokens. The
-    // refusal waits for the loaded-thread wake: it needs no route.
+    // A routed codex row re-resolves its route from TODAY's config before
+    // launch. The refusal waits for the loaded-thread wake: it needs no route.
     let codex_route_outcome =
         crate::codex_route::resume_route(harness, entry, Path::new(cwd), &mut argv);
 
-    // A pane (mux) row carries the session it was launched on; resume puts the
-    // worker back THERE via `fno mux pane run`, not in this terminal, so the
-    // operator keeps their shell and the resumed session stays drivable from the
-    // mux (D3). A row with no mux ref keeps the in-terminal exec.
+    // Keep the row's mux session for the live Claude attach decision; exited
+    // pane refs route or refuse above.
     let mux_session = entry
         .get("mux")
         .and_then(|m| m.get("session"))
@@ -2386,15 +2323,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    if !which_on_path(&argv[0]) {
-        eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
-        return 14;
-    }
-
     // a claude row's re-entry resolves through the canonical plan so
     // the ACCOUNT axis (and, on the attach arm, the route) rides every launch
-    // shape below - delegation, --print-command, the mux pane relaunch, and
-    // the in-terminal exec. The dead arm's own `--settings` splice stays the
+    // shape below - delegation and the in-terminal exec.
+    // The dead arm's own `--settings` splice stays the
     // route carrier there (it applies the identical usability rule), so only
     // the plan's env is layered on that arm's argv; a duplicate `--settings`
     // from the plan argv would hand claude the flag twice. A proven default
@@ -2408,13 +2340,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .unwrap_or(&name)
         .to_string();
-    // The print form is pure inspection and stays available when no plan can
-    // resolve: a heal that could not REGISTER its row (an unwritable registry)
-    // still resolves the session from the store, and a rowless session records
-    // no binding to restore - the bare argv is the honest print. Every launch
-    // shape below keeps the refusal.
+    // The inspection form returned above. Executed Claude resumes require a
+    // canonical re-entry plan before they can launch.
     let mut reentry_plan = None;
-    if harness == "claude" {
+    if matches!(&route, ResumeRoute::ClientResume) {
         // The transition follows the arm `claude_resume_argv` already chose:
         // `claim_uuid` is Some only on the dead-relaunch arm, so a live row
         // asks for Attach (its true route) instead of hardcoding Resume -
@@ -2431,26 +2360,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             None,
             Some(cwd),
         ) {
-            Ok(plan) => reentry_plan = Some(plan),
+            Ok(plan) => reentry_plan = Some(plan.carry_pins(&mut argv)),
             Err(reason) => {
-                if print_command {
-                    eprintln!(
-                        "fno agents resume: no canonical re-entry plan ({reason}); \
-                         printing the bare recorded argv"
-                    );
-                } else {
-                    eprintln!("fno agents resume: refused: {reason}");
-                    return crate::reentry::REENTRY_REFUSED_EXIT;
-                }
+                eprintln!("fno agents resume: refused: {reason}");
+                return crate::reentry::REENTRY_REFUSED_EXIT;
             }
         }
     }
 
-    // W1 (identity IN): the pane relaunch must boot wearing the row's
-    // name, or the mux titles the pane from the command basename (the
-    // `2:resume_f75e.sh` shape) and one worker renders split: an anonymous
-    // pane beside a row still pointing at the dead pane. Both the printed
-    // copy-paste form and the launched form get the same wrapper.
+    // Keep the row's identity on route-managed print commands and the codex
+    // wake route, which may relaunch the session through the daemon.
     let identity = match mesh_identity_assignments(
         entry.get("name").and_then(Value::as_str).unwrap_or(&name),
         harness,
@@ -2458,46 +2377,18 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     ) {
         Ok(a) => a,
         Err(why) => {
-            eprintln!("fno agents resume: {why}; refusing an unattributable pane relaunch");
+            eprintln!("fno agents resume: {why}; refusing an unattributable resume");
             return 13;
         }
     };
 
-    if print_command {
-        // an unresolvable codex route refuses even the print form.
-        if let Some(Err(reason)) = &codex_route_outcome {
-            eprintln!(
-                "{}",
-                crate::codex_route::refusal_line(entry, &row_name, reason)
-            );
-            return crate::reentry::REENTRY_REFUSED_EXIT;
-        }
-        // a claude row prints its CANONICAL plan argv - env prefix,
-        // session id, and the recorded --settings together, matching what
-        // `fno agents attach` and `recover --print-command` print. Paths and
-        // ids only; nothing from inside the route file is printed (AC5).
-        let mut printed_argv: Vec<String> = match &reentry_plan {
-            Some(plan) => {
-                let pairs: Vec<(String, String)> = plan
-                    .env
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                crate::pane_relaunch::env_prefixed(&pairs, &plan.argv)
-            }
-            None => argv.clone(),
-        };
-        if let Some(Ok(Some(route))) = &codex_route_outcome {
-            printed_argv = crate::pane_relaunch::env_prefixed(&route.env_masked(), &printed_argv);
-        }
-        crate::pane_relaunch::print_relaunch_command(
-            mux_session.as_deref(),
-            cwd,
-            &printed_argv,
-            &identity,
-            &row_name,
-        );
-        return 0;
+    if matches!(
+        &route,
+        ResumeRoute::ClientResume | ResumeRoute::TerminalExec | ResumeRoute::KeeperRevive
+    ) && !which_on_path(&argv[0])
+    {
+        eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
+        return 14;
     }
 
     // Validate cwd before claiming, delegating, or launching - AFTER the print
@@ -2508,79 +2399,74 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // means a gone cwd never acquires the session claim, and never burns a
     // wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
-        eprintln!(
-            "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
-             is recoverable first (renamed worktree base, unmounted volume): \
-             the row is the resume handle. To re-drive the session under fno from a live cwd, \
-             rm this row and `fno agents adopt <id>` rebinds a fresh one; rm alone deletes the \
-             handle and the session binding with it. rm is for a path that is gone for good.",
-            py_repr_str(cwd),
-            py_repr_str(&name)
-        );
-        return 13;
+        return crate::resume_gate::gone_cwd_refusal(cwd, &name);
     }
 
-    // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
-    // this arm (the dead-relaunch arm above sets Some(uuid); the two error
-    // arms already returned). A bare `claude attach` exec here has no pty,
-    // no route-settings restore, and no post-exec verification -- the same
-    // gap the Python fallback (`resume_cli.py::_resume_claude_wake`) closed.
-    // Delegating to it rather than re-deriving that pty/bracketed-paste/
-    // retry recipe natively keeps ONE implementation instead of two: a fix
-    // landed only here would leave `fno agents resume` (this binary) fixed
-    // and `fno-agents resume` still printing "Attaching..." and exiting,
-    // which is the guard-on-one-of-N-paths trap this repo already tracks.
+    // A parked claude row (`claude agents`: blocked/done/stopped/failed) takes
+    // the message directly - the harness state decides, not the transcript
+    // truth, so this serves the live arm and the dead arm alike. It runs its
+    // own gate before a revive, so it must precede the block below and never
+    // reserve twice; a row it does not serve returns None and meets that
+    // block as today.
+    if matches!(&route, ResumeRoute::ClientResume) {
+        if let Some(code) = crate::resume_wake::parked_claude_route(
+            harness,
+            entry,
+            &name,
+            &row_name,
+            cwd,
+            message.as_deref(),
+            home,
+        ) {
+            return code;
+        }
+    }
+
+    // A resume brings the session back from down. If its node (or a PR it
+    // binds) took a different live or suspect holder while it was down,
+    // relaunching would put a second writer on that branch - refuse before
+    // any launch. The live-attach arm is skipped (a live session is not
+    // coming back from down, so there is no collision to guard);
+    // `--print-command` returned earlier and stays pure inspection.
+    if !matches!(&route, ResumeRoute::ClientResume) || claim_uuid.is_some() {
+        let gate_id = claim_uuid.as_deref().unwrap_or(session_id);
+        if let Some(code) = crate::resume_gate::gate_and_reserve(home, &name, gate_id) {
+            return code;
+        }
+    }
+
+    // An exited keeper-lane thread row revives on a fresh keeper; the
+    // second-writer claim above is held before anything launches.
+    if matches!(&route, ResumeRoute::KeeperRevive) {
+        return crate::keeper_revival::revive(
+            home,
+            &row_name,
+            harness,
+            session_id,
+            cwd,
+            &argv,
+            message.as_deref(),
+        );
+    }
+
+    // Live claude rows are read from the account's roster and resumed over
+    // control.sock; the Python wake and its supervisor-birth leg are retired.
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        // No claim here: acquiring one before the skip-eligibility read raced
-        // two no-op resumes on a pty-write lock neither was taking. The
-        // delegated wake (resume_cli.py `_resume_claude_wake`) acquires the
-        // identical `resume-attach: {short_id}` key under its own skip check,
-        // so the wake stays guarded through either entrypoint.
-        // Route via `fno`, never a bare `fno-py` (a cargo-only install has
-        // only the mux on PATH; see crates/fno/src/bootstrap.rs), and pin
-        // FNO_AGENTS_RUNTIME=python: `resume` is a RUST_CLIENT_VERBS entry, so
-        // without the pin this exec re-enters this same binary and loops.
-        // exec(), not status(): the process is replaced - the same
-        // exit-127-on-failure convention as bin/client.rs, and no child
-        // process group to propagate signals to.
-        use std::os::unix::process::CommandExt;
-        let mut command = std::process::Command::new("fno");
-        command
-            // --cwd carries the EnterWorktree-resolved cwd computed above
-            // (`resolved_cwd`), not the raw registry value: Python has no
-            // equivalent of `resolve_resume_cwd` and would otherwise re-derive
-            // the stale pre-EnterWorktree cwd from the registry entry itself.
-            .args(["agents", "resume", &name, "--cwd", cwd])
-            .env("FNO_AGENTS_RUNTIME", "python");
-        // the delegated wake re-resolves the same plan on the Python
-        // side; carrying the env here keeps the two runtimes from disagreeing
-        // if a stale binary lags one side of the rule.
-        if let Some(plan) = &reentry_plan {
-            for (key, value) in &plan.env {
-                command.env(key, value);
-            }
-        }
-        if cross_project {
-            command.arg("--cross-project");
-        }
-        if let Some(msg) = &message {
-            command.args(["--message", msg]);
-        }
-        let err = command.exec();
-        eprintln!(
-            "fno agents resume: delegating {name} to fno-py failed: {err}. \
-             Install the fno front door or run `fno-py agents resume {name}` directly."
+        return crate::resume_wake::claude_live_route(
+            entry,
+            &name,
+            &row_name,
+            cwd,
+            message.as_deref(),
+            message_already_queued,
+            reentry_plan.as_ref(),
+            cross_project,
+            home,
         );
-        return 127;
     }
 
-    // The pane target decides the claim, not the other way round: a
-    // row with a mux ref AND a session id claims first; a row with no mux ref
-    // keeps the in-terminal exec and acquires NO claim (a pid-scoped claim on
-    // a path that never took one would make a thread-lane codex resume exit
-    // 11 where it used to exec).
-    // a codex row wakes over the daemon before any pane machinery.
-    if harness == "codex" {
+    // A codex thread wakes over the daemon before the terminal exec path.
+    if matches!(&route, ResumeRoute::ServerResume) {
         let route = crate::resume_wake::codex_resume_wake_route(
             &name,
             entry,
@@ -2601,76 +2487,34 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return code;
     }
 
-    let resume_id = claim_uuid
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .unwrap_or(session_id);
-    let pane_target = pane_relaunch_target(mux_session.as_deref(), resume_id);
-    if claim_uuid.is_none() && pane_target.is_some() {
-        claim_uuid = Some(session_id.to_string());
+    if codex_terminal_exec {
+        argv = match crate::harness_capabilities::compose_pre_exec(
+            harness,
+            "interactive_resume",
+            argv,
+        ) {
+            Ok(argv) => argv,
+            Err(_) => {
+                eprintln!(
+                    "fno agents resume: harness {} resume contract is invalid.",
+                    py_repr_str(harness)
+                );
+                return 13;
+            }
+        };
+        if !which_on_path(&argv[0]) {
+            eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
+            return 14;
+        }
     }
 
-    // Guard a session resume with the single-writer claim before launching
-    // (--print-command already returned above, so it never claims). The exec
-    // path claims with no TTL (it lives as long as this pid); the mux path
-    // claims with one, because it exits after dispatch and a dead holder
-    // would let a second resumer steal the claim before the worker is
-    // probe-live.
+    // Guard claude's same-id session resume before launch. Terminal
+    // interactive-resume routes retain their existing exec behavior.
     if let Some(uuid) = &claim_uuid {
-        let ttl = if mux_session.is_some() {
-            Some(MUX_RESUME_CLAIM_TTL_MS)
-        } else {
-            None
-        };
-        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None, ttl) {
+        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None, None) {
             eprintln!("{msg}");
             return code;
         }
-    }
-
-    // Pane relaunch: the mux owns the cwd (--cwd) and the pane, and this
-    // process returns after the launch so the operator's terminal stays free.
-    // The claim above carries a TTL (not a pid) on this path, so it stays
-    // Live across the launch-to-proof window. The launch then PROVES the
-    // worker stayed up before claiming success - a pane run exit 0 proves a
-    // pane was created, never that the worker lived - rebinds the row to the
-    // new pane on a live proof, and prints the pane's last output on a death.
-    if let Some(session) = pane_target {
-        let pane = mux_pane_run_argv(session, cwd, &argv, &identity, Some(&row_name));
-        // the account namespace rides the pane relaunch. The mux CLI
-        // forwards its environment to the pane child; the server-side
-        // canonical resolution lands with the mux gestures (wave 2.2).
-        let mut plan_env: Vec<(String, String)> = reentry_plan
-            .as_ref()
-            .map(|p| p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default();
-        // the restored route's env (key + provider stamp) rides the
-        // pane relaunch - the child env is the only key channel.
-        if let Some(Ok(Some(route))) = &codex_route_outcome {
-            plan_env.extend(route.env.clone());
-        }
-        let expected_mux = entry.get("mux").and_then(|m| {
-            Some(crate::state::MuxRef {
-                session: m.get("session")?.as_str()?.to_string(),
-                pane_id: m.get("pane_id")?.as_u64()?,
-            })
-        });
-        // session_id is the transport short_id, empty on a pane row; the
-        // resumed session's id is the uuid (claim_uuid).
-        let resumed_id = claim_uuid.as_deref().unwrap_or(session_id);
-        return crate::pane_relaunch::relaunch_on_pane(
-            "resume",
-            &row_name,
-            harness,
-            resumed_id,
-            cwd,
-            session,
-            &pane,
-            &plan_env,
-            expected_mux.as_ref(),
-            ("agent_resumed", "agent_resume_failed"),
-            home,
-        );
     }
 
     // Dead-arm respawn and bg-resume: the plan's mechanism relaunches the
@@ -2682,11 +2526,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .as_ref()
         .is_some_and(|p| matches!(p.mechanism.as_str(), "respawn" | "bg-resume"))
     {
-        return run_and_confirm_respawn(
+        return crate::resume_wake::respawn_and_deliver(
             reentry_plan.as_ref().unwrap(),
             &name,
-            "resume",
-            "agent_resumed",
+            message.as_deref(),
             home,
         );
     }
@@ -2731,6 +2574,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     if let Some(plan) = &reentry_plan {
         for (key, value) in &plan.env {
             exec_command.env(key, value);
+        }
+    }
+    // A claude row's argv is a `claude` client, so this exec can birth the
+    // supervisor too.
+    if matches!(&route, ResumeRoute::ClientResume) {
+        match &reentry_plan {
+            Some(plan) => crate::claude_supervisor::guard_birth_for_plan(&plan.env),
+            None => crate::claude_supervisor::guard_birth([]),
         }
     }
     // the restored route's env rides the in-terminal exec.
@@ -2863,49 +2714,6 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         return code;
     }
 
-    // The recorded mux destination wins when there is one: the pane relaunch
-    // returns after the launch so the operator's terminal stays free, and the
-    // account namespace rides the child environment. The launch proves the
-    // worker stayed up before claiming success, and rebinds the row on a live
-    // proof (same contract as the resume pane arm).
-    if let Some(mux_ref) = plan.mux.as_ref() {
-        // W1: same wrapper the resume arm carries. `which_on_path`
-        // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
-        // happens inside mux_pane_run_argv.
-        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
-            Ok(a) => a,
-            Err(why) => {
-                eprintln!("fno agents recover: {why}; refusing an unattributable pane relaunch");
-                return 13;
-            }
-        };
-        let pane = mux_pane_run_argv(
-            &mux_ref.session,
-            &plan.cwd,
-            &plan.argv,
-            &identity,
-            Some(&plan.name),
-        );
-        let plan_env: Vec<(String, String)> = plan
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        return crate::pane_relaunch::relaunch_on_pane(
-            "recover",
-            &plan.name,
-            "claude",
-            &plan.session_id,
-            &plan.cwd,
-            &mux_ref.session,
-            &pane,
-            &plan_env,
-            Some(mux_ref),
-            ("agent_recovered", "agent_recover_failed"),
-            home,
-        );
-    }
-
     // Respawn and bg-resume mechanisms: run and confirm (see
     // run_and_confirm_respawn). Both relaunch shapes exit at once, so the
     // exec below would replace this process with a launcher that immediately
@@ -2939,6 +2747,8 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
     for (key, value) in &plan.env {
         exec_command.env(key, value);
     }
+    // recover execs a claude client, so it can birth the supervisor too.
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
     let err = exec_command.exec();
     // exec only returns on failure.
     eprintln!("fno agents recover: failed to exec {}: {err}", plan.argv[0]);
@@ -4176,7 +3986,7 @@ mod tests {
         let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
         let mut checked = 0usize;
         for harness in contract.harness.keys() {
-            if !interactive_resume_supported(harness) {
+            if !crate::resume_route::interactive_resume_supported(harness) {
                 continue;
             }
             let row = serde_json::json!({
@@ -4238,86 +4048,9 @@ mod tests {
             "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
         );
 
-        // A row carrying neither still resolves to empty, so the callers'
-        // is_empty refusals keep firing.
+        // A row carrying neither resolves to empty; callers' is_empty refusals keep firing.
         let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
         assert_eq!(resume_session_id(&bare, "pi"), "");
-    }
-
-    #[test]
-    fn session_id_field_and_resume_argv_match_python() {
-        assert_eq!(session_id_field("claude"), Some("short_id"));
-        assert_eq!(session_id_field("codex"), Some("harness_session_id"));
-        assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
-        assert_eq!(session_id_field("agy"), Some("harness_session_id"));
-        assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
-        assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
-        assert_eq!(session_id_field("unknown"), None);
-
-        // --cd lands the resume in the row's own tree instead of the session
-        // directory codex defaults to. It sits with the -c grant BEFORE the
-        // subcommand, where codex's globals go. Kept byte-identical to Python
-        // `_build_resume_argv`; `test_rust_verb_parity.py` fails on drift, so
-        // token ORDER is load-bearing here, not just membership.
-        assert_eq!(
-            build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
-            Some(vec![
-                "codex".into(),
-                "-c".into(),
-                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
-                    .into(),
-                "--cd".into(),
-                "/path/that/does/not/exist".into(),
-                "resume".into(),
-                "uuid-1".into(),
-            ])
-        );
-        // No cwd means no --cd: a bare flag fails parsing, and inventing a
-        // directory is the wrong-tree failure this exists to prevent.
-        assert_eq!(
-            build_resume_argv("codex", "uuid-2", None),
-            Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
-        );
-        // An EMPTY cwd is absent too, which is what Python's `if cwd` does.
-        // Pinned here because nothing else is: drop the `.filter` and this is
-        // the only assertion that fails, instead of a bare `--cd ""` reaching
-        // codex, which cannot start on it.
-        assert_eq!(
-            build_resume_argv("codex", "uuid-3", Some("")),
-            Some(vec!["codex".into(), "resume".into(), "uuid-3".into()]),
-            "empty cwd must be treated as absent, matching the Python twin"
-        );
-        assert_eq!(
-            build_resume_argv("claude", "abc123", None),
-            Some(vec!["claude".into(), "--resume".into(), "abc123".into()])
-        );
-        assert_eq!(
-            build_resume_argv("gemini", "g-1", None),
-            Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
-        );
-        assert_eq!(
-            build_resume_argv("opencode", "ses_1", None),
-            Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
-        );
-        // The measured primitive (fresh process quoting an earlier turn's
-        // token over `--conversation`, 2026-08-26): the argv renders, and a
-        // row carrying a canonical harness_session_id reaches it. No spawn
-        // lane records one yet, so `resume` on today's agy rows still stops
-        // at the missing-session-id refusal.
-        assert_eq!(
-            build_resume_argv("agy", "x", None),
-            Some(vec!["agy".into(), "--conversation".into(), "x".into()])
-        );
-    }
-
-    #[test]
-    fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
-        assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));
-        assert!(!is_uuid_shaped("")); // empty
-        assert!(!is_uuid_shaped("not-a-uuid"));
-        assert!(!is_uuid_shaped("0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9")); // uppercase
-        assert!(!is_uuid_shaped("0a1b2c3d4e5f6071829 3a4b5c6d7e8f9")); // no dashes
-        assert!(!is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f")); // 11-char tail
     }
 
     // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
@@ -4455,27 +4188,7 @@ mod tests {
     #[test]
     fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
         // --print-command is the no-side-effect inspection form: the selected
-        // fork id rides the argv and nothing launches. The dead arm probes
-        // jobs/<short>/state.json under $HOME, so pin HOME to a throwaway dir
-        // with that state staged. The state is staged under the REAL $HOME
-        // (jobs/11111111, removed after) rather than by repinning the HOME
-        // env: set_var is process-global and races every concurrent test's
-        // env reads and spawns (a flaked `git` NotFound on CI), and the lock
-        // only serializes the tests that already take it.
-        let home_dir = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let jobs = home_dir.join(".claude").join("jobs").join("11111111");
-        let staged_here = !jobs.join("state.json").exists();
-        if staged_here {
-            std::fs::create_dir_all(&jobs).unwrap();
-            std::fs::write(
-                jobs.join("state.json"),
-                serde_json::json!({"state": "idle"}).to_string(),
-            )
-            .unwrap();
-        }
-
+        // fork id rides the argv and nothing launches.
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
         let entry = forked_row();
@@ -4493,9 +4206,6 @@ mod tests {
             ],
             &home,
         );
-        if staged_here {
-            std::fs::remove_dir_all(&jobs).unwrap();
-        }
         assert_eq!(code, 0);
     }
 
@@ -4780,14 +4490,9 @@ mod tests {
 
     #[test]
     fn acquire_named_session_claim_guards_resume_attach_keys() {
-        // The live-attach delegation itself acquires no claim (Python's
-        // `_resume_claude_wake` does, gated on skip-eligibility, once exec'd)
-        // -- but the "resume-attach:{short_id}" key format this exercises is
-        // still the shared contract: Python's own claim uses the identical
-        // key so the two runtimes contend for the same lock on the same row
-        // whichever one ends up acquiring it. Verify that key independently
-        // refuses a second concurrent writer, the same contract
-        // acquire_resume_session_claim already has for its own key.
+        // The live-attach route acquires this key before injecting. Verify the
+        // shared lock contract independently: it refuses a second concurrent
+        // writer on the same row, as the session-claim path does for its key.
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
         let short_id = "deadbeef";
         let root = cv_tmpdir();
@@ -4795,7 +4500,7 @@ mod tests {
         // A different live writer already holds the claim (matching this
         // process's own holder string would just re-acquire, not conflict).
         let pre = acquire(
-            &format!("resume-attach:{short_id}"),
+            &crate::resume_wake::resume_attach_claim_key(short_id),
             "other-writer",
             AcquireOpts {
                 root: Some(root.path().to_path_buf()),
@@ -4805,7 +4510,7 @@ mod tests {
         assert!(matches!(pre, AcquireOutcome::Acquired(_)));
 
         let err = acquire_named_session_claim(
-            &format!("resume-attach:{short_id}"),
+            &crate::resume_wake::resume_attach_claim_key(short_id),
             short_id,
             Some(root.path()),
             None,
@@ -4817,7 +4522,7 @@ mod tests {
         // A different short_id: an unrelated row's wake is never blocked by
         // this one's claim.
         let other = acquire_named_session_claim(
-            "resume-attach:other-id",
+            &crate::resume_wake::resume_attach_claim_key("other-id"),
             "other-id",
             Some(root.path()),
             None,
@@ -4971,7 +4676,9 @@ mod tests {
         assert_eq!(e.claude_session_uuid, None);
         assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
         assert!(!e.short_id.is_empty());
-        assert_eq!(e.name, format!("t-{}", e.short_id));
+        // The name prefers the linked node id over the bare t- form (a
+        // transcript title would outrank both; this test env has none).
+        assert_eq!(e.name, "20260804T202518Z-cl99002-4e0236");
         assert_eq!(e.status, crate::AgentStatus::Idle);
         assert!(e.pid.is_none());
     }
@@ -5603,33 +5310,8 @@ mod tests {
         assert_eq!(expand_eq(&["a=b".to_string()]), vec!["a=b".to_string()]);
         assert_eq!(expand_eq(&["-n5".to_string()]), vec!["-n5".to_string()]);
     }
-
-    #[test]
-    fn append_agents_event_writes_python_envelope() {
-        let dir = std::env::temp_dir().join(format!(
-            "fno-cv-event-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let events = dir.join("events.jsonl");
-        append_agents_event(
-            &events,
-            "agent_resumed",
-            &[
-                ("name", Value::String("worker-A".into())),
-                ("provider", Value::String("codex".into())),
-            ],
-        );
-        let content = fs::read_to_string(&events).unwrap();
-        let line = content.trim_end();
-        // data fields first, ts + kind last; compact (no spaces).
-        assert!(line.starts_with(r#"{"name":"worker-A","provider":"codex","ts":"#));
-        assert!(line.ends_with(r#""kind":"agent_resumed"}"#));
-        let parsed: Value = serde_json::from_str(line).expect("valid JSON line");
-        assert_eq!(parsed["kind"], "agent_resumed");
-        fs::remove_dir_all(&dir).ok();
-    }
 }
+
+#[cfg(test)]
+#[path = "client_verbs_tests.rs"]
+mod client_verbs_tests;

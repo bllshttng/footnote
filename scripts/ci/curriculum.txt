@@ -101,13 +101,11 @@ mail view
 mail status
 mail drain
 # Track D, a different product (L15)
-# L15 mux, optional
-mux attach
-mux ls
-mux server
-mux pane send
-mux pane read
-mux shell-init
+# L15 mux, optional. One native tree drives help, completion and inventory,
+# so the ratchet registers mux as one leaf; the operation paths live in the
+# generated inventory, not the baseline.
+mux
+version
 # Cross-cutting (L16)
 # L16 cost, providers, and what you left out
 config accounts

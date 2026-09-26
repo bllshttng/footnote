@@ -388,87 +388,6 @@ def test_protected_role_forces_best_available_and_the_floor():
     assert any("protected-role(implement)" in step for step in chain)
 
 
-# --- runtime_capacity: harness -> accounts -> MAX --------------------------- #
-
-
-def _fake_headroom(monkeypatch, states):
-    """Patch the batch headroom read with a per-account verdict map."""
-    import fno.adapters.providers.runtime_state as rs
-    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
-
-    def _many(provider_ids, **_kw):
-        return {
-            pid: Headroom(
-                getattr(HeadroomState, states.get(pid, "unknown").upper()),
-                None,
-                source="lock",
-            )
-            for pid in provider_ids
-        }
-
-    monkeypatch.setattr(rs, "headrooms", _many)
-    return _many
-
-
-def _account_settings(*records: dict) -> object:
-    """A settings stand-in declaring exactly these account records.
-
-    Passing this is not decoration. ``settings=None`` means "load the real
-    config" - correct in production, ambient in a test, and `load_settings` is
-    `lru_cache`d per process, so whatever an earlier test in the same xdist
-    worker put in that cache is what these assertions read. One extra
-    claude-bound record is enough to flip the first assertion below, because
-    the fake headroom answers `unknown` for any account it was not told about
-    and `unknown` outranks `exhausted` in `_CAPACITY_RANK`. Measured: a lone
-    `{"id": "ccm", "harness": "claude"}` turns `exhausted` into `unknown`.
-    """
-    return type("S", (), {"accounts": type("A", (), {"records": list(records)})})()
-
-
-def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
-    """AC11-HP: an exhausted record bound to claude reads claude exhausted only
-    when EVERY claude account is; one healthy account means usable."""
-    inv = _inv([
-        {"name": "opus-x", "harness": "claude", "model": "o", "band": "high",
-         "account": "primary"},
-    ])
-    _fake_headroom(monkeypatch, {"primary": "exhausted"})
-    cap = rr.runtime_capacity(("claude",), settings=_account_settings(), inventory=inv)
-    # the harness has one declared account, exhausted -> exhausted
-    assert cap["claude"]["state"] == "exhausted"
-    # a second healthy account (registered record) makes the harness usable
-    settings = _account_settings(
-        {"id": "primary", "harness": "claude"},
-        {"id": "backup", "harness": "claude"},
-    )
-    _fake_headroom(monkeypatch, {"primary": "exhausted", "backup": "ok"})
-    cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
-    assert cap["claude"]["state"] == "ok"
-    assert cap["claude"]["accounts"] == {"primary": "exhausted", "backup": "ok"}
-    # exhausted + UNKNOWN is NOT exhausted: exhaustion requires every account
-    _fake_headroom(monkeypatch, {"primary": "exhausted"})
-    cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
-    assert cap["claude"]["state"] == "unknown"
-
-
-def test_harness_accounts_expands_rows_then_registered_records(monkeypatch):
-    class _Settings:
-        class accounts:
-            records = [{"id": "rec-a", "harness": "claude"}, {"id": "rec-b", "harness": "codex"}]
-    inv = _inv([
-        {"name": "opus-x", "harness": "claude", "model": "o", "route": "zai/glm-5.3"},
-        {"name": "flash-x", "harness": "claude", "model": "f", "account": "paid-lane"},
-    ])
-    # a row's explicit account names its record; a route names a VENDOR, never
-    # an account id, so it contributes nothing (a vendor key could never match
-    # the account-keyed state and would dilute a live lock with its UNKNOWN)
-    assert rr.harness_accounts("claude", settings=_Settings, inventory=inv) == [
-        "paid-lane", "rec-a",
-    ]
-    # no declared row for codex -> every registered record bound to codex
-    assert rr.harness_accounts("codex", settings=_Settings, inventory=inv) == ["rec-b"]
-
-
 def test_same_model_two_access_paths_two_cost_profiles():
     """Cost belongs to the ACCESS PATH: the same model reached two ways is two
     rows with two cost profiles, and the cheaper path wins within the band -
@@ -490,52 +409,6 @@ def test_same_model_two_access_paths_two_cost_profiles():
     # the expensive path still stands when the cheap one is exhausted
     candidate, _ = _grid("medium", "p2", {"claude": "ok", "opencode": "exhausted"}, inv=inv)
     assert candidate["harness"] == "claude"
-
-
-def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):
-    # "no accounts" has to be DECLARED. Left ambient this reads the real config
-    # through the process-cached `load_settings`, and on a machine that has
-    # claude account records it probes their real headroom and reports a window
-    # of "lock" rather than "absent". Same defect as the aggregation test above.
-    cap = rr.runtime_capacity(
-        ("claude",), settings=_account_settings(), inventory=rr.Inventory()
-    )
-    assert cap["claude"]["window"] == "absent"
-    assert cap["claude"]["state"] == "unknown"
-
-
-def test_runtime_capacity_keeps_per_account_sources_and_observed_at(monkeypatch):
-    """The payload keeps each account's provenance beside its state, so a
-    named row never has to guess whose evidence the harness window named.
-    The fields the Rust walk already reads stay byte-compatible."""
-    import fno.adapters.providers.runtime_state as rs
-    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
-
-    def _many(provider_ids, **_kw):
-        return {
-            "paid": Headroom(
-                HeadroomState.EXHAUSTED, 123.0, source="lock", observed_at=1000.0
-            ),
-            "free": Headroom(
-                HeadroomState.UNKNOWN, None, source="stale", observed_at=None
-            ),
-        }
-
-    monkeypatch.setattr(rs, "headrooms", _many)
-    inv = _inv([
-        {"name": "x", "harness": "claude", "model": "o", "band": "high",
-         "account": "paid"},
-        {"name": "y", "harness": "claude", "model": "m", "band": "low",
-         "account": "free"},
-    ])
-    cap = rr.runtime_capacity(("claude",), settings=_account_settings(), inventory=inv)
-    assert cap["claude"]["sources"] == {"paid": "lock", "free": "stale"}
-    assert cap["claude"]["observed_at"] == {"paid": 1000.0, "free": None}
-    # untouched shapes: the harness-wide worst and the per-account states.
-    # unknown outranks exhausted in _CAPACITY_RANK, so the worst account's
-    # source (stale) is the harness window.
-    assert cap["claude"]["accounts"] == {"paid": "exhausted", "free": "unknown"}
-    assert cap["claude"]["window"] == "stale"
 
 
 # --- resolve_tier / node_model (inventory-backed) --------------------------- #
@@ -669,7 +542,7 @@ def test_the_grid_still_injects_nothing_when_config_declares_nothing():
 
 
 def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monkeypatch):
-    """The fallback bands `gpt-5.6-sol` from `max`, not from `high`.
+    """The fallback bands `codex-sol` from `max`, not from `high`.
 
     It sits in both. A regression guard on the rule, not the test that caught
     the bug - the duplicate-row test below is that one, and this assertion
@@ -678,12 +551,12 @@ def test_a_model_in_two_bands_keeps_the_strongest_whatever_the_table_order(monke
     """
     from fno.adapters.providers import benchmarks as _bm
 
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
-    assert "gpt-5.6-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
+    assert "codex-sol" in _bm.STATIC_TIERS["max"], "premise: listed in max"
+    assert "codex-sol" in _bm.STATIC_TIERS["high"], "premise: listed in high too"
 
     def _band_of(table):
         monkeypatch.setattr(_bm, "STATIC_TIERS", table)
-        return {r["name"]: r["band"] for r in rr._builtin_rows()}["gpt-5.6-sol"]
+        return {r["name"]: r["band"] for r in rr._builtin_rows()}["codex-sol"]
 
     forward = dict(_bm.STATIC_TIERS)
     reversed_table = dict(reversed(list(_bm.STATIC_TIERS.items())))
@@ -815,7 +688,7 @@ def test_decider_slot_table_covers_every_readout_verb(tmp_path):
     now iterates slot_verbs, so the two sets are equal by construction. This
     test covers both failure modes: a configured verb outside the tuple
     (fix here) and a dispatched verb whose profile an operator removed
-    (pr-create here) - the latter must appear in the table with an empty
+    (review here) - the latter must appear in the table with an empty
     lane list, which is exactly what the Rust None arm builds.
     """
     from fno.config import settings_from_files
@@ -831,7 +704,7 @@ def test_decider_slot_table_covers_every_readout_verb(tmp_path):
     )
     settings = settings_from_files([cfg])
     assert "fix" in rr.slot_verbs(settings=settings)
-    assert "pr-create" in rr.slot_verbs(settings=settings)
+    assert "review" in rr.slot_verbs(settings=settings)
     table = rr._slot_profiles_table(settings)
     assert set(rr.slot_verbs(settings=settings)) == set(table)
     assert table["fix"]["lanes_raw"], "the fix row must carry its lanes, not only its key"
@@ -927,3 +800,70 @@ def test_strict_routing_arms_a_configured_verb_outside_the_tuple(tmp_path):
     assert any("agents.profiles.fix.lanes[0]" in step for step in chain)
     _payload, _chain, verdict = rr.resolve_slot("tdd", None, {}, settings=settings)
     assert verdict == "policy-held"
+
+
+@requires_rust
+def test_strict_routing_names_a_scalar_lanes(tmp_path):
+    """A scalar lanes is a shape fault, not an absent one.
+
+    Twice a config write stored 'zai-flash,codex-luna' where the routing
+    code requires a list, and each time strict routing refused every spawn
+    for hours with 'declares no lanes': text that sends the reader hunting
+    for a missing key. The table passes the scalar through and the Rust
+    guard names it in both legs.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "enforce_inventory = true\n"
+        "\n"
+        "[agents.profiles.target]\n"
+        'lanes = "zai-flash,codex-luna"\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    _payload, chain, _verdict = rr.resolve_slot("target", None, {}, settings=settings)
+    assert any("must be a list" in step for step in chain)
+    assert not any("declares no lanes" in step for step in chain)
+
+
+@requires_rust
+def test_an_unrouted_verb_still_walks_the_resolver_and_names_the_grid():
+    """A verb whose profile declares no lanes used to return early with an
+    empty chain: the harness default applied with no receipt naming why.
+    Every spawn now walks the ONE resolver, the walk answers with the grid's
+    own vocabulary, and the candidate is still None, so the built argv (which
+    injects a model only from a candidate) is byte-identical to before."""
+    candidate, chain, verdict = rr.resolve_slot(
+        "no-such-profile-verb", None, {}, inventory=rr.Inventory()
+    )
+    assert candidate is None
+    assert chain, "the walk must leave a receipt for an unrouted verb"
+    assert chain[-1] == "grid=no-inventory-declared"
+    assert verdict == "unarmed"
+
+
+@requires_rust
+def test_resolve_tier_resolves_codex_family_words_and_keeps_claude_aliases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """AC8-EDGE: with no declared rows, the builtin fallback still answers a
+    tier request, and the codex family word resolves through the real
+    route-slot pre-pass while the claude alias stays verbatim for the
+    harness to resolve itself."""
+    import json as _json
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(_json.dumps({
+        "fetched_at": "2026-09-23T06:14:54Z",
+        "models": [
+            {"slug": "gpt-6-sol", "visibility": "list"},
+            {"slug": "gpt-6-luna", "visibility": "list"},
+        ],
+    }))
+    model, chain = rr.resolve_tier("high", provider="codex")
+    assert model == "gpt-6-sol", chain
+    model, chain = rr.resolve_tier("high", provider="claude")
+    assert model == "opus", chain

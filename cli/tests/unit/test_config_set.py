@@ -321,6 +321,34 @@ def test_set_list_single_item_round_trips(tmp_path):
     assert _read(tmp_path)["review"]["external_reviewers"] == ["gemini"]
 
 
+def test_set_raw_list_field_stores_a_list_not_a_string(tmp_path):
+    # `lanes` is typed Any so a bad list never breaks a config read. The verb
+    # stored the JSON argument as a string, and the router saw no lanes.
+    set_config_value(
+        "agents.profiles.target.lanes",
+        '["codex-luna", {"provider": "zai", "model": "glm"}]',
+        scope="project",
+        repo_root=tmp_path,
+    )
+    assert _read(tmp_path)["agents"]["profiles"]["target"]["lanes"] == [
+        "codex-luna",
+        {"provider": "zai", "model": "glm"},
+    ]
+    set_config_value(
+        "agents.profiles.fix.lanes", "codex-luna, zai", scope="project", repo_root=tmp_path
+    )
+    assert _read(tmp_path)["agents"]["profiles"]["fix"]["lanes"] == ["codex-luna", "zai"]
+
+
+@pytest.mark.parametrize("value", ['{"a": 1}', '"codex-luna"', "[not json"])
+def test_set_raw_list_field_rejects_a_non_list(tmp_path, value):
+    with pytest.raises(ConfigSetError):
+        set_config_value(
+            "agents.profiles.target.lanes", value, scope="project", repo_root=tmp_path
+        )
+    assert not (tmp_path / ".fno" / "config.toml").exists()
+
+
 # ---------------------------------------------------------------------------
 # Post-write override detection and positive receipt markers (x-389d)
 # ---------------------------------------------------------------------------
@@ -343,7 +371,6 @@ def _pin_two_layers(
     glob_yaml = gdir / "settings.yaml"
 
     import fno.paths as paths_mod
-    from fno import config as config_mod
 
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")

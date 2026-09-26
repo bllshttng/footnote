@@ -158,6 +158,18 @@ pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
     })
 }
 
+/// Read one key path from the global config only, when an action requires a
+/// global-scope value rather than the normal project-to-global fallback.
+pub(crate) fn config_lookup_global(keys: &[&str]) -> Option<toml::Value> {
+    let content = std::fs::read_to_string(global_config_path()?).ok()?;
+    let table = parse_config(&content)?;
+    let mut cur = table.get(*keys.first()?)?;
+    for key in &keys[1..] {
+        cur = cur.get(key)?;
+    }
+    Some(cur.clone())
+}
+
 /// Per-field merged table across the candidates, the way Python's loader
 /// deep-merges candidate files: the highest-priority candidate that defines a
 /// field wins that field, and a lower candidate's other fields still fill in.
@@ -467,6 +479,44 @@ pub fn retire_interval_s(cwd: &Path, grace_secs: u64) -> u64 {
 /// specimen was over three hours old; a younger deps binary may be a live run.
 pub const DEFAULT_ORPHAN_MIN_ELAPSED_SECS: u64 = 900;
 
+/// Default open-work retire window (change 2): an OPEN-work row whose
+/// transcript has been quiet this long is no longer evidenced by its node.
+/// Well above the 900 s retire grace on purpose - an open node is a real
+/// claim until a full day of silence says otherwise - and resolvable from
+/// `agents.reap.open_work_retire_s`.
+pub const DEFAULT_OPEN_WORK_RETIRE_SECS: u64 = 86_400;
+
+/// Resolve `agents.reap.open_work_retire_s` for the registry sweep, same
+/// precedence + fail-open degrade as [`retire_grace_secs`]: an unparseable or
+/// zero value degrades to the default rather than reaping every open row on
+/// a config typo. `$FNO_AGENTS_OPEN_WORK_RETIRE_SECS` is a global test/tuning
+/// override.
+pub fn open_work_retire_secs(cwd: &Path) -> u64 {
+    if let Some(v) = non_empty_env("FNO_AGENTS_OPEN_WORK_RETIRE_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        .filter(|v| *v > 0)
+    {
+        return v;
+    }
+    resolve(cwd, table_open_work_retire_s).unwrap_or(DEFAULT_OPEN_WORK_RETIRE_SECS)
+}
+
+fn table_open_work_retire_s(t: &toml::Table) -> Option<u64> {
+    t.get("agents")?
+        .as_table()?
+        .get("reap")?
+        .as_table()?
+        .get("open_work_retire_s")?
+        .as_integer()
+        .and_then(|i| u64::try_from(i).ok())
+        .filter(|v| *v > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn read_open_work_retire_s(content: &str) -> Option<u64> {
+    table_open_work_retire_s(&parse_config(content)?)
+}
+
 /// Resolve `test.orphan_min_elapsed_seconds` for the orphan-reap sweep, same
 /// precedence + fail-open degrade as [`retire_grace_secs`].
 pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
@@ -478,6 +528,32 @@ pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
             .and_then(|i| u64::try_from(i).ok())
     })
     .unwrap_or(DEFAULT_ORPHAN_MIN_ELAPSED_SECS)
+}
+
+/// The default run-slot cap for [`max_cargo_runs`]: how many cargo runs may
+/// hold the machine at once (compile or execute doors together).
+pub const DEFAULT_MAX_CARGO_RUNS: u32 = 2;
+
+/// Resolve `test.max_cargo_runs` for the cargo run-slot admission, same
+/// precedence + fail-open degrade as [`orphan_min_elapsed_secs`]: a value
+/// below 1, or one that is not an integer, gives the default, so a typo
+/// never walls off every cargo on the machine.
+pub fn max_cargo_runs(cwd: &Path) -> u32 {
+    resolve(cwd, table_max_cargo_runs).unwrap_or(DEFAULT_MAX_CARGO_RUNS)
+}
+
+fn table_max_cargo_runs(t: &toml::Table) -> Option<u32> {
+    t.get("test")?
+        .as_table()?
+        .get("max_cargo_runs")?
+        .as_integer()
+        .and_then(|i| u32::try_from(i).ok())
+        .filter(|v| *v > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn read_max_cargo_runs(content: &str) -> Option<u32> {
+    table_max_cargo_runs(&parse_config(content)?)
 }
 
 /// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
@@ -621,10 +697,6 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default absolute machine backstop: refuse above this times the CPU count no
-/// matter whose load it is, because pure fleet-share admits onto a box already
-/// thrashing from foreign work. `<= 0` disables. Matches the Pydantic default.
-pub const DEFAULT_HARD_MAX_LOAD_PER_CPU: f64 = 40.0;
 /// Default freshness window for a single-flight answer. Matches the Pydantic
 /// default.
 pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
@@ -726,13 +798,6 @@ pub fn max_fleet_cpu_share(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "max_fleet_cpu_share")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MAX_FLEET_CPU_SHARE)
-}
-
-/// Resolve `agents.hard_max_load_per_cpu`. Unparseable coerces to the default.
-pub fn hard_max_load_per_cpu(cwd: &Path) -> f64 {
-    resolve_agents_value(cwd, "hard_max_load_per_cpu")
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_HARD_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.single_flight_ttl_seconds`: how long one child's written
@@ -1012,6 +1077,9 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
 
 /// Resolve `[auto_merge] require_fresh_ci` (default ON). A malformed or absent
 /// value falls back to the safe default so a config typo cannot reopen stale CI.
+/// The healer (`fno-agents pr-heal --all --apply`) is the actor that runs the
+/// stale remedy (`fno do pr push` on a conflicting PR or the merge-slot
+/// holder), so arming the check no longer holds a merge no one unblocks.
 pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
     resolve(cwd, |t| {
         t.get("auto_merge")?
@@ -1063,6 +1131,31 @@ pub fn notify_min_interval_s(cwd: &Path) -> u64 {
     .unwrap_or(300)
 }
 
+/// `[auto_continue] select_timeout_s` (default 120): the maximum time allowed
+/// for the bounded backlog selection read. Zero, negative, or malformed values
+/// fall back to the hang-safe default.
+pub fn auto_continue_select_timeout_s(cwd: &Path) -> u64 {
+    for path in config_candidates(cwd) {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some(table) = parse_config(&content) else {
+            continue;
+        };
+        let Some(auto_continue) = table.get("auto_continue").and_then(Value::as_table) else {
+            continue;
+        };
+        let Some(value) = auto_continue.get("select_timeout_s") else {
+            continue;
+        };
+        return value
+            .as_integer()
+            .and_then(|v| (v > 0).then_some(v as u64))
+            .unwrap_or(120);
+    }
+    120
+}
+
 /// `[notify] arm_failing_after_s` (default 1800): how long an arm stays failing, or stale from a dead scheduler, before the arm_watch daemon arm tells the operator. Also the rate floor between arm notices. `0` or a value that does not parse falls back to 1800.
 pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     resolve(cwd, |t| {
@@ -1074,6 +1167,67 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     })
     .filter(|v| *v > 0)
     .unwrap_or(1800)
+}
+
+/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default.
+pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("arm_starved_after_s")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+    })
+    .filter(|v| *v > 0)
+    .unwrap_or(604_800)
+}
+
+/// `[auto_heal] enabled` (default false): whether the CI healer drive loop is armed.
+pub fn auto_heal_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("auto_heal")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
+/// `[active_backlog] enabled` (default false): whether the drain loop runs.
+pub fn active_backlog_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("active_backlog")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
+/// `[slot_cutover] enabled` (default false): whether the shared Claude slot may switch.
+pub fn slot_cutover_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("slot_cutover")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
+/// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
+/// safe repairs (dead flight holds, the launchd refresh, the install from
+/// main) before it pages. Off, the rows still name the repair verb.
+pub fn self_heal_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("recovery")?
+            .as_table()?
+            .get("self_heal")?
+            .as_table()?
+            .get("enabled")?
+            .as_bool()
+    })
+    .unwrap_or(true)
 }
 
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
@@ -1252,6 +1406,54 @@ mod tests {
         clear_config_env();
     }
 
+    #[test]
+    fn slot_cutover_is_opt_in_and_rejects_non_booleans() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("slot-cutover-default", "schema_version = 1\n");
+        assert!(!slot_cutover_enabled(&cwd));
+
+        let cwd =
+            write_project_settings("slot-cutover-enabled", "[slot_cutover]\nenabled = true\n");
+        assert!(slot_cutover_enabled(&cwd));
+
+        let cwd = write_project_settings(
+            "slot-cutover-invalid",
+            "[slot_cutover]\nenabled = \"yes\"\n",
+        );
+        assert!(!slot_cutover_enabled(&cwd));
+        clear_config_env();
+    }
+
+    #[test]
+    fn global_config_lookup_ignores_project_values() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let global = std::env::temp_dir().join(format!("fno-global-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&global).unwrap();
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", global.join("settings.json"));
+        std::fs::write(
+            global.join("config.toml"),
+            "[[accounts.records]]\nid = \"global-account\"\n",
+        )
+        .unwrap();
+        let project = write_project_settings(
+            "global-lookup-project",
+            "[[accounts.records]]\nid = \"local-account\"\n",
+        );
+
+        assert_eq!(
+            config_lookup(&project, &["accounts", "records"]).unwrap()[0]["id"].as_str(),
+            Some("local-account")
+        );
+        assert_eq!(
+            config_lookup_global(&["accounts", "records"]).unwrap()[0]["id"].as_str(),
+            Some("global-account")
+        );
+        std::fs::remove_dir_all(global).ok();
+        clear_config_env();
+    }
+
     /// review: a dead config anchor (the launch worktree reaped under a
     /// long-lived daemon) must not silently default every getter; the reader
     /// re-anchors to the agents home.
@@ -1314,6 +1516,59 @@ mod tests {
         let cwd =
             write_project_settings("arm-failing-valid", "[notify]\narm_failing_after_s = 600\n");
         assert_eq!(notify_arm_failing_after_s(&cwd), 600);
+        clear_config_env();
+    }
+
+    #[test]
+    fn auto_continue_select_timeout_s_defaults_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("select-timeout-default", "schema_version = 1\n");
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-valid",
+            "[auto_continue]\nselect_timeout_s = 45\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 45);
+        let cwd = write_project_settings(
+            "select-timeout-zero",
+            "[auto_continue]\nselect_timeout_s = 0\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-negative",
+            "[auto_continue]\nselect_timeout_s = -1\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-string",
+            "[auto_continue]\nselect_timeout_s = \"90\"\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        clear_config_env();
+    }
+
+    #[test]
+    fn auto_continue_select_timeout_invalid_project_value_does_not_inherit_global() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "[auto_continue]\nselect_timeout_s = 45\n",
+        )
+        .unwrap();
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            global.path().join("settings.json"),
+        );
+        let cwd = write_project_settings(
+            "select-timeout-invalid-project",
+            "[auto_continue]\nselect_timeout_s = \"bad\"\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        std::env::remove_var("FNO_NO_CANONICAL_CONFIG");
         clear_config_env();
     }
 
@@ -1545,6 +1800,51 @@ mod tests {
         assert_eq!(read_roster_scope("[reap]\nroster_scope = \"all\"\n"), None);
         // A sibling key inside agents.reap does not answer for roster_scope.
         assert_eq!(read_roster_scope("[agents.reap]\nretain_days = 3\n"), None);
+    }
+
+    // change 2: the open-work window reads agents.reap and fails open
+    // to the default - a zero would reap every open row on the next sweep,
+    // so it is a typo, never a setting.
+    #[test]
+    fn open_work_retire_s_reads_agents_reap_and_coerces_zero_to_default() {
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 3600\n"),
+            Some(3600)
+        );
+        // No block, wrong block, sibling key: all absence.
+        assert_eq!(read_open_work_retire_s("schema_version = 1\n"), None);
+        assert_eq!(
+            read_open_work_retire_s("[reap]\nopen_work_retire_s = 3600\n"),
+            None
+        );
+        // Zero and negative coerce to None, so the resolver's default wins.
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 0\n"),
+            None
+        );
+        assert_eq!(
+            open_work_retire_secs(Path::new("/nonexistent-open-work")),
+            DEFAULT_OPEN_WORK_RETIRE_SECS
+        );
+    }
+
+    // change 1.1: the run-slot cap reads test.max_cargo_runs and fails open
+    // to the default, so a typo or a 0 never walls off every cargo.
+    #[test]
+    fn max_cargo_runs_reads_test_block_and_coerces_invalid_to_default() {
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 3\n"), Some(3));
+        // No block, wrong type, 0, negative: all absence, so the default wins.
+        assert_eq!(read_max_cargo_runs("schema_version = 1\n"), None);
+        assert_eq!(
+            read_max_cargo_runs("[test]\nmax_cargo_runs = \"3\"\n"),
+            None
+        );
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 0\n"), None);
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = -1\n"), None);
+        assert_eq!(
+            max_cargo_runs(Path::new("/nonexistent-max-cargo-runs")),
+            DEFAULT_MAX_CARGO_RUNS
+        );
     }
 
     #[test]

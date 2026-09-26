@@ -62,6 +62,10 @@ def _stub_signals(
     monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: capture_present)
     # Config-schema surfaces (x-6c5b): default to EQUAL keysets so existing tests
     # exercise no drift; drift tests pass differing sets explicitly.
+    # The store export-freshness arm reads the real store; hermetic default.
+    import fno.doctor_graph as _doctor_graph
+
+    monkeypatch.setattr(_doctor_graph, "export_health", lambda: {"stale": False})
     monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: deployed_config_keys)
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: source_config_keys)
     monkeypatch.setattr(
@@ -111,6 +115,16 @@ def _stub_signals(
     from fno import update
 
     monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    # The rust-stale --fix guard re-resolves the source pin; left unstubbed
+    # it shells to the real native authority and refuses from a feature
+    # worktree, so every fix test inherits this machine's checkout. The
+    # guard refuses on an unresolvable pin, so the default is an allow
+    # verdict for the stubbed source; pin tests override it.
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {"decision": "allow", "path": str(src)},
+    )
     # Control-plane arm staleness shells out to the real `fno-agents status
     # --json`. A developer machine with genuinely stale arms leaks STALE lines
     # into full-output assertions, so stub it like the other probes.
@@ -312,7 +326,6 @@ def test_build_report_checks_source_sync_after_post_merge_refresh(
         "_plugin_hooks_launch_report",
         "_pre_push_hook_report",
         "_groom_health",
-        "_archive_id_collisions",
         "_launch_agent_failures",
         "_plugin_cache_report",
         "_silent_switch_report",
@@ -425,6 +438,27 @@ def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -
     assert "fno config setup" in result.stdout
 
 
+def test_doctor_reports_stale_surface_via_door(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A stale receipt (version drift) becomes a named opencode advisory."""
+    (tmp_path / "oc" / "plugins").mkdir(parents=True)
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "oc"))
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda verb, args, **kw: (
+            None,
+            {
+                "status": "stale",
+                "version": "0.3.1",
+                "source_version": "0.3.2",
+                "missing": [],
+            },
+        ),
+    )
+    report = doctor._harness_surface_report()
+    assert "STALE" in report["opencode"]
+    assert "0.3.2" in report["opencode"]
+
+
 def test_doctor_main_run_points_at_codex_hooks_dual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -463,9 +497,7 @@ def test_harness_surface_is_quiet_when_codex_and_footnote_state_are_absent(
         lambda: pytest.fail("plugin inspection should not run without Codex or Footnote state"),
     )
     monkeypatch.setattr(doctor, "_codex_hooks_report", lambda: {})
-    monkeypatch.setattr(
-        "fno.setup.integration._opencode_plugins_dir", lambda: tmp_path / "no-opencode"
-    )
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "no-opencode"))
 
     assert "codex_plugin" not in doctor._harness_surface_report()
 
@@ -1054,7 +1086,6 @@ def test_parse_field_meta_keys_broken_or_absent_returns_none() -> None:
 
 def _init_git_source(root: Path, registry_text: str) -> None:
     """Commit a registry.py into a throwaway git repo laid out like the cli source."""
-    import subprocess
 
     reg = root / "src" / "fno" / "config" / "registry.py"
     reg.parent.mkdir(parents=True)
@@ -1411,6 +1442,94 @@ def test_ac2_edge_rust_only_fix_no_marker_outcome_exits_one(
     result = runner.invoke(app, ["doctor", "--fix"])
     assert result.exit_code == 1
     assert "will not converge" in result.stderr
+
+
+def test_fix_rust_stale_refused_pin_exits_one_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused source pin (resolved HEAD not an ancestor of origin/main)
+    must make rust-only --fix exit 1 and never call _refresh_rust_bins -
+    that refresh would install an unmerged feature worktree across the
+    fleet. Sync status reads `unknown` for such a HEAD, so the `behind`
+    guard alone does not catch it."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/wt/x-20d2"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_marker="aaa",
+        rust_source_rev="bbb",
+        cargo_bin_present=True,
+        source_checkout_sync={
+            "status": "unknown",
+            "behind": None,
+            "source_head": "deadbeef",
+            "remote_head": "mainhead",
+            "detail": "not an ancestor",
+        },
+    )
+    from fno import update
+
+    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {
+            "decision": "refuse",
+            "path": "/wt/x-20d2",
+            "refusal": "refusing source /wt/x-20d2: linked worktree HEAD deadbeef "
+            "is not an ancestor of origin/main HEAD mainhead",
+        },
+    )
+
+    def _no_refresh(source, *, force=False, dry_run=False):
+        raise AssertionError("_refresh_rust_bins must not run on a refused pin")
+
+    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 1
+    assert "/wt/x-20d2" in result.stderr
+    assert "refused" in result.stderr
+
+
+def test_fix_rust_stale_pin_path_mismatch_refuses_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allow verdict for a DIFFERENT path than the one the verdict
+    measured gates nothing: a concurrent --source repin between the verdict
+    read and the fix would validate one checkout and refresh another. The
+    refresh may only run on the exact tree the pin just allowed."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_marker="aaa",
+        rust_source_rev="bbb",
+        cargo_bin_present=True,
+    )
+    from fno import update
+
+    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {"decision": "allow", "path": "/elsewhere/safe"},
+    )
+
+    def _no_refresh(source, *, force=False, dry_run=False):
+        raise AssertionError("_refresh_rust_bins must not run on a pin path mismatch")
+
+    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 1
+    assert "/elsewhere/safe" in result.stderr
 
 
 def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
@@ -2076,6 +2195,12 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
     monkeypatch.setattr(
         doctor, "_control_plane_arms_report", lambda: {"arms": [], "stale": [], "unknown_reason": None}
     )
+    # Same reasoning for the plugin-roots probe (`fno-agents plugin-install
+    # --check`): a legit advisory subprocess on machines with a cargo bin,
+    # stubbed so the tripwire isolates cargo, not the probe.
+    monkeypatch.setattr(
+        doctor, "_plugin_cache_report", lambda: {"status": "unknown"}
+    )
 
     from fno import update
 
@@ -2100,7 +2225,6 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
 
 def _fake_run(returncode: int, stdout: str):
     """Build a subprocess.run stub returning a fixed CompletedProcess."""
-    import subprocess
 
     def _run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
@@ -2588,32 +2712,42 @@ def test_fix_skips_the_install_when_the_agent_is_already_there(
     runner.invoke(app, ["doctor", "--fix"])
 
 
-def test_agent_scan_parses_last_exit_not_current_state(
+def test_agent_scan_maps_the_rust_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `-` in the PID column is normal for a periodic job; only col 2 counts."""
-    import subprocess as sp
+    """Doctor keeps the dead-list shape; the launchctl parse lives in the Rust fold."""
+    import fno.rust_binary as rust_binary
 
-    monkeypatch.setattr(doctor.sys, "platform", "darwin")
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/bin/launchctl")
-    listing = (
-        "PID\tStatus\tLabel\n"
-        "-\t0\tsh.fno.groom\n"
-        "-\t78\tsh.fno.pr-watcher\n"
-        "412\t0\tsh.fno.mux\n"
-        "-\t127\tcom.other.thing\n"
-        "-\t-\tsh.fno.idle\n"
+    stdout = json.dumps(
+        {
+            "launchd": {
+                "applicable": True,
+                "dead": [{"label": "com.user.autocorrect-watcher", "exit": 78}],
+            }
+        }
     )
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/true"))
     monkeypatch.setattr(
         doctor.subprocess,
         "run",
-        lambda *a, **kw: sp.CompletedProcess(a[0], 0, listing, ""),
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, stdout, ""),
     )
     report = doctor._launch_agent_failures()
     assert report["applicable"] is True
-    assert report["dead"] == [{"label": "sh.fno.pr-watcher", "exit": 78}], (
-        "only nonzero-exit sh.fno.* labels count; foreign labels and `-` do not"
+    assert report["dead"] == [{"label": "com.user.autocorrect-watcher", "exit": 78}], (
+        "exit 1 is the table's red verdict; the payload still parses, and the "
+        "autocorrect labels the old sh.fno. prefix filter missed now count"
     )
+
+
+def test_agent_scan_refuses_closed_without_a_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable fold reads not-applicable and fabricates no alarm."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    assert doctor._launch_agent_failures() == {"applicable": False, "dead": []}
 
 
 def test_never_run_remedy_is_platform_appropriate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2756,258 +2890,130 @@ def test_codex_app_server_report_live_listener_reads_present(tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
-# Deployed claude plugin cache freshness (x-4be1): the hooks Claude sessions
-# actually run come from ~/.claude/plugins/cache, not the wheel. Same
-# fresh|stale|unknown vocabulary; stale only on proven evidence.
+# Deployed fno plugin roots freshness: the Rust verb enumerates every root
+# (marketplace stage, registry installPath, orphan copies) and byte-checks
+# each against source HEAD. Same fresh|stale|unknown vocabulary; stale only
+# on proven evidence.
 # ---------------------------------------------------------------------------
 
 
-def _plugin_repo_with_two_commits(tmp_path: Path) -> tuple[Path, str, str]:
-    """A real git repo with two commits; returns (repo, old_sha, head_sha)."""
-    import subprocess
-
-    repo = tmp_path / "src"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    for cmd in (
-        ["config", "user.email", "t@t"],
-        ["config", "user.name", "t"],
-    ):
-        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
-    (repo / "f").write_text("1")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
-    old = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    (repo / "f").write_text("2")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "two"], check=True)
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    return repo, old, head
-
-
-def _write_plugin_registry(tmp_path: Path, sha: str) -> Path:
-    registry = tmp_path / "installed_plugins.json"
-    registry.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "plugins": {
-                    "fno@footnote": [
-                        {
-                            "scope": "user",
-                            "gitCommitSha": sha,
-                            "installedAt": "2026-08-13T04:48:50.501Z",
-                        }
-                    ]
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return registry
-
-
-def test_plugin_cache_pinned_at_head_is_fresh(tmp_path, monkeypatch):
-    repo, _old, head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    assert doctor._plugin_cache_report()["status"] == "fresh"
-
-
-def test_plugin_cache_pinned_at_ancestor_is_stale(tmp_path, monkeypatch):
-    repo, old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, old)
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    report = doctor._plugin_cache_report()
-    assert report["status"] == "stale"
-    assert report["sha"] == old
-    assert report["installed_at"] == "2026-08-13T04:48:50.501Z"
-
-
-def test_plugin_cache_foreign_sha_is_unknown_not_stale(tmp_path, monkeypatch):
-    """A sha this clone has never seen is unknown, never asserted stale."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor,
-        "_plugin_registry_path",
-        lambda: _write_plugin_registry(tmp_path, "0" * 40),
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    assert doctor._plugin_cache_report()["status"] == "unknown"
-
-
-def test_plugin_cache_missing_registry_is_unknown(tmp_path, monkeypatch):
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: tmp_path / "nope.json"
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    assert doctor._plugin_cache_report()["status"] == "unknown"
-
-
 def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
-    _repo, _old, head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
-    )
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
-    assert doctor._plugin_cache_report()["status"] == "unknown"
+    report = doctor._plugin_cache_report()
+    assert report["status"] == "unknown"
+    assert "no source checkout" in (report.get("detail") or "")
 
 
-def _write_shaless_registry(tmp_path: Path) -> Path:
-    """Registry for a directory-marketplace install: no gitCommitSha key."""
-    registry = tmp_path / "installed_plugins.json"
-    registry.write_text(
-        json.dumps({"version": 2, "plugins": {"fno@footnote": [{"scope": "user"}]}}),
-        encoding="utf-8",
-    )
-    return registry
-
-
-def _write_stage_marketplace(tmp_path: Path, stage_path: Path) -> Path:
-    marketplaces = tmp_path / "known_marketplaces.json"
-    marketplaces.write_text(
-        json.dumps(
-            {
-                "footnote": {
-                    "source": {"source": "directory", "path": str(stage_path)},
-                    "installLocation": str(stage_path),
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    return marketplaces
-
-
-_STAGE_STALE_JSON = json.dumps(
-    {
-        "status": "stale",
-        "stage": "/stage/fno",
+def _root_verdict(path: str, status: str, live: bool, **extra) -> dict:
+    drift = extra.get("differing_count", 0) + extra.get("missing_count", 0)
+    note = f" ({drift} file(s) differ from source HEAD)" if drift else ""
+    if status == "stale" and not live:
+        note += ". Fix: cd /src && fno config plugin install claude removes the stale second copy"
+    blocker = None
+    if status == "stale":
+        blocker = (
+            f"plugin root {path} ({'live' if live else 'second copy'}) differs from "
+            f"source HEAD in {drift} file(s) (e.g. {(extra.get('sample') or ['?'])[0]}). "
+            "Fix: cd /src && fno config plugin install claude"
+        )
+    verdict = {
+        "path": path,
+        "origin": "marketplace" if live else "registry",
+        "live": live,
+        "kind": "stage",
+        "status": status,
         "source": "/src",
         "source_head": "a" * 40,
-        "differing_count": 17,
+        "differing_count": 0,
         "missing_count": 0,
-        "sample": ["hooks/claim-heartbeat.sh"],
+        "sample": [],
+        "remedy": "cd /src && fno config plugin install claude",
         "detail": None,
+        "note": note,
+        "blocker": blocker,
     }
-)
+    verdict.update(extra)
+    return verdict
 
 
-def test_plugin_cache_directory_marketplace_stage_stale(tmp_path, monkeypatch):
-    """AC5-HP: no sha + directory marketplace -> the verdict is a byte check
-    of the stage against source HEAD, and the blocker names count + remedy."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
+def _roots_stdout(roots: list[dict], detail: str | None = None) -> str:
+    live = next((r for r in roots if r["live"]), None)
+    rank = {"fresh": 0, "absent": 0, "unknown": 1, "stale": 2}
+    worst = max(roots, key=lambda r: rank.get(r["status"], 1), default=None)
+    return json.dumps(
+        {
+            "status": (worst or {"status": "unknown"})["status"],
+            "sha": (live or {}).get("sha"),
+            "installed_at": None,
+            "kind": "stage" if (live or not roots) else None,
+            "stage": (live or {}).get("path"),
+            "remedy": (live or {}).get("remedy"),
+            "detail": detail,
+            "roots": roots,
+        }
     )
+
+
+def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypatch):
+    """Two roots with the non-live one stale: the fold keeps both under
+    roots, reads status stale, points the flat keys at the live root, and
+    the blocker names the stale second copy."""
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: tmp_path)
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     monkeypatch.setattr(
         doctor,
-        "_known_marketplaces_path",
-        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
+        "_run_stage_check",
+        lambda argv: (
+            3,
+            _roots_stdout(
+                [
+                    _root_verdict("/stage/fno", "fresh", True),
+                    _root_verdict(
+                        "/claude/plugins/cache/footnote/fno/0.3.2",
+                        "stale",
+                        False,
+                        differing_count=1422,
+                        sample=["hooks/king-delegation-guard.sh"],
+                    ),
+                ]
+            ),
+            "",
+        ),
     )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
-    monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (3, _STAGE_STALE_JSON, ""))
 
     report = doctor._plugin_cache_report()
 
-    assert report["kind"] == "stage"
     assert report["status"] == "stale"
-    assert report["differing_count"] == 17
+    assert report["kind"] == "stage"
+    assert report["stage"] == "/stage/fno"
+    assert len(report["roots"]) == 2
+    assert any("/claude/plugins/cache/footnote" in r["path"] for r in report["roots"])
     assert "fno config plugin install claude" in report["remedy"]
     blockers = doctor._blockers({"plugin_cache": report})
-    assert any("plugin stage" in b and "17 file(s)" in b for b in blockers)
-    assert any("hooks/claim-heartbeat.sh" in b for b in blockers)
-
-
-def test_stage_check_prefers_the_registry_install_location(tmp_path, monkeypatch):
-    """Claude execs from the plugin registry's installLocation; that path
-    wins over the marketplace path when both exist."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    registry = tmp_path / "installed_plugins.json"
-    registry.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "plugins": {
-                    "fno@footnote": [
-                        {"scope": "user", "installLocation": "/live/fno"}
-                    ]
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(doctor, "_plugin_registry_path", lambda: registry)
-    monkeypatch.setattr(
-        doctor,
-        "_known_marketplaces_path",
-        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
-    seen = {}
-
-    def _probe(argv):
-        seen["stage"] = argv[argv.index("--stage") + 1]
-        return 0, json.dumps({"status": "fresh"}), ""
-
-    monkeypatch.setattr(doctor, "_run_stage_check", _probe)
-
-    report = doctor._plugin_cache_report()
-
-    assert seen["stage"] == "/live/fno"
-    assert report["stage"] == "/live/fno"
+    assert any("second copy" in b and "1422 file(s)" in b for b in blockers)
+    assert any("hooks/king-delegation-guard.sh" in b for b in blockers)
 
 
 def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):
-    """AC5-ERR: a failed or timed-out stage probe is unknown with the reason
-    in detail, and adds no blocker."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_known_marketplaces_path",
-        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    """A failed or timed-out stage probe is unknown with the reason in
+    detail, adds no blocker, and reports no root as fresh."""
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: tmp_path)
     monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
-    monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (-1, "", "timeout expired"))
+    monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (1, "", "boom"))
 
     report = doctor._plugin_cache_report()
 
     assert report["kind"] == "stage"
     assert report["status"] == "unknown"
-    assert "timeout expired" in (report.get("detail") or "")
+    assert "boom" in (report.get("detail") or "")
+    assert report["roots"] == []
     assert doctor._blockers({"plugin_cache": report}) == []
 
 
 def test_plugin_cache_stage_check_needs_a_cargo_binary(tmp_path, monkeypatch):
     """No cargo fno-agents on the machine -> unknown naming the gap, never a
     false fresh (CI runners carry no ~/.cargo/bin)."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_known_marketplaces_path",
-        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
     monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: None)
 
     report = doctor._plugin_cache_report()
@@ -3015,118 +3021,6 @@ def test_plugin_cache_stage_check_needs_a_cargo_binary(tmp_path, monkeypatch):
     assert report["kind"] == "stage"
     assert report["status"] == "unknown"
     assert "no cargo fno-agents binary" in (report.get("detail") or "")
-
-
-def test_plugin_cache_non_directory_marketplace_keeps_registry_answer(tmp_path, monkeypatch):
-    """A sha-less entry with a non-directory marketplace keeps today's answer."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
-    )
-    marketplaces = tmp_path / "known_marketplaces.json"
-    marketplaces.write_text(
-        json.dumps({"footnote": {"source": {"source": "github", "repo": "x/y"}}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(doctor, "_known_marketplaces_path", lambda: marketplaces)
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-
-    report = doctor._plugin_cache_report()
-
-    assert report.get("kind") is None
-    assert report["detail"] == "installed_plugins.json carries no gitCommitSha"
-
-
-def _plugin_repo_with_hook_deletion(tmp_path: Path) -> tuple[Path, str]:
-    """Two commits: the first references hooks/demo-gate.sh, the second
-    deletes the script and its config entry together (the incident shape).
-    Returns (repo, base_sha)."""
-    import subprocess
-
-    repo = tmp_path / "src-hookdel"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    for cmd in (
-        ["config", "user.email", "t@t"],
-        ["config", "user.name", "t"],
-    ):
-        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
-    hooks = repo / "hooks"
-    hooks.mkdir()
-    (hooks / "hooks.json").write_text(
-        '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": ['
-        '{"type": "command", "command": '
-        '"python3 ${CLAUDE_PLUGIN_ROOT}/hooks/demo-gate.sh"}]}]}}',
-        encoding="utf-8",
-    )
-    (hooks / "demo-gate.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
-    base = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    (hooks / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
-    (hooks / "demo-gate.sh").unlink()
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "delete"], check=True)
-    return repo, base
-
-
-def test_plugin_cache_stale_names_deleted_hook_scripts(tmp_path, monkeypatch):
-    repo, base = _plugin_repo_with_hook_deletion(tmp_path)
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, base)
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    report = doctor._plugin_cache_report()
-    assert report["status"] == "stale"
-    assert report["deleted_hook_scripts"] == ["hooks/demo-gate.sh"]
-    blockers = doctor._blockers({"plugin_cache": report})
-    assert any("demo-gate.sh" in b and "drain live sessions" in b for b in blockers)
-
-
-def test_plugin_cache_stale_without_hook_deletion_stays_plain(tmp_path, monkeypatch):
-    # Lag without brick risk: same shape, but the referenced script survives
-    # the range as a stub, so the blocker must stay the plain stale line.
-    import subprocess
-
-    repo, base = _plugin_repo_with_hook_deletion(tmp_path)
-    # Re-add the path as a stub and amend the deleting commit into a stubbing
-    # one, so the range deletes nothing referenced at base.
-    (repo / "hooks" / "demo-gate.sh").write_text("# stub\nexit 0\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "--amend", "--no-edit", "-q"],
-        check=True,
-    )
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, base)
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    report = doctor._plugin_cache_report()
-    assert report["status"] == "stale"
-    assert "deleted_hook_scripts" not in report
-    blockers = doctor._blockers({"plugin_cache": report})
-    assert any("pre-HEAD bytes" in b for b in blockers)
-    assert not any("drain live sessions" in b for b in blockers)
-
-
-def test_plugin_cache_fresh_never_computes_the_range(tmp_path, monkeypatch):
-    import subprocess
-
-    repo, _base = _plugin_repo_with_hook_deletion(tmp_path)
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    monkeypatch.setattr(
-        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
-    )
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-    report = doctor._plugin_cache_report()
-    assert report["status"] == "fresh"
-    assert "deleted_hook_scripts" not in report
 
 
 # --- x-2486: the stale-cache line must name a command that can perform the fix ---

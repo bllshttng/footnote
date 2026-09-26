@@ -4,6 +4,8 @@ After a reboot or a killed mux server, every worker pane is gone. A pane's pty w
 
 ## Is this page for you?
 
+**Update:** the keeper now hosts every pane, so a restart is no longer "every worker pane is gone". A keeper-hosted pane re-adopts into the fresh server at its birth pane id. A stored leaf records that id at capture. The pane therefore returns to its own leaf instead of a fresh shell minting beside it. Restore's role shifts to the seats nobody holds. A portal whose viewer did not come back re-arms held. One whose viewer did come back re-arms live. A worker member whose pane is already live is focused, never spawned twice.
+
 You are bringing worker panes back after a reboot or a killed mux server, or choosing `[mux.restore] policy` in your config. This page owns what `hold`, `idle`, and `resume` do to worker members, and what the on-demand verb relaunches. Misreading it picks the wrong knob for your symptom. On 2026-09-04 an operator set `idle` to cut a 28-tab restore. `idle` does not govern tabs at all.
 
 Not for: the tab count. Tabs rebuild from each squad's stored tab trees under every policy value. No value restores zero tabs. Only `hold` skips tabs whose every slot binds a done worker. Held-pane and idle-row mechanics: [pane-worker-relaunch](pane-worker-relaunch.md). What a client reconnect preserves versus a server restart: [mux-restart-recovery](mux-restart-recovery.md).
@@ -34,7 +36,7 @@ The resume argv is not hardcoded. Each harness declares an `interactive_resume` 
 
 The resume lane is stricter than the attach lane, because the resume builder honors less. It fills exactly `{session_id}`. A `{short_id}` form is attach-only. A form promising a `pre_exec` daemon start is refused, never silently ignored. A harness the table gives no form is refused by name ("codex has no resume form; session ... is not resumable"). That is the honest dead row: a button that fails is worse than no button.
 
-Claude is the one special case, and not here. A live claude bg session is owned by its daemon and attaches through the existing path. A dead claude session resumes like everything else, through its declared `claude --resume <session_id>` form. Because a bare `claude --resume` on the main thread is unsafe, claude members first resolve a re-entry plan off the core loop. A member whose plan fails or is absent is refused, never resumed bare.
+Claude is the one special case. A claude member never resumes as a foreground `claude --resume` pane. It resolves a `revive` re-entry plan off the core loop (`fno-agents reentry-plan <name> --transition revive`), and the plan reads `claude agents --json --all`, never the files under `~/.claude/jobs/`. A running job attaches: `claude attach <job id>`. A listed job that is not running is respawned, then attached: `claude respawn <job id>`. An unlisted job comes back under its own id, then is attached: `claude --bg --resume <full session id>`. The seat runs that one argv, so it shows the session it just brought back. A member whose plan fails or is absent is refused, never resumed bare. The mux tap on a sideline row and the focus of a held pane take the same plan.
 
 ## Startup policy and the on-demand verb
 
@@ -71,11 +73,30 @@ Restore printed `never bound`. Is that session gone?
 
 Not necessarily. The label means fno holds no session id for the member. The spawn journal positively records the registry row's removal with an empty session field (`crates/fno/src/restore_liveness.rs:73`, `crates/fno/src/spawn_journal.rs:334`). It describes fno's reach, not the harness transcript's existence. fno cannot resume a session it holds no id for. The harness itself can, given the session id.
 
+## No spawn gate
+
+A revival re-seats a row that already held a seat, so it never asks the spawn gate and never needs `FNO_SPAWN_GATE=0`. That holds for the restore verb, the sideline tap, the held-pane focus and `fno agents resume`. Every restore member that can spawn resolves to a registry row, so no member is new, and the restore asks no headroom probe.
+
+## After a reboot, without a tap
+
+The first `fno-agents` daemon start of a boot revives the fleet on its own (`crates/fno-agents/src/boot_revival.rs`). It plans before the startup sweep rewrites a status. If a worker was live at the boot, it counts: a live-ish status, or an exit stamped after the boot began. If `claude agents --json --all` lists its job as stopped or failed and its node is still open, it revives. Kings go first, then the rest in parallel, each through `claude respawn <job id>`. One receipt row per worker, revived, skipped with its reason, or failed with its error, lands in `~/.fno/agents/boot-revival.json`. That file's boot stamp makes the pass run once per boot. If the listing cannot be read, the pass stamps nothing and runs again on the next daemon start. A row the pass never reached still revives on one tap. A tap refuses while the listing cannot be read, because a bg resume of a live session starts a copy.
+
 ## Files
 
-- `crates/fno/src/server.rs` - `declared_resume_form` (the thin view), `resume_one` (the shared gate walk), `workspace_restore_start` / `workspace_restore_apply` (the bulk driver), `restore_candidates`
+- `crates/fno/src/server/workspace_restore.rs` - the bulk driver (`workspace_restore_start` / `workspace_restore_apply`)
+- `crates/fno-agents/src/reentry.rs` - the claude re-entry plan, including the `revive` transition
+- `crates/fno-agents/src/boot_revival.rs` - the once-per-boot revival pass
+- `crates/fno/src/server.rs` - `declared_resume_form` (the thin view), `resume_one` (the shared gate walk), `restore_candidates`
 - `crates/fno/src/agents_view.rs` - `declared_form` (the one reader), `FormLane`, `resume_form`, `attach_form`
 - `crates/fno/src/mux_cli.rs` - `workspace` / `workspace_restore` CLI parsing and output
 - `crates/fno/src/proto.rs` - `ControlVerb::WorkspaceRestore`, `ServerMsg::WorkspaceRestored`, `RestoreRow`, the `RESTORE_NOT_RUN` error class
 - `crates/fno/src/digest_overlay.rs` - `MuxRestorePolicy` (hold | idle | resume)
 - `crates/fno/tests/server_spine.rs` - the wire-tolerance arms for the new reply
+
+## Three codex visibility levels, never conflated
+
+A codex thread can be visible three ways, and each is a different claim.
+
+1. Daemon listing. `thread/loaded/list` names the id. This proves the daemon hosts the thread, nothing about its content.
+2. Same-id read. `thread/read` answers for the id with its history intact. This is what the upgrade transaction verifies after a swap.
+3. Operator mobile visibility. The same id opens in ChatGPT mobile Remote Control and a new message loads there. This is the level the operator accepts on. A person reads it after merge. No test asserts it.

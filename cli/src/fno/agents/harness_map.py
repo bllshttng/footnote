@@ -681,6 +681,9 @@ def normalize_command(command: str, harness: str) -> str:
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if namespaced and prefix and first_word.startswith("/" + prefix):
             return cmd
+        # The Rust renderer's order: the row's prefix first, then agy, `fno:`.
+        if namespaced and prefix:
+            return "/" + prefix + verb + tail
         if namespaced and harness == "agy":
             return "/" + verb + tail
         if namespaced:
@@ -845,6 +848,11 @@ def check_loop_participation(harness: str, command: str) -> None:
     caps = capabilities(harness)
     participation = caps["loop_participation"]
     if participation == "native":
+        from fno.rust_binary import call_binary_json
+        args = ["readiness", "--pre-launch", "--harness", harness, "--command", command]
+        error, _ = call_binary_json("loop", args)
+        if error:
+            raise DispatchResolveError(error)
         return
     if participation == "extension" and caps.get("loop_extension"):
         if not _loop_extension_installed(harness):
@@ -1277,10 +1285,12 @@ def effort_values(harness: str) -> list[str]:
     return []
 
 
-#: claude's own --permission-mode vocabulary, its --help being the authority
-#: ; the CLI help and the doctor readout spell it from here.
+#: claude's own --permission-mode vocabulary. One home: the capability
+#: table's claude row (`permission_modes`), whose authority is claude's
+#: --help. The packaged copy this module already loads is the source, so the
+#: list cannot drift between the Rust and Python lanes.
 CLAUDE_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
+    tomllib.loads(_PACKAGED_CONTRACT_TEXT)["harness"]["claude"]["permission_modes"]
 )
 
 CLAUDE_PERMISSION_HELP = (
@@ -1316,57 +1326,6 @@ _BRIEF_MAX_BYTES = 8192
 
 #: The verbs the lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
-#: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
-_DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
-_RUNG_ANSWERS = {
-    "idea": "/blueprint",
-    "design": "/blueprint",
-    "ready": "/target",
-    "in_progress": "/target",
-    "in_review": "/target",
-}
-
-
-def resolve_effective_verb(
-    *,
-    verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
-    node_id: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    """The target/blueprint lifecycle conditional; full table:
-    docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides. The stored
-    ``verb`` reconciles through the table; out-of-family abstains to declared
-    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
-    Raises :class:`DispatchResolveError` on a refusal rung, or planless
-    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
-    refusal leads with ``node_id`` when the caller holds one, so the subject
-    of the failure is never read off a citation."""
-    raw_verb = (verb or "").strip()
-    if parse_verb_token(raw_verb):
-        raw_verb = canonical_verb_key(raw_verb)
-    if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
-        return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
-    if plan_rung is None:
-        return None, "verb=lifecycle(no-node-context)"
-    rung = plan_rung.strip().lower()
-    d = (difficulty or "").strip().lower()
-    if rung == "none" and d in _DIFFICULTY_ANSWERS:
-        answer = _DIFFICULTY_ANSWERS[d]
-        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
-    elif rung in _RUNG_ANSWERS:
-        answer = _RUNG_ANSWERS[rung]
-        note = f"verb=lifecycle(plan {rung} -> {answer}"
-    else:
-        who = f" for node {node_id}" if node_id else ""
-        raise DispatchResolveError(
-            f"dispatch verb cannot be derived{who}: plan rung {rung!r} with "
-            f"difficulty {d!r} answers no lifecycle rung"
-        )
-    if raw_verb and raw_verb != answer:
-        note += f"; stored dispatch_verb {raw_verb} reconciled"
-    return answer, note + ")"
 
 
 def resolve_dispatch(
@@ -1376,8 +1335,7 @@ def resolve_dispatch(
     node_id: Optional[str] = None,
     command: Optional[str] = None,
     verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
+    lifecycle: Optional[tuple[Optional[str], str]] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1391,11 +1349,7 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
-    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
-    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
-    an explicit command bypasses it (reconcile and the other explicit doors
-    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    per-harness builtin. ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
@@ -1409,14 +1363,11 @@ def resolve_dispatch(
     unsubstituted command, or an unanswerable node lifecycle.
     ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # The lifecycle rung derives the effective verb BEFORE the config read so
-    # the stage table resolves the DERIVED verb's profile row.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
-        lifecycle_verb, lifecycle_note = resolve_effective_verb(
-            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
-        )
-        decision.append(lifecycle_note)
+        if lifecycle is not None:
+            lifecycle_verb, lifecycle_note = lifecycle
+            decision.append(lifecycle_note)
     cfg = (
         dict(dispatch_cfg)
         if dispatch_cfg is not None
@@ -1630,14 +1581,8 @@ def resolve_dispatch(
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
-    # The loop gate, at the same choke point every spawn surface resolves
-    # through. It reads a CAPABILITY, never a harness name, and it fires after
-    # normalization so it judges the per-harness /target spelling the worker
-    # will actually receive. Deliberately not at registry load: an alien or
-    # one-shot dispatch must still resolve fine, matching the existing split
-    # where the load gate is a shape check and the dispatch gate is where a
-    # capability is required.
-    check_loop_participation(chosen_harness, template)
+    # Resolution is read-only. The spawn door checks loop readiness after it
+    # has the actual caller session context and before it launches a worker.
     # `{id}` must appear at least once; a template may reference it more than
     # once. A registry verb declaring takes_node_id=false is exempt: ignoring
     # the id is declared, not a dropped substitution.

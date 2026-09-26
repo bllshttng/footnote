@@ -315,12 +315,26 @@ fn default_true() -> bool {
 /// the client derives the age at render. Same decode both ways; floor 58.
 /// v78: `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-/// v79: `Layout.missions` carries the active-mission headers; floor stays 58.
+/// v87: `Layout.missions` removed (the band is gone); floor stays 58.
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
-/// the sideline nests only CHILD rows; floor stays 58.
-pub const PROTO_VERSION: u32 = 82;
+/// the sideline nests only CHILD rows; `BackendNotLive` also removed here.
+/// v84: `AgentRow.spawned_by_name` + `AgentRow.lineage_reason` (serde
+/// default), the parent's registry name and the birth's reason, derived
+/// server-side; floor stays 58.
+/// v85: `Command::DispatchPlan`, the card menu's Plan entry - the dispatch
+/// door pinned to the architect agent and the blueprint message; floor
+/// stays 58.
+/// v86: `AgentRow.pr_session_short` (serde default), the server-joined
+/// driving-session short id behind a PR row's attach handle; floor stays 58.
+/// v88: `AgentLaunchRequest.node` (serde default), the board's target key
+/// binds the launch to its node; floor stays 58.
+/// v89: `AgentRow.crown_name` (serde default), the crown's display name from
+/// the crown-name store file; floor stays 58.
+/// v90: `Command::ClosePortal` + `PaneInfo.portal` (serde default), the
+/// close-a-portal-only gesture and the seat's listing marker; floor stays 58.
+pub const PROTO_VERSION: u32 = 90;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -343,6 +357,12 @@ pub const FLOOR_SINCE_PROTO: u32 = 60;
 #[path = "proto_limits.rs"]
 mod limits;
 pub use limits::{BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME};
+
+#[path = "proto_err_code.rs"]
+pub mod err_code;
+
+pub mod agent_launch;
+pub use agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
 
 /// Refuse frames larger than this. A full 500x500 styled grid serializes to a
 /// few MB of JSON; 32MB is far above any real frame, low enough that a
@@ -492,6 +512,13 @@ pub enum ClientMsg {
     /// every search exit, and a no-match search_open has already dropped the
     /// state server-side).
     SearchClear { pane: u64 },
+    /// (v83, ) The sideline new-agent popup submits one typed launch
+    /// request. The server validates pre-birth, shells canonical
+    /// `fno agents spawn` OFF the core loop, and answers this client with
+    /// [`ServerMsg::AgentLaunch`] progress updates correlated by
+    /// `request_id`. Structured values only - the message rides stdin at
+    /// the spawn door, never an argv element.
+    AgentLaunch(crate::proto::agent_launch::AgentLaunchRequest),
 }
 
 /// A block-navigation walk direction (v8). `Prev` moves toward older blocks,
@@ -648,7 +675,18 @@ pub enum ControlVerb {
         command_done: bool,
     },
     /// Close a pane by id (the `ClosePane` cascade) -> [`ServerMsg::Ok`].
-    PaneKill { pane: u64 },
+    ///
+    /// With `hand_off_to` set, the pane is RELEASED rather than killed: its
+    /// keeper socket is renamed to that path, the pane leaves the layout
+    /// and the persisted squad, and the server drops its connection without
+    /// a Kill frame - a hangup the keeper survives with its child. The
+    /// field is additive, so the compatibility floor is unchanged and an
+    /// older client's PaneKill still means kill.
+    PaneKill {
+        pane: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hand_off_to: Option<String>,
+    },
     /// Acquire the writer claim on a claim-eligible pane (v5) ->
     /// [`ServerMsg::Ok`] / [`ServerMsg::Err`]. While held, human `Input` to
     /// the pane bounces with BEL + a `busy: relay` notice; `PaneSend` (the
@@ -979,6 +1017,7 @@ pub struct LayoutTreeChild {
     pub tree: LayoutTreeSpec,
 }
 
+pub use crate::proto_pane::PaneInfo;
 pub use crate::proto_slot::{LayoutBinding, LayoutSlot, PortalSlot};
 
 /// A versioned anchored layout (v44): a typed [`LayoutTreeSpec`] plus
@@ -995,10 +1034,11 @@ pub struct AnchoredLayoutSpec {
 /// Why a paneless registry-backed agent cannot take the third row-action branch.
 /// The client renders this only after pane focus, daemon attach, and dead-row
 /// resume have all been ruled out. Missing fields from pre-v53 rows remain the
-/// generic compatibility notice. The enum is NOT additive-tolerant; a new
-/// variant bumps `PROTO_VERSION` (53 -> 54 for `BackendNotLive`, 56 -> 57 for
-/// `LivenessUnmeasured`) so older peers are rejected by the handshake before
-/// they decode this row.
+/// generic compatibility notice. The enum is NOT additive-tolerant; a variant
+/// added or removed bumps `PROTO_VERSION` (53 -> 54 for the v82-removed
+/// `BackendNotLive`, 56 -> 57 for `LivenessUnmeasured`, 81 -> 82 for the
+/// removal) so older peers are rejected by the handshake before they decode
+/// this row.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNoPaneReason {
@@ -1006,11 +1046,9 @@ pub enum AgentNoPaneReason {
     MissingHarness,
     MissingSessionId,
     UnsupportedHarness,
-    BackendNotLive,
     /// (v57) The liveness reading is absent: no confirmed-dead pid and
-    /// no confirmed-live backend either. Distinct from `BackendNotLive`
-    /// because that variant asserts a falsified backend; this one says the
-    /// reading does not exist and names the check to run instead.
+    /// no confirmed-live backend. Says the reading does not exist and names
+    /// the check to run instead.
     LivenessUnmeasured,
 }
 
@@ -1225,6 +1263,12 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
+    /// (v89) The crown's display name (`Barnaby II`), read from the mux's
+    /// crown-name store file (`crown_names.json` beside the registry).
+    /// `None` = unnamed or no store file. Additive, `#[serde(default)]`,
+    /// so the floor stays put.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown_name: Option<String>,
     /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
@@ -1234,6 +1278,19 @@ pub struct AgentRow {
     /// (v82) Served CHILD/PEER word; `child` nests, `peer`/absent renders flat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_kind: Option<String>,
+    /// (v84) The registry NAME of the row `spawned_by_session` points at,
+    /// derived once per row set server-side (agents_view::merge_rows).
+    /// `None` when the edge names no row in the set or the id is claimed
+    /// by two different names. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_name: Option<String>,
+    /// (v84) Why a birth names no parent session (a v33 registry field,
+    /// read straight off the row). `None` when the row carries a parent
+    /// edge or predates the field. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_reason: Option<String>,
     /// (v49) The row's own harness session id (claude/codex uuid),
     /// the join key for `spawned_by_session`. Same value the registry row
     /// carries; `None` for a row the registry wrote without one.
@@ -1268,6 +1325,13 @@ pub struct AgentRow {
     /// v48 reader wire-tolerant (defaults false = today's behavior).
     #[serde(default)]
     pub resumable: bool,
+    /// (v86) The driving session's SHORT id for a PR row, resolved
+    /// server-side from the graph (the live claim holder's session, else
+    /// the node's last do/ship session). The PR row's attach handle; `None`
+    /// = no session known, and the row says so. `#[serde(default)]` keeps a
+    /// v85 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_session_short: Option<String>,
     /// (v54) Why the row reaches the final paneless notice branch. This is
     /// derived from the registry's authoritative harness/session fields on
     /// the server; `None` means the row is pane-hosted, attachable, synthetic,
@@ -1442,6 +1506,13 @@ pub enum Command {
     SplitH,
     SplitV,
     ClosePane,
+    /// (v90) Close ONLY the portal seat `seat` - the viewer pane - never the
+    /// row it shows: removing a row is not removing a pane, and closing a
+    /// portal is its own gesture. Fail-closed: a pane that is no live portal
+    /// seat, or the session's last pane, gets a notice and stays open.
+    ClosePortal {
+        seat: u64,
+    },
     FocusDir(Dir),
     ResizeDir(Dir),
     /// Move one seam under a mouse drag on a divider. The seam is
@@ -1596,6 +1667,16 @@ pub enum Command {
     /// (v31) `account` rides the same session-local active-account
     /// passthrough as `DispatchNext`; `None` = the default account.
     DispatchNode {
+        node: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
+    /// (v85) The card menu's Plan entry: the same dispatch door and gates as
+    /// [`Command::DispatchNode`], with the spawn pinned to the architect
+    /// sub-agent and the blueprint message, so a planner launches for the
+    /// node without leaving the mux. The server's freshness re-check and the
+    /// door's own spawn gate answer exactly as they do for a dispatch.
+    DispatchPlan {
         node: String,
         #[serde(default)]
         account: Option<String>,
@@ -1793,14 +1874,9 @@ pub enum Command {
         name: String,
         text: String,
     },
-    /// (v34) Respawn an EXITED claude bg row from the peek overlay (`r`).
-    /// The server resolves `name` fail-closed, refuses a still-live row, refuses
-    /// a row with no recorded `claude_session_uuid` (which also covers non-claude
-    /// providers, since `derive_rows` carries the uuid only for claude rows),
-    /// shape-validates the uuid before it reaches argv, then shells `fno agents
-    /// spawn <name> --resume <uuid> --substrate bg` OFF-loop. The 1s registry
-    /// poll owns the row flipping live; the notice is advisory (fact beats
-    /// report). Rides revive-in-place: the porcelain is shelled as-is.
+    /// (v34) Run `fno agents resume <name>` for a row selected by the mux
+    /// Resume gesture. The door owns harness routing and race-time refusals;
+    /// its result returns as the gesture's notice.
     RespawnAgent {
         name: String,
     },
@@ -2094,12 +2170,6 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
-        /// (v79) Active-mission progress headers, in their own lane so `squads`
-        /// carries only real workspaces. A mission is a header the client draws
-        /// as the `~ missions` band, never a workspace section, so a row grouped
-        /// under one would be drawn by no section at all and vanish.
-        #[serde(default)]
-        missions: Vec<SquadMeta>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2237,6 +2307,11 @@ pub enum ServerMsg {
         name: String,
         lines: Vec<String>,
     },
+    /// (v83, ) Progress for one sideline launch attempt, sent only to
+    /// the requesting client. `Starting` may be followed by at most one
+    /// terminal state per request; a duplicate submission is answered with
+    /// the SAME attempt, never a second spawn.
+    AgentLaunch(crate::proto::agent_launch::AgentLaunchUpdate),
     // -- v41 (layout-api) control-verb replies --
     /// Answer to [`ControlVerb::TabLs`].
     TabList { tabs: Vec<TabInfo> },
@@ -2403,67 +2478,6 @@ pub struct TabLayout {
     pub workers: Option<Vec<TabPaneOccupant>>,
 }
 
-/// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
-/// canonical root; `child_pid` is `None` only if the OS never reported one.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaneInfo {
-    pub pane_id: u64,
-    pub squad_id: u64,
-    /// The live workspace name, when this pane belongs to a named workspace.
-    /// Additive so workspace maintenance can apply `--include-named` to tabs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub squad_name: Option<String>,
-    pub tab_id: u64,
-    pub cwd: String,
-    pub child_pid: Option<u32>,
-    pub title: Option<String>,
-    /// Positive shell-integrated evidence that this pane is pristine and idle.
-    /// Missing/false is never treated as empty by a cleanup caller.
-    #[serde(default)]
-    pub pristine_idle_shell: bool,
-    /// (v65) The pane ran something and sits at a prompt NOW: shell
-    /// integration measured, no command running, a completed block. Narrower
-    /// than `!pristine_idle_shell` (which also covers running and unmeasured
-    /// panes): a cleanup caller may close on this, never the bare negation.
-    /// `#[serde(default)]` keeps a pre-v65 reader wire-tolerant.
-    #[serde(default)]
-    pub shell_idle: bool,
-    /// (v51) The pane's tab name and 1-based ordinal, so the human
-    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` mid-teardown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_ordinal: Option<usize>,
-    /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
-    /// server-side from the registry join the mux already caches. `None` for a
-    /// pane with no registry row (an ad-hoc shell). Powers `pane ls --fno-id`
-    /// and the reverse direction of `where` (Locked Decision 6).
-    #[serde(default)]
-    pub fno_id: Option<String>,
-    /// (v71) Hosts a stored member judged Dead; the default prune closes its
-    /// tab. `#[serde(default)]`: a v68 payload reads false.
-    #[serde(default)]
-    pub orphaned_worker: bool,
-    /// When the release tier fired, the evidence the release rode:
-    /// `reaped <harness> <session id> at <ts>: <basis>`. Additive like
-    /// `orphaned_worker`; absent on every other pane and every other tier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release: Option<String>,
-    /// The joined row's classified lineage: the CURRENT harness
-    /// session the row answers as, the succession chain it retired, and the
-    /// fork edge of a parallel branch. `fno_id` stays the stable thread join;
-    /// these print BESIDE it so a retired id never reads as current.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub predecessor_session_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from_session_id: Option<String>,
-    /// (v51) The pane's spawn-captured `FNO_AGENT_SELF` identity.
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
 /// exit code (AC4-EDGE: timeout is tellable apart from a match and a settle).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2509,62 +2523,6 @@ pub struct BlockMeta {
 
 /// `ServerMsg::Err` codes. One namespace so the CLI's exit-code mapping and
 /// the server's error construction never drift.
-pub mod err_code {
-    /// A pane id that no live pane owns (read/send/wait/kill).
-    pub const DEAD_PANE: u32 = 1;
-    /// A control connection whose `proto` disagrees with the server (AC4-FR).
-    pub const VERSION_SKEW: u32 = 2;
-    /// `PaneRun` could not spawn the child (no PTY, argv not executable).
-    pub const SPAWN_FAILED: u32 = 3;
-    /// A malformed request the server could parse but not act on.
-    pub const BAD_REQUEST: u32 = 4;
-    /// (v6) A block read that cannot be answered: an evicted or nonexistent
-    /// block, or a specific `seq` requested on a markerless pane.
-    pub const BLOCK_UNAVAILABLE: u32 = 5;
-    /// (v21) A guarded `PaneSend` refused: the target pane is not provably idle
-    /// (busy/blocked agent) or a live relay holds its writer claim. The bytes
-    /// did not land; the caller retries or overrides with `--force`.
-    pub const TARGET_NOT_IDLE: u32 = 6;
-    /// (v41, layout-api) `PaneWhere` could not read the agents registry (missing
-    /// / unreadable / mid-write partial JSON). DISTINCT from NOT_FOUND: the id
-    /// might exist; the lookup itself failed. Never an empty-success (Locked 4).
-    pub const REGISTRY_UNAVAILABLE: u32 = 7;
-    /// (v41, layout-api) `PaneWhere`: the `fno_id` is absent from the registry.
-    pub const NOT_FOUND: u32 = 8;
-    /// (v41, layout-api) `PaneWhere`: the `fno_id` is in the registry but hosts
-    /// no live pane (a paneless bg/headless session). DISTINCT from NOT_FOUND so
-    /// a script can branch (Locked 4).
-    pub const NOT_PANE_HOSTED: u32 = 9;
-    /// (v42) `LayoutApply`: a fixed-arity template got the wrong slot
-    /// count (e.g. `grid-2x2` with 3 slots). Pre-mutation, atomic.
-    pub const TEMPLATE_ARITY: u32 = 10;
-    /// (v42) `LayoutApply`: the template's slots cannot tile the tab's
-    /// viewport above `MIN_ROWS x MIN_COLS`. The refusal names the overflowing
-    /// slots; the tab is left completely unchanged (atomic).
-    pub const TEMPLATE_UNFITTABLE: u32 = 11;
-    /// (v42) `LayoutApply`: an unknown template name. Pre-mutation, atomic.
-    pub const TEMPLATE_UNKNOWN: u32 = 12;
-    /// `PaneFocus`: the pane exists but no non-passive client is attached, so
-    /// there is no viewer to move. DISTINCT from [`DEAD_PANE`] on purpose: "your
-    /// pane is gone" and "nobody is watching" are different problems, and
-    /// collapsing them leaves the operator unable to tell which one they have.
-    pub const NO_CLIENT: u32 = 13;
-    /// (v51) The addressed identity disagrees with the pane's captured
-    /// identity or its unique registry occupant; no bytes were typed.
-    pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
-    /// (v60) `WorkspaceRestore` arrived before the session's first real
-    /// attach, so the persisted squads were never read into memory and an empty
-    /// member list would read as "nothing to restore". The refusal names the
-    /// attach precondition; the store is untouched.
-    pub const RESTORE_NOT_RUN: u32 = 15;
-    /// (v61) `PaneSend` targeted a pane whose registry row is DND.
-    /// The bytes did not land; use mail send to queue durable until release.
-    pub const TARGET_DND: u32 = 16;
-    /// (v75) `RetireSession`'s durable half failed: the store write
-    /// did not land, so the retirement is NOT durable and the caller retries
-    /// the whole verb.
-    pub const STORE_WRITE_FAILED: u32 = 17;
-}
 
 /// One pane inside a [`TabMeta`] (v22): the leaf id the session
 /// navigator's goto targets plus a derived, display-only `label` (the running
@@ -2599,19 +2557,6 @@ pub struct TabMeta {
     /// (empty -> the navigator simply lists no plain panes for the tab).
     #[serde(default)]
     pub panes: Vec<PaneMeta>,
-}
-
-/// High bit of a synthetic "mission squad" `SquadMeta.id` (a render-time
-/// grouping header with no backing session squad - see `derive_missions`).
-/// Real squad ids are monotonic starting at 1, so this bit never collides.
-/// Shared between server (minting) and client (recognizing a virtual id
-/// needs no server round-trip to expand/collapse or place a pane into).
-pub const MISSION_SQUAD_BASE: u64 = 1 << 63;
-
-/// Whether a `SquadMeta.id` names a synthetic mission squad rather than a
-/// real session squad.
-pub fn is_mission_squad(id: u64) -> bool {
-    id & MISSION_SQUAD_BASE != 0
 }
 
 /// One squad's catalog entry inside [`ServerMsg::Layout`]. Identity is the
@@ -2908,6 +2853,7 @@ impl TestMuxDir {
             std::process::id(),
             std::thread::current().id()
         ));
+        crate::test_keeper_cleanup::reap(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         Self(dir)
     }
@@ -2916,6 +2862,7 @@ impl TestMuxDir {
 #[cfg(test)]
 impl Drop for TestMuxDir {
     fn drop(&mut self) {
+        crate::test_keeper_cleanup::reap(&self.0);
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -3440,39 +3387,9 @@ pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
     }
 }
 
-/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
-/// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
-/// nothing. A bare-init container never reaps an adopted orphan, so waiting
-/// out a grace window for ESRCH there never converges; a zombie
-/// must read as gone the moment it is observed.
-#[cfg(target_os = "linux")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::pid_t,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    written == size && info.pbi_status == libc::SZOMB
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn pid_is_zombie(_pid: i32) -> bool {
-    false
-}
+/// The zombie read; extracted beside its siblings for the file budget.
+mod pid_state;
+pub use pid_state::pid_is_zombie;
 
 /// True only when `kill(pid, 0)` proves `pid` is dead: ESRCH is the sole
 /// unambiguous signal. Any other outcome - alive, or an error like EPERM
@@ -3480,10 +3397,16 @@ pub fn pid_is_zombie(_pid: i32) -> bool {
 /// reads as not-provably-dead. The single implementation for a read that
 /// three call sites (kill-server's pre-check, its poll loop, and the
 /// server's own respawn-vs-alive check) each duplicated inline before
-///, which is exactly the shape that lets one of them drift.
+///, which is exactly the shape that lets one of them drift. A reachable
+/// ZOMBIE also reads as dead: it is unreaped (its parent may be slow, or a
+/// bare-init container never reaps at all), holds no fds, and serves
+/// nothing, so waiting out ESRCH would never converge.
 pub fn pid_confirmed_dead(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
-    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if result != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    pid_is_zombie(pid)
 }
 
 /// Every file a session leaves beside its name: the socket, the wire-version
@@ -4131,7 +4054,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 82);
+        assert_eq!(PROTO_VERSION, 90);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4421,6 +4344,8 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,
@@ -4469,13 +4394,17 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
                         no_pane_reason: None,
                         pane_activity: None,
+                        pr_session_short: None,
                     },
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,
@@ -4508,11 +4437,13 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        crown_name: None,
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
                         no_pane_reason: None,
                         pane_activity: None,
+                        pr_session_short: None,
                     },
                 ],
                 focus_node: Some("x-cccc".into()),
@@ -4548,7 +4479,6 @@ mod tests {
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
                 sweep_dead_count: 0,
-                missions: Vec::new(),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
@@ -4621,6 +4551,11 @@ mod tests {
     // the same rule; the RetireSession entries ride the moved lists.
     #[path = "control_roundtrip_tests.rs"]
     mod control_roundtrip_tests;
+    // The zombie-read family: an unreaped exit reads as dead on both
+    // helpers pinned here, so the two-call `|| pid_is_zombie` dance at the
+    // callers never needs repeating.
+    #[path = "pid_zombie_tests.rs"]
+    mod pid_zombie_tests;
 
     #[test]
     fn proto_session_name_cannot_escape_mux_dir() {

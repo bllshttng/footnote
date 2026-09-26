@@ -62,6 +62,16 @@ if [[ ! -x "$REAL_BIN" ]]; then
     exit 77
 fi
 
+# The event store's rows verb lives in the fno CLI binary, not fno-agents.
+CLI_BIN="${REPO_ROOT}/crates/fno/target/debug/fno"
+if [[ ! -x "$CLI_BIN" ]]; then
+    CLI_BIN="$(command -v fno || true)"
+fi
+if [[ -z "$CLI_BIN" || ! -x "$CLI_BIN" ]]; then
+    skip "fno CLI binary not found; run: cd crates/fno && cargo build"
+    exit 77
+fi
+
 MUX_BIN="${REPO_ROOT}/crates/fno/target/debug/fno"
 if [[ ! -x "$MUX_BIN" ]]; then
     cargo build --quiet --manifest-path "${REPO_ROOT}/crates/fno/Cargo.toml" --bin fno \
@@ -314,14 +324,27 @@ PY
 }
 
 assert_delivery_artifacts() {
-    local dir="$1" session_id="$2" events
+    local dir="$1" session_id="$2" events rows
     events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
-    grep -q '^status: done$' "$dir/plan.md" || return 1
-    grep -q '"type":"delivery_verdict_evaluated"' "$events" || return 1
-    grep -q 'DoneDelivery' "$events" || return 1
-    grep -q '"type":"session_finalized"' "$events" || return 1
-    grep -R -q "session: \`${session_id}\`" "$dir/handoffs" || return 1
-    grep -R -q 'fno-delivery://x-delivery-e2e/attempt-e2e/' "$dir/handoffs" || return 1
+    # The store commit is the write boundary: grep the committed rows, never
+    # the raw file (the same contract Case A reads through). The verb returns
+    # envelope lines as escaped JSON strings; jq -r unwraps them so the
+    # needles below match the rows the way every other reader sees them.
+    rows="$("$CLI_BIN" doctor event rows --events "$events" 2>/dev/null | jq -r '.[]' 2>/dev/null || true)"
+    # Each miss names itself on stderr: one red line that says WHICH artifact
+    # is absent beats a bare rc=1 when the case has five conjuncts.
+    grep -q '^status: done$' "$dir/plan.md" \
+        || { echo "assert_delivery_artifacts: plan.md is not stamped done" >&2; return 1; }
+    printf '%s' "$rows" | grep -q '"type":"delivery_verdict_evaluated"' \
+        || { echo "assert_delivery_artifacts: delivery_verdict_evaluated row missing" >&2; return 1; }
+    printf '%s' "$rows" | grep -q 'DoneDelivery' \
+        || { echo "assert_delivery_artifacts: DoneDelivery terminal missing" >&2; return 1; }
+    printf '%s' "$rows" | grep -q '"type":"session_finalized"' \
+        || { echo "assert_delivery_artifacts: session_finalized row missing" >&2; return 1; }
+    grep -R -q "session: \`${session_id}\`" "$dir/handoffs" \
+        || { echo "assert_delivery_artifacts: handoff session line missing" >&2; return 1; }
+    grep -R -q 'fno-delivery://x-delivery-e2e/attempt-e2e/' "$dir/handoffs" \
+        || { echo "assert_delivery_artifacts: handoff receipt missing" >&2; return 1; }
     PROJECT_DIR="$dir" uv run --project "${REPO_ROOT}/cli" python - <<'PY'
 import os
 import sqlite3
@@ -439,14 +462,14 @@ STATE
     fi
 
     PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
-    if [[ ! -f "$PROJ_EVENTS" ]]; then
-        fail "Case A: project events.jsonl not created at $PROJ_EVENTS"
+    # The store commit is the write boundary: grep the committed rows, never
+    # the raw file (the hook's termination event leaves no byte trace).
+    ROWS="$("$CLI_BIN" doctor event rows --events "$PROJ_EVENTS" 2>&1 || true)"
+    if ! printf '%s' "$ROWS" | grep -q 'termination'; then
+        fail "Case A: termination event missing in committed rows; content: $ROWS"
         ca_ok=false
-    elif ! grep -q '"termination"' "$PROJ_EVENTS" 2>/dev/null; then
-        fail "Case A: termination event missing in events.jsonl; content: $(cat "$PROJ_EVENTS")"
-        ca_ok=false
-    elif ! grep -q 'DonePRGreen' "$PROJ_EVENTS" 2>/dev/null; then
-        fail "Case A: DonePRGreen missing in events.jsonl; content: $(cat "$PROJ_EVENTS")"
+    elif ! printf '%s' "$ROWS" | grep -q 'DonePRGreen'; then
+        fail "Case A: DonePRGreen missing in committed rows; content: $ROWS"
         ca_ok=false
     fi
 
@@ -644,17 +667,15 @@ STATE
     fi
 
     PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
-    if [[ ! -f "$PROJ_EVENTS" ]]; then
-        fail "Case C: project events.jsonl not created"
+    ROWS="$("$CLI_BIN" doctor event rows --events "$PROJ_EVENTS" 2>&1 || true)"
+    if ! printf '%s' "$ROWS" | grep -q 'termination'; then
+        fail "Case C: termination event missing in committed rows; content: $ROWS"
         cc_ok=false
-    elif ! grep -q '"termination"' "$PROJ_EVENTS" 2>/dev/null; then
-        fail "Case C: termination event missing in events.jsonl; content: $(cat "$PROJ_EVENTS")"
+    elif ! printf '%s' "$ROWS" | grep -q 'Budget'; then
+        fail "Case C: Budget missing in termination event; content: $ROWS"
         cc_ok=false
-    elif ! grep -q 'Budget' "$PROJ_EVENTS" 2>/dev/null; then
-        fail "Case C: Budget missing in termination event; content: $(cat "$PROJ_EVENTS")"
-        cc_ok=false
-    elif ! grep -q 'cost' "$PROJ_EVENTS" 2>/dev/null; then
-        fail "Case C: axis=cost missing in termination event; content: $(cat "$PROJ_EVENTS")"
+    elif ! printf '%s' "$ROWS" | grep -q 'cost'; then
+        fail "Case C: axis=cost missing in termination event; content: $ROWS"
         cc_ok=false
     fi
 

@@ -286,7 +286,6 @@ Two spawns are never picked for, whatever the knob says:
 One read-only verb reporting the store's real condition, exiting non-zero when anything is wrong:
 
 - a record whose stored credential duplicates another's (two ids, one account)
-- a stored credential past its expiry
 - a `config_dir` that is missing or holds no login
 - a tainted slot
 - a shared-slot account with no proven identity bound (why its usage reads `unknown`)
@@ -325,7 +324,8 @@ The on-disk `~/.claude/.credentials.json` is a third source: the usage probe rea
 Reconciliation resolves both and refuses with `ambiguous-slot` when they name different accounts: that is not a tie to break, because whichever was stamped, some reader would get the other one.
 Every distinct candidate must prove, and they must all name one account.
 No candidate is set aside, whatever the reason it did not prove: a 401 rejects an access token while its refresh token may still be live, so `claude` can refresh that account straight back into the slot it reads first, and an unanswered call says nothing at all.
-The same rule reaches the usage probe, which reports `unknown` for a slot presenting more than one distinct credential however well the bearer it holds proves out, since `claude` reads the scoped Keychain item first while the probe reads the unscoped one.
+
+The same rule reaches the usage probe. A slot proving more than one distinct principal reports `unknown`, however well the bearer it holds proves out. The platform split causes this. `claude` reads the scoped Keychain item first, while the probe reads the unscoped one. The earlier version counted credentials instead. A machine running a claude daemon always writes its own scoped Keychain item. One account presented twice therefore read as ambiguous, and the operator's own usage went dark.
 Capture-before-overwrite reads the same candidates, so the two cannot disagree about which credential belongs to a record; with more than one distinct credential present it captures nothing, since a lost rotated token is recoverable with a login while another account's credential filed under this record is silent.
 The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
 A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
@@ -383,13 +383,13 @@ The verdict is `matched`, `mismatch`, `ambiguous` or `unknown`. Only one of them
 
 A reading is bound to the credential generation that produced it. Identity is proven before the usage request, which stops another account's numbers being fetched at all. A sign-in that lands after the request is a separate window, and a reading from it is discarded with `identity_changed`. The marker matters as much as the discard: a missing snapshot alone reads exactly like a probe that never ran.
 
-The accounts list and the Connections modal carry an identity column. The modal renders the cell that `fno config accounts list` prints, so one renderer states every token, and a row states who its credential is proved to serve. A matched row names its own record. A mismatch renders `!serves <record>`. The active stamp names the account that put a credential in the slot. The slot credential presents as the named record. The row shows both instead of papering over the gap. `?<reason>` marks anything unproved, and two credential roots observing one principal flag `!shared-identity`. A row never names an account it did not prove. The fix for a drift is the manual one: sign out and back in with a foreground `/logout` and `/login`, or re-register.
+The accounts list and the Connections modal carry an identity column. The modal renders the cell that `fno config accounts list` prints, so one renderer states every token, and a row states who its credential is proved to serve. A matched row names its own record. A mismatch renders `!serves <record>`. The active stamp names the account that put a credential in the slot. The slot credential presents as the named record. The row shows both instead of papering over the gap. `?<reason>` marks anything unproved, and two credential roots observing one principal flag `!shared-identity`. A row never names an account it did not prove. To keep the account that is signed in, run `fno config accounts reconcile-slot claude`. To move to another account, follow the switch in the section below.
 
-One lane fact, observed on Claude Code 2.1.266. The Keychain item is chosen by whether `CLAUDE_CONFIG_DIR` is set at all, not by which account will read it. A daemon-spawned background session receives its token at spawn and never reads the Keychain. A login change therefore reaches new spawns only.
+One lane fact, observed on Claude Code 2.1.266. The Keychain item is chosen by whether `CLAUDE_CONFIG_DIR` is set at all, not by which account will read it. An interactive `claude` reads the unscoped `Claude Code-credentials` item. A daemon-hosted background session reads the scoped `Claude Code-credentials-<hash>` item, where the hash is the first 8 hex of the sha256 of `$HOME/.claude`. A login reaches a running session on its next request, with no restart.
 
 ### Switching claude accounts is manual, by design
 
-Two claude accounts on one machine are two separate session stores, and that separation is the point. The operator signs out of canonical `claude` and signs back in as the other account. It takes about a minute, and live sessions need remote control re-enabled afterwards.
+Two claude accounts on one machine are two separate session stores, and that separation is the point. The operator signs in as the other account twice, and never runs `/logout` first. A logout can revoke the refresh token of the account you leave, and every stored copy of that account then stops working. A plain `claude /login` moves interactive sessions. `CLAUDE_CONFIG_DIR=$HOME/.claude claude /login` moves the background fleet. Blocked sessions recover on their next request, so no daemon bounce and no respawn is needed. The second login also makes the two items agree, which clears the ambiguous-slot finding. `fno config accounts use` is not the switch yet, because it writes a stored copy whose refresh token the live session has already spent.
 
 A second account can instead keep its own credential directory (`--config-dir ~/.claude-alt`). Its transcript folders are often symlinks back into canonical. Sharing transcripts never merges credential identity. The binding reads the Keychain item scoped to that directory, plus that directory's own `.credentials.json`. Neither source is a transcript.
 
@@ -498,9 +498,9 @@ The paragraph below is the superseded theory, kept as the historical record of t
 
 `fno agents resume` is two arms, and only one of them relaunches in theory. The theory held that a reachable supervisor gets `claude attach <short_id>`. That opens a session that was still running. So the route already lives in that process, and no attach can lose it. (Superseded 2026-08-23, see the table above.)
 
-A 2026-08-15 incident found the theory does not hold for a *blocked* row. A supervisor can be registered as reachable and still sit at a populated prompt, with no live model turn in flight. `claude attach` run non-interactively has no pty, so it prints "Attaching..." and exits having done nothing. When nothing happened at all, that silence reads as "the route was fine". The Python fallback now treats the live arm the same as a relaunch, for routing purposes. It lives in `resume_cli.py`, active under `FNO_AGENTS_RUNTIME=python` or whenever no Rust binary is installed. It restores `route_settings_path` into the attaching subprocess's env, and allocates its own pty via `script -q /dev/null`. A row already Working, Idle, or Done skips both: no wake means no restore, so a stale route file there is not a refusal. It injects an optional message as three bracketed-paste-safe writes. Then it verifies the row's live status actually reached `Working` before reporting success, or exits 16 otherwise. This is strictly more defensive than "nothing to do". When the target process really is alive with its own correct env, restoring the route is a no-op. When it was not, restoring the route is the fix.
+A 2026-08-15 incident found the theory does not hold for a *blocked* row. A supervisor can be registered as reachable and still sit at a populated prompt. It can have no model turn in flight. Non-interactive `claude attach` has no pty. It can print "Attaching..." and exit without delivery. The Rust live arm reads the target account's Claude roster. When a message was requested, it refuses `working` or `done` rows. It sends the wrapped message over `control.sock` and confirms it in the transcript. Python no longer wakes Claude rows.
 
-**The Rust arm now reaches the same fix, by delegation**. `resume` is in `RUST_CLIENT_VERBS`, so it auto-routes to the installed `fno-agents` daemon binary whenever one is present, which is the default. Reading only the Python path once led to the wrong conclusion, that resume can never lose a route. An exited row gets `claude --resume <uuid>` from Rust's own dead-row arm. That arm already restores a recorded route through `--settings` before this fix, unchanged here. The live-attach arm used to exec `claude attach <short_id>` directly with no pty, the same silent no-op the Python fallback closed. It now shells out to `fno agents resume <name>` with `FNO_AGENTS_RUNTIME=python` pinned in the child env, rather than re-deriving the pty and bracketed-paste recipe a second time. Calling `fno-py` directly works by accident today. It shells out through the front door on purpose, so a future default-runtime flip cannot reopen the `RUST_CLIENT_VERBS` re-exec loop. Both binaries now reach the one verified implementation for a live row. See the backlog's Rust-side route-restore investigation for the history behind this split.
+**The Rust arm owns live Claude resume directly.** The `resume` verb routes to the installed `fno-agents` binary because it is in `RUST_CLIENT_VERBS`. Its `claude_live_route` reads the plan-pinned account roster. It delivers wrapped messages over `control.sock`. It no longer delegates to Python or pins `FNO_AGENTS_RUNTIME=python`. Python `resume_cli.py` refuses Claude rows with exit 13. The dead-row `claude --resume <uuid>` arm still restores recorded routes through `--settings`.
 
 Both doors apply the same usability rule, not just an existence check: a recorded
 file that is missing, unparseable, or carries only the auth-scrub floor all
@@ -717,9 +717,7 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 
 **`fno`: command not found**
 
-`fno` is installed as a script by the `footnote` package. Run via
-`uv run fno ...` from the `cli/` directory, or install the package into your
-virtualenv with `uv pip install -e cli/`.
+To install `fno`, follow [Verify it worked](getting-started.md#verify-it-worked). In a dev checkout, run `uv run fno ...` from the `cli/` directory, or install the package into your virtualenv with `uv pip install -e cli/`.
 
 **OAuth refresh failing through the symlink**
 
@@ -1204,6 +1202,18 @@ When a subagent dispatch needs to pick a provider, `agents.dispatch_target.resol
 Per-agent pins win over combos when both are configured for the same agent: combos compose with per-agent routing as additional fallback, not replacement.
 
 Unknown combo (in env or settings) logs a WARNING and falls through to the next rule. `ComboNotFoundError` is reserved for `dispatch_with_combo` itself (the silent-bypass-blocker that callers can catch and fall through cleanly).
+
+### What chooses the account a spawn bills
+
+`accounts.active` is rung four of `agents.dispatch_target.resolve_dispatch_target`. Failover and outage-handoff routes read it. It is a rotation pointer, not a spawn default. For a spawn, `agents.spawn_defaults.inject_spawn_defaults` checks the lane, then `agents.profiles.<verb>.account`, then `agents.defaults.account`. An explicit `--account` is the CLI pin.
+
+| Reading | Where it shows | What it means |
+|---|---|---|
+| `accounts.active` | `fno config get accounts.active` | the rotation pointer for failover. A project file overrides the global one. It is one key across harnesses. |
+| the list star | `fno config accounts list`, `*` | which managed record put the credential in the harness slot (the slot stamp) |
+| the identity cell | the same list, `identity=` | which account the slot credential serves, when proved |
+
+Pinning a default is `agents.defaults.account`, and it is the operator's call because it moves billing.
 
 ### Cursor state
 

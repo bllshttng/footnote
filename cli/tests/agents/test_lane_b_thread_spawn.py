@@ -15,7 +15,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,6 +37,23 @@ from fno.agents.harness_map import (
 from fno.agents.harnesses.pi import pi_model, pi_provider
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
+
+
+@pytest.fixture(autouse=True)
+def _rust_posture_door(monkeypatch):
+    """Pin the launch-posture door to THIS checkout's fno-agents build.
+
+    complete_launch_argv resolves the posture through the Rust owner, so a
+    stale installed binary must not answer for this tree; skip where the
+    checkout has none (the same contract conftest.native_backlog_door
+    implements)."""
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
 
 
 def _fake_keeper(monkeypatch, tmp_path):
@@ -48,15 +64,47 @@ def _fake_keeper(monkeypatch, tmp_path):
     """
     recorded: dict[str, object] = {}
 
+    real_popen = subprocess.Popen
+
     class _FakeProc:
         pid = 4242
+
+        args: list[str] = []
 
         def kill(self) -> None:  # pragma: no cover - failure paths only
             recorded["killed"] = True
 
+        def __enter__(self) -> "_FakeProc":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def wait(self, timeout: object = None) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def communicate(self, input: object = None, timeout: object = None):
+            return ("", "")
+
     def _fake_popen(argv, **kwargs):  # noqa: ANN001, ANN202
+        # The keeper stub sits on the shared subprocess module, so the launch-
+        # posture door (the fno-agents binary behind complete_launch_argv)
+        # must pass through to the real Popen: faking it would break
+        # subprocess.run's own context-manager use and starve the door.
+        if argv and str(argv[0]).endswith("fno-agents"):
+            return real_popen(argv, **kwargs)
+        # Only the keeper launch is the behavior under test. Native event
+        # commits (subprocess.run -> Popen with the fno CLI) ride the real
+        # binary, or the emit is starved and the capture clobbered.
+        if "--keeper" not in [str(part) for part in argv]:
+            return real_popen(argv, **kwargs)
         recorded["argv"] = argv
-        return _FakeProc()
+        proc = _FakeProc()
+        proc.args = list(argv)
+        return proc
 
     def _fake_identify(sock, timeout_sec=10.0):  # noqa: ANN001
         argv = list(recorded["argv"])  # type: ignore[arg-type]
@@ -376,7 +424,16 @@ def test_lane_b_spawn_kills_the_keeper_when_identify_disagrees(
     def _wrong_identify(sock, timeout_sec=10.0):  # noqa: ANN001
         return {"v": 1, "keeper_pid": 4242, "child_pid": 555, "session_id": "other"}
 
-    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", lambda *a, **k: _LiveProc())
+    # Same pass-through as _fake_keeper: the launch-posture door must reach
+    # the real binary; only the KEEPER Popen is faked.
+    real_popen = subprocess.Popen
+
+    def _live_popen(argv, **kwargs):  # noqa: ANN001, ANN202
+        if argv and str(argv[0]).endswith("fno-agents"):
+            return real_popen(argv, **kwargs)
+        return _LiveProc()
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", _live_popen)
     monkeypatch.setattr(dispatch_mod, "_keeper_identify", _wrong_identify)
     with pytest.raises(DispatchAskError) as exc_info:
         _lane_b_thread_spawn(name="wk-wrong", harness="pi", cwd=lane_b_home)
@@ -389,7 +446,13 @@ def test_lane_b_spawn_kills_the_keeper_when_identify_disagrees(
             return 2  # exited at the bind refusal: the socket is not ours
 
     recorded.clear()
-    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", lambda *a, **k: _DeadProc())
+
+    def _dead_popen(argv, **kwargs):  # noqa: ANN001, ANN202
+        if argv and str(argv[0]).endswith("fno-agents"):
+            return real_popen(argv, **kwargs)
+        return _DeadProc()
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", _dead_popen)
     with pytest.raises(DispatchAskError) as exc_info:
         _lane_b_thread_spawn(name="wk-collide", harness="pi", cwd=lane_b_home)
     assert "another keeper still holds" in str(exc_info.value)
@@ -440,9 +503,7 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
     # basetemp does not: rewrite the isolated state root to a short tmp dir
     # (use_tmpdir's docstring invites overwriting the settings file).
     settings = lane_b_home / ".fno" / "settings.yaml"
-    short_state = Path(
-        tempfile.mkdtemp(prefix="fno-laneb-")
-    )  # noqa: PTH103 - lifetime is this one journey test
+    short_state = short_bind_root("fno-laneb-")  # lifetime is this one journey test
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",
         encoding="utf-8",
@@ -586,7 +647,7 @@ def test_stop_agent_kills_a_keeper_row_over_its_own_socket(lane_b_home) -> None:
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not (the same rewrite the journey test below makes).
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-stoppy.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -616,7 +677,7 @@ def test_stop_agent_refuses_a_keeper_that_never_confirms(lane_b_home) -> None:
     from fno.agents.dispatch import DispatchAskError, _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-stubborn.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -659,7 +720,7 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     from fno.agents.dispatch import _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-", dir="/tmp"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-vanish.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -734,7 +795,7 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
     # pytest tmpdir can exceed it, which would make bind fail and this test
     # pass vacuously. The test asserts the bind and the accepted frames, so
     # neither failure mode is silent.
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-", dir="/tmp"))
+    short_state = short_bind_root("fno-laneb-cursor-")
     sock = short_state / "mux" / "threads" / "wk-cursor-stop.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -852,7 +913,7 @@ def test_lane_b_cursor_agent_keeper_argv_carries_trust_and_grant(
     from fno.agents import dispatch as d
 
     monkeypatch.setattr(
-        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None, **k: minted
     )
     _lane_b_thread_spawn(
         name="wk-cursor-argv", harness="cursor-agent", cwd=lane_b_home
@@ -910,7 +971,7 @@ def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
     from fno.agents import dispatch as d
 
     monkeypatch.setattr(
-        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None, **k: minted
     )
     _lane_b_thread_spawn(
         name="wk-agy-argv",
@@ -932,6 +993,28 @@ def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
         "print mode exits after one turn; a keeper thread must host the TUI"
     )
     assert argv[argv.index("--pane-key") + 1] == minted
+
+
+def test_lane_b_agy_default_argv_unchanged(lane_b_home, monkeypatch, capsys) -> None:
+    """No permission flags: the keeper argv keeps today's shape (declared
+    --conversation form + the lane-default bypass), and stderr names the
+    posture once so the launch is never silent about its bypass."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    minted = "3f2c9a11-2222-4333-8444-555566667777"
+
+    from fno.agents import dispatch as d
+
+    monkeypatch.setattr(
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None, **k: minted
+    )
+    _lane_b_thread_spawn(name="wk-agy-def", harness="agy", cwd=lane_b_home)
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail[:2] == ["agy", "--conversation", minted][:2]
+    assert "--dangerously-skip-permissions" in tail
+    assert "--mode" not in tail and "--sandbox" not in tail
+    err = capsys.readouterr().err
+    assert "agy posture: bypass (lane-default)" in err
 
 
 def test_lane_b_agy_trusts_the_cwd_before_the_keeper_launches(
@@ -1044,7 +1127,7 @@ def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
 
     # AF_UNIX caps sun_path at 104 bytes and the pytest basetemp does not fit,
     # the same short-path move the keeper spawn itself makes.
-    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    short = short_bind_root("fnok-")
     sock_path = short / "k.sock"
     modal = _frame(1, b"Do you trust the contents of this project?\n")
     ready = _frame(1, b"? for shortcuts")
@@ -1110,7 +1193,7 @@ def test_a_modal_arriving_with_the_marker_is_still_answered() -> None:
     """
     from fno.agents.dispatch import _keeper_seed_submit
 
-    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    short = short_bind_root("fnok-")
     sock_path = short / "k.sock"
     modal = _frame(1, b"Do you trust the contents of this project?\n")
     ready = _frame(1, b"? for shortcuts")

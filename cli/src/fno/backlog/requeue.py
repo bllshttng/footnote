@@ -115,6 +115,18 @@ def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Opti
             raise typer.Exit(code=3)
         node["locked_by"] = None
         node["locked_at"] = None
+        # session_id is the lock's mirror (_normalize_lock_fields keeps it
+        # equal to locked_by): leaving it set re-materializes the holder on
+        # the next write, so the release clears the whole lock family.
+        node["session_id"] = None
+        node["locked_by_harness"] = None
+        node["locked_by_harness_session"] = None
+        # The keeper cannot derive plan rungs; a released row returns to the
+        # state it was claimed from (ready, or idea for an undesigned plan).
+        if node.get("status") == "in_progress":
+            from fno.graph.ladder import Rung, plan_rung
+
+            node["status"] = "idea" if plan_rung(node) in (Rung.IDEA, Rung.NONE) else "ready"
         return entries
 
     commit_rows_via_store(_graph_path(), mutator)
@@ -259,7 +271,11 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         )
         if reach.verdict == REACHABLE:
             from datetime import datetime, timezone
+            from fno.graph.maintain import abandoned_do_rows, do_row_idle_s
 
+            why = next((a.reason for a in abandoned_do_rows([{**row, "locked_by": None}], set(), strict=False) if a.session_id == r.get("session_id") and a.verdict == "held"), None)
+            if why is None:
+                continue
             # reap-open is NOT named here: this worker reads reachable, so a
             # death claim would be false. The owner's honest self-close is.
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -267,7 +283,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
                 f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
                 "a reachable worker still owns the do window. If that session is "
                 f"yours and has stopped this node: fno backlog session add {node_id} "
-                f"--phase do --ended-at {now}",
+                f"--phase do --ended-at {now}. The do row stays: {why}.",
                 err=True,
             )
             raise typer.Exit(code=3)
@@ -287,7 +303,9 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
 
     # `working, 0 samples` names a corpse and `working, 31 samples` names a
     # worker. None is a harness that keeps no transcript, never a zero.
-    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
+    from datetime import datetime, timezone
+    from fno.graph.maintain import do_row_idle_s
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s")), "row_idle_s": do_row_idle_s(row, r, datetime.now(timezone.utc).timestamp())} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))

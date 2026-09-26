@@ -12,7 +12,7 @@ Design constraints (locked):
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
     Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
-  - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
+  - PATH from default_agent_path (fixed install dirs), never the caller's env
 """
 
 from __future__ import annotations
@@ -153,6 +153,20 @@ def _xml_escape(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def default_agent_path(fno_binary: str = "fno") -> str:
+    entries = [str(Path(fno_binary).parent)] if "/" in fno_binary else []
+    entries += [p for p in (str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin",
+                            "/usr/local/bin", "/usr/bin", "/bin") if p not in entries]
+    return ":".join(entries)
+
+def _write_if_changed(plist_path: Path, plist_text: str) -> bool:
+    if plist_path.exists() and plist_path.read_text(encoding="utf-8") == plist_text:
+        return False
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_text, encoding="utf-8")
+    return True
+
+
 def _augment_path(install_path: str) -> str:
     """Ensure ~/.local/bin and /opt/homebrew/bin are in PATH."""
     entries = [p for p in install_path.split(":") if p]
@@ -175,7 +189,7 @@ def render_plist(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
 ) -> str:
     """Render the plist XML string.  No filesystem writes.
@@ -196,7 +210,7 @@ def render_plist(
     log_out = str(fno_state / "pr-watcher.out.log")
     log_err = str(fno_state / "pr-watcher.err.log")
 
-    augmented_path = _augment_path(install_path)
+    augmented_path = _augment_path(install_path or default_agent_path(fno_binary))
 
     return _PLIST_TEMPLATE.format(
         label=_xml_escape(_LABEL),
@@ -445,10 +459,11 @@ def refresh_watcher(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
     defer_when_ticking: bool = False,
     caller: str = "unknown",
+    force_bounce: bool = False,
 ) -> tuple[str, int]:
     """Re-render the plist onto the current binary, then bounce. Post-update hook.
 
@@ -469,10 +484,11 @@ def refresh_watcher(
             install_path=install_path,
             interval=interval,
         )
-        launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(plist_text, encoding="utf-8")
+        changed = _write_if_changed(plist_path, plist_text)
     except OSError as exc:
         return (f"failed to write plist {plist_path}: {exc}", 1)
+    if not changed and not force_bounce:
+        return (f"plist unchanged; not re-registered ({caller})", 0)
     return bounce(
         plist_path=plist_path, defer_when_ticking=defer_when_ticking, caller=caller
     )
@@ -530,7 +546,6 @@ def install(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
     dry_run: bool = False,
     activate: bool = True,
@@ -543,8 +558,6 @@ def install(
         Where to write ``sh.fno.pr-watcher.plist``.
     fno_binary:
         Absolute path to the ``fno`` binary.
-    install_path:
-        ``$PATH`` at install time.
     interval:
         Poll interval in seconds.
     dry_run:
@@ -557,7 +570,6 @@ def install(
     plist_text = render_plist(
         launch_agents_dir=launch_agents_dir,
         fno_binary=fno_binary,
-        install_path=install_path,
         interval=interval,
     )
 
@@ -615,7 +627,6 @@ def ensure_activated(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
 ) -> str:
     """Idempotently install + load the watcher.  Non-interactive, never raises.
@@ -642,7 +653,6 @@ def ensure_activated(
         plist_text = render_plist(
             launch_agents_dir=launch_agents_dir,
             fno_binary=fno_binary,
-            install_path=install_path,
             interval=interval,
         )
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
@@ -731,6 +741,54 @@ def tick_end_bits(end: dict) -> list[str]:
     return bits
 
 
+#: The unarmed readout is static: the arm command is the whole answer, and
+#: shelling the Rust renderer for a constant pays a spawn on every status.
+_HEAL_UNARMED = (
+    "Heal: unarmed (auto_heal.enabled=false; "
+    "arm with: fno config set auto_heal.enabled true)"
+)
+
+
+def heal_status_line(events_path: Optional[Path] = None) -> str:
+    """The one ``Heal:`` readout line printed by status, install and refresh.
+
+    Rendered by ``fno-agents pr-heal --status`` (Rust owns the journal and
+    pid-file reads; this side passes only the arm bit and the journal, the
+    way ``_heal_phase`` already shells ``pr-heal``). Unarmed answers without
+    the binary: the arm command is the whole answer. Any readout failure
+    degrades to a line that says so, never silence.
+    """
+    try:
+        from fno.config import load_settings
+
+        settings = load_settings()
+    except Exception:  # noqa: BLE001 - an unreadable config reads unarmed
+        settings = None
+    armed = bool(getattr(getattr(settings, "auto_heal", None), "enabled", False))
+    if not armed:
+        return _HEAL_UNARMED
+    try:
+        import subprocess
+
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            raise RuntimeError("fno-agents binary not found")
+        argv = [str(binary), "pr-heal", "--status", "--armed"]
+        if events_path is not None:
+            argv += ["--events-file", str(events_path)]
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=15
+        )
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("Heal:")]
+        if proc.returncode != 0 or not lines:
+            raise RuntimeError(f"pr-heal --status exited {proc.returncode}")
+        return lines[-1]
+    except Exception as exc:  # noqa: BLE001 - the readout never raises
+        return f"Heal: armed; readout unavailable ({exc})"
+
+
 def status(
     *,
     launch_agents_dir: Path,
@@ -756,6 +814,10 @@ def status(
     typer.echo(f"Verdict:      {report['verdict']} ({report['detail']})")
     if report.get("fix"):
         typer.echo(f"Fix:          {report['fix']}")
+    # The heal arm state sits beside the verdict: the operator's report "I
+    # have never seen the healer do anything" was unanswerable from a
+    # readout that printed nothing about it.
+    typer.echo(heal_status_line(events_path))
     typer.echo(f"Last tick:    {marks['last_tick'] or '(no tick recorded)'}")
     typer.echo(f"Last attempt: {marks['last_attempt'] or '(no attempt recorded)'}")
     end = marks["last_end"]
@@ -815,14 +877,8 @@ def status(
     open_count = _observed_open_pr_count(state_path)
     typer.echo(f"Open PRs:     {open_count}")
 
-    # Parked PRs from watermark store
-    parked = _parked_prs(state_path)
-    if parked:
-        typer.echo(f"Parked PRs ({len(parked)}):")
-        for key, reason in parked.items():
-            typer.echo(f"  {key}: {reason}")
-    else:
-        typer.echo("Parked PRs:   none")
+    # Parked PRs, read by the one owner (fno-agents pr-park list).
+    _parked_block(events_path, state_path)
 
 
 def _tick_watermarks(events_path: Optional[Path]) -> dict:
@@ -848,20 +904,41 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         except Exception:
             return marks
 
-    if not events_path.exists():
+    store_exists = False
+    try:
+        from fno.events.store_client import store_db_path
+
+        store_exists = store_db_path(events_path).exists()
+    except Exception:
+        store_exists = False
+
+    if not events_path.exists() and not store_exists:
         return marks
 
     chunks_by_receipt: dict[str, list[dict]] = {}
     try:
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-                if not isinstance(ev, dict):
+        # The store commit is the write boundary: committed rows are the
+        # history. A journal with no store beside it (pre-store daemon, a
+        # seeded fixture) is still read from its raw bytes.
+        if store_exists:
+            from fno.events.store_client import query_rows
+
+            rows: "list[dict]" = query_rows(events_path)
+        else:
+            rows = []
+            for line in events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
                     continue
-            except json.JSONDecodeError:
+                try:
+                    ev = json.loads(line)
+                    if isinstance(ev, dict):
+                        rows.append(ev)
+                except json.JSONDecodeError:
+                    continue
+
+        for ev in rows:
+            if not isinstance(ev, dict):
                 continue
             etype = ev.get("type")
             if etype == "pr_watch_sweep_chunk":
@@ -905,7 +982,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
                 del recent[:-_RECENT_ENDS_KEEP]
-    except OSError:
+    except Exception:
         pass
     return marks
 
@@ -970,37 +1047,79 @@ def _valid_completed_tick(
     return {"ts": ts, "swept_count": swept_count}
 
 
-def _parked_prs(state_path: Optional[Path]) -> dict:
-    """Return observed-cache and pending-delivery parked outcomes."""
-    if state_path is None:
-        try:
-            from fno.pr_watch._state import pr_watcher_state_path
+def _parked_block(events_path: Optional[Path], state_path: Optional[Path]) -> None:
+    """The parked block, read by the one owner: fno-agents pr-park list.
 
-            state_path = pr_watcher_state_path()
-        except Exception:
-            return {}
-
+    Port of the in-Python `_parked_prs` store reader (law d-b6cc1a2a): the
+    action adds the buckets, the node join and the recovered failure detail
+    the flat dict never carried. The action takes the config-resolved paths
+    so a state-dir override still reads the right files.
+    """
     from fno.pr_watch._dispatch import _delivery_state_path
+    from fno.pr_watch._state import pr_watcher_state_path
+    from fno.rust_binary import resolve_binary
 
-    delivery_path = _delivery_state_path(state_path)
-    parked = {}
-    for path, label in ((state_path, ""), (delivery_path, " [delivery]")):
-        if not path.exists():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        parked.update(
-            {
-                f"{key}{label}": entry.get("parked")
-                for key, entry in data.items()
-                if isinstance(entry, dict) and entry.get("parked")
-            }
-        )
-    return parked
+    try:
+        from fno.paths import state_dir
+
+        fno_state = state_dir()
+    except Exception:
+        # No bare HOME/.fno fallback here: the state-dir path gate forbids
+        # the literal, and an unreadable state dir is a degrade-and-say-so.
+        typer.echo("Parked PRs:   (state dir unreadable)")
+        return
+    base = Path(state_path) if state_path is not None else pr_watcher_state_path()
+    if events_path is None:
+        events_path = fno_state / "events.jsonl"
+    err_log = fno_state / "pr-watcher.err.log"
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Parked PRs:   (fno-agents binary unavailable)")
+        return
+    cmd = [
+        str(binary), "pr-park", "list", "--json",
+        "--state", str(base),
+        "--delivery", str(_delivery_state_path(base)),
+        "--events", str(events_path),
+        "--err-log", str(err_log),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception:
+        typer.echo("Parked PRs:   (pr-park action unreadable)")
+        return
+    # A nonzero exit is a failed read, not an empty store: reporting "none"
+    # here would dress a broken action up as a clean board.
+    if proc.returncode != 0:
+        typer.echo("Parked PRs:   (pr-park action unreadable)")
+        return
+    try:
+        rows = json.loads(proc.stdout or "{}").get("rows", [])
+    except Exception:
+        typer.echo("Parked PRs:   (pr-park action unreadable)")
+        return
+    buckets = [r.get("bucket") for r in rows]
+    open_rows = [r for r in rows if r.get("bucket") == "open"]
+    finished = buckets.count("finished")
+    header = buckets.count("foreign")
+    if not rows:
+        typer.echo("Parked PRs:   none")
+        return
+    typer.echo(
+        f"Parked PRs ({len(open_rows)} open, {finished} finished, {header} foreign):"
+    )
+    for r in open_rows:
+        age = r.get("age_hours")
+        age_s = "?" if age is None or age < 0 else f"{age}h"
+        detail = r.get("reason_detail") or r.get("reason") or ""
+        node = r.get("node") or "-"
+        node_status = r.get("node_status") or "no node status"
+        typer.echo(f"  {r.get('key')}  {detail} ({age_s}, node {node}, {node_status})")
+    if finished:
+        typer.echo(f"  finished: {finished} (the sweep marks these handled)")
+    if header:
+        typer.echo(f"  foreign: {header} (other repos, left alone)")
 
 
 # ---------------------------------------------------------------------------

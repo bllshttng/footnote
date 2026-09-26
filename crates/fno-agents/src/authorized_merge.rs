@@ -20,22 +20,33 @@ use std::process::Command;
 
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
+use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
 use crate::paths::canonical_repo_root;
+
+/// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
+/// (600s) round up with margin to 60 minutes.
+const MERGE_SLOT_TTL_MS: i64 = 60 * 60 * 1000;
+/// The receipt text derives its minute count from here, so a retuned TTL
+/// never leaves the wording stale.
+const MERGE_SLOT_TTL_MINUTES: i64 = MERGE_SLOT_TTL_MS / 60_000;
 
 /// What the caller wants to happen once the decision clears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
-    /// Merge now (`fno do pr merge`).
     Merge,
-    /// Arm GitHub's auto-merge queue (`finalize` at a green terminal).
     Arm,
+    /// Answer "may this PR head merge now?" and run nothing, write nothing:
+    /// never takes, renews or releases the merge slot. `fno do pr status`
+    /// reads this receipt as `ready`.
+    Preview,
 }
 
 impl Effect {
     fn word(self) -> &'static str {
         match self {
             Effect::Merge => "merge",
+            Effect::Preview => "preview",
             Effect::Arm => "arm",
         }
     }
@@ -43,8 +54,56 @@ impl Effect {
     fn parse(raw: &str) -> Option<Effect> {
         match raw {
             "merge" => Some(Effect::Merge),
+            "preview" => Some(Effect::Preview),
             "arm" => Some(Effect::Arm),
             _ => None,
+        }
+    }
+}
+
+/// One gate's answer, named so a reader can key on the word a status read
+/// has always shown (`review_in_flight`, `merge_slot_held`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocker {
+    pub code: String,
+    pub class: BlockerClass,
+    pub detail: String,
+}
+
+/// How a blocked preview reads. The classes mirror the receipt words a
+/// caller already knows, so the verdict doc keeps one vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockerClass {
+    /// Retryable: the same command later can succeed.
+    Held,
+    /// Needs an operator action. Retrying changes nothing.
+    Refused,
+    /// An instrument could not answer. Never a verdict.
+    Unknown,
+}
+
+impl Blocker {
+    pub fn held(code: &str, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            class: BlockerClass::Held,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn refused(code: &str, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            class: BlockerClass::Refused,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn unknown(code: &str, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            class: BlockerClass::Unknown,
+            detail: detail.into(),
         }
     }
 }
@@ -185,6 +244,30 @@ pub struct Request {
     /// coverage status receipt) and then asks again for the effect, which
     /// re-runs the whole chain. Nothing is merged or armed on this pass.
     pub decide_only: bool,
+    /// Which caller asks: `"durable_grant"` (the watcher's merge phase) or
+    /// absent/`"manifest"` (the interactive verb). On the durable-grant lane a
+    /// red verdict is the state a working session is in while it pushes fixes,
+    /// so it holds; spending a retry on it parked six open PRs in one
+    /// afternoon. The interactive lane keeps `Failed`, where the
+    /// `merge_status=failed` stamp is the worker's signal to stop.
+    pub authority: Option<String>,
+    /// Merge-side flake acceptance, passed by the merge verb (`--accept-flake`).
+    pub accept_flake: bool,
+    /// Preview-supplied facts, so a preview ask never spawns `fno do pr
+    /// status` for what its caller already computed. When a field is absent
+    /// the walk reads its own probes instead.
+    pub supplied_verdict: Option<String>,
+    /// The rollup counts behind `supplied_verdict`, so the walk can name the
+    /// KIND of red (`ci_cancelled_retrigger`, `commit_status_red`) the way
+    /// the status read always has.
+    pub supplied_counts: Option<Value>,
+    pub supplied_rerun_recovered: Option<bool>,
+    /// `Some(Some(n))` = n unresolved; `Some(None)` = the read answered
+    /// unknown; None = not supplied (probe instead).
+    pub supplied_optional_unresolved: Option<Option<i64>>,
+    /// GitHub's own merge-hold words, as status computed them (`github_blocked`,
+    /// `github_behind`, ...). Absent: the walk derives them from `checks_read`.
+    pub supplied_github_blockers: Option<Vec<String>>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -238,6 +321,24 @@ pub struct PrFacts {
     pub armed: bool,
 }
 
+/// One `fno do pr status` read, both facts. `verdict` is the CI word the
+/// checks arm has always matched on. `github_block` is GitHub's own hold on
+/// the merge, named with the context it is missing, from the same payload:
+/// the door used to parse this JSON and keep one key of twenty-six.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecksRead {
+    pub verdict: String,
+    pub github_block: Option<String>,
+    /// From the same status payload: unresolved OPTIONAL review findings.
+    /// `Some(None)` = the payload answered unknown; None = no answer at all.
+    pub optional_unresolved: Option<Option<i64>>,
+    /// From the same status payload: CI was red, then green on rerun without
+    /// a fresh review. Some(false) or None never holds.
+    pub rerun_recovered: Option<bool>,
+    /// The check names the rerun recovered from, for the hold's own reason.
+    pub rerun_failures: Option<Vec<String>>,
+}
+
 /// The outside world, injectable so the decision is testable without a network.
 pub trait Probes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String>;
@@ -251,14 +352,37 @@ pub trait Probes {
     fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn require_fresh_ci(&self, cwd: &Path) -> bool;
-    /// `green` | `red` | `pending` | `unknown`.
-    fn checks_verdict(&self, cwd: &Path, pr: u64) -> String;
+    /// The PR number holding `merge-slot:<base_ref>` when the claim reads
+    /// `Live` or `Suspect`. `Free`/`Stale` read `Ok(None)`. `Corrupted` or an
+    /// unparseable holder is `Err`.
+    fn slot_holder(&self, cwd: &Path, base_ref: &str) -> Result<Option<u64>, String>;
+    /// Take the merge slot for `pr` on a bounded TTL lease.
+    fn take_slot(&self, cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String>;
+    /// Release the merge slot if `pr` still holds it. Errors are ignored:
+    /// release is best-effort, and the TTL is the backstop.
+    fn release_slot(&self, cwd: &Path, base_ref: &str, pr: u64);
+    /// The four verdict words `green` | `red` | `pending` | `unknown`, plus
+    /// GitHub's own ruleset hold when the same payload names one.
+    fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead;
     fn covered_head(&self, cwd: &Path) -> Option<String>;
     fn auto_merge_enabled(&self, cwd: &Path) -> bool;
     fn posture_floor_block(&self, cwd: &Path) -> Option<String>;
     fn strategy(&self, cwd: &Path) -> String;
     /// Run `gh` with these arguments. `Ok((success, combined_output))`.
     fn run_gh(&self, cwd: &Path, args: &[String]) -> Result<(bool, String), String>;
+    /// Shell the `fno` CLI for a gate probe: `Ok((exit_code, stdout, stderr))`,
+    /// None code = signal death. The coverage and fidelity gates ride this, so
+    /// Fake-based tests answer the gates without a network.
+    fn fno_shell(
+        &self,
+        cwd: &Path,
+        args: &[String],
+    ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String>;
+    /// Live parallel-lane claims. The default 0 keeps the overlap gate
+    /// disarmed wherever an impl does not count lanes (the sequential default).
+    fn live_lanes(&self, _cwd: &Path) -> usize {
+        0
+    }
 }
 
 /// A cleared decision: the effect may run, pinned to this head.
@@ -278,10 +402,32 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         .pr_facts(cwd, request.pr)
         .map_err(|reason| Outcome::Unknown { reason })?;
 
+    // The preview arm answers the same gates read-only and never reaches an
+    // effect: `fno do pr status` reads its receipt as `ready`.
+    if request.effect == Effect::Preview {
+        return match preview_walk(probes, request, &facts) {
+            PreviewVerdict::Go { .. } => {
+                let head = facts.head_sha.clone();
+                Ok(Authorized {
+                    facts,
+                    head,
+                    strategy: probes.strategy(cwd),
+                })
+            }
+            PreviewVerdict::Blocked(blockers) => Err(Outcome::Held {
+                reason: blockers
+                    .iter()
+                    .map(|b| b.detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            }),
+        };
+    }
+
     // A merged or closed PR has no would-merge left. Every guard below protects
     // what WOULD merge, so answering "unreviewed" here sends a caller hunting a
     // defect that is blocking nothing.
-    if facts.state == "MERGED" || facts.state == "CLOSED" {
+    if is_terminal_state(&facts.state) {
         return Err(Outcome::Held {
             reason: format!(
                 "PR {} is already {}; nothing to merge",
@@ -355,28 +501,182 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         });
     }
 
+    let checks = probes.checks_read(cwd, facts.number);
+    // The gates the Python merge verb owned before this port. They run before
+    // the CI/slot gates below so a PR the coverage or stub gate holds never
+    // takes the merge slot and squats it for its TTL.
+    if request.effect == Effect::Merge {
+        let (coverage_blocker, _waiver) =
+            crate::merge_gates::coverage_gate(probes, cwd, facts.number);
+        if let Some(blocker) = coverage_blocker {
+            return Err(Outcome::Held {
+                reason: blocker.detail,
+            });
+        }
+        if let Some(blocker) = walk_entries(cwd).and_then(|entries| {
+            crate::merge_gates::stub_manifest_gate(&repo_root(cwd), &entries, facts.number)
+        }) {
+            return Err(Outcome::Held {
+                reason: blocker.detail,
+            });
+        }
+        if let Some(blocker) = crate::merge_gates::plan_fidelity_blocker(probes, cwd, facts.number)
+        {
+            return Err(Outcome::Refused {
+                reason: blocker.detail,
+            });
+        }
+        if let Some(blocker) = crate::merge_gates::overlap_blocker(probes, cwd, facts.number) {
+            return Err(Outcome::Held {
+                reason: blocker.detail,
+            });
+        }
+        if request.require_checks {
+            if let Some(blocker) = flake_blocker(request, &checks) {
+                return Err(Outcome::Held {
+                    reason: blocker.detail,
+                });
+            }
+        }
+        if let Some(blocker) = optional_reviews_blocker(checks.optional_unresolved) {
+            return Err(Outcome::Held {
+                reason: blocker.detail,
+            });
+        }
+    }
+
+    // The GitHub hold rides the same status read the checks arm already paid
+    // for, and outranks the require_checks flag: a ruleset hold is not a
+    // question about CI greenness, and gating it on that flag repeats the
+    // category error this arm exists to close. Held, not Failed - a required
+    // check that is merely pending still arrives, and the reason names the
+    // missing context so a human can narrow the ruleset when it never can.
+    // Merge only: Arm hands the PR to GitHub's own queue, which is designed
+    // to wait out a missing requirement, so arming on a ruleset hold is the
+    // right move and this hold must not stand in its way.
+    if request.effect == Effect::Merge {
+        if let Some(missing) = &checks.github_block {
+            return Err(Outcome::Held {
+                reason: format!(
+                    "GitHub holds this merge: required checks missing at the head ({missing})"
+                ),
+            });
+        }
+    }
     if request.require_checks {
         // Only a POSITIVE red fails. Every other non-green answer holds, so a
         // read that could not run - `fno do pr status` says `error` when the
         // fetch is rate-limited or the network is down - retries instead of
         // stamping the node's merge status failed.
-        match probes.checks_verdict(cwd, facts.number).as_str() {
+        match checks.verdict.as_str() {
             "green" => {
                 if request.effect == Effect::Merge && probes.require_fresh_ci(cwd) {
-                    if let Some(reason) = probes.ci_base(cwd, &facts).fail_open() {
-                        return Err(Outcome::Held {
-                            reason: format!(
-                                "{reason}; remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry",
-                                n = facts.number
-                            ),
-                        });
+                    let stale = probes.ci_base(cwd, &facts).fail_open();
+                    let n = facts.number;
+                    match probes.slot_holder(cwd, &facts.base_ref) {
+                        // A claims io fault never blocks merges: fall back to
+                        // the pre-slot behavior and take no slot.
+                        Err(_) => {
+                            if let Some(reason) = stale {
+                                return Err(Outcome::Held {
+                                    reason: format!("{reason}; {}", stale_remedy(n)),
+                                });
+                            }
+                        }
+                        Ok(mut holder) => {
+                            // A holder that merged, closed, went red, or took
+                            // a dispatch hold frees its slot now instead of
+                            // waiting out the TTL. The hold read is fail_open:
+                            // evicting on an unreadable read would collapse the
+                            // ordering the slot exists to keep.
+                            if let Some(m) = holder {
+                                if m != n {
+                                    let holder_held =
+                                        probes.dispatch_hold(cwd, m).fail_open().is_some();
+                                    let stale_holder = holder_held
+                                        || match probes.pr_facts(cwd, Some(m)) {
+                                            Ok(holder_facts) => {
+                                                is_terminal_state(&holder_facts.state)
+                                                    || probes.checks_read(cwd, m).verdict == "red"
+                                            }
+                                            // Unreadable holder PR keeps the
+                                            // slot; the TTL bounds it.
+                                            Err(_) => false,
+                                        };
+                                    if stale_holder {
+                                        probes.release_slot(cwd, &facts.base_ref, m);
+                                        holder = None;
+                                    }
+                                }
+                            }
+                            match holder {
+                                Some(m) if m != n => {
+                                    return Err(Outcome::Held {
+                                        reason: format!(
+                                            "{ci}merge_slot_held: PR {m} holds the merge slot; \
+                                             PR {n} waits so PR {m}'s rebased CI stays current; \
+                                             the slot frees when PR {m} merges, closes, goes red, \
+                                             takes a dispatch hold, or its {ttl}m lease ends",
+                                            ci = if stale.is_some() {
+                                                "ci_base_stale; "
+                                            } else {
+                                                ""
+                                            },
+                                            ttl = MERGE_SLOT_TTL_MINUTES
+                                        ),
+                                    });
+                                }
+                                Some(_self_held) => {
+                                    if let Some(reason) = stale {
+                                        // Never re-acquire: it could extend
+                                        // the TTL and starve the queue.
+                                        return Err(Outcome::Held {
+                                            reason: format!(
+                                                "{reason}; PR {n} holds the merge slot; {}",
+                                                stale_remedy(n)
+                                            ),
+                                        });
+                                    }
+                                }
+                                None => {
+                                    if let Some(reason) = stale {
+                                        match probes.take_slot(cwd, &facts.base_ref, n) {
+                                            Ok(()) => {
+                                                return Err(Outcome::Held {
+                                                    reason: format!(
+                                                        "{reason}; PR {n} now holds the merge \
+                                                         slot for {ttl}m; {remedy}",
+                                                        ttl = MERGE_SLOT_TTL_MINUTES,
+                                                        remedy = stale_remedy(n)
+                                                    ),
+                                                });
+                                            }
+                                            Err(_) => {
+                                                return Err(Outcome::Held {
+                                                    reason: format!(
+                                                        "{reason}; {}",
+                                                        stale_remedy(n)
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
             "red" => {
-                return Err(Outcome::Failed {
-                    reason: "checks are red; require_checks_pass forbids merging without green"
-                        .to_string(),
+                return Err(match request.authority.as_deref() {
+                    Some("durable_grant") => Outcome::Held {
+                        reason: "checks are red; the healer or the worker owns the next push"
+                            .to_string(),
+                    },
+                    _ => Outcome::Failed {
+                        reason: "checks are red; require_checks_pass forbids merging without green"
+                            .to_string(),
+                    },
                 })
             }
             verdict => {
@@ -401,6 +701,328 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 /// every grant; an explicit per-run env grant satisfies the standing arm on its
 /// own; otherwise the LIVE config decides, so a manifest snapshot never outlives
 /// an operator flipping the switch off mid-flight.
+/// The preview's verdict shape: authorized, or every blocker the gates could
+/// evaluate. The one receipt `fno do pr status` reads as `ready`.
+pub enum PreviewVerdict {
+    Go { waiver: Option<String> },
+    Blocked(Vec<Blocker>),
+}
+
+/// The read-only preview walk: same gates, same order as the effect path's
+/// first-refusal chain, all collected. Preview never writes: take_slot and
+/// release_slot have no preview call site, so a stale PR with a free slot
+/// reads `ci_base_stale` with the slot untouched (AC1).
+pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -> PreviewVerdict {
+    let cwd = request.cwd.as_path();
+    let mut blockers: Vec<Blocker> = Vec::new();
+    let mut entries: Option<Vec<Value>> = None;
+    let mut checks: Option<ChecksRead> = None;
+
+    // (1) terminal. AC3: the blockers are exactly [pr_terminal].
+    if is_terminal_state(&facts.state) {
+        return PreviewVerdict::Blocked(vec![Blocker::held(
+            "pr_terminal",
+            format!(
+                "PR {} is already {}; nothing to merge",
+                facts.number,
+                facts.state.to_lowercase()
+            ),
+        )]);
+    }
+
+    // (2) authority: per-run refusal, live config, posture floor. The codes
+    // re-derive authority_refusal's fold order, read-only.
+    if let Some(reason) = authority_refusal(probes, cwd, request) {
+        let code = if request.approved == Some(false) {
+            "per_run_no_merge"
+        } else {
+            let env_grant = request.approved == Some(true)
+                && request.auto_merge_source.as_deref() == Some("env-target-auto-merge");
+            if !env_grant && !probes.auto_merge_enabled(cwd) {
+                "auto_merge_disabled"
+            } else {
+                "posture_floor"
+            }
+        };
+        blockers.push(match code {
+            "per_run_no_merge" => Blocker::refused("per_run_no_merge", reason),
+            "auto_merge_disabled" => Blocker::refused("auto_merge_disabled", reason),
+            _ => Blocker::refused("posture_floor", reason),
+        });
+    }
+
+    // (3) node binding: unbound is refused, unreadable is unknown.
+    match probes.node_binding(cwd, facts) {
+        ProbeOutcome::Clear => {}
+        ProbeOutcome::Refused(reason) => {
+            blockers.push(Blocker::refused("node_unbound", reason));
+        }
+        ProbeOutcome::Inconclusive(reason) => {
+            blockers.push(Blocker::unknown("node_binding_unknown", reason));
+        }
+    }
+
+    // (4) holds, in decide's order.
+    if let Some(reason) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
+        blockers.push(Blocker::held("dispatch_hold", reason));
+    }
+    if let Some(reason) = probes.review_hold(cwd, facts.number).fail_closed() {
+        blockers.push(Blocker::held("review_in_flight", reason));
+    }
+
+    // (5) the pin.
+    if let Some(head) = request
+        .covered_head
+        .clone()
+        .or_else(|| probes.covered_head(cwd))
+        .filter(|sha| !sha.is_empty())
+    {
+        if head != facts.head_sha {
+            blockers.push(Blocker::unknown(
+                "head_moved",
+                format!(
+                    "the PR head moved from {head} to {} between validation and the effect",
+                    facts.head_sha
+                ),
+            ));
+        }
+    } else {
+        blockers.push(Blocker::unknown(
+            "head_not_covered",
+            format!(
+                "no covered head is readable for PR {}; refusing an unpinned merge",
+                facts.number
+            ),
+        ));
+    }
+
+    // (6) lineage + merge result, in decide's order.
+    if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
+        blockers.push(Blocker::refused(
+            "stacked_base",
+            format!("stale base: {reason}"),
+        ));
+    }
+    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+        blockers.push(Blocker::held(
+            "red_merge_result",
+            format!("red merge result: {reason}"),
+        ));
+    }
+
+    // (7) the status payload: supplied facts win, so a preview ask never
+    // spawns `fno do pr status` for a fact its caller computed.
+    let checks = checks.get_or_insert_with(|| match &request.supplied_verdict {
+        Some(word) => ChecksRead {
+            verdict: word.clone(),
+            github_block: None,
+            optional_unresolved: request.supplied_optional_unresolved,
+            rerun_recovered: request.supplied_rerun_recovered,
+            rerun_failures: None,
+        },
+        None => probes.checks_read(cwd, facts.number),
+    });
+    let optional = request
+        .supplied_optional_unresolved
+        .or(checks.optional_unresolved);
+
+    // (7b) the ported gates, always in preview (the effect path runs them
+    // only for Merge). Fidelity reads the ledger, not the graph rows, so it
+    // runs even when the store is unreadable: the gate list must not shrink
+    // with an ingredient the gate does not use.
+    if entries.is_none() {
+        entries = walk_entries(cwd);
+    }
+    let repo_root_path = repo_root(cwd);
+    let (coverage_blocker, waiver) = crate::merge_gates::coverage_gate(probes, cwd, facts.number);
+    if let Some(blocker) = coverage_blocker {
+        blockers.push(blocker);
+    }
+    if let Some(entry_slice) = entries.as_deref() {
+        if let Some(blocker) =
+            crate::merge_gates::stub_manifest_gate(&repo_root_path, entry_slice, facts.number)
+        {
+            blockers.push(blocker);
+        }
+    }
+    if let Some(blocker) = crate::merge_gates::plan_fidelity_blocker(probes, cwd, facts.number) {
+        blockers.push(blocker);
+    }
+    if let Some(blocker) = crate::merge_gates::overlap_blocker(probes, cwd, facts.number) {
+        blockers.push(blocker);
+    }
+    if let Some(blocker) = flake_blocker(request, &checks) {
+        blockers.push(blocker);
+    }
+    if let Some(blocker) = optional_reviews_blocker(optional) {
+        blockers.push(blocker);
+    }
+
+    // (8) GitHub's own hold: supplied words, else the parsed github_block.
+    let github_words: Vec<String> = request.supplied_github_blockers.clone().unwrap_or_else(|| {
+        checks
+            .github_block
+            .clone()
+            .map(|_m| vec!["github_blocked".to_string()])
+            .unwrap_or_default()
+    });
+    for word in &github_words {
+        let (code, detail): (&str, String) = match word.as_str() {
+            "github_blocked" => (
+                "github_blocked",
+                match &checks.github_block {
+                    Some(m) => format!(
+                        "GitHub holds this merge: required checks missing at the head ({m})"
+                    ),
+                    None => "GitHub holds this merge".to_string(),
+                },
+            ),
+            other => (other, other.to_string()),
+        };
+        blockers.push(Blocker::held(code, detail));
+    }
+
+    // (9) the CI verdict gate, same precondition as the effect path.
+    if request.require_checks && checks.verdict != "green" {
+        let word = ci_blocker_word(&checks.verdict, request.supplied_counts.as_ref());
+        let detail = format!(
+            "checks are {}; require_checks_pass forbids merging without green",
+            checks.verdict
+        );
+        if checks.verdict == "red" && request.authority.as_deref() == Some("durable_grant") {
+            // The durable-grant lane holds on red (a working session pushes
+            // fixes); the interactive lane refuses. Class follows the lane.
+            blockers.push(Blocker::held(
+                word.as_str(),
+                "checks are red; the healer or the worker owns the next push",
+            ));
+        } else {
+            blockers.push(Blocker::refused(word.as_str(), detail));
+        }
+    }
+
+    // (10) the slot gate, read-only: same precondition (fresh-CI posture,
+    // green) and same eviction readability as the effect path, but take_slot
+    // and release_slot have no preview call site.
+    if request.require_checks && checks.verdict == "green" && probes.require_fresh_ci(cwd) {
+        let stale = probes.ci_base(cwd, facts).fail_open();
+        let n = facts.number;
+        if let Some(reason) = &stale {
+            blockers.push(Blocker::held(
+                "ci_base_stale",
+                format!("{reason}; {}", stale_remedy(n)),
+            ));
+        }
+        match probes.slot_holder(cwd, &facts.base_ref) {
+            Err(_) => {}
+            Ok(Some(m)) if m != n => {
+                let holder_held = probes.dispatch_hold(cwd, m).fail_open().is_some();
+                let evictable = holder_held
+                    || match probes.pr_facts(cwd, Some(m)) {
+                        Ok(hf) => {
+                            is_terminal_state(&hf.state)
+                                || probes.checks_read(cwd, m).verdict == "red"
+                        }
+                        Err(_) => false,
+                    };
+                if !evictable {
+                    blockers.push(Blocker::held(
+                        "merge_slot_held",
+                        format!(
+                            "merge_slot_held: PR {m} holds the merge slot; PR {n} waits so \
+                             PR {m}'s rebased CI stays current; the slot frees when PR {m} \
+                             merges, closes, goes red, takes a dispatch hold, or its {ttl}m lease ends",
+                            ttl = MERGE_SLOT_TTL_MINUTES
+                        ),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    if blockers.is_empty() {
+        PreviewVerdict::Go { waiver }
+    } else {
+        PreviewVerdict::Blocked(blockers)
+    }
+}
+
+/// The status-side name for a non-green verdict: the KIND of red, never a
+/// generic one. A red whose every failure is a taken-away run is a
+/// cancelled-retrigger; one whose every failure is a StatusContext is a
+/// status red; anything else is the generic word. Unreadable counts
+/// degrade to the generic name - the verdict itself stays authoritative.
+fn ci_blocker_word(verdict: &str, counts: Option<&Value>) -> String {
+    if verdict != "red" {
+        return format!("ci_{verdict}");
+    }
+    if let Some(c) = counts {
+        let uf = c.get("unsettled_fail").and_then(Value::as_i64).unwrap_or(0);
+        let f = c.get("fail").and_then(Value::as_i64).unwrap_or(0);
+        let fs = c.get("fail_statuses").and_then(Value::as_i64).unwrap_or(0);
+        if uf > 0 && uf == f {
+            return "ci_cancelled_retrigger".to_string();
+        }
+        if fs > 0 && fs == f {
+            return "commit_status_red".to_string();
+        }
+    }
+    "ci_red".to_string()
+}
+
+/// The flake gate, shared by the effect and preview walks: a rerun-recovered
+/// green is not a clean green. `accept_flake` is the sanctioned override.
+fn flake_blocker(request: &Request, checks: &ChecksRead) -> Option<Blocker> {
+    if request.accept_flake {
+        return None;
+    }
+    if checks.rerun_recovered != Some(true) {
+        return None;
+    }
+    let failed = checks
+        .rerun_failures
+        .as_ref()
+        .map(|names| names.join(", "))
+        .unwrap_or_else(|| "unknown checks".to_string());
+    Some(Blocker::held(
+        "rerun_recovered_green",
+        format!(
+            "rerun-recovered green (earlier failed attempt: {failed}); merge held. \
+             Sanctioned override: fno do pr merge <pr> --accept-flake"
+        ),
+    ))
+}
+
+/// The optional-reviews gate, shared by the effect and preview walks: an
+/// unknown read never passes for "none unresolved".
+fn optional_reviews_blocker(value: Option<Option<i64>>) -> Option<Blocker> {
+    match value {
+        None | Some(None) => Some(Blocker::unknown(
+            "optional_reviews_unknown",
+            "optional review findings unreadable; refusing to assume none unresolved",
+        )),
+        Some(Some(0)) => None,
+        Some(Some(_)) => Some(Blocker::held(
+            "optional_reviews_unresolved",
+            "optional review findings unresolved",
+        )),
+    }
+}
+
+/// Graph rows for the stub-manifest and plan-fidelity gates. An unreadable
+/// store degrades to None (the default hard merge path), as the Python did.
+fn walk_entries(cwd: &Path) -> Option<Vec<Value>> {
+    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    backlog_api::rows(&store).ok()
+}
+
+/// The repo top-level for manifest lookups: manifests live at the project
+/// root's `.fno/`, never under a subdirectory cwd.
+fn repo_root(cwd: &Path) -> PathBuf {
+    canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf())
+}
+
 fn authority_refusal<P: Probes>(probes: &P, cwd: &Path, request: &Request) -> Option<String> {
     let source = request
         .auto_merge_source
@@ -430,10 +1052,31 @@ fn authority_refusal<P: Probes>(probes: &P, cwd: &Path, request: &Request) -> Op
 /// Decide, then run the effect unless the caller asked to stop at the decision.
 pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
     match decide(probes, request) {
-        Ok(authorized) if request.decide_only => Outcome::Authorized {
-            head: authorized.head,
-        },
-        Ok(authorized) => effect(probes, request, &authorized),
+        Ok(authorized) if request.decide_only || request.effect == Effect::Preview => {
+            Outcome::Authorized {
+                head: authorized.head,
+            }
+        }
+        Ok(authorized) => {
+            let outcome = effect(probes, request, &authorized);
+            // decide() takes the slot only under Effect::Merge, so only a
+            // Merge hands it back. Every terminal effect() outcome of a Merge
+            // - landed, durably Failed, HeadChanged, or Unknown - releases it
+            // here rather than starving the queue for the rest of the lease.
+            // An arm leaves GitHub to merge later; a slot dropped here lets a
+            // racer restale the queue the armed PR is still waiting in, and a
+            // holder that arms keeps the slot until its merge lands, which the
+            // eviction above then reads as terminal. A PR that never held the
+            // slot releases nothing (holder-matched).
+            if request.effect == Effect::Merge {
+                probes.release_slot(
+                    request.cwd.as_path(),
+                    &authorized.facts.base_ref,
+                    authorized.facts.number,
+                );
+            }
+            outcome
+        }
         Err(outcome) => outcome,
     }
 }
@@ -443,6 +1086,12 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
     let number = authorized.facts.number;
     if authorized.facts.armed {
         return match request.effect {
+            // Preview never reaches an effect (run() short-circuits it).
+            Effect::Preview => {
+                return Outcome::Unknown {
+                    reason: "preview never runs an effect".to_string(),
+                }
+            }
             // Re-arming is a no-op on GitHub's side, so the receipt says armed
             // without spending a request.
             Effect::Arm => Outcome::Armed {
@@ -486,6 +1135,9 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
                 head: authorized.head.clone(),
                 note: None,
                 cleanup_failure: None,
+            },
+            Effect::Preview => Outcome::Unknown {
+                reason: "preview never runs an effect".to_string(),
             },
         };
     }
@@ -600,6 +1252,15 @@ pub struct RealProbes;
 
 impl RealProbes {
     fn fno(cwd: &Path, args: &[&str]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+        let out = Command::new("fno")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map_err(|error| error.to_string())?;
+        Ok((out.status.code(), out.stdout, out.stderr))
+    }
+
+    fn fno_strings(cwd: &Path, args: &[String]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
         let out = Command::new("fno")
             .args(args)
             .current_dir(cwd)
@@ -775,21 +1436,118 @@ impl Probes for RealProbes {
                 return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
             }
         };
-        ci_base_verdict(compare, &base_tip, &runs)
+        let verdict = ci_base_verdict(compare, &base_tip, &runs);
+        let ProbeOutcome::Refused(stale) = verdict else {
+            return verdict;
+        };
+        let pull_head = format!("pull/{}/head", facts.number);
+        let fetch = Command::new("git")
+            .args([
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                &facts.base_ref,
+                &pull_head,
+            ])
+            .current_dir(cwd)
+            .output();
+        let overlap = match fetch {
+            Ok(output) if output.status.success() => {
+                let Some((_, since)) = oldest_current_run(&runs) else {
+                    return stale_overlap_verdict(
+                        stale,
+                        facts.number,
+                        Err("no current workflow run".to_string()),
+                    );
+                };
+                crate::merge_gates::stale_overlap(
+                    cwd,
+                    &format!("origin/{}", facts.base_ref),
+                    &facts.head_sha,
+                    &since,
+                )
+            }
+            Ok(output) => Err(format!(
+                "fetch failed: {}",
+                first_line(&String::from_utf8_lossy(&output.stderr))
+            )),
+            Err(error) => Err(format!("fetch failed: {error}")),
+        };
+        stale_overlap_verdict(stale, facts.number, overlap)
     }
 
     fn require_fresh_ci(&self, cwd: &Path) -> bool {
         crate::agents_config::auto_merge_require_fresh_ci(cwd)
     }
 
-    fn checks_verdict(&self, cwd: &Path, pr: u64) -> String {
-        match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
-            Ok((_code, stdout, _stderr)) => serde_json::from_slice::<Value>(&stdout)
-                .ok()
-                .and_then(|v| v.get("verdict").and_then(Value::as_str).map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_string()),
-            Err(_) => "unknown".to_string(),
+    fn slot_holder(&self, cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
+        slot_holder_read(cwd, base_ref)
+    }
+
+    fn take_slot(&self, _cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String> {
+        // One store: the space db that `fno agents claim status merge-slot:<base>`
+        // resolves for a non-global key (claim_store::open_for_key with no
+        // root), so a claim taken here is readable by the claim verb with no
+        // root and by any worktree of the repo.
+        let opts = crate::claims::AcquireOpts {
+            pid_unavailable: true,
+            ttl_ms: Some(MERGE_SLOT_TTL_MS),
+            root: None,
+            reason: Some("ci_base_stale merge slot".to_string()),
+            ..Default::default()
+        };
+        let value =
+            crate::claim_store::acquire_db(&slot_key(base_ref), &slot_holder_key(pr), &opts)?;
+        match value.get("outcome").and_then(Value::as_str) {
+            Some("acquired") => Ok(()),
+            Some("held_by_other") => Err(format!(
+                "merge slot already held by {}",
+                value.get("holder").and_then(Value::as_str).unwrap_or("?")
+            )),
+            other => Err(format!("merge slot acquire answered {other:?}")),
         }
+    }
+
+    fn release_slot(&self, _cwd: &Path, base_ref: &str, pr: u64) {
+        let _ =
+            crate::claim_store::release_db(&slot_key(base_ref), &slot_holder_key(pr), None, None);
+    }
+
+    fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
+        match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
+            Ok((_code, stdout, _stderr)) => parse_checks_read(&stdout),
+            Err(_) => ChecksRead {
+                verdict: "unknown".to_string(),
+                github_block: None,
+                optional_unresolved: None,
+                rerun_recovered: None,
+                rerun_failures: None,
+            },
+        }
+    }
+
+    fn fno_shell(
+        &self,
+        cwd: &Path,
+        args: &[String],
+    ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+        Self::fno_strings(cwd, args)
+    }
+
+    fn live_lanes(&self, cwd: &Path) -> usize {
+        // The parallel-lane count the Python hold derived (`claims.lanes.
+        // active_lane_count`): live `lane-slot:` claims at the canonical
+        // repo's own claims root. The global root is other repos' lanes and
+        // must not count. A probe miss answers 0 - the Python miss contract
+        // that disarms the overlap hold rather than blocking on our own read.
+        let Some(repo) = canonical_repo_root(cwd) else {
+            return 0;
+        };
+        let dir = repo.join(crate::claims::CLAIMS_DIRNAME);
+        crate::claims::list_in(std::slice::from_ref(&dir), Some("lane-slot:"), false)
+            .map(|records| records.len())
+            .unwrap_or(0)
     }
 
     fn covered_head(&self, cwd: &Path) -> Option<String> {
@@ -818,6 +1576,162 @@ impl Probes for RealProbes {
         combined.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok((out.status.success(), combined))
     }
+}
+
+/// Parse one `fno do pr status` stdout into both facts the door needs. An
+/// unreadable read claims neither: `unknown` holds under `require_checks`
+/// exactly as before, and no GitHub hold is asserted from output that never
+/// named one.
+fn parse_checks_read(stdout: &[u8]) -> ChecksRead {
+    let unknown = ChecksRead {
+        verdict: "unknown".to_string(),
+        github_block: None,
+        optional_unresolved: None,
+        rerun_recovered: None,
+        rerun_failures: None,
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(stdout) else {
+        return unknown;
+    };
+    let optional_unresolved = v.get("optional_reviews_unresolved").map(|raw| {
+        if let Some(n) = raw.as_i64() {
+            Some(n)
+        } else {
+            None
+        }
+    });
+    let rerun_recovered = v.get("rerun_recovered").and_then(Value::as_bool);
+    let rerun_failures = v.get("recovered_failures").and_then(|raw| {
+        let rows = raw.as_array()?;
+        Some(
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        )
+    });
+    let verdict = v
+        .get("verdict")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unknown".to_string());
+    let state = v.get("github_merge_state");
+    let source = || {
+        state
+            .and_then(|s| s.get("source"))
+            .and_then(Value::as_str)
+            .unwrap_or("github_blocked")
+            .to_string()
+    };
+    let github_block = v
+        .get("ready_blockers")
+        .and_then(Value::as_array)
+        .filter(|b| b.iter().any(|b| b.as_str() == Some("github_blocked")))
+        .map(|_| {
+            match state
+                .and_then(|s| s.get("missing_required_checks"))
+                .and_then(Value::as_array)
+            {
+                Some(names) if !names.is_empty() => {
+                    let joined = names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if joined.is_empty() {
+                        source()
+                    } else {
+                        joined
+                    }
+                }
+                _ => source(),
+            }
+        });
+    ChecksRead {
+        verdict,
+        github_block,
+        optional_unresolved,
+        rerun_recovered,
+        rerun_failures,
+    }
+}
+
+/// A merged or closed PR has no would-merge left, for the PR under decision
+/// and for a merge-slot holder alike.
+fn is_terminal_state(state: &str) -> bool {
+    state == "MERGED" || state == "CLOSED"
+}
+
+/// The `ci_base_stale` remedy, shared by every `Held` reason that ends in it.
+fn stale_remedy(n: u64) -> String {
+    format!("remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry")
+}
+
+/// The merge-slot claim key for a base branch. Not a global-id prefix: the
+/// crown's worktree cwd and the sweep's repo-root cwd must resolve one
+/// lockfile, so callers always pass an explicit `root`.
+fn slot_key(base_ref: &str) -> String {
+    format!("merge-slot:{base_ref}")
+}
+
+fn slot_holder_key(pr: u64) -> String {
+    format!("pr:{pr}")
+}
+
+pub(crate) fn parse_slot_holder(holder: &str) -> Option<u64> {
+    holder.strip_prefix("pr:")?.parse::<u64>().ok()
+}
+
+/// The one merge-slot claim read. Strict polarity kept: a corrupted claim or
+/// an unparseable holder is an Err (the merge path refuses on an unreadable
+/// slot rather than merging past it); the fail-open consumer
+/// ([`merge_slot_holder`]) maps Err to None at its own boundary. Primary
+/// store: the space db `fno agents claim status merge-slot:<base>` reads with
+/// no root. A lockfile written by a pre-move merge verb is read once as a
+/// migration fallback at the canonical root, dropping out when its lease ends.
+fn slot_holder_read(cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
+    let key = slot_key(base_ref);
+    let value = crate::claim_store::status_db(&key, None);
+    match value {
+        Err(e) => Err(e),
+        Ok(v) => {
+            let state = v.get("state").and_then(Value::as_str).unwrap_or("");
+            if state == "corrupted" {
+                return Err(format!("merge slot claim corrupted: {key}"));
+            }
+            if matches!(state, "live" | "suspect") {
+                let holder = v
+                    .get("holder")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("merge slot claim {key} read {state} with no holder"))?;
+                return parse_slot_holder(holder)
+                    .map(Some)
+                    .ok_or_else(|| format!("merge slot holder unparseable: {holder}"));
+            }
+            let _ = state;
+            let root = canonical_repo_root(cwd);
+            let (legacy_state, record) = claims::status(&key, root.as_deref());
+            match legacy_state {
+                ClaimState::Live | ClaimState::Suspect => {
+                    let record = record.ok_or_else(|| {
+                        format!("merge slot claim {key} read {legacy_state:?} with no record")
+                    })?;
+                    parse_slot_holder(&record.holder)
+                        .map(Some)
+                        .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
+                }
+                _ => Ok(None),
+            }
+        }
+    }
+}
+/// The live merge-slot holder for `base_ref`, fail-open: any claims fault
+/// reads as None so a consumer that only decides whether idling is safe (the
+/// loopcheck classifier) never blocks on a claims io error. Some(pr) only for
+/// a LIVE or SUSPECT slot whose holder parses; a self-held slot stays
+/// Some(self) and the caller filters it.
+pub(crate) fn merge_slot_holder(cwd: &Path, base_ref: &str) -> Option<u64> {
+    slot_holder_read(cwd, base_ref).ok().flatten()
 }
 
 fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -880,7 +1794,8 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
         return ProbeOutcome::Refused(format!(
             "PR {n} is unbound: {detail}. A merge the graph cannot see is refused. \
              Bind it: pick or file the node (fno backlog idea \"...\"), run \
-             fno do pr closure-trailer <id>, append the printed line to the PR \
+             fno do pr closure-trailer <id> [--extra <id> ...], append the \
+             printed ONE line to the PR \
              body, then retry. A revert or hotfix binds the same way; no flag \
              bypasses this gate.",
             n = facts.number
@@ -986,6 +1901,62 @@ fn valid_github_timestamp(value: &str) -> bool {
         })
 }
 
+fn oldest_current_run(runs: &[(String, String)]) -> Option<(String, String)> {
+    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
+    for (name, created_at) in runs {
+        if let Some((_, newest)) = newest_by_workflow
+            .iter_mut()
+            .find(|(known, _)| known == name)
+        {
+            if created_at > newest {
+                *newest = created_at.clone();
+            }
+        } else {
+            newest_by_workflow.push((name.clone(), created_at.clone()));
+        }
+    }
+    newest_by_workflow
+        .into_iter()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+}
+
+pub(crate) fn stale_overlap_verdict(
+    stale: String,
+    pr: u64,
+    overlap: Result<crate::merge_gates::StaleOverlap, String>,
+) -> ProbeOutcome {
+    match overlap {
+        Ok(result) if result.shared.is_empty() => {
+            eprintln!(
+                "pr-merge: ci_base_stale waived: {} files landed since CI base {}, none shared with PR {pr}",
+                result.landed,
+                result.ci_base_sha.chars().take(8).collect::<String>()
+            );
+            ProbeOutcome::Clear
+        }
+        Ok(result) => {
+            let shown = result
+                .shared
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let extra = if result.shared.len() > 3 {
+                format!(" and {} more", result.shared.len() - 3)
+            } else {
+                String::new()
+            };
+            ProbeOutcome::Refused(format!(
+                "{stale}; shares {} files with main since CI base {}: {shown}{extra}",
+                result.shared.len(),
+                result.ci_base_sha.chars().take(8).collect::<String>()
+            ))
+        }
+        Err(error) => ProbeOutcome::Refused(format!("{stale}; file overlap unreadable ({error})")),
+    }
+}
+
 /// Did the green runs test a merge ref that already held the base tip?
 pub fn ci_base_verdict(
     behind_by: u64,
@@ -1005,23 +1976,7 @@ pub fn ci_base_verdict(
         );
     }
 
-    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
-    for (name, created_at) in runs {
-        if let Some((_, newest)) = newest_by_workflow
-            .iter_mut()
-            .find(|(known, _)| known == name)
-        {
-            if created_at > newest {
-                *newest = created_at.clone();
-            }
-        } else {
-            newest_by_workflow.push((name.clone(), created_at.clone()));
-        }
-    }
-    let Some((name, created_at)) = newest_by_workflow
-        .iter()
-        .min_by(|(_, left), (_, right)| left.cmp(right))
-    else {
+    let Some((name, created_at)) = oldest_current_run(runs) else {
         return ProbeOutcome::Clear;
     };
     if created_at.as_str() >= base_tip_at {
@@ -1037,7 +1992,7 @@ pub fn ci_base_verdict(
 /// current HEAD, or None.
 pub fn covered_head_from_event(cwd: &Path) -> Option<String> {
     let path = crate::paths::events_path(cwd);
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = crate::event_store::journal_text(&path, &["review_coverage"]);
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)
@@ -1092,6 +2047,29 @@ pub fn run_authorized_merge(args: &[String]) -> i32 {
     code
 }
 
+/// The merges hold, read the way the spawn gate reads its breaker: a stop
+/// holding merges (or an unreadable record, fail closed) refuses the merge
+/// primitive with the breaker generation and reason. `None` admits.
+fn merges_breaker_refusal() -> Option<(i32, String)> {
+    match crate::fleet_incident::verdict_for("merges") {
+        crate::fleet_incident::Verdict::Clear(_) => None,
+        crate::fleet_incident::Verdict::Stopped(r) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP,
+            format!(
+                "refused: fleet incident stop holds merges (generation {}, reason: {}); \
+                 reopen with `fno agents incident clear --reason <text>`\n",
+                r.generation, r.reason
+            ),
+        )),
+        crate::fleet_incident::Verdict::Unavailable(d) => Some((
+            crate::spawn_gate::EXIT_FLEET_STOP_UNAVAILABLE,
+            format!(
+                "refused: fleet incident state is unreadable ({d}); the merge primitive fails closed\n"
+            ),
+        )),
+    }
+}
+
 /// Test-friendly variant: returns (exit_code, stdout, stderr) without printing.
 pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     let payload: Value = match read_payload(args) {
@@ -1126,10 +2104,72 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         );
         return (0, out, String::new());
     }
+    // The status ops are the pr-status fact readers riding this verb's
+    // payload, the same transport the hold and grant ops use:
+    // `{"op": "status-merge-blocker"|"status-failure-cause", ...}`.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("status-"))
+    {
+        let out = crate::pr_status_facts::run_op(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     let request = match parse_request(&payload) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
     };
+    // The merges hold: the one merge primitive refuses like the spawn gate
+    // does, naming the breaker generation and reason, before any probe or
+    // queue work. Reads stay reads: preview and decide-only asks answer
+    // normally, and the quota ops above never touch the breaker.
+    if !request.decide_only && matches!(request.effect, Effect::Merge | Effect::Arm) {
+        if let Some((code, message)) = merges_breaker_refusal() {
+            return (code, String::new(), message);
+        }
+    }
+    // A preview ask answers with the structured receipt: `ready` is the
+    // receipt's `blockers` being empty, so the verb prints the list itself
+    // instead of the joined-prose Outcome form the effect arms render.
+    if request.effect == Effect::Preview {
+        let cwd = request.cwd.as_path();
+        let receipt = match RealProbes.pr_facts(cwd, request.pr) {
+            Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
+            Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
+                PreviewVerdict::Go { waiver } => {
+                    let mut receipt = serde_json::json!({
+                        "outcome": "authorized",
+                        "head": facts.head_sha,
+                        "blockers": [],
+                    });
+                    if let Some(note) = waiver {
+                        receipt["coverage_waiver"] = Value::String(note);
+                    }
+                    receipt
+                }
+                PreviewVerdict::Blocked(rows) => serde_json::json!({
+                    "outcome": "held",
+                    "head": facts.head_sha,
+                    "blockers": rows
+                        .iter()
+                        .map(|b| serde_json::json!({
+                            "code": b.code,
+                            "class": match b.class {
+                                BlockerClass::Held => "held",
+                                BlockerClass::Refused => "refused",
+                                BlockerClass::Unknown => "unknown",
+                            },
+                            "detail": b.detail,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+            },
+        };
+        return (0, format!("{}\n", receipt), String::new());
+    }
     // The receipt is the verdict, so the exit code answers only whether the verb
     // RAN: 0 with a receipt on stdout, 2 when the payload was unusable. A code
     // that also encoded refusal would make a held merge indistinguishable from a
@@ -1162,7 +2202,7 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
         .get("effect")
         .and_then(Value::as_str)
         .and_then(Effect::parse)
-        .ok_or_else(|| "payload needs effect merge|arm".to_string())?;
+        .ok_or_else(|| "payload needs effect merge|arm|preview".to_string())?;
     Ok(Request {
         cwd,
         pr: payload.get("pr").and_then(Value::as_u64),
@@ -1172,8 +2212,15 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             .get("auto_merge_source")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        // Preview defaults its CI gate ON: the question is "may this head
+        // merge NOW", and a merge ask carries its own posture. A payload can
+        // still pass require_checks: false to ask the gates without CI.
         require_checks: payload
             .get("require_checks")
+            .and_then(Value::as_bool)
+            .unwrap_or(effect == Effect::Preview),
+        accept_flake: payload
+            .get("accept_flake")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         covered_head: payload
@@ -1186,6 +2233,32 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             .get("decide_only")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        authority: payload
+            .get("authority")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        supplied_verdict: payload
+            .get("verdict")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        supplied_counts: payload.get("counts").cloned(),
+        supplied_rerun_recovered: payload.get("rerun_recovered").and_then(Value::as_bool),
+        supplied_optional_unresolved: payload.get("optional_reviews_unresolved").map(|v| {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else {
+                None
+            }
+        }),
+        supplied_github_blockers: payload
+            .get("github_blockers")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
     })
 }
 
@@ -1193,6 +2266,7 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct Fake {
@@ -1208,6 +2282,18 @@ mod tests {
         fresh_ci: Option<bool>,
         ci_base_calls: RefCell<u32>,
         checks: Option<String>,
+        /// GitHub's ruleset hold for the PR under decision; `None` (the
+        /// default) reads no hold, so every pre-existing test keeps its behavior.
+        github_block: Option<String>,
+        /// Optional-review answer for the PR under decision; the default
+        /// `Some(Some(0))` keeps every pre-existing test passing.
+        optional_unresolved: Option<Option<i64>>,
+        /// Rerun-recovery answer for the PR under decision.
+        rerun_recovered: Option<bool>,
+        /// The coverage verb's exit for the PR under decision; None reads 0.
+        coverage_exit: Option<i32>,
+        /// The plan-fidelity gate's verdict for a test-armable refusal.
+        plan_fidelity_refused: bool,
         covered_head: Option<String>,
         enabled: bool,
         floor: Option<String>,
@@ -1217,6 +2303,19 @@ mod tests {
         /// `gh pr merge` and let the retry succeed.
         gh_recovery_ok: Option<bool>,
         gh_calls: RefCell<Vec<Vec<String>>>,
+        /// Simulated merge-slot claim: `None` is free, `Some(pr)` is held.
+        slot: RefCell<Option<u64>>,
+        slot_holder_err: bool,
+        take_slot_err: bool,
+        take_slot_calls: RefCell<Vec<u64>>,
+        release_slot_calls: RefCell<Vec<u64>>,
+        /// Facts and checks for a PR other than the one under decision, keyed
+        /// by PR number - a holder read in the slot logic.
+        other_facts: RefCell<HashMap<u64, PrFacts>>,
+        other_checks: RefCell<HashMap<u64, String>>,
+        /// Dispatch holds keyed by PR, so a test can hold a holder without
+        /// holding the PR under decision.
+        other_holds: RefCell<HashMap<u64, ProbeOutcome>>,
     }
 
     fn open_facts() -> PrFacts {
@@ -1238,21 +2337,34 @@ mod tests {
             covered_head: Some("abc123".to_string()),
             enabled: true,
             gh_ok: true,
+            optional_unresolved: Some(Some(0)),
             ..Default::default()
         }
     }
 
     impl Probes for Fake {
-        fn pr_facts(&self, _cwd: &Path, _pr: Option<u64>) -> Result<PrFacts, String> {
+        fn pr_facts(&self, _cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String> {
             if let Some(error) = &self.facts_error {
                 return Err(error.clone());
             }
-            self.facts.clone().ok_or_else(|| "no facts".to_string())
+            let main = self.facts.clone().ok_or_else(|| "no facts".to_string())?;
+            match pr {
+                Some(n) if n != main.number => self
+                    .other_facts
+                    .borrow()
+                    .get(&n)
+                    .cloned()
+                    .ok_or_else(|| format!("no facts for pr {n}")),
+                _ => Ok(main),
+            }
         }
         fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn dispatch_hold(&self, _cwd: &Path, pr: u64) -> ProbeOutcome {
+            if let Some(hold) = self.other_holds.borrow().get(&pr) {
+                return hold.clone();
+            }
             self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
@@ -1271,8 +2383,53 @@ mod tests {
         fn require_fresh_ci(&self, _cwd: &Path) -> bool {
             self.fresh_ci.unwrap_or(true)
         }
-        fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
-            self.checks.clone().unwrap_or_else(|| "green".to_string())
+        fn slot_holder(&self, _cwd: &Path, _base_ref: &str) -> Result<Option<u64>, String> {
+            if self.slot_holder_err {
+                return Err("merge slot claim corrupted".to_string());
+            }
+            Ok(*self.slot.borrow())
+        }
+        fn take_slot(&self, _cwd: &Path, _base_ref: &str, pr: u64) -> Result<(), String> {
+            self.take_slot_calls.borrow_mut().push(pr);
+            if self.take_slot_err {
+                return Err("merge slot already held by pr:99".to_string());
+            }
+            *self.slot.borrow_mut() = Some(pr);
+            Ok(())
+        }
+        fn release_slot(&self, _cwd: &Path, _base_ref: &str, pr: u64) {
+            self.release_slot_calls.borrow_mut().push(pr);
+            let mut held = self.slot.borrow_mut();
+            if *held == Some(pr) {
+                *held = None;
+            }
+        }
+        fn checks_read(&self, _cwd: &Path, pr: u64) -> ChecksRead {
+            let mine = self.facts.as_ref().map(|f| f.number) == Some(pr);
+            let verdict = if mine {
+                self.checks.clone().unwrap_or_else(|| "green".to_string())
+            } else {
+                self.other_checks
+                    .borrow()
+                    .get(&pr)
+                    .cloned()
+                    .unwrap_or_else(|| "green".to_string())
+            };
+            ChecksRead {
+                verdict,
+                github_block: if mine {
+                    self.github_block.clone()
+                } else {
+                    None
+                },
+                optional_unresolved: if mine {
+                    self.optional_unresolved
+                } else {
+                    Some(Some(0))
+                },
+                rerun_recovered: if mine { self.rerun_recovered } else { None },
+                rerun_failures: None,
+            }
         }
         fn covered_head(&self, _cwd: &Path) -> Option<String> {
             self.covered_head.clone()
@@ -1295,6 +2452,29 @@ mod tests {
             }
             Ok((self.gh_ok, self.gh_output.clone()))
         }
+        fn fno_shell(
+            &self,
+            _cwd: &Path,
+            args: &[String],
+        ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+            let covered = if self.plan_fidelity_refused {
+                br#"{"refused": true, "reason": "test"}"#.to_vec()
+            } else {
+                br#"{"refused": false}"#.to_vec()
+            };
+            // The coverage ask is the `do pr coverage-check` shell; any other
+            // fno-shell call is a fidelity ask in these tests.
+            let is_coverage = args.len() >= 3 && args[2] == "coverage-check";
+            Ok((
+                if is_coverage {
+                    self.coverage_exit.or(Some(0))
+                } else {
+                    Some(0)
+                },
+                if is_coverage { Vec::new() } else { covered },
+                Vec::new(),
+            ))
+        }
     }
 
     fn request(effect: Effect) -> Request {
@@ -1307,6 +2487,13 @@ mod tests {
             require_checks: false,
             covered_head: None,
             decide_only: false,
+            authority: None,
+            accept_flake: false,
+            supplied_verdict: None,
+            supplied_counts: None,
+            supplied_rerun_recovered: None,
+            supplied_optional_unresolved: None,
+            supplied_github_blockers: None,
         }
     }
 
@@ -1326,6 +2513,293 @@ mod tests {
             assert!(outcome.detail().contains("review_in_flight"));
             assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
         }
+    }
+
+    #[test]
+    fn a_stale_pr_takes_the_free_slot_and_holds_a_second_stale_pr_behind_it() {
+        // AC1-HP.
+        let mut fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 3 behind".to_string())),
+            ..clean()
+        };
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome7 = run(&fake, &req7);
+        assert_eq!(outcome7.word(), "held");
+        assert!(outcome7.detail().contains("PR 7 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(7));
+
+        fake.facts = Some(PrFacts {
+            number: 8,
+            head_sha: "def456".to_string(),
+            ..open_facts()
+        });
+        fake.covered_head = Some("def456".to_string());
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        let detail8 = outcome8.detail();
+        assert!(detail8.contains("merge_slot_held"));
+        assert!(detail8.contains("PR 7"));
+        assert_eq!(
+            *fake.slot.borrow(),
+            Some(7),
+            "the slot must stay with the first holder"
+        );
+    }
+
+    #[test]
+    fn a_holder_with_fresh_ci_clears_and_releases_the_slot_on_merge_while_a_racer_waits() {
+        // AC2-HP.
+        let mut fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 9,
+                head_sha: "nine".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("nine".to_string()),
+            ..clean()
+        };
+        let req9 = Request {
+            require_checks: true,
+            pr: Some(9),
+            ..request(Effect::Merge)
+        };
+        let outcome9 = run(&fake, &req9);
+        assert_eq!(outcome9.word(), "held");
+        let detail9 = outcome9.detail();
+        assert!(detail9.contains("merge_slot_held"));
+        assert!(detail9.contains("PR 7"));
+        assert_eq!(
+            *fake.slot.borrow(),
+            Some(7),
+            "the waiting PR must not take the slot"
+        );
+
+        fake.facts = Some(PrFacts {
+            number: 7,
+            head_sha: "abc123".to_string(),
+            ..open_facts()
+        });
+        fake.covered_head = Some("abc123".to_string());
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome7 = run(&fake, &req7);
+        assert_eq!(
+            outcome7.word(),
+            "merged",
+            "the slot holder with fresh CI clears and merges"
+        );
+        assert_eq!(
+            *fake.slot.borrow(),
+            None,
+            "the slot releases once the Merged outcome lands"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_went_red_releases_its_slot_to_a_waiting_stale_pr() {
+        // AC3-EDGE.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks.borrow_mut().insert(7, "red".to_string());
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(8));
+        assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn a_holder_under_a_dispatch_hold_releases_its_slot_to_a_waiting_stale_pr() {
+        // A held holder is neither terminal nor red, so only the hold read
+        // frees it. The hold answers per PR: if the fake keyed it globally,
+        // PR 8 would refuse at the hold gate before reaching the slot logic.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks
+            .borrow_mut()
+            .insert(7, "green".to_string());
+        fake.other_holds.borrow_mut().insert(
+            7,
+            ProbeOutcome::Refused("dispatch_hold: held by the crown for a queued node".to_string()),
+        );
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(8));
+        assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn an_inconclusive_hold_read_keeps_the_slot_with_its_holder() {
+        // The eviction hold read is fail_open: an unreadable hold must not
+        // evict, so the lease stays the bound.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks
+            .borrow_mut()
+            .insert(7, "green".to_string());
+        fake.other_holds.borrow_mut().insert(
+            7,
+            ProbeOutcome::Inconclusive("hold-check could not run".to_string()),
+        );
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("merge_slot_held"));
+        assert_eq!(*fake.slot.borrow(), Some(7));
+        assert!(fake.release_slot_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_arm_never_releases_the_slot() {
+        // decide() takes the slot only under Effect::Merge, so the release in
+        // run() belongs to the same effect: an armed holder keeps the slot
+        // until its merge lands, which the eviction then reads as terminal.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            ..clean()
+        };
+        let req = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Arm)
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "armed");
+        assert!(fake.release_slot_calls.borrow().is_empty());
+        assert_eq!(*fake.slot.borrow(), Some(7));
+    }
+
+    #[test]
+    fn a_holder_whose_merge_attempt_fails_releases_its_own_slot() {
+        // run() releases unconditionally once effect() has run (Merged,
+        // Failed, HeadChanged, or Unknown alike): the slot's protective job
+        // is done the moment decide() clears, so nothing after that should
+        // starve the queue for the rest of the 60m lease. Failed exercises
+        // it here; the release call itself no longer branches on outcome.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            gh_ok: false,
+            gh_output: "not mergeable (conflicts or base changed)".to_string(),
+            ..clean()
+        };
+        let req = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "failed");
+        assert_eq!(
+            *fake.slot.borrow(),
+            None,
+            "a durable merge failure must free the slot rather than starve the queue"
+        );
+    }
+
+    #[test]
+    fn slot_holder_error_fails_open_to_the_stale_hold_without_taking_a_slot() {
+        // AC4-ERR.
+        let fake = Fake {
+            slot_holder_err: true,
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 5 behind".to_string())),
+            ..clean()
+        };
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome = run(&fake, &req7);
+        assert_eq!(outcome.word(), "held");
+        let detail = outcome.detail();
+        assert!(detail.contains("ci_base_stale"));
+        assert!(
+            !detail.contains("merge slot"),
+            "a fail-open read must not mention the slot"
+        );
+        assert!(fake.take_slot_calls.borrow().is_empty());
     }
 
     #[test]
@@ -1376,6 +2850,89 @@ mod tests {
             ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
             ProbeOutcome::Inconclusive(_)
         ));
+    }
+
+    #[test]
+    fn oldest_current_run_uses_each_workflows_newest_run_then_takes_the_oldest() {
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            oldest_current_run(&runs),
+            Some(("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn oldest_current_run_returns_none_without_workflow_runs() {
+        assert_eq!(oldest_current_run(&[]), None);
+    }
+
+    #[test]
+    fn a_stale_ci_base_clears_when_no_changed_files_are_shared() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 4,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_disjoint_stale_ci_base_handles_a_malformed_short_sha_without_panicking() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            2094,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdefgé".to_string(),
+                landed: 1,
+                shared: Vec::new(),
+            }),
+        );
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn a_stale_ci_base_refuses_with_shared_paths_and_a_bounded_list() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Ok(crate::merge_gates::StaleOverlap {
+                ci_base_sha: "abcdef123456".to_string(),
+                landed: 5,
+                shared: vec![
+                    "docs/guide.md".to_string(),
+                    "hooks/a.json".to_string(),
+                    "hooks/b.json".to_string(),
+                    "hooks/c.json".to_string(),
+                ],
+            }),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("docs/guide.md")
+                && reason.contains("hooks/a.json")
+                && reason.contains("hooks/b.json")
+                && reason.contains("and 1 more")
+                && !reason.contains("hooks/c.json")));
+    }
+
+    #[test]
+    fn an_unreadable_stale_overlap_fails_closed() {
+        let outcome = stale_overlap_verdict(
+            "ci_base_stale: old run".to_string(),
+            8,
+            Err("fetch failed".to_string()),
+        );
+        assert!(matches!(outcome, ProbeOutcome::Refused(reason)
+            if reason.starts_with("ci_base_stale")
+                && reason.contains("file overlap unreadable (fetch failed)")));
     }
 
     #[test]
@@ -1451,7 +3008,7 @@ mod tests {
             let fake = Fake {
                 node_binding: Some(ProbeOutcome::Refused(
                     "PR 7 is unbound: branch names no node; no node carries this PR; \
-                     body carries no Backlog-Closure trailer. A merge the graph cannot \
+                     body carries no closure line. A merge the graph cannot \
                      see is refused. Bind it: pick or file the node (fno backlog idea \
                      \"...\"), run fno do pr closure-trailer <id>, append the printed \
                      line to the PR body, then retry."
@@ -1783,6 +3340,32 @@ mod tests {
     }
 
     #[test]
+    fn a_red_verdict_holds_on_the_durable_grant_lane_and_fails_interactive() {
+        // Red CI is the state a working session is in while it pushes fixes.
+        // Spending a retry on it parked six open PRs in one afternoon.
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        req.authority = Some("durable_grant".to_string());
+        let red = Fake {
+            checks: Some("red".to_string()),
+            ..clean()
+        };
+        let held = run(&red, &req);
+        assert_eq!(held.word(), "held");
+        assert!(held
+            .detail()
+            .contains("the healer or the worker owns the next push"));
+        assert!(red.gh_calls.borrow().is_empty());
+
+        // The interactive lane keeps `failed`: the merge_status=failed stamp is
+        // the worker's signal, and the existing tests above depend on it.
+        let mut interactive = request(Effect::Merge);
+        interactive.require_checks = true;
+        interactive.authority = Some("manifest".to_string());
+        assert_eq!(run(&red, &interactive).word(), "failed");
+    }
+
+    #[test]
     fn a_gh_failure_over_a_merge_that_landed_reads_as_merged() {
         // The local post-merge step can fail after the server-side merge landed.
         let fake = Fake {
@@ -1865,6 +3448,100 @@ mod tests {
         let mut req = request(Effect::Merge);
         req.require_checks = true;
         assert_eq!(run(&red, &req).word(), "failed");
+    }
+
+    #[test]
+    fn a_ruleset_hold_holds_and_names_the_missing_context() {
+        // The door fetched the hold's own name moments before `gh pr merge`
+        // and used to spend a failure on it. Held, not Failed: a required
+        // check that is merely pending still arrives.
+        let fake = Fake {
+            checks: Some("green".to_string()),
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("smoke"));
+        assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_ruleset_hold_outranks_the_require_checks_flag() {
+        // A ruleset hold is not a question about CI greenness. A door gated on
+        // the flag would attempt the bypass its own reader just refused.
+        let fake = Fake {
+            github_block: Some("stacked-base-guard".to_string()),
+            ..clean()
+        };
+        let req = request(Effect::Merge);
+        assert_eq!(req.require_checks, false);
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("stacked-base-guard"));
+    }
+
+    #[test]
+    fn an_arm_effect_proceeds_past_a_ruleset_hold_to_the_queue() {
+        // Arm hands the PR to GitHub's own queue, which waits out a missing
+        // requirement by design; the hold must not stand in its way.
+        let fake = Fake {
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Arm);
+        req.decide_only = true;
+        assert_eq!(
+            run(&fake, &req),
+            Outcome::Authorized {
+                head: "abc123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_green_read_without_a_github_block_authorizes_as_before() {
+        let fake = clean();
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        req.decide_only = true;
+        assert_eq!(
+            run(&fake, &req),
+            Outcome::Authorized {
+                head: "abc123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unparseable_status_read_claims_no_github_block() {
+        let read = parse_checks_read(b"error: rate limited");
+        assert_eq!(read.verdict, "unknown");
+        assert_eq!(read.github_block, None);
+    }
+
+    #[test]
+    fn a_github_block_with_null_missing_falls_back_to_the_source() {
+        // merge_blocker answers `missing_required_checks: null` with a source
+        // line saying the block stands, so the reason must carry that line.
+        let payload = r#"{"verdict": "green", "ready_blockers": ["github_blocked"], "github_merge_state": {"state": "blocked", "blockers": ["github_blocked"], "missing_required_checks": null, "source": "the rules read failed or names no unsatisfied rule; the block stands"}}"#;
+        let read = parse_checks_read(payload.as_bytes());
+        assert_eq!(read.verdict, "green");
+        assert_eq!(
+            read.github_block.as_deref(),
+            Some("the rules read failed or names no unsatisfied rule; the block stands")
+        );
+    }
+
+    #[test]
+    fn the_parser_consumes_a_real_status_payload_verbatim() {
+        // Captured verbatim from a live `fno do pr status` read, 2026-09-19.
+        let payload = r#"{"pr": "2251", "head": "d38a744c36b97c65df67df7f4245f6704adfa494", "verdict": "green", "settled": true, "green": true, "pr_state": "MERGED", "mergeable": "UNKNOWN", "github_merge_state": null, "checks": {"total": 37, "check_runs": 36, "statuses": 1, "fail_check_runs": 0, "fail_statuses": 0, "pass": 37, "fail": 0, "pending": 0, "unsettled": 0, "unsettled_fail": 0}, "optional_reviews": [], "optional_reviews_unresolved": 0, "optional_reviews_resolved_unchanged": 0, "review_coverage": {"coverage": "not_asked", "reviewed_count": 0, "self_attested_count": 0, "head_sha": null, "stale_verdicts": [], "note": "not asked: PR is terminal (merged or closed); this says nothing about coverage at merge time"}, "review_posture": null, "merge_authority": {"auto_merge_enabled": true, "grant": "dispatch", "mergeable_autonomously": true}, "merge_execution": null, "rounds_used": null, "max_rounds": null, "rounds_exhausted": null, "rounds_note": "no review_coverage row at this head; run fno-agents review-coverage", "review_activity": {"blocker": "", "detail": "", "hold": null, "worktree": {"probed": false, "path": null, "dirty": null, "head": null, "note": "not asked: PR is terminal"}}, "dispatch_hold": null, "ready": true, "ready_blockers": []}"#;
+        let read = parse_checks_read(payload.as_bytes());
+        assert_eq!(read.verdict, "green");
+        assert_eq!(read.github_block, None);
     }
 
     #[test]
@@ -2061,5 +3738,309 @@ mod tests {
             .expect("a well-formed payload parses");
         assert_eq!(ok.effect, Effect::Arm);
         assert_eq!(ok.pr, Some(7));
+    }
+
+    fn preview_request(pr: u64) -> Request {
+        Request {
+            pr: Some(pr),
+            effect: Effect::Preview,
+            require_checks: true,
+            ..request(Effect::Preview)
+        }
+    }
+
+    fn preview_blockers(fake: &Fake, req: &Request) -> Vec<Blocker> {
+        let facts = fake.facts.clone().unwrap_or_else(open_facts);
+        match preview_walk(fake, req, &facts) {
+            PreviewVerdict::Go { .. } => Vec::new(),
+            PreviewVerdict::Blocked(rows) => rows,
+        }
+    }
+
+    #[test]
+    fn a_stale_pr_behind_a_held_slot_previews_both_blockers_without_taking_the_slot() {
+        // AC1.
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 3 behind".to_string())),
+            slot: RefCell::new(Some(7)),
+            other_facts: RefCell::new({
+                let mut map = HashMap::new();
+                map.insert(
+                    7,
+                    PrFacts {
+                        number: 7,
+                        state: "OPEN".to_string(),
+                        ..open_facts()
+                    },
+                );
+                map
+            }),
+            ..clean()
+        };
+        let req = Request {
+            pr: Some(8),
+            covered_head: Some("abc123".to_string()),
+            ..preview_request(8)
+        };
+        // The Fake pins covered_head to its own facts head, so pr 8 with the
+        // default facts reads a moved head; give pr 8 its own facts.
+        let mut fake = fake;
+        fake.facts = Some(PrFacts {
+            number: 8,
+            head_sha: "def456".to_string(),
+            ..open_facts()
+        });
+        fake.covered_head = Some("def456".to_string());
+        let blockers = preview_blockers(&fake, &req);
+        let codes: Vec<&str> = blockers.iter().map(|b| b.code.as_str()).collect();
+        assert!(codes.contains(&"ci_base_stale"), "{codes:?}");
+        assert!(codes.contains(&"merge_slot_held"), "{codes:?}");
+        let slot_blocker = blockers
+            .iter()
+            .find(|b| b.code == "merge_slot_held")
+            .expect("slot blocker");
+        assert!(slot_blocker.detail.contains("PR 7"), "{slot_blocker:?}");
+        assert!(fake.take_slot_calls.borrow().is_empty());
+        assert!(fake.release_slot_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_pr_previews_exactly_pr_terminal() {
+        // AC3.
+        let fake = Fake {
+            facts: Some(PrFacts {
+                state: "MERGED".to_string(),
+                ..open_facts()
+            }),
+            ..clean()
+        };
+        let blockers = preview_blockers(&fake, &preview_request(7));
+        assert_eq!(blockers.len(), 1, "{blockers:?}");
+        assert_eq!(blockers[0].code, "pr_terminal");
+    }
+
+    #[test]
+    fn merge_and_preview_name_the_same_first_blocker_for_every_gate() {
+        // AC2: for each gate made to refuse in turn, the Merge outcome's
+        // detail and the Preview's first blocker are the SAME answer - one
+        // decision, two collectors.
+        let base = || Fake { ..clean() };
+        let scenarios: Vec<(&str, Fake)> = vec![
+            (
+                "pr_terminal",
+                Fake {
+                    facts: Some(PrFacts {
+                        state: "CLOSED".to_string(),
+                        ..open_facts()
+                    }),
+                    ..base()
+                },
+            ),
+            (
+                "node_unbound",
+                Fake {
+                    node_binding: Some(ProbeOutcome::Refused(
+                        "unbound: no node names this PR".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "dispatch_hold",
+                Fake {
+                    dispatch_hold: Some(ProbeOutcome::Refused(
+                        "dispatch_hold: held by tgt-x".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "review_in_flight",
+                Fake {
+                    review_hold: Some(ProbeOutcome::Refused(
+                        "review_in_flight: held by tgt-x at abc123".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "red_merge_result",
+                Fake {
+                    merge_result: Some(ProbeOutcome::Refused(
+                        "F821 in the merged tree".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "stacked_base",
+                Fake {
+                    lineage: Some(ProbeOutcome::Refused(
+                        "base no longer reaches the default branch".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "github_blocked",
+                Fake {
+                    github_block: Some("smoke".to_string()),
+                    ..base()
+                },
+            ),
+            (
+                "review_coverage_uncovered",
+                Fake {
+                    coverage_exit: Some(3),
+                    ..base()
+                },
+            ),
+            (
+                "optional_reviews_unresolved",
+                Fake {
+                    optional_unresolved: Some(Some(2)),
+                    ..base()
+                },
+            ),
+            (
+                "ci_pending",
+                Fake {
+                    checks: Some("pending".to_string()),
+                    ..base()
+                },
+            ),
+        ];
+        for (code, fake) in scenarios {
+            let req_merge = Request {
+                require_checks: true,
+                ..request(Effect::Merge)
+            };
+            let outcome = run(&fake, &req_merge);
+            let blockers = preview_blockers(&fake, &preview_request(7));
+            assert!(
+                !blockers.is_empty(),
+                "{code}: preview cleared while merge refused ({outcome:?})"
+            );
+            let first = blockers[0].code.clone();
+            assert_eq!(
+                outcome.detail(),
+                blockers[0].detail,
+                "{code}: merge detail and the preview's first blocker ({first}) disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_preview_runs_no_effect_and_takes_no_slot() {
+        let fake = Fake {
+            fresh_ci: Some(false),
+            ..clean()
+        };
+        let outcome = run(&fake, &preview_request(7));
+        assert_eq!(outcome.word(), "authorized");
+        assert!(fake.take_slot_calls.borrow().is_empty());
+        assert!(fake.release_slot_calls.borrow().is_empty());
+        assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_red_kind_word_splits_by_the_counts() {
+        let counts = |uf: i64, f: i64, fs: i64| serde_json::json!({"unsettled_fail": uf, "fail": f, "fail_statuses": fs});
+        assert_eq!(
+            ci_blocker_word("red", Some(&counts(1, 1, 0))),
+            "ci_cancelled_retrigger"
+        );
+        assert_eq!(
+            ci_blocker_word("red", Some(&counts(0, 2, 2))),
+            "commit_status_red"
+        );
+        assert_eq!(ci_blocker_word("red", Some(&counts(1, 3, 1))), "ci_red");
+        assert_eq!(ci_blocker_word("red", None), "ci_red");
+        assert_eq!(ci_blocker_word("pending", None), "ci_pending");
+    }
+
+    #[test]
+    fn a_preview_payload_defaults_its_ci_gate_on() {
+        let payload: Value =
+            serde_json::from_str(r#"{"cwd": "/tmp", "effect": "preview", "pr": 7}"#).unwrap();
+        let request = parse_request(&payload).unwrap();
+        assert_eq!(request.effect, Effect::Preview);
+        assert!(request.require_checks);
+        let merge_payload: Value =
+            serde_json::from_str(r#"{"cwd": "/tmp", "effect": "merge", "pr": 7}"#).unwrap();
+        assert!(!parse_request(&merge_payload).unwrap().require_checks);
+    }
+
+    #[test]
+    fn live_lanes_counts_live_lane_claims_at_the_canonical_root() {
+        // The overlap hold arms on this count; the trait default 0 would
+        // leave it dead in production. The claim is planted through the same
+        // acquire API the lane runtime uses, in a fresh git repo, so the
+        // canonical-root resolution and the claims scan both run for real.
+        let base = std::env::temp_dir().join(format!("x53c5-lanes-{}", std::process::id()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "git init failed for the lane-count fixture"
+        );
+        let opts = crate::claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ttl_ms: Some(60_000),
+            root: Some(repo.clone()),
+            ..Default::default()
+        };
+        let claimed = matches!(
+            crate::claims::acquire("lane-slot:0", "parallel-lane:live-lanes-test", opts),
+            crate::claims::AcquireOutcome::Acquired(_)
+        );
+        assert!(claimed, "the planted lane claim must acquire");
+        assert_eq!(
+            RealProbes.live_lanes(&repo),
+            1,
+            "the live lane claim must count"
+        );
+        let _ = crate::claims::release(
+            "lane-slot:0",
+            "parallel-lane:live-lanes-test",
+            Some(repo.as_path()),
+            None,
+        );
+        assert_eq!(
+            RealProbes.live_lanes(&repo),
+            0,
+            "released lane must not count"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn covered_head_reads_a_store_committed_coverage_row() {
+        // AC5-HP: a covered row at HEAD committed to the store only.
+        let _root = crate::paths::DeclaredRoot::declare("am_covered_head_store");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(cwd)
+            .output();
+        // No git repo in the temp dir: HEAD is empty, so the scan accepts any
+        // head. A store-only covered row still answers.
+        let _ = head;
+        let line = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "aaaaaaaaaa", "coverage": "covered", "reviewed_count": 2}
+        })
+        .to_string();
+        let events = crate::paths::events_path(cwd);
+        crate::event_store::append_envelope(&events, &line, None).unwrap();
+        let covered = covered_head_from_event(cwd);
+        assert_eq!(covered.as_deref(), Some("aaaaaaaaaa"), "{covered:?}");
     }
 }

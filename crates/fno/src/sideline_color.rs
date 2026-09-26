@@ -65,6 +65,8 @@ pub struct SidelinePalette {
     /// routing-row NAME -> color (the `[sideline.colors.row]` table).
     pub row: Vec<(String, String)>,
     pub routing_rows: Vec<RoutingRow>,
+    /// The `[sideline] layout` switch: which row shape the sideline paints.
+    pub layout: SidelineLayout,
 }
 
 impl SidelinePalette {
@@ -73,6 +75,29 @@ impl SidelinePalette {
             .iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, c)| parse_color(c))
+    }
+}
+
+/// The sideline's row shape: the padded two-line card (`Card`, the default),
+/// or the one-line table row (`List`). Read once with the colors; an unknown
+/// or missing value reads as the card default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidelineLayout {
+    /// The one-line table row, selected by `layout = "list"`.
+    List,
+    /// The default: the padded two-line card.
+    #[default]
+    Card,
+}
+
+/// Parse the `[sideline] layout` value: the two-line card is the DEFAULT
+/// (`"list"` selects the one-line table row; any other value - including no
+/// value - reads as the default). A standalone mapping so a unit test can
+/// call it without a config file.
+pub fn parse_layout(v: Option<&str>) -> SidelineLayout {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("list") => SidelineLayout::List,
+        _ => SidelineLayout::Card,
     }
 }
 
@@ -120,9 +145,11 @@ fn indexed_or_hex(n: &str) -> Option<Color> {
 
 /// Read the config file the same precedence every other agent-view settings
 /// read uses (agents_view: project `.fno/config.toml`, then the
-/// `$FNO_GLOBAL_SETTINGS_PATH` sibling, else `~/.fno/config.toml`). Returns
-/// the first that parses; a missing or malformed file yields the empty
-/// palette (zero-config rendering stays on the built-in table).
+/// `$FNO_GLOBAL_SETTINGS_PATH` sibling, else `~/.fno/config.toml`). The files
+/// MERGE per key, project over global, so a global `[sideline]` pref survives
+/// a checkout that carries its own project config; a missing or malformed
+/// file contributes nothing (zero-config rendering stays on the built-in
+/// table).
 fn read_palette() -> SidelinePalette {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(pwd) = std::env::var_os("PWD")
@@ -140,59 +167,87 @@ fn read_palette() -> SidelinePalette {
     if let Some(g) = global {
         candidates.push(g);
     }
-    for path in candidates {
+    let mut pal = SidelinePalette::default();
+    let mut layout: Option<SidelineLayout> = None;
+    for path in candidates.into_iter().rev() {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
             continue;
         };
-        let mut pal = SidelinePalette::default();
-        if let Some(colors) = doc.get("sideline").and_then(|s| s.get("colors")) {
-            let pairs = |table: Option<&toml::Value>| -> Vec<(String, String)> {
-                table
-                    .and_then(|t| t.as_table())
-                    .map(|t| {
-                        t.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            pal.harness = pairs(colors.get("harness"));
-            pal.route = pairs(colors.get("route"));
-            pal.model = pairs(colors.get("model"));
-            pal.row = pairs(colors.get("row"));
-        }
-        if let Some(rows) = doc
-            .get("routing")
-            .and_then(|r| r.get("models"))
-            .and_then(|m| m.as_array())
-        {
-            pal.routing_rows = rows
-                .iter()
-                .filter_map(|r| r.as_table())
-                .map(|t| RoutingRow {
-                    name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    harness: t
-                        .get("harness")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .into(),
-                    model: t.get("model").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    route: t.get("route").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    account: t
-                        .get("account")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .into(),
-                    color: t.get("color").and_then(|v| v.as_str()).unwrap_or("").into(),
-                })
-                .collect();
-        }
-        return pal;
+        fold_palette(&mut pal, &mut layout, &doc);
     }
-    SidelinePalette::default()
+    if let Some(l) = layout {
+        pal.layout = l;
+    }
+    pal
+}
+
+/// Fold one parsed config doc into `pal`, with `layout` holding the first
+/// explicitly-set value across folds. Callers fold global-first and
+/// project-last, so the project's keys win and a key only the global file
+/// sets survives: display prefs merge per key, never first-file-wins. A
+/// malformed file contributes nothing, the same tolerance the first-parse
+/// reader kept.
+fn fold_palette(pal: &mut SidelinePalette, layout: &mut Option<SidelineLayout>, doc: &toml::Value) {
+    if let Some(s) = doc
+        .get("sideline")
+        .and_then(|s| s.get("layout"))
+        .and_then(|v| v.as_str())
+    {
+        *layout = Some(parse_layout(Some(s)));
+    }
+    let pairs = |table: Option<&toml::Value>| -> Vec<(String, String)> {
+        table
+            .and_then(|t| t.as_table())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let merge = |into: &mut Vec<(String, String)>, over: Vec<(String, String)>| {
+        for (k, v) in over {
+            match into.iter_mut().find(|(ek, _)| *ek == k) {
+                Some(slot) => slot.1 = v,
+                None => into.push((k, v)),
+            }
+        }
+    };
+    if let Some(colors) = doc.get("sideline").and_then(|s| s.get("colors")) {
+        merge(&mut pal.harness, pairs(colors.get("harness")));
+        merge(&mut pal.route, pairs(colors.get("route")));
+        merge(&mut pal.model, pairs(colors.get("model")));
+        merge(&mut pal.row, pairs(colors.get("row")));
+    }
+    if let Some(rows) = doc
+        .get("routing")
+        .and_then(|r| r.get("models"))
+        .and_then(|m| m.as_array())
+    {
+        pal.routing_rows = rows
+            .iter()
+            .filter_map(|r| r.as_table())
+            .map(|t| RoutingRow {
+                name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                harness: t
+                    .get("harness")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
+                model: t.get("model").and_then(|v| v.as_str()).unwrap_or("").into(),
+                route: t.get("route").and_then(|v| v.as_str()).unwrap_or("").into(),
+                account: t
+                    .get("account")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
+                color: t.get("color").and_then(|v| v.as_str()).unwrap_or("").into(),
+            })
+            .collect();
+    }
 }
 
 static PAL: std::sync::RwLock<Option<&'static SidelinePalette>> = std::sync::RwLock::new(None);
@@ -401,6 +456,64 @@ mod tests {
     // The palette tests run against the empty process palette; they pin the
     // CASCADE mechanics and the built-in table, never ambient config.
 
+    fn doc(s: &str) -> toml::Value {
+        toml::from_str(s).expect("test toml parses")
+    }
+
+    #[test]
+    fn fold_merges_per_key_project_over_global() {
+        let global =
+            doc("[sideline]\nlayout = \"list\"\n[sideline.colors.harness]\nclaude = \"cyan\"\nonly_global = \"red\"\n");
+        let project =
+            doc("[sideline.colors.harness]\nclaude = \"blue\"\nonly_project = \"yellow\"\n");
+        let mut pal = SidelinePalette::default();
+        let mut layout: Option<SidelineLayout> = None;
+        fold_palette(&mut pal, &mut layout, &global);
+        fold_palette(&mut pal, &mut layout, &project);
+        assert_eq!(
+            pal.harness
+                .iter()
+                .find(|(k, _)| k == "claude")
+                .map(|(_, v)| v.as_str()),
+            Some("blue"),
+            "the project's value wins per key"
+        );
+        assert!(
+            pal.harness.iter().any(|(k, _)| k == "only_global"),
+            "a global-only key survives"
+        );
+        assert!(pal.harness.iter().any(|(k, _)| k == "only_project"));
+        // An unset project layout keeps the global one.
+        assert_eq!(layout, Some(SidelineLayout::List));
+    }
+
+    #[test]
+    fn fold_layout_lets_the_project_pick_card_under_a_global_list() {
+        let global = doc("[sideline]\nlayout = \"list\"\n");
+        let project = doc("[sideline]\nlayout = \"card\"\n");
+        let mut pal = SidelinePalette::default();
+        let mut layout: Option<SidelineLayout> = None;
+        fold_palette(&mut pal, &mut layout, &global);
+        fold_palette(&mut pal, &mut layout, &project);
+        assert_eq!(layout, Some(SidelineLayout::Card));
+    }
+
+    #[test]
+    fn fold_routing_rows_replace_when_present() {
+        let global = doc("[[routing.models]]\nname = \"g\"\n");
+        let project = doc("[[routing.models]]\nname = \"p\"\n");
+        let mut pal = SidelinePalette::default();
+        let mut layout: Option<SidelineLayout> = None;
+        fold_palette(&mut pal, &mut layout, &global);
+        assert_eq!(pal.routing_rows.len(), 1);
+        fold_palette(&mut pal, &mut layout, &project);
+        assert_eq!(pal.routing_rows.len(), 1);
+        assert_eq!(
+            pal.routing_rows[0].name, "p",
+            "a present routing list replaces wholesale"
+        );
+    }
+
     #[test]
     fn builtin_table_colors_by_route_then_harness() {
         assert_eq!(
@@ -491,6 +604,7 @@ mod tests {
             route: pairs(route),
             harness: pairs(harness),
             row: pairs(row),
+            layout: SidelineLayout::default(),
         }
     }
 
@@ -777,6 +891,32 @@ mod tests {
         assert!(
             PAL.read().unwrap().is_some(),
             "the next palette() re-primes"
+        );
+    }
+
+    #[test]
+    fn parse_layout_reads_card() {
+        assert_eq!(parse_layout(Some("card")), SidelineLayout::Card);
+        assert_eq!(parse_layout(Some(" card ")), SidelineLayout::Card);
+        assert_eq!(parse_layout(Some("CARD")), SidelineLayout::Card);
+    }
+
+    #[test]
+    fn parse_layout_missing_key_is_card() {
+        assert_eq!(
+            parse_layout(None),
+            SidelineLayout::Card,
+            "no key is the card default"
+        );
+        assert_eq!(parse_layout(Some("")), SidelineLayout::Card);
+    }
+
+    #[test]
+    fn parse_layout_unknown_value_is_card() {
+        assert_eq!(
+            parse_layout(Some("grid")),
+            SidelineLayout::Card,
+            "an unknown value reads as the default"
         );
     }
 }

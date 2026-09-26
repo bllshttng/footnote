@@ -37,19 +37,6 @@ const UNKNOWN_RESET_HOLD_S: i64 = 5 * 3600;
 /// (mux_spawn._MUX_SUBPROCESS_TIMEOUT_S).
 const PANE_PROBE_BUDGET: Duration = Duration::from_secs(30);
 
-/// The registry statuses that can never hold a crown
-/// (mirrors registry.TERMINAL_STATUSES; the crowned_sessions divisor skips
-/// them exactly as Python's court reader does).
-fn status_is_terminal(s: &AgentStatus) -> bool {
-    matches!(
-        s,
-        AgentStatus::Orphaned
-            | AgentStatus::Failed
-            | AgentStatus::Exited
-            | AgentStatus::PermanentDead
-    )
-}
-
 /// The `providers.provider_limits.<provider>.lanes` cap, or `None` when the
 /// provider is uncapped. A config that never named a provider_limits table
 /// falls back to the built-in budget table, exactly as the Python gate's
@@ -70,6 +57,30 @@ pub(crate) fn provider_lanes_cap(config_cwd: &Path, provider: &str) -> Option<us
 /// The built-in budget table (`config._BUILTIN_PROVIDER_BUDGETS`): zai only.
 fn built_in_lanes(provider: &str) -> Option<i64> {
     (provider == "zai").then_some(5)
+}
+
+/// The `agents.provider_limits.<provider>.subagents` ceiling, or `None` when
+/// the provider is uncapped. Mirrors `provider_lanes_cap`: a config that
+/// never named a provider_limits table falls back to the built-in budget
+/// table, exactly as Python's `provider_subagent_budget` fails open
+/// (`config._BUILTIN_PROVIDER_BUDGETS`). The reign check-in reads it as the
+/// blueprint-subagent ceiling; `None` reads as the default ceiling there.
+pub(crate) fn provider_subagents_cap(config_cwd: &Path, provider: &str) -> Option<usize> {
+    let subagents = match agents_config::config_lookup(config_cwd, &["agents", "provider_limits"]) {
+        Some(table) => table
+            .get(provider)
+            .and_then(|budget| budget.get("subagents"))
+            .and_then(|v| v.as_integer()),
+        None => built_in_subagents(provider),
+    };
+    usize::try_from(subagents.unwrap_or(0))
+        .ok()
+        .filter(|subagents| *subagents >= 1)
+}
+
+/// The built-in budget table (`config._BUILTIN_PROVIDER_BUDGETS`): zai only.
+fn built_in_subagents(provider: &str) -> Option<i64> {
+    (provider == "zai").then_some(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +203,7 @@ fn pid_liveness(pid: u32, recorded: Option<u64>) -> Result<bool, ()> {
 
 /// One lane's count could not be proved: the probe's unknown verdict, with
 /// the lane and the fault named.
+#[derive(Debug)]
 pub(crate) struct LaneFault {
     pub(crate) provider: String,
     pub(crate) error: String,
@@ -332,14 +344,18 @@ pub(crate) fn read_questions_journal(registry_path: &Path, warnings: &mut Vec<St
     match registry_path.parent().and_then(Path::parent) {
         Some(fno_dir) => {
             let path = fno_dir.join("questions.jsonl");
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
-                if e.kind() != std::io::ErrorKind::NotFound {
+            match crate::event_store::journal_text_checked(
+                &path,
+                &crate::event_store::EventQuery::of_types(crate::needs::QUESTION_TYPES),
+            ) {
+                Ok(text) => text,
+                Err(e) => {
                     warnings.push(format!(
                         "operator questions unreadable ({e}); waiting workers counted"
                     ));
+                    String::new()
                 }
-                String::new()
-            })
+            }
         }
         None => String::new(),
     }
@@ -369,19 +385,32 @@ pub(crate) fn read_awaiting_operator(
     awaiting_operator(rows, &raw, transcript_age_s)
 }
 
+/// One provider lane reading: the count the gate refuses on, the registry row
+/// names it counted, the parked pairs it left out, and the slot claims it
+/// counted. A claude row with an open operator question and a quiet
+/// transcript holds its process and its slot but spends nothing on the lane,
+/// so it stops counting against the provider cap.
+#[derive(Debug)]
+pub(crate) struct LaneReading {
+    pub count: usize,
+    pub counted: Vec<String>,
+    pub parked: Vec<(String, String)>,
+    /// The `(name, expires_at)` pairs of the slot claims the count included:
+    /// the lane's held-by-claim share, reservations named.
+    pub reserved: Vec<(String, i64)>,
+}
+
 /// Count rows of ONE provider only when status and positive liveness agree
-/// (the port of `spawn_gate.provider_live_count`). Returns the count, the
-/// names of the rows it included, and the parked pairs it left out: a claude
-/// row with an open operator question and a quiet transcript holds its process
-/// and its slot but spends nothing on the lane, so it stops counting against
-/// the provider cap. Every unreadable source is an `Err`, never a zero.
+/// (the port of `spawn_gate.provider_live_count`). Every unreadable source is
+/// an `Err`, never a zero.
 pub(crate) fn provider_live_count(
     registry_path: &Path,
     provider: &str,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<LaneReading, String> {
     let questions_raw = read_questions_journal(registry_path, warnings);
-    provider_live_count_with_questions(registry_path, provider, &questions_raw, warnings)
+    provider_live_count_with_questions(registry_path, provider, &questions_raw, redeemer, warnings)
 }
 
 /// The same count over a pre-read journal, so a caller counting MANY providers
@@ -390,8 +419,9 @@ pub(crate) fn provider_live_count_with_questions(
     registry_path: &Path,
     provider: &str,
     questions_raw: &str,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<LaneReading, String> {
     let registry =
         load_registry(registry_path).map_err(|e| format!("fno registry unreadable: {e}"))?;
     let live_rows: Vec<&RegistryEntry> = registry
@@ -511,8 +541,15 @@ pub(crate) fn provider_live_count_with_questions(
     // claims dedup sees both lists.
     let mut claim_seen = counted_names.clone();
     claim_seen.extend(parked.iter().map(|(n, _)| n.clone()));
-    count += provider_live_slot_claims(provider, &claim_seen, warnings)?;
-    Ok((count, counted_names, parked))
+    let (claim_count, reserved) =
+        provider_live_slot_claims(provider, &claim_seen, redeemer, warnings)?;
+    count += claim_count;
+    Ok(LaneReading {
+        count,
+        counted: counted_names,
+        parked,
+        reserved,
+    })
 }
 
 /// Pane liveness for one row: `Some(bool)` decided, `None` when the row
@@ -529,26 +566,32 @@ fn pane_state(row: &RegistryEntry) -> Result<Option<bool>, String> {
 /// Provider-tagged headless reservations not represented by rows
 /// (`_provider_live_slot_claims`). A Suspect reservation (dead pid inside its
 /// TTL) counts as live, as `live_worker_slot_claims` counts it. A corrupted
-/// one refuses.
-fn provider_live_slot_claims(
+/// one refuses. Returns the count beside the `(name, expires_at)` pairs it
+/// counted, so a refusal can name who holds the lane. `redeemer` skips that
+/// one name when its claim carries the `reserved_by` key: a reserved spawn is
+/// not charged for its own reservation, and a live worker's plain slot claim
+/// is never skipped by borrowing its name.
+pub(crate) fn provider_live_slot_claims(
     provider: &str,
     counted_names: &[String],
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<usize, String> {
+) -> Result<(usize, Vec<(String, i64)>), String> {
     let root = match claims::global_claims_root() {
         Some(root) => root,
-        None => return Ok(0),
+        None => return Ok((0, Vec::new())),
     };
     let dir = match claims::claims_dir_for(Some(&root)) {
         Some(dir) => dir,
-        None => return Ok(0),
+        None => return Ok((0, Vec::new())),
     };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(_) => return Ok(0),
+        Err(_) => return Ok((0, Vec::new())),
     };
     let counted: HashSet<&str> = counted_names.iter().map(String::as_str).collect();
     let mut count = 0usize;
+    let mut reserved: Vec<(String, i64)> = Vec::new();
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy().into_owned();
@@ -569,6 +612,12 @@ fn provider_live_slot_claims(
             ClaimState::Corrupted => return Err(format!("worker reservation {key} is corrupted")),
             _ => {}
         }
+        let is_reservation = record
+            .as_ref()
+            .is_some_and(|rec| rec.metadata.get("reserved_by").is_some());
+        if redeemer == Some(name) && is_reservation {
+            continue;
+        }
         let model_provider = record.as_ref().and_then(|rec| {
             rec.metadata
                 .get("model_provider")
@@ -588,11 +637,17 @@ fn provider_live_slot_claims(
             continue;
         }
         match state {
-            ClaimState::Live | ClaimState::Suspect => count += 1,
+            ClaimState::Live | ClaimState::Suspect => {
+                count += 1;
+                reserved.push((
+                    name.to_string(),
+                    record.as_ref().and_then(|rec| rec.expires_at).unwrap_or(0),
+                ));
+            }
             _ => {}
         }
     }
-    Ok(count)
+    Ok((count, reserved))
 }
 
 /// Minimal percent-decoder for claim filenames (inverse of
@@ -651,8 +706,15 @@ pub(crate) fn share_reading(
     let mut held_rows: Vec<String> = Vec::new();
     let mut unattributed: Vec<String> = Vec::new();
     for e in &registry.entries {
+        // A crown counts until it is cleared or its row is permanently dead.
+        // A reboot leaves every crowned row reading exited while the crown
+        // still stands, and dropping those crowns read kings=0 and a share
+        // of 1 for everyone.
         if let Some(session) = e.harness_session_id.as_deref() {
-            if e.crown_level.is_some() && !session.is_empty() && !status_is_terminal(&e.status) {
+            if e.crown_level.is_some()
+                && !session.is_empty()
+                && e.status != AgentStatus::PermanentDead
+            {
                 crowned.insert(session.to_string());
             }
         }
@@ -682,6 +744,42 @@ pub(crate) fn share_reading(
         held: Some(held_rows.len()),
         held_rows: Some(held_rows),
         unattributed_rows: Some(unattributed),
+    }
+}
+
+/// Return the caller's row only when crown settlement confirms it will be vacated.
+pub(crate) fn succession_replaces(
+    live: &[RegistryEntry],
+    caller: Option<&str>,
+    scope: &str,
+) -> Result<String, &'static str> {
+    let caller = caller
+        .filter(|session| !session.is_empty())
+        .ok_or("no_caller")?;
+    let mut rows = live.iter().filter(|row| {
+        row.harness_session_id.as_deref() == Some(caller)
+            || row.cc_session_id.as_deref() == Some(caller)
+    });
+    let row = rows.next().ok_or("caller_not_live")?;
+    if rows.next().is_some() {
+        return Err("caller_ambiguous");
+    }
+    let rows = serde_json::to_value(live).map_err(|_| "settle_unreadable")?;
+    let answer = crate::crown_settle::resolve(&serde_json::json!({
+        "scope": scope,
+        "rows": rows,
+        "succession": true,
+        "caller": {"kind": "agent", "name": row.name.clone()},
+    }))
+    .map_err(|_| "settle_unreadable")?;
+    let vacates_caller = answer
+        .get("vacate")
+        .and_then(Value::as_array)
+        .is_some_and(|vacate| vacate.len() == 1 && vacate[0].as_str() == Some(row.name.as_str()));
+    if answer.get("outcome").and_then(Value::as_str) == Some("succeeded") && vacates_caller {
+        Ok(row.name.clone())
+    } else {
+        Err("caller_not_sole_holder")
     }
 }
 
@@ -776,6 +874,89 @@ pub(crate) fn check_account_quota_lock(
     ))
 }
 
+/// The auth wall beside the quota lock: a spawn naming an account whose
+/// config dir cannot log in is refused before launch, so the node is not
+/// counted as dispatched while nobody works on it. Claude-only: codex and
+/// opencode status verbs read local state and cannot see a server-side
+/// expiry, so a probe built on them could only ever say yes. The rules and
+/// their order live in [`check_account_login_with`]; this wrapper binds the
+/// production reader and probe so tests can inject both.
+pub(crate) fn check_account_login(
+    route_provider: Option<&str>,
+    account: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    check_account_login_with(
+        route_provider,
+        account,
+        crate::reentry::shell_account_binding,
+        crate::claude_login::probe_config_dir,
+        warnings,
+    )
+}
+
+/// The decision body, split for tests: `binding` and `probe` are injected, so
+/// a test never shells out. Rules, in order:
+/// 1. no account or `default`: admit, nothing is called (the quota lock's rule).
+/// 2. a route to any provider other than anthropic: admit, nothing is called
+///    - a routed worker authenticates with the route's key, not the slot's login.
+/// 3. an unreadable binding: admit; the Python seam's own resolver owns that
+///    refusal and runs before the gate.
+/// 4. a binding with no config dir (an api-key lane): admit, nothing to probe.
+/// 5. a readable config dir: probe it. Logged in: admit. A logged-out verdict
+///    refuses with the quota lock's exit code and a receipt naming the
+///    account, the dir and the login command. An INCONCLUSIVE probe (timeout,
+///    unparseable output, a non-auth error) pushes a note and admits - a
+///    silent fail-open would hide a probe broken by a future claude flag
+///    rename, so the note is the lane's one honesty signal.
+pub(crate) fn check_account_login_with(
+    route_provider: Option<&str>,
+    account: &str,
+    binding: impl Fn(&str) -> Result<Option<String>, String>,
+    probe: impl Fn(&Path) -> crate::claude_login::Login,
+    warnings: &mut Vec<String>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    use crate::claude_login::Login;
+    use crate::spawn_gate::{Refusal, EXIT_PROVIDER_CAP};
+    if account.is_empty() || account == "default" {
+        return Ok(());
+    }
+    if route_provider.is_some_and(|p| p != "anthropic") {
+        return Ok(());
+    }
+    let Ok(Some(dir)) = binding(account) else {
+        // An Err reads admit, same as an api-key lane (rule 3/4).
+        return Ok(());
+    };
+    let dir = PathBuf::from(dir);
+    match probe(&dir) {
+        Login::LoggedIn => Ok(()),
+        Login::Unknown(why) => {
+            warnings.push(format!(
+                "spawn-gate note: account {account} login probe inconclusive ({why}); not refusing on it"
+            ));
+            Ok(())
+        }
+        Login::LoggedOut(detail) => {
+            let remedy = crate::claude_login::login_command(&dir);
+            warnings.push(format!(
+                "spawn-gate: account {account} cannot log in ({detail}); refusing; no worker launched; run: {remedy}"
+            ));
+            Err(Refusal::with_receipt(
+                EXIT_PROVIDER_CAP,
+                serde_json::json!({
+                    "status": "refused",
+                    "reason": "account_not_logged_in",
+                    "account": account,
+                    "config_dir": dir,
+                    "detail": detail,
+                    "remedy": remedy,
+                }),
+            ))
+        }
+    }
+}
+
 /// The same wall on the ROUTE axis: a route-keyed spawn (`--provider zai`,
 /// no `--account`) never reaches the account check above, so the lane
 /// snapshot the daemon persists every PROVIDER_CAP_INTERVAL_S, armed or
@@ -795,6 +976,20 @@ pub(crate) fn check_lane_quota_lock(
     let Some(snapshot) = crate::provider_cap::read_persisted_snapshot(&home) else {
         return Ok(());
     };
+    let provider_lanes: Vec<_> = snapshot
+        .lanes
+        .iter()
+        .filter(|lane| lane.provider == provider)
+        .collect();
+    if provider_lanes.is_empty() {
+        warnings.push(format!(
+            "spawn-gate note: provider lane {provider} quota unmeasured (no lane in snapshot); not refusing on it"
+        ));
+    } else if provider_lanes.iter().all(|lane| lane.state == "unmeasured") {
+        warnings.push(format!(
+            "spawn-gate note: provider lane {provider} quota unmeasured (no member measured); not refusing on it"
+        ));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -851,29 +1046,8 @@ pub(crate) fn check_lane_quota_lock(
     ))
 }
 
-/// The provider runtime-state payload: `$FNO_RUNTIME_STATE_PATH`, else the
-/// configured state root's `provider-runtime-state.json`. An unreadable file
-/// is an empty payload (unlocked), matching the Python reader's None arm.
 fn runtime_state_payload(config_cwd: &Path) -> Value {
-    let path: PathBuf = match std::env::var_os("FNO_RUNTIME_STATE_PATH") {
-        Some(override_) => PathBuf::from(override_),
-        None => {
-            let mut path = agents_config::state_dir(config_cwd).unwrap_or_else(default_state_dir);
-            path.push("provider-runtime-state.json");
-            path
-        }
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null)
-}
-
-fn default_state_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".fno")
+    crate::route_capacity::runtime_state_payload(config_cwd)
 }
 
 /// The account's binding rate-limit deadline, when its health entry is fresh
@@ -966,10 +1140,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 2, "two live zai rows");
-        assert_eq!(counted, vec!["a".to_string(), "b".to_string()]);
-        assert!(parked.is_empty(), "no parked rows in the plain fixture");
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(reading.count, 2, "two live zai rows");
+        assert_eq!(reading.counted, vec!["a".to_string(), "b".to_string()]);
+        assert!(
+            reading.parked.is_empty(),
+            "no parked rows in the plain fixture"
+        );
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -999,10 +1180,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 1, "the recycled incarnation must not count");
-        assert_eq!(counted, vec!["good".to_string()]);
-        assert!(parked.is_empty(), "no parked rows in the plain fixture");
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(reading.count, 1, "the recycled incarnation must not count");
+        assert_eq!(reading.counted, vec!["good".to_string()]);
+        assert!(
+            reading.parked.is_empty(),
+            "no parked rows in the plain fixture"
+        );
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1160,10 +1348,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 1, "the waiting worker stops holding the lane");
-        assert_eq!(counted, vec!["b".to_string()]);
-        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(
+            reading.count, 1,
+            "the waiting worker stops holding the lane"
+        );
+        assert_eq!(reading.counted, vec!["b".to_string()]);
+        assert_eq!(reading.parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1229,13 +1424,17 @@ mod tests {
             &[claude_row_json("a", a), live_row("good", "zai", Some(me))],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
         assert_eq!(
-            count, 1,
+            reading.count, 1,
             "the reservation must not count the parked row back"
         );
-        assert_eq!(counted, vec!["good".to_string()]);
-        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert_eq!(reading.counted, vec!["good".to_string()]);
+        assert_eq!(reading.parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert!(
+            reading.reserved.is_empty(),
+            "the parked row's own claim is deduped, not counted and not named"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1253,7 +1452,7 @@ mod tests {
         let reg = dir.join("registry.json");
         std::fs::write(&reg, "{ not json").unwrap();
         let mut warnings = Vec::new();
-        let err = provider_live_count(&reg, "zai", &mut warnings).unwrap_err();
+        let err = provider_live_count(&reg, "zai", None, &mut warnings).unwrap_err();
         assert!(err.contains("fno registry unreadable"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1284,7 +1483,7 @@ mod tests {
         )
         .unwrap();
         let mut warnings = Vec::new();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0);
         assert!(
             warnings
@@ -1292,8 +1491,11 @@ mod tests {
                 .any(|w| w.contains("without model_provider")),
             "{warnings:?}"
         );
+        assert!(named.is_empty(), "nothing counted, nothing named");
 
-        // Tagged reservation held by THIS live process: counted for zai.
+        // Tagged reservation held by THIS live process: counted for zai, and
+        // the counted pair names it. This fixture writes no expires_at, so
+        // the pair carries 0.
         let tagged = claims_dir.join(format!("{}.lock", claims::encode_key("worker:tagged")));
         std::fs::write(
             &tagged,
@@ -1301,8 +1503,11 @@ mod tests {
         )
         .unwrap();
         warnings.clear();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 1, "a live zai-tagged claim counts");
+        assert_eq!(named.len(), 1, "the counted claim is named");
+        assert_eq!(named[0].0, "tagged");
+        assert_eq!(named[0].1, 0, "no expires_at on the fixture, so 0");
 
         // A Suspect reservation (dead pid inside its TTL) counts too, so one
         // orphaned probe row cannot wedge the whole lane count behind an Err.
@@ -1317,13 +1522,154 @@ mod tests {
             claims::ClaimState::Suspect
         ));
         warnings.clear();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 2, "a suspect zai-tagged claim counts as one slot");
+        assert_eq!(named.len(), 2, "both counted claims are named");
+        assert!(
+            named
+                .iter()
+                .any(|(name, exp)| name == "suspect" && *exp > now),
+            "the suspect pair carries the fixture's expiry"
+        );
 
         // Another provider's tag never counts for zai.
-        let n = provider_live_slot_claims("codex", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("codex", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0);
+        assert!(named.is_empty());
 
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worker reservation claim holds a provider lane slot with no registry
+    /// row and no process behind it (AC1-HP), and the count names it beside
+    /// its expiry.
+    #[test]
+    fn provider_reservation_counts_toward_the_provider_lane() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-resv-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let lock = claims_dir.join(format!(
+            "{}.lock",
+            claims::encode_key("worker:t-reserved-x-4444")
+        ));
+        std::fs::write(
+            &lock,
+            format!(
+                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                claims::SCHEMA_VERSION,
+                now + 600_000,
+                dead_pid(),
+                claims::hostname()
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 1, "a live reservation spends a lane slot");
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].0, "t-reserved-x-4444");
+        assert_eq!(named[0].1, now + 600_000);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reserved spawn is not charged for its own reservation (AC1-EDGE /
+    /// AC2-HP), but a live worker's plain slot claim (no `reserved_by`) is
+    /// never skipped by a spawn borrowing its name (AC2-ERR).
+    #[test]
+    fn provider_count_skips_the_redeemers_reservation_only() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-redeem-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let host = claims::hostname();
+        for (key, holder, reserved) in [
+            ("worker:t-reserved-x-4444", "king-1", true),
+            ("worker:t-live-worker", "live-holder", false),
+        ] {
+            let reserved_line = reserved
+                .then_some("  reserved_by: king-1\n")
+                .unwrap_or_default();
+            let lock = claims_dir.join(format!("{}.lock", claims::encode_key(key)));
+            std::fs::write(
+                &lock,
+                format!(
+                    "schema_version: {}\nkey: {key}\nholder: {holder}\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n{reserved_line}",
+                    claims::SCHEMA_VERSION,
+                    now + 600_000,
+                    std::process::id()
+                ),
+            )
+            .unwrap();
+        }
+        let mut warnings = Vec::new();
+        let (n, _) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 2, "both claims count with no redeemer");
+        let (n, _) =
+            provider_live_slot_claims("zai", &[], Some("t-reserved-x-4444"), &mut warnings)
+                .unwrap();
+        assert_eq!(n, 1, "the redeemer skips its own reservation");
+        let (n, _) =
+            provider_live_slot_claims("zai", &[], Some("t-live-worker"), &mut warnings).unwrap();
+        assert_eq!(n, 2, "a live worker's claim is never skipped by name");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An expired reservation reads Stale and is already skipped (AC1-ERR):
+    /// the starvation floor the TTL ceiling builds on.
+    #[test]
+    fn provider_count_skips_an_expired_reservation() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-expired-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let lock = claims_dir.join(format!(
+            "{}.lock",
+            claims::encode_key("worker:t-expired-x-4444")
+        ));
+        std::fs::write(
+            &lock,
+            format!(
+                "schema_version: {}\nkey: worker:t-expired-x-4444\nholder: king-1\nacquired_at: {}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                claims::SCHEMA_VERSION,
+                now - 700_000,
+                now - 100_000,
+                dead_pid(),
+                claims::hostname()
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 0, "an expired reservation is Stale and skipped");
+        assert!(named.is_empty());
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1366,6 +1712,70 @@ mod tests {
         let reading = share_reading(&missing, 6, Some("x"));
         assert_eq!(reading.kings, Some(0));
         assert_eq!(reading.share, Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A terminal row (exited / orphaned) is already uncounted by the share:
+    /// `status_is_liveish` skips it, so a stop that lands a terminal status
+    /// frees the slot without any reconcile.
+    #[test]
+    fn share_reading_skips_terminal_rows() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-terminal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        write_registry(
+            &reg,
+            &[
+                format!(
+                    r#"{{"name":"live-one","harness":"claude","cwd":"/tmp","status":"idle","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+                format!(
+                    r#"{{"name":"exited-one","harness":"claude","cwd":"/tmp","status":"exited","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+                format!(
+                    r#"{{"name":"orphaned-one","harness":"claude","cwd":"/tmp","status":"orphaned","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+            ],
+        );
+        let reading = share_reading(&reg, 6, Some("caller-uuid"));
+        assert_eq!(reading.held, Some(1));
+        assert_eq!(reading.held_rows, Some(vec!["live-one".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a reboot every crowned row reads exited, and the crowns still
+    /// stand: they divide the cap. A permanently dead crown row does not.
+    #[test]
+    fn share_reading_counts_crowns_a_reboot_left_reading_exited() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-reboot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        let crown = |name: &str, status: &str, sid: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"{name}","harness_session_id":"{sid}"}}"#
+            )
+        };
+        write_registry(
+            &reg,
+            &[
+                crown("quill", "exited", "quill-session"),
+                crown("kestrel", "orphaned", "kestrel-session"),
+                crown("gone", "permanent_dead", "gone-session"),
+                format!(
+                    r#"{{"name":"w1","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"quill-session"}}"#
+                ),
+            ],
+        );
+        let reading = share_reading(&reg, 6, Some("quill-session"));
+        assert_eq!(reading.kings, Some(2));
+        assert_eq!(reading.share, Some(3));
+        assert_eq!(reading.held, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1510,6 +1920,39 @@ mod tests {
     }
 
     #[test]
+    fn lane_quota_lock_warns_when_provider_lane_is_unmeasured() {
+        let dir = std::env::temp_dir().join(format!("fno-lanes-unmeasured-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "openai:default",
+                    "provider": "openai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": null,
+                    "missing_reset_timezone": [],
+                    "state": "unmeasured",
+                    "members": []
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": 1_000_000_000
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        assert!(check_lane_quota_lock(&dir, "openai", &mut warnings).is_ok());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("spawn-gate note:"));
+        assert!(warnings[0].contains("provider lane openai quota unmeasured"));
+        assert!(warnings[0].contains("no member measured"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lane_quota_lock_holds_recent_unknown_reset_but_not_old_or_returning_lane() {
         let dir = std::env::temp_dir().join(format!("fno-lanes-unknown-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
@@ -1611,5 +2054,203 @@ mod tests {
             None => std::env::remove_var("FNO_CONFIG"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The subagents ceiling reader: the configured table wins, the built-in
+    /// fallback caps only zai, and a non-positive or missing subagents is
+    /// uncapped (the caller then reads its own default ceiling).
+    #[test]
+    fn subagents_cap_reads_config_with_builtin_fallback() {
+        let dir = std::env::temp_dir().join(format!("fno-subagents-cap-{}", std::process::id()));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents.provider_limits.openai]\nsubagents = 3\n",
+        )
+        .unwrap();
+        assert_eq!(provider_subagents_cap(&dir, "openai"), Some(3));
+        assert_eq!(
+            provider_subagents_cap(&dir, "zai"),
+            None,
+            "a configured table replaces the builtin"
+        );
+
+        std::fs::write(fnodir.join("config.toml"), "[agents]\nmax_live = 2\n").unwrap();
+        assert_eq!(
+            provider_subagents_cap(&dir, "zai"),
+            Some(1),
+            "builtin fallback"
+        );
+        assert_eq!(provider_subagents_cap(&dir, "openai"), None);
+
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents.provider_limits.openai]\nsubagents = 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            provider_subagents_cap(&dir, "openai"),
+            None,
+            "subagents 0 is uncapped; the caller reads its own default"
+        );
+
+        match prior_config {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- check_account_login_with: one test per rule ----
+
+    use crate::claude_login::Login;
+
+    /// A binding/probe pair that counts every call, so a rule that must
+    /// short-circuit proves it called nothing.
+    fn login_lane_fakes(
+        binding_result: Result<Option<String>, String>,
+        probe_verdict: Login,
+    ) -> (
+        impl Fn(&str) -> Result<Option<String>, String>,
+        impl Fn(&Path) -> Login,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let binding_calls = calls.clone();
+        let probe_calls = calls.clone();
+        let binding = move |_id: &str| {
+            binding_calls.set(binding_calls.get() + 1);
+            binding_result.clone()
+        };
+        let probe = move |_dir: &Path| {
+            probe_calls.set(probe_calls.get() + 1);
+            probe_verdict.clone()
+        };
+        (binding, probe, calls)
+    }
+
+    /// Rule 1: no account or `default` admits and calls nothing.
+    #[test]
+    fn login_lane_skips_empty_and_default_accounts() {
+        for account in ["", "default"] {
+            let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+            let mut warnings = Vec::new();
+            assert!(check_account_login_with(None, account, binding, probe, &mut warnings).is_ok());
+            assert_eq!(calls.get(), 0, "account {account:?} must call nothing");
+            assert!(warnings.is_empty());
+        }
+    }
+
+    /// Rule 2: a route to any non-anthropic provider admits and calls
+    /// nothing - a routed worker authenticates with the route's key.
+    #[test]
+    fn login_lane_skips_a_routed_non_anthropic_spawn() {
+        let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(
+            check_account_login_with(Some("zai"), "makers", binding, probe, &mut warnings).is_ok()
+        );
+        assert_eq!(calls.get(), 0);
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 3: an unreadable binding admits; the Python resolver owns that
+    /// refusal, and the probe must not run.
+    #[test]
+    fn login_lane_admits_an_unreadable_binding_without_probing() {
+        let (binding, probe, calls) =
+            login_lane_fakes(Err("no such account".to_string()), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(calls.get(), 1, "binding once, probe never");
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 4: a binding with no config dir (an api-key lane) admits without
+    /// probing.
+    #[test]
+    fn login_lane_admits_an_api_key_lane_without_probing() {
+        let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(calls.get(), 1, "binding once, probe never");
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 5, logged-out: exit 78, the full receipt, and the warning that
+    /// names the remedy and says no worker launched.
+    #[test]
+    fn login_lane_refuses_a_logged_out_account_with_receipt() {
+        let (binding, probe, _calls) = login_lane_fakes(
+            Ok(Some("/tmp/acct".to_string())),
+            Login::LoggedOut("Login expired".to_string()),
+        );
+        let mut warnings = Vec::new();
+        let err = check_account_login_with(None, "makers", binding, probe, &mut warnings)
+            .expect_err("a logged-out account must refuse");
+        assert_eq!(err.exit_code, crate::spawn_gate::EXIT_PROVIDER_CAP);
+        let receipt = err.receipt.expect("refusal carries the receipt");
+        assert_eq!(receipt["reason"], "account_not_logged_in");
+        assert_eq!(receipt["account"], "makers");
+        assert_eq!(receipt["config_dir"], "/tmp/acct");
+        assert_eq!(receipt["detail"], "Login expired");
+        assert_eq!(
+            receipt["remedy"],
+            "CLAUDE_CONFIG_DIR=/tmp/acct claude /login"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("no worker launched") && w.contains("claude /login")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Rule 5, inconclusive: admit, but push the one honesty note.
+    #[test]
+    fn login_lane_admits_an_inconclusive_probe_with_a_note() {
+        let (binding, probe, _calls) = login_lane_fakes(
+            Ok(Some("/tmp/acct".to_string())),
+            Login::Unknown("probe timed out after 20s".to_string()),
+        );
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the inconclusive note: {warnings:?}"
+        );
+        assert!(warnings[0].contains("inconclusive"), "{warnings:?}");
+    }
+
+    /// Rule 5, logged-in: admit with no note.
+    #[test]
+    fn login_lane_admits_a_logged_in_account_silently() {
+        let (binding, probe, _calls) =
+            login_lane_fakes(Ok(Some("/tmp/acct".to_string())), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn questions_journal_read_reaches_the_store() {
+        // AC12-GATE: a store-only open question feeds the waiting read.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("agents").join("registry.json");
+        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-gate-1", "question": "proceed?", "blocks": ["x-1"]}
+        });
+        crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        let mut warnings = Vec::new();
+        let raw = read_questions_journal(&registry, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(raw.contains("q-gate-1"), "{raw}");
     }
 }

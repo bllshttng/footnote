@@ -103,9 +103,9 @@ def test_ac1_hp_cost_update_appends_to_graph_node(tmp_path):
         node_id="ab-12345678",
     )
 
-    graph = json.loads(graph_path.read_text())
-    assert "entries" in graph, "graph.json must preserve the {'entries': [...]} envelope"
-    node = graph["entries"][0]
+    from fno.graph.store import read_graph_strict
+
+    node = read_graph_strict(graph_path)[0]
     assert len(node["cost_sessions"]) == 1
     assert node["cost_sessions"][0]["session_id"] == "sess-graph-test"
     assert node["cost_sessions"][0]["cost_usd"] == 1.00

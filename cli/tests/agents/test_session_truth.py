@@ -244,6 +244,130 @@ def test_resolve_without_a_title_reports_absence(tmp_path):
     assert result["harness_title"] is None
 
 
+def test_observed_title_takes_the_newest_record_from_the_last_block(tmp_path, monkeypatch):
+    """AC1-HP: the walk stops at the newest agent-name record; the older one
+    is never parsed and the 3 MiB body is never read."""
+    from fno.agents import session_truth
+    from fno.agents.session_truth import observed_title
+
+    p = tmp_path / "big.jsonl"
+    filler = json.dumps({"type": "user"}) + "\n"
+    p.write_text(
+        json.dumps({"type": "agent-name", "agentName": "old-name"}) + "\n"
+        + filler * (3 * 1024 * 1024 // len(filler))
+        + json.dumps({"type": "agent-name", "agentName": "new-name"}) + "\n"
+        + filler * 3
+    )
+    loads = []
+    real_loads = session_truth.json.loads
+    monkeypatch.setattr(
+        session_truth.json, "loads",
+        lambda s, *a, **k: loads.append(s) or real_loads(s, *a, **k),
+    )
+    reads = []
+    real_open = open
+
+    def counting_open(path, mode="r", *args, **kwargs):
+        fh = real_open(path, mode, *args, **kwargs)
+
+        class CountingBytes:
+            def __enter__(self):
+                fh.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return fh.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(fh, name)
+
+            def read(self, *args):
+                data = fh.read(*args)
+                reads.append(len(data))
+                return data
+
+            def readline(self, *args):
+                data = fh.readline(*args)
+                reads.append(len(data))
+                return data
+
+            def __iter__(self):
+                for line in fh:
+                    reads.append(len(line))
+                    yield line
+
+        return CountingBytes()
+
+    monkeypatch.setattr(session_truth, "open", counting_open, raising=False)
+    assert observed_title("claude", p) == "new-name"
+    assert sum(reads) < 2 * 1024 * 1024
+    assert len(loads) == 1
+
+
+def test_observed_title_finds_a_record_at_the_head_of_a_long_transcript(tmp_path):
+    """AC1-EDGE: the only agent-name record is the file's first line, far
+    above the first block; the walk goes all the way back for it."""
+    from fno.agents.session_truth import observed_title
+
+    p = tmp_path / "head.jsonl"
+    filler = json.dumps({"type": "user"}) + "\n"
+    p.write_text(
+        json.dumps({"type": "agent-name", "agentName": "head-name"}) + "\n"
+        + filler * (5 * 1024 * 1024 // len(filler) // 2)
+    )
+    assert observed_title("claude", p) == "head-name"
+
+
+def test_observed_title_skips_a_torn_newest_record(tmp_path):
+    """AC1-ERR: a newest agent-name line torn mid-record fails to parse and
+    is skipped; the walk answers with the older complete record."""
+    from fno.agents.session_truth import observed_title
+
+    p = tmp_path / "torn.jsonl"
+    p.write_text(
+        json.dumps({"type": "agent-name", "agentName": "old-name"}) + "\n"
+        + '{"type":"agent-name","agentName":"new' + "\n"
+    )
+    assert observed_title("claude", p) == "old-name"
+
+
+def test_observed_title_on_an_unreadable_path_is_none(tmp_path):
+    """AC1-ERR: a directory cannot be opened; the read reports None and
+    raises nothing."""
+    from fno.agents.session_truth import observed_title
+
+    assert observed_title("claude", tmp_path) is None
+
+
+def test_lines_newest_first_matches_a_reversed_split(tmp_path):
+    """AC2-HP: the walk yields the file's lines last line first at every
+    block size, across boundaries, an oversized line and a multi-byte char."""
+    from fno.agents.session_truth import _lines_newest_first
+
+    body = b"alpha\n" + b"x" * 200 + b"\ncaf\xc3\xa9\nlast"
+    p = tmp_path / "walk.jsonl"
+    for trailing in (b"\n", b""):
+        content = body + trailing
+        p.write_bytes(content)
+        expected = list(reversed(content.split(b"\n")))
+        for block in range(1, 65):
+            with p.open("rb") as fh:
+                assert list(_lines_newest_first(fh, block)) == expected, (
+                    f"block={block} trailing={trailing!r}"
+                )
+
+
+def test_lines_newest_first_on_an_empty_file_yields_nothing(tmp_path):
+    """AC2-EDGE: an empty file yields no lines and the title read is None."""
+    from fno.agents.session_truth import _lines_newest_first, observed_title
+
+    p = tmp_path / "empty.jsonl"
+    p.write_bytes(b"")
+    with p.open("rb") as fh:
+        assert list(_lines_newest_first(fh)) == []
+    assert observed_title("claude", p) is None
+
+
 def test_resolve_reads_worktree_transcript_your_move(tmp_path):
     """AC2-HP + integrates the resolver fix: session dispatched with canonical
     cwd, live transcript in the worktree dir, last turn ends in a question."""
@@ -424,6 +548,24 @@ def test_render_states():
          "last_activity_age_s": None, "session_id": None, "suggestions": ["w1"]}
     )
     assert "unknown" in unk and "not-found" in unk and "w1" in unk
+
+
+def test_truth_line_reads_exited_for_a_resumable_exit_and_dead_without_a_session():
+    from fno.agents.cli import _truth_line
+
+    result = {"handle": "king-4d9b-delivery", "state": "working", "reason": None,
+              "last_activity_age_s": 600, "last_activity_basis": "last-entry",
+              "observed_model": {"kind": "observed", "model": "gpt-6-astra", "samples": 2},
+              "session_id": "01a09bcd", "suggestions": []}
+    exited = _truth_line(result, "pane-gone")
+    assert exited.startswith("truth king-4d9b-delivery: exited")
+    assert "resumable" in exited
+    assert "working" not in exited and "active" not in exited
+    assert exited.endswith("[unreachable: pane-gone]")
+    assert _truth_line(result, "exit-recorded").startswith("truth king-4d9b-delivery: exited")
+    orphan = {**result, "session_id": None}
+    assert _truth_line(orphan, "pane-gone").startswith("truth king-4d9b-delivery: dead")
+    assert _truth_line(result, None).startswith("truth king-4d9b-delivery: working")
 
 
 def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):

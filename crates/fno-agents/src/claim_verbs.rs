@@ -30,12 +30,20 @@ use std::path::{Path, PathBuf};
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
+    }
+    if op == "queue" {
+        // One dispatch line: argument parsing and the arm body live in
+        // claim_queue.rs, so this 2,000-line file stays flat.
+        return crate::claim_queue::run_queue(&args[1..]);
+    }
+    if op == "session-pid" {
+        return run_claim_session_pid(&args[1..]);
     }
     if op == "list" {
         return run_claim_list(&args[1..]);
@@ -319,6 +327,45 @@ pub fn run_claim(args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `claim session-pid [--from-pid <pid>] [--json|-J]`: the one resolver of
+/// the durable pid arm. The Python side (`session_pid.py`, the init hook)
+/// reads THIS verb; `durable_session_pid` calls the same resolution
+/// in-process, so there is one producer and no subprocess behind the mutex.
+/// Contract matches the retired Python verb byte for byte: the pid on
+/// stdout, nothing at all when uncapturable, always exit 0 - so
+/// `$(fno agents claim session-pid)` stays the empty string. `--json`
+/// answers both halves in one read.
+fn run_claim_session_pid(args: &[String]) -> i32 {
+    let mut from_pid: Option<u32> = None;
+    let mut json = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--from-pid" => match it.next().and_then(|v| v.parse::<u32>().ok()) {
+                Some(pid) => from_pid = Some(pid),
+                None => return 2,
+            },
+            "--json" | "-J" => json = true,
+            other => {
+                eprintln!("fno-agents: claim session-pid: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    let start = from_pid.unwrap_or_else(|| unsafe { libc::getppid() } as u32);
+    let (pid, harness) = crate::spawn_context::session_identity_ambient(start);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"session_pid": pid, "harness": harness})
+        );
+    } else if let Some(pid) = pid {
+        println!("{pid}");
+    }
+    // Uncapturable prints nothing: the caller degrades to TTL-only liveness.
+    0
 }
 
 fn run_claim_reap(args: &[String]) -> i32 {
@@ -753,6 +800,13 @@ fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
 /// record's own `session_id` is the dispatcher's, not the worker's.
 const HANDOVER_HOLDER_PREFIX: &str = "spawn-handover:";
 
+/// The spawn gate's lane-reservation holder (`spawn_gate.rs` mints it
+/// `spawn-gate:<pid>:<name>`): the pid segment is the GATE process, the
+/// suffix is the worker the lane is reserved for. Like the handover holder,
+/// the record carries the DISPATCHER's ambient identity, because
+/// `claims::acquire` fills the fields the minter left blank.
+const SPAWN_GATE_HOLDER_PREFIX: &str = "spawn-gate:";
+
 /// Witness basis for a session the registry's served `liveness` word answers
 /// alive. Lives here, not in `claims.rs`'s basis module: that file is
 /// shrink-only (4996 lines).
@@ -886,11 +940,32 @@ pub(crate) fn session_witness_primed_for<'a>(
     memoized_session_witness(index, memo)
 }
 
+/// The worker name a dispatcher-minted holder names, or `None` when the
+/// holder is not dispatcher-minted. Two mint shapes exist: the handover
+/// (`spawn-handover:<worker>`) and the spawn gate's lane reservation
+/// (`spawn-gate:<pid>:<worker>`, where the pid segment is the gate process,
+/// never the worker). A record whose holder names a worker must never answer
+/// liveness about the session that WROTE it: `claims::acquire` fills the
+/// writer's ambient identity into the fields the minter left blank, so a
+/// gate record's `session_id` is the DISPATCHER's, and asking it about the
+/// dispatcher keeps a long-lived king reading live forever.
+fn holder_worker_name(holder: &str) -> Option<&str> {
+    if let Some(worker) = holder.strip_prefix(HANDOVER_HOLDER_PREFIX) {
+        return Some(worker);
+    }
+    holder
+        .strip_prefix(SPAWN_GATE_HOLDER_PREFIX)
+        .and_then(|rest| rest.split(':').nth(1))
+}
+
 /// The subject a liveness answer is keyed on: the holder the record NAMES,
 /// not the session that wrote it. A dispatcher-minted `spawn-handover:<worker>`
 /// record carries the MINTER's session_id, so answering from that field asks
 /// the dispatcher whether the worker is alive - a long-lived king then keeps
-/// every claim it ever launched reading live after the worker died.
+/// every claim it ever launched reading live after the worker died. A
+/// `spawn-gate:<pid>:<worker>` lane reservation is the same shape: the
+/// record's session id is the gate's caller, not the worker the lane is
+/// reserved for.
 /// Join the worker name to its registry row's session; no row means None (the
 /// caller answers Unresolved, bounded grace), never a fallback to the
 /// minter's session. The primed witness asks the SAME question when it picks
@@ -900,7 +975,7 @@ fn resolve_subject_session(
     rec: &crate::claims::ClaimRecord,
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
 ) -> Option<String> {
-    match rec.holder.strip_prefix(HANDOVER_HOLDER_PREFIX) {
+    match holder_worker_name(&rec.holder) {
         Some(worker) => {
             load_session_registry_index(index);
             index
@@ -913,16 +988,16 @@ fn resolve_subject_session(
 }
 
 /// (holder session, dispatcher session) for a claim payload. A
-/// spawn-handover record stores the MINTER's session in `session_id`; the
-/// holder is the worker it names, joined through the registry. The
-/// minter is published as `metadata.dispatched_by_session` - the shape
-/// `compare_and_rebind` writes at target-init rebind - so the payload reads
-/// the same before and after the rebind.
+/// dispatcher-minted record (handover or spawn gate) stores the MINTER's
+/// session in `session_id`; the holder is the worker it names, joined through
+/// the registry. The minter is published as `metadata.dispatched_by_session`
+/// - the shape `compare_and_rebind` writes at target-init rebind - so the
+/// payload reads the same before and after the rebind.
 fn holder_session_fields(
     rec: &crate::claims::ClaimRecord,
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
 ) -> (Option<String>, Option<String>) {
-    if !rec.holder.starts_with(HANDOVER_HOLDER_PREFIX) {
+    if holder_worker_name(&rec.holder).is_none() {
         return (rec.session_id.clone().filter(|s| !s.is_empty()), None);
     }
     let worker = resolve_subject_session(rec, index);
@@ -1584,10 +1659,7 @@ mod tests {
     fn write_truth_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         let shim_dir = dir.join("bin");
         std::fs::create_dir_all(&shim_dir).unwrap();
-        let shim = shim_dir.join("fno");
-        std::fs::write(&shim, format!("#!/bin/sh\n{}", body)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_exec_stub(&shim_dir, "fno", &format!("#!/bin/sh\n{}", body));
         shim_dir
     }
 
@@ -1905,5 +1977,95 @@ mod tests {
             assert_eq!(out["session_id"], "s1");
             assert!(out.get("metadata").is_none());
         });
+    }
+
+    #[test]
+    fn gate_holder_witness_asks_about_the_worker_it_names() {
+        // The spawn gate mints the lane reservation BEFORE the worker exists,
+        // so the record carries the DISPATCHER's ambient identity. The
+        // subject must be the named worker: a live dispatcher session must
+        // never keep a dead worker's lane reading live.
+        let me = std::process::id();
+        with_registry(
+            serde_json::json!([
+                {
+                    "name": "w-gate",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "harness_session_id": "s-worker",
+                },
+                {
+                    "name": "w-proof",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "harness_session_id": "s-worker",
+                    "pid": me,
+                    "pid_start_time": own_pid_start(),
+                },
+            ]),
+            || {
+                let (witness, _drain) = default_session_witness();
+                let gate = witness_rec("spawn-gate:36244:w-gate", "s-king-elsewhere");
+                assert!(matches!(
+                    witness(&gate),
+                    crate::claims::SessionLiveness::Live(_)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn gate_holder_without_a_worker_row_is_bounded_grace() {
+        // No registry row names the worker: Unresolved, never a fallback to
+        // the dispatcher's own live session. Control: the same live session
+        // answers Live for a plain holder, so the Unresolved is the subject
+        // switch.
+        with_registry(
+            serde_json::json!([{
+                "name": "king-row",
+                "status": "live",
+                "cwd": "/w",
+                "created_at": "2026-09-17T00:00:00Z",
+                "harness_session_id": "s-king",
+                "pid": std::process::id(),
+                "pid_start_time": own_pid_start(),
+            }]),
+            || {
+                let (witness, _drain) = default_session_witness();
+                let gate = witness_rec("spawn-gate:36244:ghost", "s-king");
+                assert!(matches!(
+                    witness(&gate),
+                    crate::claims::SessionLiveness::Unresolved
+                ));
+                let plain = witness_rec("plain-holder", "s-king");
+                assert!(matches!(
+                    witness(&plain),
+                    crate::claims::SessionLiveness::Live(_)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn gate_payload_splits_the_dispatcher_like_a_handover() {
+        let index = std::cell::RefCell::new(Some(SessionRegistryIndex {
+            known: true,
+            by_session: std::collections::HashMap::new(),
+            by_name: [("w-gate".to_string(), "s-worker".to_string())]
+                .into_iter()
+                .collect(),
+            served: std::collections::HashMap::new(),
+        }));
+        let gate = witness_rec("spawn-gate:36244:w-gate", "s-king");
+        let (holder_session, dispatched_by) = holder_session_fields(&gate, &index);
+        assert_eq!(holder_session.as_deref(), Some("s-worker"));
+        assert_eq!(dispatched_by.as_deref(), Some("s-king"));
+        // A plain holder keeps today's shape: its own session, no dispatcher.
+        let plain = witness_rec("target-session:s1", "s1");
+        let (holder_session, dispatched_by) = holder_session_fields(&plain, &index);
+        assert_eq!(holder_session.as_deref(), Some("s1"));
+        assert_eq!(dispatched_by, None);
     }
 }

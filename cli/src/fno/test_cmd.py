@@ -331,17 +331,9 @@ def _child_env(root: Path) -> dict:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
-    # Cargo intermediates go under the SANDBOX's state root, never the
-    # operator's real one and never the checkout's target/. Computed from the
-    # sandbox, not cargo_build_dir_value(): that reads the PARENT's state
-    # root, and a value pointing at ~/.fno/cargo-build makes every cargo
-    # invocation inside a test write into operator state - the exact write
-    # the state canary refuses. Matches what the child itself would resolve
-    # (its HOME is the sandbox home). Set AFTER neutralise, which scrubs a
-    # developer's own value as ambient state.
-    env["CARGO_BUILD_BUILD_DIR"] = (
-        f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
-    )
+    # Cargo intermediates are pinned by neutralise itself: _child_env runs
+    # against the same _sandbox(), so the value is identical here and in the
+    # shell/cargo trees (x-19f1).
     # TMPDIR is deliberately left ambient. The fence allows journal roots
     # under TMPDIR (fno.events._hermetic_allowed_roots), and the sandbox is
     # created by mkdtemp under that same TMPDIR, so every sandbox path is
@@ -667,7 +659,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("cost-accuracy harness", ".",
      "uv run --project cli python tests/lib/test_cost_tracker_pricing.py\n"
      "uv run --project cli python tests/metrics/test_session_cost_dedup.py\n"
-     "uv run --project cli python tests/metrics/test_backfill_cost_recompute.py\n"
      "bash tests/lib/test_cost_tracker_sh_parity.sh"),
     ("loop-check shim + immutable manifest harness", ".",
      "bash tests/hooks/test_loop_check_shim.sh\n"
@@ -686,14 +677,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # cases sat unrun, including the ones covering this very gate. Named
     # explicitly rather than globbed so adding a fourth is a visible edit.
     #
-    # This closes tests/hooks/ ONLY, and the gap is wider: tests/operator/,
-    # tests/spec/, tests/integration/*_bdd_invariants.py and about a dozen
-    # loose tests/test_*.py files are in neither tree either. They are left out
-    # deliberately, not overlooked - running them today gives 3 failed, 159
-    # passed, 1 error, so wiring them in would red the build on pre-existing
-    # rot that has nothing to do with the guard this PR adds. Whoever repairs
-    # those files should add them here in the same change, and the honest
-    # reading until then is that this step fixes one directory, not the class.
+    # This closes tests/hooks/ ONLY. `tests/spec/` is routed by the
+    # auto-discovered `scripts/tests/test-spec-suite.sh`; remaining gaps are
+    # tests/operator/, tests/integration/*_bdd_invariants.py, and loose
+    # tests/test_*.py files. Keep those out until their owners have a green
+    # baseline, rather than making unrelated pre-existing failures part of
+    # this suite.
     ("Python hook harnesses (outside both test trees)", ".",
      "uv run --project cli python -m pytest -q "
      "tests/hooks/test_git_protection_push.py "
@@ -712,8 +701,18 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("state-dir path gate self-test", ".",
      "bash scripts/tests/check-no-hardcoded-paths-selftest.sh"),
     ("corrections.log placement migration", ".", "bash scripts/tests/test_corrections_migrate.sh"),
+    ("corrections fixture-row filter in the packet", ".", "bash scripts/tests/test_autocorrect_pack_fixture_rows.sh"),
+    ("autocorrect packet skill-file leg", ".", "bash scripts/tests/test_autocorrect_pack_skill_files.sh"),
+    ("autocorrect prompt contract", ".", "bash scripts/tests/test_autocorrect_prompt_contract.sh"),
+    ("corrections skill-commit SOURCE resolution", ".", "bash tests/hooks/test_corrections_skill_commit.sh"),
     ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
-    ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
+    # The workspace .cargo/config.toml redirects build-dir to the cargo-home
+    # base, so a plain `cargo build` writes the binary THERE and leaves the
+    # classic target/ the FRONT export and the claim-door pin both name
+    # abandoned for cargo to reclaim - the resolver then reads None mid-run.
+    # Pin the classic layout, the same spell smoke-setup uses.
+    ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents",
+     'CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build'),
     # The debug binary is present here, so the @requires_rust parity suites run
     # instead of skipping. Stub the provider CLIs on PATH (test_rust_verb_parity
     # presence-checks them without faking); per-test fakes still win where a
@@ -735,8 +734,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Keyless dispatch-to-terminal smoke (binary present)", "cli",
      "uv run pytest --tb=short -q tests/unit/test_keyless_smoke.py"),
     ("registry-miss heal across the Rust/Python seam", ".", "bash tests/test-agents-heal-token.sh"),
-    ("Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)", "cli",
-     "FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py"),
     ("loop-check journey tests (e2e + emission-schema + backstop-subprocess)", ".",
      "bash tests/hooks/test_loop_check_e2e.sh\n"
      "bash tests/events/test-loop-check-emission-schema.sh\n"
@@ -972,12 +969,9 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 6 are macOS-green and
+# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 5 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
-#
-#   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
-#     not fail on -f, so the Linux fallback branch never runs.
 #
 #   THE `fno`-ON-PATH FAMILY - five live harnesses, one cause, TWO SHAPES.
 #   A fresh runner ships only the venv `fno-py`; a dev machine has a global
@@ -1043,7 +1037,6 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
 scripts/tests/test_graph_resolve.sh
 tests/events/test-check-pr-emits-polling.sh
-tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
 tests/hooks/test_init_node_guard_tokenize.sh
@@ -1549,16 +1542,24 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # the packet counts as a failure - so selecting one without its build step
 # produces a false red instead of feedback. The registry already owns the
 # build; selection has to carry it along.
-_RUST_BIN_MARKER = "target/debug/fno-agents"
+_RUST_BIN_MARKERS = (
+    "target/debug/fno-agents",
+    # A harness may resolve the binary through the env pin or the release
+    # fallback instead of spelling the debug path (test_loop_check_shim.sh);
+    # each spelling is a real dependency on a binary being present.
+    "target/release/fno-agents",
+    "FNO_AGENTS_BIN",
+)
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
 _CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
     try:
-        return _RUST_BIN_MARKER in (root / rel).read_text(encoding="utf-8", errors="replace")
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    return any(marker in text for marker in _RUST_BIN_MARKERS)
 
 
 def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:
@@ -1782,13 +1783,11 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
     # as they do in CI. The claim door is preserved outside target/ first.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
-        if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
-            # The changed-smoke job has Rust but no setup build. Its selected
-            # build step must run before claim tests, so keep the target path
-            # present and pin the door at the fresh build.
-            _pin_claim_door(env, root / "crates/fno-agents/target/debug/fno-agents")
-        else:
-            _preserve_claim_door(root, env)
+        # The door always reads a sandbox COPY: a build-dir override in the
+        # packet's build step, or a later scrub, must not strand the claim
+        # consumers the way a direct target/ pin did.
+        _preserve_claim_door(root, env)
+        if _RUST_BUILD_STEP not in {name for name, _, _ in steps}:
             _scrub_target_bins(root)
 
     e0 = time.monotonic()

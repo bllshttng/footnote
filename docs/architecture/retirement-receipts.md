@@ -12,7 +12,20 @@ The effects, in order: the confirmed stop, the native active-surface removal, th
 
 ## The receipt and its required ops
 
-Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed by harness and session id. Each carries the retirement contract (`retirement_contract`, the required op set promised) and a build stamp (`writer_build`) as provenance. A receipt on another contract, or with no contract, skips instead of failing the audit.
+Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed by harness and `harness_session_id`. Each carries the retirement contract (`retirement_contract`, the required op set promised) and a build stamp (`writer_build`) as provenance. A receipt on another contract, or with no contract, skips instead of failing the audit.
+
+A claude receipt's resume line asks resume_pin, the same pin-or-refuse decision every fno door that resumes a claude session makes. When the row records a model or an effort, the line carries `--model` and `--effort`. For a row a non-Anthropic route served, it names `fno agents spawn --resume <sid> -P <provider> -m <model>`. A bare `claude --resume` lands on the account default, and that door seeds a new session from the transcript, so the session id changes. The line is shell-quoted. `resume_argv` holds the raw tokens a launcher runs.
+
+Every receipt names its writer. `removed_by` carries the SURFACE that took the row, never the process that ran it, and `removal_trigger` separates an unattended sweep from a session-initiated call. The doors:
+
+| Door | `removed_by` | `removal_trigger` |
+|---|---|---|
+| The scheduled retirement sweep and `fno-agents reap --apply` | `gc-sweep` | `unattended` |
+| The roster sweep for harness rows no fno row names | `roster-reap` | `unattended` |
+| The registry choke point (`update_registry` reached by `rm` and every save that drops rows), Rust leg | the bounded argv verb (`state::invocation_verb()`) | `unattended` when the daemon binary invoked it, `session` otherwise |
+| The same choke point, Python leg (`fno.agents.registry`) | the bounded argv verb, overridden by the remover the spawn-axes ask carries | `session`, stamped by the shared builder |
+
+A receipt with an empty `removed_by` predates the required field. It ages out on the 7-day retention clock. The merge reaper (`merge-reaper`) is part of the writer vocabulary. Today it emits events only, and its cleanup writes no receipt yet. When its cleanup grows a receipt, the `Writer` enum already names it. `reap --verify` audits `gc-sweep` and empty-stamp receipts. Every other stamp skips as a removal receipt, which carries no effect records by contract.
 
 `reap --verify` audits a window of the store against the CURRENT contract, so a correct retirement still counts after a reinstall moves the build. A pass means the promised outcome, not a nonempty list: every verified receipt must carry four effect ops, each at `confirmed-removed`, `confirmed-already-absent`, or `not-applicable`:
 

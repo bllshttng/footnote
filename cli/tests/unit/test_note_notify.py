@@ -399,41 +399,49 @@ def test_an_unresolvable_role_holder_skips_instead_of_failing() -> None:
 # --- the sender is a resolvable handle, never a literal ----------------------
 
 
-def test_send_pointer_stamps_the_callers_own_handle(monkeypatch) -> None:
-    """Provenance is looked up by from_name, so the sender must be this
-    session's own handle: a literal that matches no registry row ships
-    harness=unknown with no from_session."""
-    import fno.agents.dispatch as dispatch_mod
-    from fno.harness_identity import canonical_handle
+def _fake_machine_mail(monkeypatch, receipt: str) -> list[list[str]]:
+    import subprocess
+    from pathlib import Path
 
+    import fno.agents.dispatch as dispatch_mod
+    import fno.rust_binary as rust_binary
+
+    calls: list[list[str]] = []
+
+    def fake_dispatch_send(address, body, provider, **kwargs):
+        return SimpleNamespace(delivery="hosted", msg_id="legacy-msg")
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout=receipt, stderr="")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_dispatch_send)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/fake/fno-agents"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_send_pointer_forwards_to_rust_machine_mail_with_session(monkeypatch) -> None:
     session = "a1535d0b88424e4dbcafd733b8defc9c"
-    seen: dict = {}
-
-    def fake_send(address, body, provider, **kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(delivery="hosted", msg_id="msg-abc12345")
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
     monkeypatch.setattr(note_notify, "own_session", lambda: session)
+    calls = _fake_machine_mail(monkeypatch, "hosted msg-abc12345")
+
     assert note_notify.send_pointer("sess-worker", "body") == "hosted msg-abc12345"
-    assert seen["from_name"] == canonical_handle(session)
+    assert calls == [[
+        "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
+    ]]
 
 
-def test_send_pointer_without_identity_keeps_the_default_and_still_sends(
-    monkeypatch,
-) -> None:
-    import fno.agents.dispatch as dispatch_mod
-
-    seen: dict = {}
-
-    def fake_send(address, body, provider, **kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(delivery="durable", msg_id="msg-abc12345")
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
+def test_send_pointer_forwards_to_rust_machine_mail_without_session(monkeypatch) -> None:
     monkeypatch.setattr(note_notify, "own_session", lambda: None)
+    calls = _fake_machine_mail(monkeypatch, "durable msg-abc12345")
+
     assert note_notify.send_pointer("sess-worker", "body") == "durable msg-abc12345"
-    assert seen["from_name"] == "fno"
+    assert calls == [[
+        "/fake/fno-agents", "machine-mail-send", "--arm", "note-pointer",
+        "--timeout-secs", "30", "--to", "sess-worker", "--", "body",
+    ]]
 
 
 # --- the refusal: resolution runs before the append ---------------------------
@@ -645,6 +653,20 @@ def test_one_confirmed_delivery_among_failures_still_exits_zero(monkeypatch) -> 
 # --- the verb: refuse before the append, deliver by default --------------------
 
 
+def _stubbed_receipt(node_id: str) -> dict:
+    """The native receipt shape the bridge relays verbatim."""
+    return {
+        "status": "ok",
+        "routed": "state",
+        "node_id": node_id,
+        "revision": 1,
+        "line": (
+            f"noted {node_id}: revision 1, 11 chars\n"
+            f"replaced nothing: {node_id} had no current state"
+        ),
+    }
+
+
 def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
     """Run `fno backlog note` with resolution and the native write stubbed.
 
@@ -661,7 +683,7 @@ def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
 
     def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
-        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+        return 0, _stubbed_receipt(node_id)
 
     monkeypatch.setattr(note_bridge, "_write_state", fake_write)
 
@@ -686,7 +708,7 @@ def test_the_verb_delivers_by_default(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert appended == ["x-0d08"]
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notified sess-worker" in result.stdout
 
 
@@ -703,7 +725,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
         "_write_state",
         lambda node_id, text, *, quiet, session_id, graph_path, reads=None: (
             0,
-            {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1},
+            _stubbed_receipt(node_id),
         ),
     )
 
@@ -715,7 +737,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
         graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
     )
     assert result.exit_code == 0
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notif" not in result.stdout
 
 
@@ -737,6 +759,55 @@ def test_quiet_archived_node_uses_the_archive_refusal(monkeypatch) -> None:
     assert "Error: node x-3a64 is archived" in result.stderr
     assert "fno backlog unarchive x-3a64" in result.stderr
     assert "no node resolves" not in result.stderr
+
+
+def _run_note_quiet(monkeypatch, node_id: str, live_rows: list[dict]):
+    """Run `fno backlog note <id> <text> --quiet` with the archive and the
+    live read stubbed, so the archive pre-check is the only store contact."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        "fno.graph.api.wire_rows", lambda *, path=None: list(live_rows)
+    )
+    monkeypatch.setattr(
+        "fno.graph._archive_lookup.archived_entry",
+        lambda nid: {"id": node_id} if nid == node_id else None,
+    )
+    monkeypatch.setattr(
+        note_bridge,
+        "_write_state",
+        lambda nid, text, *, quiet, session_id, graph_path, reads=None: (
+            0,
+            _stubbed_receipt(nid),
+        ),
+    )
+    return CliRunner().invoke(app, ["backlog", "note", node_id, "the finding", "--quiet"])
+
+
+def test_a_live_node_with_an_archive_twin_still_notes(monkeypatch) -> None:
+    """The x-12d1 deadlock: an archive row shares a live id, note refused and
+    named an unarchive that reported nothing to restore. Live first, then the
+    archive: a node the update door accepts, the note door accepts too."""
+    result = _run_note_quiet(monkeypatch, "x-12d1", [{"id": "x-12d1", "type": "feature"}])
+    assert result.exit_code == 0, result.stderr
+    assert "noted x-12d1" in result.stdout
+    assert "is archived" not in result.stderr
+
+
+def test_an_archive_only_id_still_refuses_after_a_live_miss(monkeypatch) -> None:
+    """The pre-check keeps its teeth: no live row, archive row present, the
+    exact PR 1871 remedy stands."""
+    result = _run_note_quiet(monkeypatch, "x-3a64", [])
+    assert result.exit_code == 1
+    assert (
+        "Error: node x-3a64 is archived; run `fno backlog unarchive x-3a64`"
+        " to restore it before updating."
+    ) in result.stderr
 
 
 def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
@@ -771,7 +842,7 @@ def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> Non
 
     def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
-        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+        return 0, _stubbed_receipt(node_id)
 
     monkeypatch.setattr(note_bridge, "_write_state", fake_write)
     result = CliRunner().invoke(graph_cli.cli, ["note", "x-ffff", "the finding"])
@@ -806,7 +877,7 @@ def test_failed_sends_land_on_stderr_and_exit_four(monkeypatch) -> None:
         monkeypatch, ["note", "x-0d08", "the finding"], readers=readers, send=boom
     )
     assert result.exit_code == 4
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notify FAILED sess-a" in result.stderr
     assert "no reader confirmed delivery (0 UNCONFIRMED, 2 FAILED)" in result.stderr
 
@@ -820,7 +891,7 @@ def test_an_undelivered_receipt_never_reaches_stdout(monkeypatch) -> None:
         monkeypatch, ["note", "x-0d08", "the finding"], readers=readers, send=boom
     )
     assert result.exit_code == 4
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notify FAILED sess-worker" in result.stderr
     assert "notify FAILED" not in result.stdout
 
@@ -844,3 +915,107 @@ def test_a_keeper_error_reply_reaches_the_honest_refusal(monkeypatch, tmp_path) 
     assert isinstance(got, Refused)
     assert "could not read who is bound" in got.message
     assert "no node resolves" not in got.message
+
+
+def test_the_bridge_prints_the_native_line_verbatim(monkeypatch) -> None:
+    """The bridge relays the native `line` whole: two physical lines stay two."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        note_bridge,
+        "_write_state",
+        lambda node_id, text, *, quiet, session_id, graph_path, reads=None: (
+            0,
+            {
+                "status": "ok",
+                "routed": "state",
+                "node_id": node_id,
+                "revision": 1,
+                "line": "noted x-0d08: revision 1, 11 chars\n"
+                "replaced nothing: x-0d08 had no current state",
+            },
+        ),
+    )
+
+    def no_resolve(task_id, graph_path):
+        raise AssertionError("the resolver must not run under --quiet")
+
+    monkeypatch.setattr(note_notify, "readers_before_append", no_resolve)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
+    )
+    assert result.exit_code == 0
+    assert (
+        "noted x-0d08: revision 1, 11 chars\n"
+        "replaced nothing: x-0d08 had no current state"
+    ) in result.stdout
+
+
+def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
+    """AC9-ERR: an older binary's receipt carries no `line`; the relay
+    degrades to an empty line, never a traceback after the write landed."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    written: list[str] = []
+
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
+        written.append(node_id)
+        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+
+    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
+
+    def no_resolve(task_id, graph_path):
+        raise AssertionError("the resolver must not run under --quiet")
+
+    monkeypatch.setattr(note_notify, "readers_before_append", no_resolve)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
+    )
+    assert result.exit_code == 0
+    assert written == ["x-0d08"]
+
+
+def test_blocking_note_rides_ctx_args_straight_to_rust(monkeypatch) -> None:
+    """The finding flags never touch the note machinery in Python: the bridge
+    is a passthrough and Rust owns routing, delivery and the receipt."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    calls: list[list[str]] = []
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(argv, check=False):
+        calls.append(argv)
+        return Proc()
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents")
+    monkeypatch.setattr(note_bridge.subprocess, "run", fake_run)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("the note machinery must not run for a blocking finding")
+
+    monkeypatch.setattr("fno.backlog.note_notify.readers_before_append", must_not_run)
+    monkeypatch.setattr(note_bridge, "_write_state", must_not_run)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-5a62", "the gate leak", "--blocking"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls, "the native action must run"
+    assert calls[0][1:2] == ["backlog-note"]
+    assert calls[0][-1] == "--blocking"
+    assert "x-5a62" in calls[0] and "the gate leak" in calls[0], (
+        "the positionals ride through verbatim"
+    )

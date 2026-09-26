@@ -16,8 +16,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::proto::{AgentBadge, AgentRow, AnswerablePrompt, Reach};
-use crate::transcript_tail::read_tail;
-
 // The tail reader lives in its own module (transcript_tail); the sideline
 // entry point keeps its historical path here.
 pub use crate::transcript_tail::session_tails;
@@ -137,6 +135,10 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
+    /// The crown's display name (`Barnaby II`), read from the crown-name
+    /// store's file contract (`crate::crown_names`); `None` = unnamed or
+    /// no store file.
+    pub crown_name: Option<String>,
     /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
     /// parent (a root, as far as the renderer can know). Distinct from
@@ -145,6 +147,14 @@ pub struct RegistryAgent {
     /// The served CHILD/PEER word for this row's spawn edge, read from the
     /// registry row. `None` (a pre-v32 row) renders flat like a peer.
     pub lineage_kind: Option<String>,
+    /// The registry NAME of the row `spawned_by_session` points at, derived
+    /// once per row set in [`merge_rows`]. `None` when the edge names a
+    /// session no row holds, or two rows claim the same id: an ambiguous
+    /// parent reads as absent, never as a confident wrong answer.
+    pub spawned_by_name: Option<String>,
+    /// Why this row's edge names no parent session (a v33 registry field,
+    /// read straight off the row). Spent by the sideline detail pane.
+    pub lineage_reason: Option<String>,
     /// Whether this row's terminal-looking status is a POSITIVE
     /// falsification or an absence of evidence. `Alive` for an active
     /// non-terminal status (mirrors `exited == false`). Orphaned and failed
@@ -313,7 +323,7 @@ impl AttachForm {
 /// Single-quote each token for `sh -c`. Every token here comes from the
 /// capability contract or a session id, but quoting is the property that keeps
 /// that true of a contract someone edits later.
-fn shell_join(tokens: &[String]) -> String {
+pub(crate) fn shell_join(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
@@ -325,8 +335,8 @@ fn shell_join(tokens: &[String]) -> String {
 /// the bundled form it reads, the config key that may override it, and how
 /// strict the parse is: a resume lane fills exactly `{session_id}` (the
 /// contract validator refuses any other placeholder in a resume lane), so a
-/// `{short_id}` form or one promising a `pre_exec` the resume builder does
-/// not run is not a resume form.
+/// `{short_id}` form is not a resume form. A `pre_exec` rides either lane;
+/// the resume builder composes it the way the attach renderer does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FormLane {
     Attach,
@@ -713,9 +723,6 @@ fn parse_form(lane: FormLane, block: &toml::Value) -> Option<AttachForm> {
                 .collect()
         })
         .unwrap_or_default();
-    if lane == FormLane::Resume && !pre_exec.is_empty() {
-        return None;
-    }
     Some(AttachForm {
         tokens,
         id_kind,
@@ -985,7 +992,20 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     };
     let mut out = Vec::with_capacity(workers.len());
     let mut terminal_skips = 0usize;
+    let mut spare_skips = 0usize;
     for w in &workers {
+        // A pre-warmed idle spare (`dispatch.source == "spare"`, empty seed)
+        // has no conversation to attach: it is daemon inventory, not live
+        // work, and the `cc-<id>` fallback below would mint it a phantom row.
+        // Understood, so it counts like a terminal skip, not schema drift.
+        if w.get("dispatch")
+            .and_then(|d| d.get("source"))
+            .and_then(|v| v.as_str())
+            == Some("spare")
+        {
+            spare_skips += 1;
+            continue;
+        }
         // A terminal `state` means the session is not attachable, so it is
         // not roster presence. An unknown/missing state stays (tolerant, and
         // `parse_claude_agents` holds unknowns rather than dropping them).
@@ -1059,7 +1079,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     // (tolerate-alien-row, tested), and a partial rename degrades visibly on
     // the sideline rather than as a fake-empty success; a ratio guard here
     // would break the documented 1-of-4 alien-row case.
-    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 {
+    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 && spare_skips == 0 {
         return None;
     }
     Some(out)
@@ -1223,8 +1243,6 @@ pub type TruthBadges = HashMap<String, String>;
 
 /// Claim-live + a fire within this window reads Working; older/absent stays no-badge.
 const TRUTH_RECENCY_WINDOW_S: u64 = 1800; // 30 min
-/// Bounded tail read of events.jsonl so an 11MB log stays cheap per render tick.
-const TRUTH_EVENTS_TAIL_BYTES: u64 = 256 * 1024;
 
 /// The `.fno` state base for events.jsonl, off the same anchor as
 /// `registry_path` (`FNO_AGENTS_HOME`'s parent > `$HOME/.fno`).
@@ -1497,22 +1515,21 @@ fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
-/// Read the last `budget` bytes of the events log (its own budget below).
-fn read_events_tail(path: &Path) -> Option<String> {
-    read_tail(path, TRUTH_EVENTS_TAIL_BYTES)
-}
-
-/// One tail pass over events.jsonl -> `{session_id: age_seconds}` for the newest
-/// loop_check fire per session (mirrors read_prior_fires' tolerant filter).
+/// The store's newest loop_check fires -> `{session_id: age_seconds}` (the
+/// keyed query keeps the render tick cheap without a raw-file tail).
 fn newest_fire_ages(events_path: &Path, now_secs: u64) -> HashMap<String, u64> {
-    let Some(text) = read_events_tail(events_path) else {
-        return HashMap::new();
+    let q = crate::event_store::EventQuery {
+        types: vec!["loop_check".into()],
+        since_ms: Some((now_secs.saturating_sub(TRUTH_RECENCY_WINDOW_S) * 1000) as i64),
+        ..Default::default()
+    };
+    let rows = match crate::event_store::query_events(events_path, &q) {
+        Ok(rows) => rows,
+        Err(_) => return HashMap::new(),
     };
     let mut newest: HashMap<String, u64> = HashMap::new(); // sid -> newest epoch secs
-    for line in text.lines() {
-        if !line.contains("\"loop_check\"") {
-            continue;
-        }
+    for row in &rows {
+        let line = row.line.as_str();
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -1750,8 +1767,26 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// deliberately UNCHANGED - the sideline still renders what it can read. The
 /// count is the fact that was being thrown away, offered to the callers that
 /// cannot safely ignore it.
+/// The attach id a claude row carries: an 8-hex jobId. A legacy row whose
+/// `short_id` holds the FULL uuid (the register path wrote it that way)
+/// still attaches: the jobId is the uuid's own leading segment, so derive
+/// it rather than hand the attach a uuid the verb refuses. Any other shape
+/// passes through untouched - the 8-hex gesture gate stays the judge.
+fn attach_job_id(raw: &str) -> String {
+    if raw.len() > 8 {
+        let lead = raw.split('-').next().unwrap_or(raw);
+        if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return lead.to_ascii_lowercase();
+        }
+    }
+    raw.to_string()
+}
+
 pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    // One store read for the whole derive: the crown-name file contract
+    // (`crate::crown_names`). Missing or malformed reads as no names.
+    let (crown_names, crown_names_by_node) = crate::crown_names::read_crown_names();
     let rows = doc
         .get("agents")
         .or_else(|| doc.get("entries"))?
@@ -1901,7 +1936,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .or_else(|| row.get("claude_short_id"))
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
-                    .map(str::to_string),
+                    .map(attach_job_id),
                 // A full session id addresses a durable thread, and only a
                 // thread-shaped row may take one.
                 IdKind::Session if is_thread_shape => row
@@ -1974,6 +2009,12 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let crown_name = crate::crown_names::crown_name_for(
+            &crown_names,
+            &crown_names_by_node,
+            crown_scope.as_deref(),
+            row.get("node").and_then(|v| v.as_str()),
+        );
         let spawned_by_session = row
             .get("spawned_by_session")
             .and_then(|v| v.as_str())
@@ -1981,6 +2022,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .map(str::to_string);
         let lineage_kind = row
             .get("lineage_kind")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let lineage_reason = row
+            .get("lineage_reason")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -2161,8 +2207,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             updated_at,
             crown_level,
             crown_scope,
+            crown_name,
             spawned_by_session,
             lineage_kind,
+            spawned_by_name: None,
+            lineage_reason,
             liveness,
             liveness_measured_at: measured_at,
             harness_title,
@@ -2307,13 +2356,24 @@ pub async fn watch_registry(
 /// 3. Foreign rows: every roster worker matching no registry short_id becomes
 ///    a synthesized external row (paneless, attachable via `attach_id`).
 /// 4. Sort by name (the determinism rule the change gate and layouts need).
+///
+/// The join key is the FIRST `-` segment of each side, not the raw bytes:
+/// the roster lists the 8-hex sessionId prefix, and a registry row whose
+/// minted `short_id` kept the full uuid must still own its roster worker -
+/// an exact-string join misses it and synthesizes a duplicate `cc-<id>`
+/// foreign row beside the row that is already there. (The mint-side fix
+/// that keeps the stored short_id 8-hex lives in the registry store.)
+fn roster_join_key(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
+}
+
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
     use std::collections::{HashMap, HashSet};
-    // short_id -> source account, so an upgrade can adopt the roster row's
+    // join key -> source account, so an upgrade can adopt the roster row's
     // structural account tag, not just test membership.
     let roster_by_id: HashMap<&str, Option<&str>> = roster
         .iter()
-        .map(|w| (w.short_id.as_str(), w.account.as_deref()))
+        .map(|w| (roster_join_key(&w.short_id), w.account.as_deref()))
         .collect();
 
     // Upgrade in place, then dedup the roster against the (borrowed) registry
@@ -2323,7 +2383,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         let Some(id) = r.attach_id.as_deref() else {
             continue;
         };
-        let Some(&acct) = roster_by_id.get(id) else {
+        let Some(&acct) = roster_by_id.get(roster_join_key(id)) else {
             continue;
         };
         // Structural roster-dir tag wins (Locked Decision 6) for EVERY matching
@@ -2346,10 +2406,14 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
     }
 
-    let reg_ids: HashSet<&str> = out.iter().filter_map(|r| r.attach_id.as_deref()).collect();
+    let reg_ids: HashSet<&str> = out
+        .iter()
+        .filter_map(|r| r.attach_id.as_deref())
+        .map(roster_join_key)
+        .collect();
     let mut foreign = Vec::new();
     for w in roster {
-        if reg_ids.contains(w.short_id.as_str()) {
+        if reg_ids.contains(roster_join_key(&w.short_id)) {
             continue; // adopted / already owned by a registry row
         }
         foreign.push(RegistryAgent {
@@ -2381,8 +2445,11 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             spawned_by_session: None,
             lineage_kind: None,
+            spawned_by_name: None,
+            lineage_reason: None,
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: None,
@@ -2415,7 +2482,10 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         }
         // Only a roster row that still lists the id live synthesizes a child;
         // nothing lists it -> render nothing, exactly as today (AC4-EDGE).
-        let Some(roster_hit) = roster.iter().find(|w| w.short_id == id) else {
+        let Some(roster_hit) = roster
+            .iter()
+            .find(|w| roster_join_key(&w.short_id) == roster_join_key(id))
+        else {
             continue;
         };
         parked.push(RegistryAgent {
@@ -2443,9 +2513,12 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             spawned_by_session: r.harness_session_id.clone(),
             // A parked fork belongs to its own worker: a CHILD of it.
             lineage_kind: Some("child".into()),
+            spawned_by_name: None,
+            lineage_reason: None,
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: r.harness_title.clone(),
@@ -2455,13 +2528,15 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     }
     out.extend(parked);
     out.extend(foreign);
+    spawned_by_name::derive_spawned_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-/// Rendering cap on lineage depth: a pathological chain must not push
-/// rows off-screen (same bounded-steps posture `crown_indent` held).
-pub const MAX_LINEAGE_DEPTH: usize = 8;
+mod lineage_layout;
+mod spawned_by_name;
+
+pub use lineage_layout::{lineage_layout, MAX_LINEAGE_DEPTH};
 
 /// The parent edge the sideline nests on: the row's `spawned_by_session`
 /// only when the edge is CHILD. A PEER handoff, or a pre-v32 row with no
@@ -2471,134 +2546,6 @@ pub fn lineage_parent(row: &AgentRow) -> Option<&str> {
         Some("child") => row.spawned_by_session.as_deref(),
         _ => None,
     }
-}
-
-/// Join rows into a lineage forest and lay it out for rendering.
-/// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
-/// stable pre-order (each row beneath its parent), and `depths[i]` is row
-/// `i`'s lineage depth. Keyed by ROW IDENTITY (the input index), never by a
-/// display name - two rows can legitimately share a name (two bare panes both
-/// labeled `shell`), and a name-keyed join maps both to one row's depth.
-///
-/// The join: `parent_of` on one row is matched against `id_of` on the others.
-/// Three rules, all load-bearing on live registry data:
-/// - a row whose parent is ABSENT from the set renders as a root (depth 0),
-///   never an error - the parent may sit in another section, another project,
-///   or predate the field entirely;
-/// - depth is capped at [`MAX_LINEAGE_DEPTH`];
-/// - cycles are possible: the parent value is ambient-captured from an
-///   environment variable, never validated at write time, so the upward walk
-///   carries its own path and breaks a revisit by rooting the cycle's entry.
-///   A self-edge or an A->B->A pair terminates; it never hangs.
-///
-/// Deterministic: roots and siblings keep input order, so a set with no parent
-/// edges lays out in input order at depth 0 (byte-identical to a flat list).
-pub fn lineage_layout<T>(
-    rows: &[T],
-    id_of: impl Fn(&T) -> Option<&str>,
-    parent_of: impl Fn(&T) -> Option<&str>,
-) -> (Vec<usize>, Vec<usize>) {
-    let n = rows.len();
-    // id -> index; the first row wins a duplicated id (ids are only as
-    // trustworthy as the env they were captured from).
-    let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(n);
-    for (i, r) in rows.iter().enumerate() {
-        if let Some(id) = id_of(r) {
-            by_id.entry(id).or_insert(i);
-        }
-    }
-    let parent_idx: Vec<Option<usize>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            parent_of(r)
-                .and_then(|p| by_id.get(p).copied())
-                // A row naming its own id roots immediately.
-                .filter(|&p| p != i)
-        })
-        .collect();
-
-    // Depth by memoized upward walk. The walk stops at a resolved ancestor
-    // (its depth is known), a root (no in-set parent -> depth 0), or a
-    // revisit (cycle -> the revisited node roots at depth 0). Unwinding is
-    // uniform: every path node takes its (already-assigned) parent's depth+1.
-    let mut depth: Vec<Option<usize>> = vec![None; n];
-    for i in 0..n {
-        if depth[i].is_some() {
-            continue;
-        }
-        let mut path: Vec<usize> = Vec::new();
-        let mut cur = i;
-        loop {
-            if depth[cur].is_some() {
-                break;
-            }
-            if path.contains(&cur) {
-                depth[cur] = Some(0);
-                break;
-            }
-            path.push(cur);
-            match parent_idx[cur] {
-                Some(p) => cur = p,
-                None => {
-                    depth[cur] = Some(0);
-                    break;
-                }
-            }
-        }
-        for &node in path.iter().rev() {
-            // Root, anchor, and cycle-entry nodes already hold their depth;
-            // only the still-unassigned chain nodes take parent_depth + 1.
-            if depth[node].is_none() {
-                let parent_depth = parent_idx[node].and_then(|p| depth[p]).unwrap_or(0);
-                depth[node] = Some((parent_depth + 1).min(MAX_LINEAGE_DEPTH));
-            }
-        }
-    }
-
-    // Pre-order emission: roots (no in-set parent, or a cycle entry at depth
-    // 0) in input order, children in input order beneath them. The emitted
-    // guard covers a cycle's back-edge: a member already reached as a
-    // descendant is never duplicated.
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut has_parent = vec![false; n];
-    for (i, p) in parent_idx.iter().enumerate() {
-        if let Some(p) = p {
-            children[*p].push(i);
-            has_parent[i] = true;
-        }
-    }
-    let mut order: Vec<usize> = Vec::with_capacity(n);
-    let mut emitted = vec![false; n];
-    let mut stack: Vec<usize> = Vec::new();
-    for r in 0..n {
-        if has_parent[r] && depth[r] != Some(0) {
-            continue;
-        }
-        stack.push(r);
-        while let Some(x) = stack.pop() {
-            if emitted[x] {
-                continue;
-            }
-            emitted[x] = true;
-            order.push(x);
-            for &c in children[x].iter().rev() {
-                if !emitted[c] {
-                    stack.push(c);
-                }
-            }
-        }
-    }
-    // Defensive tail: nothing should reach here unemitted (every row is a root
-    // or a descendant of one), but a forest the walk could not classify still
-    // renders rather than vanishing.
-    for (i, was_emitted) in emitted.iter().enumerate().take(n) {
-        if !was_emitted {
-            order.push(i);
-        }
-    }
-    let depths = (0..n).map(|i| depth[i].unwrap_or(0)).collect();
-    (order, depths)
 }
 
 /// One tracked external session's observed liveness from `claude agents --json
@@ -2746,6 +2693,8 @@ mod tests {
     mod lineage_kind_tests;
     mod liveness_rule_tests;
     mod parked_child_tests;
+    mod roster_join_tests;
+    mod spawned_by_name_tests;
     mod thread_row_status_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
@@ -2996,6 +2945,50 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(unattributable, 0);
+    }
+
+    #[test]
+    fn a_registered_row_with_a_full_uuid_short_id_attaches_by_its_job_id() {
+        // The register path once wrote the FULL uuid into short_id, and
+        // `claude attach <full uuid>` refuses it: the tap showed a dead
+        // viewer. The attach id derives the uuid's own leading segment, so a
+        // legacy row taps into its session; a real 8-hex key passes through.
+        let rows = derive_rows(
+            &reg(concat!(
+                r#"{"name":"warden","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"49a80492-388e-44a3-bd91-017be26bcaa0"},"#,
+                r#"{"name":"spawned","harness":"claude","cwd":"/w","status":"live","#,
+                r#""short_id":"abcd1234"}"#
+            )),
+            NOW,
+        )
+        .unwrap();
+        // Rows render in attention order, so look the rows up by name.
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .unwrap_or_else(|| panic!("row {n} missing"))
+        };
+        assert_eq!(by_name("warden").attach_id.as_deref(), Some("49a80492"));
+        assert_eq!(by_name("spawned").attach_id.as_deref(), Some("abcd1234"));
+    }
+
+    #[test]
+    fn attach_job_id_derives_only_from_a_hex_uuid_lead() {
+        // Exactly-8-hex is already a job id. A longer value derives only
+        // when its leading dash segment is 8 hex (a uuid); anything else is
+        // not fno's to rewrite - the gesture gate stays the judge.
+        assert_eq!(attach_job_id("abcd1234"), "abcd1234");
+        assert_eq!(
+            attach_job_id("49a80492-388e-44a3-bd91-017be26bcaa0"),
+            "49a80492"
+        );
+        assert_eq!(attach_job_id("49A80492-388e"), "49a80492", "case-folded");
+        assert_eq!(attach_job_id("n0t-a-uuid"), "n0t-a-uuid");
+        assert_eq!(
+            attach_job_id("too-long-hexstring-abcdef12"),
+            "too-long-hexstring-abcdef12"
+        );
     }
 
     #[test]
@@ -3266,11 +3259,13 @@ tokens = []"#,
     /// daemon-starting form each refuse rather than render an argv the
     /// resume builder cannot honor.
     #[test]
-    fn the_resume_lane_refuses_short_id_and_pre_exec_forms() {
+    fn the_resume_lane_refuses_short_id_and_carries_pre_exec() {
         let short_id: toml::Value =
             toml::from_str(r#"tokens = ["opencode", "--session", "{short_id}"]"#).unwrap();
         assert!(parse_form(FormLane::Attach, &short_id).is_some());
         assert!(parse_form(FormLane::Resume, &short_id).is_none());
+        // The shared-daemon ownership assertion rides the resume lane too:
+        // the pre_exec is carried, and the resume builder composes it.
         let daemon_start: toml::Value = toml::from_str(
             r#"
             tokens   = ["codex", "resume", "{session_id}"]
@@ -3278,8 +3273,12 @@ tokens = []"#,
         "#,
         )
         .unwrap();
-        assert!(parse_form(FormLane::Attach, &daemon_start).is_some());
-        assert!(parse_form(FormLane::Resume, &daemon_start).is_none());
+        let carried = parse_form(FormLane::Resume, &daemon_start).expect("pre_exec rides resume");
+        assert_eq!(
+            carried.pre_exec,
+            ["codex", "app-server", "daemon", "start"],
+            "the ownership assertion survives the parse"
+        );
         let plain: toml::Value =
             toml::from_str(r#"tokens = ["codex", "resume", "{session_id}"]"#).unwrap();
         assert!(parse_form(FormLane::Resume, &plain).is_some());
@@ -3751,89 +3750,6 @@ unheard_of_field = true
         // not empty: None keeps the caller's last-good rows.
         assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
         assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
-    }
-
-    // The CURRENT claude shape: a bare list, as captured from
-    // `claude agents --json` (claude 2.1.247, 2026-08-27). The fixture is a
-    // mechanically redacted copy of that capture: item count, per-item key
-    // set and order, value types, states, and the id==sessionId-prefix
-    // invariant are the real document's; names/cwds/UUID tails are redacted.
-    #[test]
-    fn parse_roster_bare_list_capture_yields_every_live_session() {
-        let raw = include_str!("../tests/testdata/roster-bare-list.json");
-        let doc: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let items = doc.as_array().unwrap();
-        let live: Vec<&serde_json::Value> = items
-            .iter()
-            .filter(|v| {
-                !v.get("state")
-                    .and_then(|s| s.as_str())
-                    .is_some_and(is_terminal_state)
-            })
-            .collect();
-        assert!(
-            live.len() < items.len(),
-            "capture must carry terminal items for this test to prove they skip"
-        );
-        let workers = parse_roster(raw).unwrap();
-        // Positive marker 1: the parsed count equals the capture's LIVE
-        // session count (terminal-catalog sessions are not roster presence),
-        // and every short_id keys off the item's own id/sessionId.
-        assert_eq!(
-            workers.len(),
-            live.len(),
-            "every LIVE captured session parses; terminal ones skip"
-        );
-        for (w, item) in std::iter::zip(&workers, live) {
-            let sid = item.get("sessionId").and_then(|v| v.as_str()).unwrap();
-            assert_eq!(w.short_id, sid.split('-').next().unwrap());
-            assert_eq!(w.cwd, item.get("cwd").and_then(|v| v.as_str()).unwrap());
-            // Flat `name` is the bare-list field; the fallback convention
-            // must not have fired for a named capture item.
-            assert_eq!(w.name, item.get("name").and_then(|v| v.as_str()).unwrap());
-        }
-    }
-
-    #[test]
-    fn parse_roster_bare_list_state_and_id_semantics() {
-        // Terminal states skip (roster presence means attachable); the
-        // explicit `id` field is the attach key, prefix is the fallback; an
-        // unknown state stays (tolerant, parse_claude_agents holds unknowns).
-        let raw = r#"[
-            {"id":"aaaabbbb","sessionId":"ccccdddd-1","cwd":"/w","name":"live-id-wins",
-             "kind":"background","startedAt":1,"state":"working"},
-            {"id":"ef56ab78","sessionId":"ef56ab78-2","cwd":"/x","name":"unknown-state",
-             "kind":"background","startedAt":2,"state":"weird"},
-            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"done-skips",
-             "kind":"background","startedAt":3,"state":"done"},
-            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"stopped-skips",
-             "kind":"background","startedAt":4,"state":"stopped"}]"#;
-        let workers = parse_roster(raw).unwrap();
-        assert_eq!(workers.len(), 2, "done and stopped skip, unknown stays");
-        assert_eq!(
-            workers[0].short_id, "aaaabbbb",
-            "explicit id wins over prefix"
-        );
-        assert_eq!(workers[0].name, "live-id-wins");
-        assert_eq!(workers[1].short_id, "ef56ab78");
-        assert!(!workers.iter().any(|w| w.name.contains("skips")));
-    }
-
-    #[test]
-    fn parse_roster_all_terminal_roster_is_a_recognized_empty_fleet() {
-        // The fleet finished: every catalog item is terminal (the daemon
-        // lingers on finished sessions). Every skip was RECOGNIZED, so this
-        // is an empty live fleet, not drift - Some(empty) lets the sideline
-        // clear instead of holding last-good rows as fake-live forever
-        // (codex review round 2).
-        let raw = r#"[
-            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"a",
-             "kind":"background","startedAt":3,"state":"done"},
-            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"b",
-             "kind":"background","startedAt":4,"state":"failed"}]"#;
-        assert_eq!(parse_roster(raw), Some(Vec::new()));
-        // Zero recognizable workers (no state, no sessionId) is still drift.
-        assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
     }
 
     // ---- Union merge + dual-doc ReaderState (task 1.2) ----
@@ -4357,6 +4273,8 @@ config_dir = "~/.claude-alt"
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_name: None,
+            lineage_reason: None,
             model: None,
             route: None,
             route_provider_id: None,
@@ -4383,6 +4301,7 @@ config_dir = "~/.claude-alt"
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            crown_name: None,
             liveness: if exited {
                 Liveness::Dead
             } else {
@@ -4531,12 +4450,10 @@ config_dir = "~/.claude-alt"
             .unwrap();
         }
         fn write_event(&self, sid: &str, ts: &str) {
-            let line =
-                format!(r#"{{"ts":"{ts}","type":"loop_check","data":{{"session_id":"{sid}"}}}}"#);
-            let mut body = std::fs::read_to_string(self.events()).unwrap_or_default();
-            body.push_str(&line);
-            body.push('\n');
-            std::fs::write(self.events(), body).unwrap();
+            let line = format!(
+                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}"}}}}"#
+            );
+            crate::event_store::append_envelope(&self.events(), &line, None).unwrap();
         }
     }
     impl Drop for Tmp {
@@ -4560,6 +4477,23 @@ config_dir = "~/.claude-alt"
             badges.get("target-x-dddd-fleet").map(String::as_str),
             Some("loop 2m ago")
         );
+    }
+
+    #[test]
+    fn newest_fire_ages_reads_a_store_committed_row() {
+        // AC7-HP: a store-only loop_check row 120s before now maps to 120.
+        let t = Tmp::new("fire-ages");
+        t.write_event(SID, "2026-07-09T01:05:00Z");
+        let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
+        let ages = newest_fire_ages(&t.events(), now);
+        assert_eq!(ages.get(SID), Some(&120), "{ages:?}");
+    }
+
+    #[test]
+    fn newest_fire_ages_is_empty_without_a_store() {
+        // AC7-HP: no rows -> no badges, never an error.
+        let t = Tmp::new("fire-ages-empty");
+        assert!(newest_fire_ages(&t.events(), 1_800_000_000).is_empty());
     }
 
     #[test]

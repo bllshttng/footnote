@@ -46,7 +46,7 @@ envelope:
       # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
       # both the Python and bash validators via the `patterns` list below
       # (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -293,7 +293,7 @@ event_types:
           description: "The target run id of the worktree the attestation was emitted in (fno_id, mirrored). NOT the attesting actor: it is grepped from the worktree manifest, so it equals manifest.session_id for every emitter in that worktree, including a reviewer who is not the author. A join on it returns self by construction; key the authorship join on attester_session_id instead."
         harness:
           type: string
-          description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
+          description: "The harness of the worktree's target run (claude | codex | gemini | opencode | agy), read from the live manifest beside session_id. It is NOT the attesting actor's harness; attester_session_id names that actor."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote. Present ONLY on the copy mirrored into the cross-project global log (`fno.events.cli` GLOBAL_MIRROR_TYPES); the project-log copy needs no scoping and omits it. Same producer and same meaning as `review_coverage.repo`: one parser, `fno.paths.repo_identity_from_remote_url`, in parity with `repo_identity_from_remote_url` in crates/fno-agents/src/finalize.rs. It is the FULL identity, never the last path segment, because `org-a/widget` and `org-b/widget` would otherwise share a key. Without it a global-log reader can match only on `head_sha`, and a fork shares those. Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the row rather than guess."
@@ -366,7 +366,7 @@ event_types:
                 type: string
               summary:
                 type: string
-                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it requires text the schema never stored, and `declined` (which needs corroboration a solo author cannot mint) becomes the only reachable disposition. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
+                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it means knowing what the finding says. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
         findings_truncated:
           type: boolean
           description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."
@@ -375,7 +375,7 @@ event_types:
           description: "The declared round this verdict is, as a running max across the PR's life. A round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds. A row carrying this field bypasses the head collapse, because the declared number is already the round's identity. The round budget (config.review.max_rounds) counts these. OPTIONAL."
         dispositions:
           type: array
-          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined BLOCKING finding is terminal only with corroboration the author cannot mint alone - see docs/architecture/review-coverage-termination.md. OPTIONAL."
+          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined finding with a non-empty reason is terminal whoever declined it, and `nonblocking` over a finding the gate re-derives as blocking stays non-terminal - see docs/architecture/review-coverage-termination.md. OPTIONAL."
           items:
             type: object
             properties:
@@ -422,7 +422,7 @@ event_types:
           description: "Review verb, including its leading slash, as observed by the speaker."
         reason:
           type: string
-          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base, so nothing could be measured. Both name an ATTEMPT that produced no verdict; neither attests anything."
+          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base; target_not_checked_out = the review's named branch has no matching worktree; target_head_moved = that worktree no longer matches the reviewed head. All name an ATTEMPT that produced no verdict; none attests anything."
         args_raw:
           type: string
           description: "Everything after the verb, preserved verbatim when observable."
@@ -588,6 +588,18 @@ event_types:
               items:
                 type: string
               description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
+            carried:
+              type: array
+              items:
+                type: object
+                properties:
+                  head:
+                    type: string
+                    description: "The attestation's pinned data.head_sha, which the rebase removed from the branch's ancestry."
+                  freshness:
+                    type: string
+                    description: "The review_freshness label that granted the carry (fresh, carried_base_sync, carried_docs_only, carried_subset, or carried_interdiff(n=0, cap))."
+              description: "Attestation heads whose tiles survived a head move on content identity, each with the review_freshness label that granted it: the three-dot code-diff identity (base divided out on both sides) proved the whole merge_base..head delta unchanged, so the recorded review still covers every shipping line. Fail-closed: granted only on a whole-range proof, never on Stale, a failure, or an interdiff above zero; a carried head also appears in chain_heads, and dropped still names the ranges the rebase removed."
         rounds_used:
           type: integer
           description: "Review rounds across the whole life of the PR (a round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, as the max of BOTH axes where both were read (attestation rounds and distinct GitHub-App reviewed commits); a healthy covered PR may carry the events axis alone, because the reviews read is paid only where it can change the answer. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
@@ -647,41 +659,32 @@ event_types:
     consumers: [fno-agents loop-check, fno do pr]
 
   - name: review_finding
-    description: "An operator annotated a node's work (via `fno backlog annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-aaaa-defanged."
+    description: "An operator recorded a blocking review finding (via `fno backlog note <node> --blocking` / `fno mux block annotate`). TELEMETRY ONLY: the durable record is the findings table in the store, and loop-check gates on that store, never on this event. The event keeps the scoreboard's review_observed count alive."
     sources: [observer]
     data:
-      required: [finding_id, node, text]
+      required: [finding_id, node_id]
       properties:
         finding_id:
           type: string
-          description: "Collision-safe short id minted at emit, never operator-supplied. loop-check quotes it in the deny reason and `fno backlog annotate resolve` clears it."
-        node:
+          description: "Collision-safe short id minted at write, never operator-supplied. `fno backlog note --resolve <id>` clears the store record."
+        node_id:
           type: string
-          description: "The backlog node the finding is scoped to. loop-check matches the session's node against this."
-        text:
-          type: string
-          description: "The operator annotation (original, un-defanged)."
-        block_cmd:
-          type: string
-          description: "The annotated block's command line, when captured via mux (optional)."
-        block_excerpt:
-          type: string
-          description: "A capped excerpt of the annotated block output (optional)."
-    consumers: [fno-agents loop-check]
+          description: "The backlog node the finding is scoped to. loop-check matches the session's node against the store record."
+    consumers: [fno-agents scoreboard]
 
   - name: review_finding_resolved
-    description: "A review_finding was explicitly resolved (by operator or self-resolving worker via `fno backlog annotate resolve`). Clears the matching finding for the loop-check gate. Idempotent: a second resolve of the same id is a warning no-op and emits nothing."
+    description: "A finding was explicitly resolved (via `fno backlog note --resolve <id>`). TELEMETRY ONLY: the store row carries resolved_at; this event keeps the scoreboard count alive."
     sources: [observer]
     data:
       required: [finding_id]
       properties:
         finding_id:
           type: string
-          description: "The review_finding id being resolved."
-        node:
+          description: "The finding id that was resolved."
+        status:
           type: string
-          description: "The finding's node (echoed for observability; optional)."
-    consumers: [fno-agents loop-check]
+          description: "resolved or already_resolved (echoed for observability)."
+    consumers: [fno-agents scoreboard]
 
   - name: review_hold_expired
     description: "A merge surface read a review hold (review:branch:<branch>) whose TTL had lapsed, whether or not the holder session was still running, and cleared past it. The hold exists so a merge cannot land while a review of that head is still executing; a hold that outlives its review would wedge the lane permanently, so it ages out - but never silently, because a lane that clears with no receipt is indistinguishable from one that was never held. Emitted where the decision was taken, not by the reaper."
@@ -878,15 +881,15 @@ event_types:
     consumers: [hooks/target-stop-hook.sh]
 
   - name: target_denominator
-    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
+    description: "The scope denominator chosen at `fno do target init` : a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), a count derived from the node's own details (denominator=derived), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration; a derived count is its own kind so it never reads as a declaration in the ratio."
     sources: [target]
     data:
       required: [denominator]
       properties:
         session_id: { type: string, description: "The run's fno_id; best-effort (used to dedup retried inits in the ratio)." }
-        denominator: { type: string, enum: [plan, deliverables, none] }
-        count: { type: integer, description: "The declared deliverable count when denominator=deliverables; absent otherwise." }
-        enumerated: { type: boolean, description: "Whether enumerated_scope fired on the node (withdrawing the cheap exit)." }
+        denominator: { type: string, enum: [plan, deliverables, derived, none] }
+        count: { type: integer, description: "The declared or derived deliverable count; absent only when denominator=none." }
+        enumerated: { type: boolean, description: "Whether the node's own prose reads as an unambiguous enumeration." }
     consumers: [operator]
 
   - name: phase_rolled_back
@@ -954,6 +957,20 @@ event_types:
           type: string
           description: "Optional provenance_nonce; tie-back to a session if provided."
     consumers: [hooks/target-stop-hook.sh]
+
+  - name: mail_notify_self_missed
+    description: "inject-mail-notify.sh (UserPromptSubmit) called `fno agents mail notify-self` and it did not deliver within its 2-second bound: rc 124 is the bound firing; any other nonzero is a refusal or a crash the hook previously discarded (2>/dev/null || true). Forensic event: the next reading of mail_notify_self_missed rows against agent_mail_drained gaps names the cause (timeout, identity refusal, crash); recording it does not fix it."
+    sources: [hook]
+    data:
+      required: [rc]
+      properties:
+        rc:
+          type: integer
+          description: "Exit status of `fno agents mail notify-self`; 124 means the portable 2-second bound fired."
+        stderr_tail:
+          type: string
+          description: "Last stderr line, at most 200 chars, when the verb wrote one."
+    consumers: [operator]
 
   - name: reconcile_backfill_wrote
     description: "fno megatron reconcile --backfill wrote a missing completion JSON for a confirmed-merged PR. Forensic event: the file is the source of truth, this event is best-effort telemetry."
@@ -1317,6 +1334,14 @@ event_types:
         graph_path:
           type: string
           description: "The graph file whose transaction conflicted."
+        touched:
+          type: array
+          items:
+            type: string
+          description: "Node ids the conflicted write touched; concurrent chains in one journal become attributable."
+        session_id:
+          type: string
+          description: "Full session id of the emitting caller, when resolvable; absent when unprovable."
     consumers: [operator]
 
   - name: orphan_reap_sweep
@@ -2117,6 +2142,23 @@ event_types:
       required: []
       properties: {}
 
+  - name: daemon_drift_pending_exit
+    description: "Daemon measured its own build drifted and retired at a quiet tick with no live worker, so the next lazy start runs the installed binary."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        running:
+          type: string
+          description: "Path of the executable the daemon was running."
+        running_size:
+          type: integer
+        on_disk:
+          type: string
+          description: "Path of the drifted on-disk binary."
+        on_disk_size:
+          type: integer
+
   - name: daemon_shutting_down
     description: "Daemon received shutdown signal and is winding down."
     sources: [daemon]
@@ -2190,6 +2232,37 @@ event_types:
         lineage_reason:
           type: string
           description: "Why spawned_by_session is absent: the identity resolution's own reason at spawn time. A birth names either its parent or why it could not."
+
+  - name: agent_convert_phase
+    description: "One phase of the agent.convert pane-to-thread transaction. Emitted at each step so an interrupted conversion can be read back from the event stream: classified, claims-held, pane-stopped, hand-off, resumed, flipped, rolled-back."
+    sources: [daemon]
+    data:
+      required: [name, strategy, phase]
+      properties:
+        name:
+          type: string
+          description: "The registry row being converted."
+        strategy:
+          type: string
+          description: "The declared conversion strategy: keeper-rebind, server-resume or client-resume."
+        phase:
+          type: string
+          description: "Which step of the transaction this event reports."
+        socket:
+          type: string
+          description: "The thread-lane keeper socket, on the flipped phase of a keeper rebind."
+        child_pid:
+          type: integer
+          description: "The surviving child process, on the flipped phase of a keeper rebind."
+        short_id:
+          type: string
+          description: "The relaunched session's short id, on the flipped phase of a client resume."
+        session_id:
+          type: string
+          description: "The session id the row carries after the flip."
+        error:
+          type: string
+          description: "Why the conversion rolled back, on the rolled-back phase."
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."
@@ -2380,6 +2453,18 @@ event_types:
           type: integer
         reclaimed_bytes:
           type: integer
+        removed_rows:
+          description: "The session rows the completion removed."
+          type: array
+        kept:
+          description: "The session rows the completion kept, with the reason."
+          type: array
+        rows:
+          description: "\"present\" | \"none-present\": whether the node join found any row at all."
+          type: string
+        tree:
+          description: "\"removed\" | \"kept:<reason>\" | \"no-worktree\": the worktree outcome."
+          type: string
 
   - name: merge_cleanup_refused
     retention: durable
@@ -2427,6 +2512,9 @@ event_types:
         pr:
           type: integer
         reason:
+          type: string
+        last_hold:
+          description: "The reason of the request's last hold event, or \"none\" when it expired having never been held."
           type: string
 
   - name: merge_flake_accepted
@@ -2644,7 +2732,7 @@ event_types:
           type: string
 
   - name: reign_armed
-    description: "A crowned reign finished arming its beat: six monitors plus the self-injected /loop and /goal. Journaled by the reigning session through fno doctor event emit."
+    description: "A crowned reign finished arming its beat: the self-injected /loop. Journaled by the reigning session through fno doctor event emit."
     sources: [loop, daemon]
     data:
       required: []
@@ -2753,6 +2841,33 @@ event_types:
         elapsed_seconds:
           type: integer
 
+  - name: agent_crown_vacated
+    description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
+    sources: [daemon]
+    data:
+      required: [scope, cause]
+      properties:
+        scope:
+          type: [string, "null"]
+        level:
+          type: [integer, "null"]
+        holder:
+          type: [string, "null"]
+        holder_session:
+          type: [string, "null"]
+        grantor:
+          type: [string, "null"]
+        cause:
+          type: string
+        successor:
+          type: [string, "null"]
+        evidence:
+          type: [string, "null"]
+        inheritor:
+          type: [string, "null"]
+        cleared_rows:
+          type: array
+
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
@@ -2805,7 +2920,7 @@ event_types:
           description: "One object per held row: id, reason, detail, age_s (nullable), escalated."
 
   - name: pr_nudge_sent
-    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed."
+    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed. red_head names the head whose settled red caused this wake. reason carries a failed resume's last stderr line; resume_exit and resume_reason carry the fallback resume's outcome on a mail pass. pr is null for a dead-worker row: a session the sweep keeps on an in_progress node whose roster process is gone, whose remedy is resume, not a PR."
     sources: [daemon]
     data:
       required: [session_id, node, pr, action, attempt, delivered]
@@ -2815,7 +2930,7 @@ event_types:
         node:
           type: string
         pr:
-          type: integer
+          type: [integer, "null"]
         action:
           type: string
           enum: [mail, resume]
@@ -2830,9 +2945,17 @@ event_types:
           enum: [resume]
         undelivered:
           type: integer
+        red_head:
+          type: string
+        reason:
+          type: string
+        resume_exit:
+          type: integer
+        resume_reason:
+          type: string
 
   - name: pr_nudge_escalated
-    description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity. undelivered is how many of those nudges never landed in the session."
+    description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity. undelivered is how many of those nudges never landed in the session. pr is null for a dead-worker row: the marker then reads pr-nudge: dead worker on <node>."
     sources: [daemon]
     data:
       required: [session_id, node, pr]
@@ -2842,12 +2965,12 @@ event_types:
         node:
           type: string
         pr:
-          type: integer
+          type: [integer, "null"]
         undelivered:
           type: integer
 
   - name: pr_nudge_paused
-    description: "A recorded merge order pauses the nudge ladder for this session: no nudge is sent while the lead node named in the decision is not done. Emitted at most once per hour per session."
+    description: "A recorded merge order pauses the nudge ladder for this session: no nudge is sent while the lead node named in the decision is not done. Emitted at most once per hour per session. pr is null for a dead-worker row (a merge order on its node pauses the resume ladder too)."
     sources: [daemon]
     data:
       required: [session_id, node, pr]
@@ -2857,7 +2980,7 @@ event_types:
         node:
           type: string
         pr:
-          type: integer
+          type: [integer, "null"]
 
   - name: state_reap
     description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
@@ -2917,7 +3040,7 @@ event_types:
           type: string
 
   - name: stale_sweep
-    description: "The daemon's stale-question reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the durable [watchdog-stale:*] operator question to the measured fleet. Report-only by construction: rows past the wake ceiling are the needs-human bucket no action lane may take, so the question channel is the only surface they reach. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "The daemon's stale-row reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the lane's fleet tasks (the former [watchdog-stale:*] operator question, now filed in the fleet-task channel) to the measured fleet. Report-only by construction: a king reads open tasks on the board's fleet_task queue. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -2930,6 +3053,21 @@ event_types:
           type: string
         error:
           type: string
+
+  - name: question_sweep
+    description: "The daemon's question sweep ran on its interval floor and closed the node-closed questions it found, appending one empty-answer row per question to the provider cap (a non-empty answer would arm the unrecorded-decision gate against the asking session for a decision nobody made). Emitted for every run including outcome none, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        closed:
+          type: integer
+        outcome:
+          type: string
+        ids:
+          type: array
+          items:
+            type: string
 
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever."
@@ -3325,6 +3463,91 @@ event_types:
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
     consumers: [operator]
 
+  - name: machine_sample
+    description: "One bounded machine and session-cost sample from the machine_watch beat. Null is unmeasured, never zero; compressor_gb is RAM occupied by compressed pages while compressed_gb is the data stored in them."
+    sources: [loop, test]
+    data:
+      required: [verdict]
+      properties:
+        sample_id: { type: [string, "null"] }
+        load_1m: { type: [number, "null"] }
+        load_5m: { type: [number, "null"] }
+        load_15m: { type: [number, "null"] }
+        cores: { type: [number, "null"] }
+        busy_fraction: { type: [number, "null"] }
+        sys_fraction: { type: [number, "null"] }
+        busy_window_s: { type: [number, "null"] }
+        runnable: { type: [integer, "null"] }
+        processes: { type: [integer, "null"] }
+        zombies: { type: [integer, "null"] }
+        cargo_processes: { type: [integer, "null"] }
+        test_processes: { type: [integer, "null"] }
+        compressor_gb: { type: [number, "null"] }
+        compressed_gb: { type: [number, "null"] }
+        swap_used_gb: { type: [number, "null"] }
+        swap_total_gb: { type: [number, "null"] }
+        live_rows: { type: [integer, "null"] }
+        kings: { type: [integer, "null"] }
+        workers: { type: [integer, "null"] }
+        verdict: { type: string }
+        busy_band: { type: [number, "null"] }
+        load_band_per_core: { type: [number, "null"] }
+        took_ms: { type: integer }
+        sessions: { type: [array, "null"] }
+        unresolved: { type: array }
+        top_rss: { type: [array, "null"] }
+        sessions_error: { type: [string, "null"] }
+    consumers: [operator]
+
+  - name: stop_decision
+    description: "The Stop hook's single correlated ownership decision for one harness fire. The control_plane_tick remains the aggregate projection; this row preserves the identity and output contract needed to audit who owned continuation."
+    sources: [hook]
+    data:
+      required: [session_id, raw_identity_candidates, turn_id, manifest, scope, node_id, driver, continuation_owner, decision, class, correlation_id, harness_output_contract]
+      properties:
+        session_id:
+          type: string
+          description: "Full harness session identity supplied by the Stop fire."
+        raw_identity_candidates:
+          type: array
+          items: { type: string }
+          description: "Every raw identity candidate considered by the resolver, in precedence order."
+        turn_id:
+          type: string
+          description: "Codex turn id from the Stop payload, or an empty string for non-Codex fires."
+        manifest:
+          type: string
+          description: "Resolved manifest path, or an empty string when no manifest owned the fire."
+        scope:
+          type: string
+          description: "Manifest scope/crown scope, or an empty string when unscoped."
+        node_id:
+          type: string
+          description: "Manifest node identity, or an empty string when no node is bound."
+        driver:
+          type: string
+          description: "The continuation driver that answered, or unknown when ownership could not be resolved."
+        continuation_owner:
+          type: string
+          enum: [goal, loop_check, none, refusal]
+          description: "The single owner selected for the next continuation."
+        decision:
+          type: string
+          enum: [allow, block, refuse]
+          description: "The Stop decision after continuation arbitration."
+        class:
+          type: string
+          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow]
+          description: "Typed reason class for the decision."
+        correlation_id:
+          type: string
+          description: "Stable id joining the project and aggregate projections for this Stop fire."
+        harness_output_contract:
+          type: string
+          enum: [empty, json_block, exit_2_stderr]
+          description: "The output contract the calling harness will consume for a block/refusal."
+    consumers: [operator, fno doctor]
+
   - name: evals_scheduled_run
     description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
     sources: [daemon, test]
@@ -3460,7 +3683,7 @@ event_types:
       properties:
         guard:
           type: string
-          description: "Guard name: graph-write-protect, worktree-write-protect, join-partition-write-guard, plan-location-guard, git-protection, or bg-process-guard."
+          description: "Guard name: graph-write-protect, worktree-write-protect, generated-write-guard, join-partition-write-guard, plan-location-guard, git-protection, or bg-process-guard."
         decision:
           type: string
           enum: [allow, block]
@@ -3597,8 +3820,17 @@ event_types:
           description: "Optional. One line naming the action that closes the question."
         options:
           type: array
-          items: { type: string }
-          description: "Optional choices when the question is a pick rather than free text."
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  n: { type: integer }
+                  text: { type: string }
+                  next: { type: string }
+                  pros: { type: array, items: { type: string } }
+                  cons: { type: array, items: { type: string } }
+          description: "Optional choices when the question is a pick rather than free text; the Rust intake writes objects carrying each option's next."
         blocks:
           type: array
           items: { type: string }
@@ -3606,7 +3838,56 @@ event_types:
         subject:
           type: string
           description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
+        context:
+          type: object
+          description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
     consumers: [operator, fno-agents needs]
+
+  - name: fleet_task
+    description: "A machine chore that names its own clearing command, filed by a lane writer (heal, pr-nudge, the daemon reconcile lanes) instead of an operator_question, so the operator's question list carries only rows needing a human ruling. Written only by Rust (fleet_task.rs); never written by Python. A king reads open tasks on the board's fleet_task queue, report-only; the operator question surfaces never show one."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "Stable id for this task (ft-<hex>), what a fleet_task_closed row names to close it."
+        lane:
+          type: string
+          description: "The writer family that owns the chore: heal, pr-nudge, watchdog-stale, reap-hold, king-escalation, watchdog-unfinished-work, watchdog-friction."
+        key:
+          type: string
+          description: "The dedup key within the lane, e.g. 'PR 2226 rebase conflict'."
+        text:
+          type: string
+          description: "The human-readable chore text, including the command that clears it."
+        run:
+          type: string
+          description: "Optional. The command that clears the chore."
+        node:
+          type: string
+          description: "Optional. The backlog node the task is about, when the writer knows one; the sweep closes the task when that node closes."
+        cwd:
+          type: string
+          description: "The repo root the writer ran in; one heal process serves several repos, so identity is lane + key + cwd."
+    consumers: [fno-agents needs, king board]
+
+  - name: fleet_task_closed
+    description: "A fleet_task was closed: its condition cleared (rebased, activity), its node closed, its lane reconciled empty or superseded, or the sweep retired it. Written only by Rust. Append-only with a last-writer-wins fold; a double close is a no-op."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "The fleet_task this closes."
+        reason:
+          type: string
+          description: "Why it closed: rebased, activity, node-closed, set-empty, superseded, moved-to-fleet-task."
+        closed_by:
+          type: string
+          description: "The writer that closed it: heal, pr-nudge, question-sweep, or the lane marker."
+    consumers: [fno-agents needs, king board]
 
   - name: operator_question_closed
     description: "An operator_question was answered or withdrawn. Explicit close only: there is no auto-expiry and no transcript-derived auto-resolution, because peek.Record carries role and text but no timestamp, so answering 'is there a user turn newer than this question' would need a new timestamped reader in every harness arm. An explicit clear costs nothing and never lies about whether an answer actually arrived. A question going quiet with age is the exact failure being fixed, so age never closes one. Append-only with a last-writer-wins fold: a double close is a no-op, not an error."
@@ -3624,6 +3905,103 @@ event_types:
           type: string
           description: "Optional. Session id that closed it, which need not be the session that asked."
     consumers: [operator, fno-agents needs]
+
+  - name: attention_answer
+    retention: durable
+    description: "One durable answer row from an attention sink: the projection the daemon arm delivers (a question or pin the user answered away from a terminal, through the configured questions file, or later a sink adapter) recorded before the clear runs, so the answer survives a slow or refused clear. The row lands in questions.jsonl (the feed's question store), first answer wins, a later one records superseded and changes nothing. The `fno inbox outstanding clear` it precedes records the actual decision; this row is the provenance receipt naming the sink and the answer lane. Written by the attention daemon arm; never written by Python."
+    sources: [daemon, test]
+    data:
+      required: [item_id, sink, authority]
+      properties:
+        item_id:
+          type: string
+          description: "The question id (or note/mine item slug) this answers."
+        sink:
+          type: string
+          description: "The sink that carried the answer: `file` for the markdown file, `ntfy`, `webhook`, `mux`, or `harness-native` later."
+        option:
+          type: integer
+          description: "Optional. The chosen option number, 1-based, when the answer picked one."
+        words:
+          type: string
+          description: "Optional. Free-text answer when the user wrote words instead of ticking."
+        done:
+          type: boolean
+          description: "Optional. True when a pin's action was taken (the top line ticked)."
+        answered_at:
+          type: string
+          description: "Optional. When the user's edit settled and the arm read it."
+        authority:
+          type: string
+          description: "The answer lane: `file_edit` for the file sink (a local edit carries no identity the machine can check), `sink` for adapters. Never operator: the clear refuses that caller by design and the plan's section 5 lanes live here."
+        attested_by:
+          type: string
+          description: "Optional. The sink-side evidence: file:<path>:<hash> for the file sink, <sink>:<evidence> for adapters."
+        mapped_by:
+          type: string
+          description: "Optional. The writer that mapped the edit to the item: `attention_arm`."
+        superseded:
+          type: boolean
+          description: "Optional. True when a later answer already won; the row changes nothing."
+        decision_id:
+          type: string
+          description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
+    consumers: [operator, fno-agents needs]
+
+  - name: user_ask_answered
+    retention: durable
+    description: "A question the user asked a session was answered: the ack (fno inbox user ack --outcome answer:<text>) records what the answer was, beside the turn that asked. The attention arm folds these rows into the questions file as closed lines, so the thread survives outside chat. Written by the Rust ack (compaction ack); the asker is the user, so no authority lane applies."
+    sources: [target, test]
+    data:
+      required: [session_id, turn_id, answer]
+      properties:
+        session_id:
+          type: string
+          description: "The session the user asked."
+        turn_id:
+          type: string
+          description: "The acked user turn."
+        excerpt:
+          type: string
+          description: "Optional. The turn's rendered excerpt from the scan cursor; empty when the cursor has rotated."
+        answer:
+          type: string
+          description: "The answer text after the answer: prefix."
+        answered_at:
+          type: string
+          description: "Optional. When the ack recorded it."
+    consumers: [operator, fno-agents needs]
+
+  - name: day_boundary
+    retention: durable
+    description: "A deterministic project-scoped morning or end-of-day readback folded from existing journals, backlog completion records, and the operator-question lifecycle. The stored row is the bounded historical report; Markdown and JSON rendering are exports. Repeated invocation of the same boundary kind on the same local day reuses the existing row and does not advance question attention."
+    sources: [target, hook, daemon, test]
+    data:
+      required: [boundary_id, kind, cutoff]
+      properties:
+        boundary_id:
+          type: string
+        kind:
+          type: string
+          enum: [start, end]
+        cutoff:
+          type: string
+        prior_boundary_id:
+          type: string
+        featured:
+          type: array
+          items: { type: string }
+        completed:
+          type: integer
+        open:
+          type: [integer, string]
+        opened:
+          type: integer
+        closed:
+          type: integer
+        retractions:
+          type: integer
+    consumers: [operator, fno-agents feed]
 
   - name: operator_decision
     retention: durable
@@ -3683,6 +4061,12 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
+        reads:
+          type: array
+          description: "Optional. Executed evidence rows (cmd, exit code, output head) backing a code fact the ruling asserts. Listed by the reader projection before this declaration existed; declared here so the schema and the projection agree."
+        scope:
+          type: string
+          description: "Optional. Who the law governs: `global`, or `project:<slug>`. A row with no scope reads as project:fno, because every row recorded before this field existed was recorded in fno. The law door stamps the recording session's project by default; widening to global is an explicit --global, because law is never inherited by silence. Readers filter to global plus the session's project and fail open with a named reason when the project cannot be resolved."
     consumers: [operator, fno inbox decisions]
 
   - name: operator_notice
@@ -3810,6 +4194,39 @@ event_types:
           description: "Optional (pane-send floor). The verb's own exit code the outcome word came from."
     consumers: [operator]
 
+  - name: operator_submit
+    retention: durable
+    description: "A human pressed Enter in a mux pane or portal: the positive witness that a person typed the next turn. Written at the CoreMsg::Input choke point, after the relay bounce and the passive-client drop, so machine transports (pane send, control.sock mail, codex turn/start) never reach it. Records WHERE and WHEN only - no typed text is ever recorded. The intel fold joins submits to transcript turns by session and submit_ms; a turn with no submit and no injected shape reads unknown, never operator."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, via, submit_ms, resolution]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belongs to."
+        pane:
+          type: integer
+          description: "The pane id the Enter landed on."
+        via:
+          enum: [pane, portal, shell]
+          description: "pane: a pane hosting a registry row. portal: a pane seating a portal. shell: a pane with no registry or portal row (a hand-started harness)."
+        submit_ms:
+          type: integer
+          description: "Epoch milliseconds the Enter reached the server. The join key to transcript turns: the envelope ts is second precision, this is not."
+        resolution:
+          enum: [ok, unresolved]
+          description: "ok: a registry or portal row bound the pane, so turns in its session can join. unresolved: no row bound (shell pane); the submit still counts, nothing joins to it."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id, else its effective identity - the id transcripts are named by. Null when no row binds or the row carries no id."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis. Null when no row binds."
+        fno_id:
+          type: [string, "null"]
+          description: "The bound row's own fno session id (the durable identity). Null when no row binds."
+    consumers: [operator]
+
   - name: mail_origin_classified
     retention: durable
     description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
@@ -3851,42 +4268,6 @@ event_types:
           description: "Last few lines of gh stderr, or empty string if unavailable."
     consumers: [operator]
 
-  - name: loop_check_graphql_standdown
-    description: "Emitted when a fire stands down instead of blocking via loop_check: the fleet GitHub request budget holds a live refusal backoff or an exhausted 60s point window (budget_cause names which; `fno-agents fleet-incident gh-budget status` reads the ledger), the primary GraphQL floor is breached, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
-    sources: [hook]
-    data:
-      required: [session_id, decision, standing_down, graphql_remaining, graphql_floor]
-      properties:
-        session_id:
-          type: string
-          description: "Target session identifier."
-        decision:
-          type: string
-          description: "Always 'block': the fire spends no GraphQL and retries next tick."
-        intent:
-          type: string
-          description: "The detected intent for this fire: promise, aborted, watching, or none."
-        intent_source:
-          type: string
-          description: "Where the intent was detected (transcript tag, etc)."
-        standing_down:
-          type: boolean
-          description: "Always true; distinguishes this from a normal block."
-        graphql_remaining:
-          type: [integer, "null"]
-          description: "GraphQL quota remaining at the top-of-fire probe, or null if the probe itself failed (a secondary refusal can still trigger stand-down with no probe reading)."
-        graphql_floor:
-          type: integer
-          description: "The configured floor (GRAPHQL_FLOOR) this remaining count fell below."
-        secondary_refusal:
-          type: boolean
-          description: "True when the fleet GitHub request budget (or, historically, a recent observed secondary refusal) says the machine is being burst-limited - a failure mode the advertised quota cannot see."
-        budget_cause:
-          type: [string, "null"]
-          enum: [backoff, budget, null]
-          description: "Why the fleet GitHub request budget is holding calls: 'backoff' (a live refusal backoff) or 'budget' (the 60s point window is at its cap). Null when the stand-down came from the primary floor alone."
-    consumers: [operator]
-
   - name: loop_check_config
     description: "Emitted once on the first loop-check fire of a session, recording the resolved CLAUDE_CODE_STOP_HOOK_BLOCK_CAP so a run force-ended by the harness override (blocks meeting the cap, then silence) is distinguishable from a budget end (a terminal budget decision)."
     sources: [hook]
@@ -3906,7 +4287,7 @@ event_types:
     consumers: [operator]
 
   - name: loop_check_watch_idle
-    description: "Emitted when a loop-check fire idles a session non-terminally on a verified async wait after the agent declared a <watching> tag. The claim lease was extended to cover the watch window; the session parks until its harness-tracked watcher fires. On codex this event doubles as the daemon's watch registration."
+    description: "Emitted when a loop-check fire idles a session non-terminally after the agent declared a <watching> tag. The idle renews the claim lease over the watch window and reads no PR state; the session parks until its harness-tracked watcher fires."
     sources: [hook]
     data:
       required: [session_id, pr, blocker, lease_ms]
@@ -3915,12 +4296,12 @@ event_types:
           type: string
           description: "Target session identifier."
         pr:
-          type: integer
-          description: "PR number the session is watching."
+          type: [integer, "null"]
+          description: "PR number the tag names, or null when the tag names no positive PR number (a local run carries no pr)."
         blocker:
           type: string
-          enum: [ci, review, unknown]
-          description: "The async blocker being waited on: 'ci' (checks pending), 'review' (a bot review outstanding), or 'unknown' (a GraphQL-floor stand-down idled on the tag alone, with no read to classify the wait)."
+          enum: [ci, review, merge_slot, local, unknown]
+          description: "The blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), 'local' (a run on this machine: a test suite, a build, a review fork), or 'unknown' (any other reason; the idle verifies nothing)."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
@@ -3930,15 +4311,6 @@ event_types:
         lease_ms:
           type: integer
           description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
-        stand_down:
-          type: boolean
-          description: "Optional. True when this idle was reached via a GraphQL stand-down (primary floor or a secondary refusal) rather than a normal verified async wait."
-        graphql_remaining:
-          type: [integer, "null"]
-          description: "Optional. GraphQL quota remaining at the top-of-fire probe, present on a stand-down idle; null if the probe itself failed."
-        secondary_refusal:
-          type: boolean
-          description: "Optional. True when this idle's stand-down was triggered by an observed secondary (burst/concurrency) refusal rather than (or in addition to) the primary floor."
     consumers: [operator]
 
   - name: loop_advisory_mode
@@ -4314,11 +4686,11 @@ event_types:
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
         verb:
           type: string
-          description: "The verb this dispatch resolved. Since x-eeee this is the DERIVED canonical verb - difficulty decides at intake (plan rung none), the plan's rung decides at re-dispatch, and the node's stored dispatch_verb only reconciles through the same table - so a planless medium node records /blueprint with no declaration anywhere. The literal 'builtin' survives only where no node context existed to derive from. Before x-eeee this named the raw declaration or 'builtin'."
+          description: "The verb this dispatch resolved: the node's DECLARED dispatch_verb when the lifecycle table abstains or disagrees, else the DERIVED canonical verb - difficulty decides at intake (plan rung none), the plan's rung decides at re-dispatch, and a build rung derives /target only for a blueprint doc - so a planless medium node records /blueprint with no declaration anywhere. The literal 'builtin' survives only where no node context existed to derive from. Before x-eeee this named the raw declaration or 'builtin'."
         verb_source:
           type: string
           enum: [declared, none-declared, field-absent]
-          description: "The RAW declaration state, distinct from the resolved `verb` beside it. declared = the node dict carried a non-empty dispatch_verb (it may have been reconciled to a different phase; the decision trail names both). none-declared = the key was present and empty/null. field-absent = the key was NOT in the dict at all, a lossy projection - the dispatch REFUSES on it now instead of warning and proceeding, except for a caller that passed no node dict at all."
+          description: "The RAW declaration state, distinct from the resolved `verb` beside it. declared = the node dict carried a non-empty dispatch_verb, returned as declared; the decision trail names any disagreement with the lifecycle answer. none-declared = the key was present and empty/null. field-absent = the key was NOT in the dict at all, a lossy projection - the dispatch REFUSES on it now instead of warning and proceeding, except for a caller that passed no node dict at all."
         cwd:
           type: string
           description: "The --cwd the worker was launched into; empty means --fresh."
@@ -4331,6 +4703,12 @@ event_types:
         decision:
           type: string
           description: "The resolver's decision trail joined with '; ' (harness=config(codex); substrate=default(thread); ...): which rung supplied each axis."
+        territory:
+          type: string
+          description: "The territory key the verdict door attributed this dispatch to (a crown scope, or loose:<project>); null when nothing could read the attribution."
+        kingless:
+          type: boolean
+          description: "False on a crowned territory, true on a kingless one, null when the attribution was unreadable (territory_unknown or a read failure) - an absence is never read as a boolean. The record, not the veto: a kingless territory still drains."
     consumers: [operator]
 
   - name: advance_dispatched
@@ -4384,8 +4762,8 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, sandbox-unreachable, state-root-ungranted, slot-queue-deferred]
-          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on, so it stays ready until the reset. The epic-advance-path reasons (epic advance, K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons : capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80: queue timeout, no-wait, RAM, provider cap, load, king share), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81 or 86: a registry no spawn on this machine can pass, or a gate that could not answer at all; sandbox-unreachable = exit 85 from the codex sandbox probe at the spawn seam, a sandbox that blocks a tool every code payload on that lane needs (gh or a git ref write); state-root-ungranted = spawn-gate exit 84, the lane declares no stance toward the state root and a human grants; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, select-unmeasured, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, sandbox-unreachable, state-root-ungranted, slot-queue-deferred]
+          description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on, so it stays ready until the reset. The epic-advance-path reasons (epic advance, K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons : capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80, 86 and 88: queue timeout, no-wait, RAM, provider cap, load, king share, territory cap, blueprint cap), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81, 82, 83 or 87: a registry no spawn on this machine can pass, a gate that could not answer at all, or the fleet incident stop standing; sandbox-unreachable = exit 85 from the codex sandbox probe at the spawn seam, a sandbox that blocks a tool every code payload on that lane needs (gh or a git ref write); state-root-ungranted = spawn-gate exit 84, the lane declares no stance toward the state root and a human grants; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
         node_id:
           type: string
           description: "The candidate next node, when a reason references one (already-claimed, quota-deferred, lane-cap, unmapped-project)."
@@ -4856,7 +5234,7 @@ event_types:
           description: "GitHub PR number."
         reason:
           type: string
-          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left)."
+          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left), 'admission-refused' (the spawn gate refused the fire; not an attempt, so no retry burned)."
 
   - name: pr_watch_dispatch_failed
     description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."
@@ -4883,6 +5261,37 @@ event_types:
         reason:
           type: string
           description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
+
+  - name: pr_watch_unparked
+    description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the king row's verb) or by the sweep (head moved or 24h old)."
+    sources: [pr-park, daemon]
+    data:
+      required: [pr, by]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        by:
+          type: string
+          description: "Who un-parked it: 'manual' (fno-agents pr-park unpark) or 'sweep'."
+
+  - name: park_sweep
+    description: "The daemon's park sweep on its 6h floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          description: "'ok' when the sweep ran; 'skipped' names why it did not; 'error' when the store could not be read."
+        unparked:
+          type: integer
+        handled:
+          type: integer
+        total:
+          type: integer
+        reason:
+          type: string
 
   - name: pr_watch_tick
     description: "Heartbeat and positive sweep receipt emitted at the end of every successful PR-state watcher poll interval, including quiet ticks with no actionable PRs."
@@ -4988,7 +5397,7 @@ event_types:
         outcome:
           type: string
           enum: [ok, degraded, disabled, lock_held, quota_skip, timeout, error, paused]
-          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; paused = the global loop pause held before settings or sweep; the rest never minted a pr_watch_tick."
+          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; paused = historical, minted by the tick entry gate this schema outlived; the rest never minted a pr_watch_tick."
         duration_s:
           type: number
           description: "Wall-clock seconds from tick entry to this record."
@@ -5046,6 +5455,9 @@ event_types:
     data:
       required: [seen, unknown, dry_run]
       properties:
+        root:
+          type: string
+          description: "The project root this row's cycle ran over; one process writes one row per root."
         seen:
           type: integer
           description: "Open PRs the loop examined this cycle."
@@ -5076,6 +5488,9 @@ event_types:
         skip_read_error:
           type: integer
           description: "PRs the world would not answer (read failures)."
+        skip_deadline:
+          type: integer
+          description: "PRs past the root's slice of the 480s drive budget; they wait for the next tick."
         still_red:
           type: integer
           description: "PRs acted on that remain red (escalations or read errors after apply)."
@@ -5085,6 +5500,57 @@ event_types:
         dry_run:
           type: boolean
           description: "True for a --all --apply --dry-run rehearsal: nothing changed, nothing pushed, no question filed."
+
+  - name: pr_heal_flake
+    description: "CI heal drive loop: one row per check classified a flake and guarded, so a rerun of the same (sha, run id, check) is skipped instead of rerun forever. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [key, sha, run_id, check]
+      properties:
+        key:
+          type: string
+          description: "The dedup key of the flake guard this row staged."
+        sha:
+          type: string
+          description: "The head commit whose run flapped."
+        run_id:
+          type: string
+          description: "The CI run id the flaky check belongs to."
+        check:
+          type: string
+          description: "The check name that flapped."
+        node_id:
+          type: string
+          description: "The backlog node named on the PR branch, when one resolved."
+
+  - name: pr_heal_pr
+    description: "CI heal drive loop: one row per acted-on PR recording which remedy ran and why. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [pr, action, reason]
+      properties:
+        pr:
+          type: integer
+          description: "The acted-on PR number."
+        action:
+          type: string
+          description: "The remedy applied (rerun, escalate, comment, ...)."
+        reason:
+          type: string
+          description: "Why that remedy was chosen, from the finding's signature."
+
+  - name: daemon_fleet_scope
+    description: "Daemon startup scope declaration: whether this daemon owns a sandbox home or the operator's shared home. Readers key fleet gating and board routing off it instead of probing paths."
+    sources: [daemon]
+    data:
+      required: [scope, home]
+      properties:
+        scope:
+          type: string
+          description: "sandbox when the daemon runs on a temp-rooted home, shared otherwise."
+        home:
+          type: string
+          description: "The state root the daemon resolved."
 
   - name: recovery_nudge
     description: "Session auto-recovery injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
@@ -5619,8 +6085,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth]
-          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the five question dimensions and epic_fit/mission_fit/customer_fit/code_truth the four source dimensions of the blueprint judge (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth, competitive_fit, ship_quality, partner_challenge, reproduced, root_cause, sibling_callers, regression_test]
+          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); the blueprint judge asks a plan the dimensions its node's kind calls for (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable): the shared pack every plan answers (surface_fit/deletable/duplication/epic_fit/mission_fit/code_truth), the product pack a feature, epic or roadmap node answers (persona/uncovered_case/customer_fit/competitive_fit/ship_quality/partner_challenge), and the cause pack a bug node answers instead (reproduced/root_cause/sibling_callers/regression_test); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]
@@ -6005,6 +6471,15 @@ event_types:
         path:
           type: string
 
+  - name: store_seat_lock_unlinked
+    description: "An orphaned store seat lock (<sock>.sock.lock whose socket is gone) was unlinked from the hashed temp root at daemon start while its flock was held; a lock another process still holds is left as found."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
   - name: keeper_socket_silent_no_row
     description: "A keeper socket accepted the Identify probe but never answered, and no registry row is bound to it."
     sources: [daemon]
@@ -6112,6 +6587,9 @@ event_types:
     data:
       required: []
       properties:
+        kind:
+          type: string
+          description: "Which distress vocabulary produced the row: help for an in-session <help> tag, result_blocked for a RESULT: BLOCKED return. Additive within v:1; the type enum is frozen."
         reason:
           type: string
           description: "Why it blocked, truncated to the reason cap."
@@ -6475,7 +6953,7 @@ event_types:
     consumers: [operator]
 
   - name: king_loop_check
-    description: "One king loop-check fire that found actionable work and blocked. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
     data:
       required: [session_id]
@@ -6494,6 +6972,36 @@ event_types:
         board_error:
           type: string
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
+        provider_goal_pause_error:
+          type: string
+          description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
+    consumers: [operator]
+
+  - name: king_goal_resumed
+    description: "An admitted Codex king wake resumed its exact paused provider goal in place, without a user-shaped turn or replacement dispatch."
+    sources: [loop]
+    data:
+      required: [session_id, scope, resumed, successor, provider_receipt]
+      properties:
+        session_id:
+          type: string
+          description: "The exact harness session whose provider goal resumed."
+        scope:
+          type: string
+          description: "The crown scope whose goal was resumed."
+        resumed:
+          type: boolean
+        successor:
+          type: boolean
+        reason:
+          type: string
+          description: "The admitted wake trigger, when the caller supplied one."
+        address:
+          type: string
+          description: "The matched inbox address for a mail wake, when present."
+        provider_receipt:
+          type: object
+          description: "The Codex readback confirming objective, active status and continuation owner."
     consumers: [operator]
 
   - name: king_drain_reserve

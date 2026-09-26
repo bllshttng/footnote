@@ -4,13 +4,13 @@
 
 Your question spans several files and you do not yet know which ones, so a scoped subgraph beats a repo-wide grep. This page owns the `graphify` tool and its four verbs. Nothing in footnote depends on the tool, and a checkout without it works the same.
 
-Not for: ordinary symbol lookups. When `graphify-out/graph.json` does not exist in the repo root there is nothing to query, so skip this page and use `rg` / Grep.
+Not for: ordinary symbol lookups. When the `graphify-out/` knowledge graph does not exist in the repo root there is nothing to query, so skip this page and use `rg` / Grep.
 
 Not for: a load-bearing sweep whose zero you intend to trust. That stays an `rg -uu` job under the [AGENTS.md search conventions](../AGENTS.md#conventions), because the graph is a snapshot and can be stale.
 
 ## Availability
 
-The index is generated and local, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool. Keep `graphify-out/` out of commits: `graph.json` runs to tens of megabytes, and one `graphify-out/` under `crates/` makes the rust build report a dirty tree.
+The index is generated and local, so a dirty index is expected after a hook run or an incremental update, and it is never a reason to skip the tool. Keep `graphify-out/` out of commits: the knowledge graph runs to tens of megabytes, and one `graphify-out/` under `crates/` makes the rust build report a dirty tree.
 
 ## The four verbs
 
@@ -26,3 +26,5 @@ graphify update .               # re-extract after changing code (AST only, no A
 ## What it does not replace
 
 The search convention in [AGENTS.md](../AGENTS.md#conventions) still governs. A load-bearing sweep, one whose zero you intend to trust, uses `RIPGREP_CONFIG_PATH= rg -uu` and never a graph query, because the graph is a snapshot and can be stale by exactly the change you are looking for.
+
+A planner that asks which indexes a repo can answer starts at [code-index-providers.md](code-index-providers.md). That page holds the provider manifest, the three directories a user extends, and the blueprint step that asks by role.

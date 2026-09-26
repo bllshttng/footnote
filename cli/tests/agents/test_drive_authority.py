@@ -102,7 +102,10 @@ def test_emit_operator_initiated_envelope_and_data(tmp_path: Path) -> None:
         events_path=events,
         task_id="ab-12345678",
     )
-    rec = json.loads(events.read_text().strip())
+    from tests._event_rows import event_rows
+
+    rows = event_rows(events)
+    rec = rows[0]
     assert set(rec) == {"ts", "source", "type", "data"}
     assert rec["source"] == "backlog"
     assert rec["type"] == "operator_initiated"
@@ -143,12 +146,14 @@ def test_emit_operator_initiated_appends(tmp_path: Path) -> None:
     events = tmp_path / ".fno" / "events.jsonl"
     emit_operator_initiated("gate_set_operator_initiated", events_path=events, gate="quality_check_passed")
     emit_operator_initiated("gate_set_operator_initiated", events_path=events, gate="output_validated")
-    lines = events.read_text().strip().splitlines()
+    from tests._event_rows import event_rows
+
+    lines = event_rows(events)
     assert len(lines) == 2
-    assert json.loads(lines[0])["data"]["gate"] == "quality_check_passed"
-    assert json.loads(lines[0])["data"]["action_type"] == "gate_set_operator_initiated"
+    assert lines[0]["data"]["gate"] == "quality_check_passed"
+    assert lines[0]["data"]["action_type"] == "gate_set_operator_initiated"
     # Unspecified source defaults to "target".
-    assert json.loads(lines[1])["source"] == "target"
+    assert lines[1]["source"] == "target"
 
 
 def test_emit_operator_initiated_swallows_write_errors(tmp_path: Path, capsys) -> None:

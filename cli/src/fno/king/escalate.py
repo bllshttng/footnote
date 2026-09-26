@@ -7,8 +7,9 @@ respawned king meeting the same board records no second question, and a
 changed board supersedes only that king's stale row.
 
 The operator-facing text renders in the ``fno-agents`` crate
-(``king-escalation-text``); this module keeps the fold and the
-liveness read.
+(``king-escalation-text``); the reconcile fold behind ``escalate`` lives in
+``crates/fno-agents/src/fleet_task.rs``, reached through the ``fleet-task``
+transport.
 """
 from __future__ import annotations
 

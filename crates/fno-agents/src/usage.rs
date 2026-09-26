@@ -40,7 +40,11 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "trace [options]",
     "registry-json",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
+    // The `--substrate thread` arm is a LIFECYCLE move, not a re-entry: it
+    // converts a live pane into a persistent thread under the same session
+    // id. The three flags that belong to it are spelled out here because
+    // this line is what `resume --help` prints.
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and crown; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a crowned row). Both need --substrate thread",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
@@ -83,7 +87,7 @@ usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> 
        [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
        [--global-settings <p>] [--ledger <p>] [--gh-budget-ledger <p>] [--now <rfc3339>]
        [--author-harness <h>] [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>]
-       [--fno-bin <p>] [--read-timeout-ms <n>]
+       [--fno-bin <p>] [--read-timeout-ms <n>] [--harness <h>] [--harness-session <id>]
 
 The stop-hook decision verb: it decides whether a driven session may stop,
 and every verdict comes from external truth read fresh on each fire - PR
@@ -95,6 +99,11 @@ session's own claim of done is not an input.
 its one deliverable shipped. king reads a king manifest (frontmatter
 scope) and asks whether the crown scope drained. The arm is chosen by the
 flag, never by sniffing the file, and any other value is refused.
+
+--harness and --harness-session name the harness and harness session id
+of the caller that asked this target to stop. With both set, the
+registry answers who may drive this target before any progress logic
+runs. With either absent, the engine answers exactly as it always has.
 
 Required: --state, --transcript, --cwd. Unknown flags are tolerated for
 shim forward-compat. stdout is one JSON decision; exit 0 = a decision
@@ -122,10 +131,10 @@ mod tests {
     /// source, so a new flag cannot land undocumented.
     #[test]
     fn loop_check_help_covers_every_accepted_flag() {
-        let source = include_str!("loopcheck.rs");
+        let source = include_str!("loopcheck/args.rs");
         let start = source
             .find("fn parse_args(")
-            .expect("parse_args not found in loopcheck.rs");
+            .expect("parse_args not found in loopcheck/args.rs");
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").expect("parse_args has no closing brace")];
 

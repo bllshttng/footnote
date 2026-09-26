@@ -23,6 +23,7 @@ from typing import Any, List, Literal, Optional, Union
 
 import typer
 
+from fno.graph.write_receipts import confirm_created_row, confirm_updated_row
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
@@ -282,12 +283,6 @@ def _resolve_entries_or_exit(id: str):
             err=True,
         )
         raise typer.Exit(code=GRAPH_UNREADABLE_EXIT)
-
-
-def _archive_path() -> Path:
-    from fno.graph._constants import GRAPH_ARCHIVE_JSON
-
-    return GRAPH_ARCHIVE_JSON
 
 
 # -- relatedness sidecar (`fno backlog relatedness build|get`) --
@@ -1187,17 +1182,13 @@ def _create_node_impl(
         # against; before the rollup block, whose broad except would swallow a
         # refusal.
         if related:
-            from fno.graph._intake import _parse_blocker_list
-            from fno.graph.store import set_related
+            from fno.graph.store import apply_related_update
 
-            set_related(
-                entries,
-                new_id,
-                [
-                    _resolve_asserted_id(t, entries, flag="--related", self_id=new_id)
-                    for t in _parse_blocker_list(related)
-                ],
+            node = apply_related_update(
+                entries, node, related,
+                lambda t: _resolve_asserted_id(t, entries, flag="--related", self_id=new_id),
             )
+            node_holder[0] = node
         # Rollup resolution runs INSIDE the mutator: it reads the same locked
         # snapshot the node was born into and applies an auto-link in the same
         # write, so no second lock and no window where the node exists unlinked.
@@ -1293,6 +1284,8 @@ def _create_node_impl(
     new_child_id = new_id_holder[0]
     if new_child_id is not None and node_holder[0] is not None and node_holder[0].get("parent"):
         _project_plans_from_graph([new_child_id])
+
+    confirm_created_row(_graph_path(), new_id_holder[0])
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
@@ -1460,6 +1453,31 @@ def _fold_candidates(
     return out, source
 
 
+def _file_wave(ctx, json_output, receipt, target_id, title, body, difficulty, source_node):
+    from fno.graph.store import append_wave_note
+
+    note = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": "wave",
+        "title": title,
+        "details": body,
+        "difficulty": difficulty,
+        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+        "text": body or title,
+    }
+    found, error = append_wave_note(_graph_path(), target_id, note)
+    if not found:
+        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+        raise typer.Exit(code=2)
+    receipt.update(outcome="wave", node_id=target_id, note=note, minted_id=None)
+    if json_output or (ctx.obj and ctx.obj.get("json")):
+        typer.echo(json.dumps(receipt, indent=2))
+    else:
+        typer.echo(
+            f"wave note appended to {target_id} progress_notes ({len(note['text'])} chars); "
+            f"no node minted. Read it: fno backlog get {target_id}"
+        )
+
 @cli.command(
     "idea",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
@@ -1541,6 +1559,7 @@ def cmd_idea(
     from fno.text_or_file import read_text_arg
 
     details = read_text_arg(details, details_file, what="the details")
+    wave_body = details if details is not None else description
 
     if wave_of:
         if evidence is not None:
@@ -1590,37 +1609,13 @@ def cmd_idea(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=2)
 
-        from fno.graph.store import append_wave_note
-
         entries = wire_rows(path=_graph_path())
         try:
             target_id = _resolve_asserted_id(wave_of, entries, flag="--wave-of")
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=2)
-        note = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "kind": "wave",
-            "title": title,
-            "details": details if details is not None else description,
-            "difficulty": difficulty,
-            "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
-            "text": (details if details is not None else description) or title,
-        }
-        found, error = append_wave_note(_graph_path(), target_id, note)
-        if not found:
-            typer.echo(f"Error: {error or 'wave append refused'}", err=True)
-            raise typer.Exit(code=2)
-        receipt = {
-            "outcome": "wave",
-            "node_id": target_id,
-            "note": note,
-            "minted_id": None,
-        }
-        if json_output or (ctx.obj and ctx.obj.get("json")):
-            typer.echo(json.dumps(receipt, indent=2))
-        else:
-            typer.echo(f"folded as wave into {target_id}; minted_id: null")
+        _file_wave(ctx, json_output, {}, target_id, title, wave_body, difficulty, source_node)
         return
 
     if difficulty is None and not separate and _stdin_is_interactive():
@@ -1645,7 +1640,7 @@ def cmd_idea(
             try:
                 candidates, candidate_source = _fold_candidates(
                     title=title,
-                    details=details if details is not None else description,
+                    details=wave_body,
                     difficulty=normalized_difficulty,
                     entries=entries,
                 )
@@ -1687,28 +1682,8 @@ def cmd_idea(
                         typer.echo(f"separate: {choice_receipt['separate_command']}")
                     return
                 if typer.confirm(f"{marker}. Fold into {top['id']}?", default=False):
-                    from fno.graph.store import append_wave_note
-
-                    note = {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "kind": "wave",
-                        "title": title,
-                        "details": details if details is not None else description,
-                        "difficulty": normalized_difficulty,
-                        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
-                        "text": (details if details is not None else description) or title,
-                    }
-                    found, error = append_wave_note(_graph_path(), top["id"], note)
-                    if not found:
-                        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
-                        raise typer.Exit(code=2)
-                    choice_receipt["outcome"] = "wave"
-                    choice_receipt["node_id"] = top["id"]
-                    choice_receipt["note"] = note
-                    if json_output or (ctx.obj and ctx.obj.get("json")):
-                        typer.echo(json.dumps(choice_receipt, indent=2))
-                    else:
-                        typer.echo(f"folded as wave into {top['id']}; minted_id: null")
+                    _file_wave(
+                        ctx, json_output, choice_receipt, top["id"], title, wave_body, normalized_difficulty, source_node)
                     return
 
     _create_node_impl(
@@ -2924,7 +2899,7 @@ def cmd_encounter(
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "evidence": evidence,
     }
     if as_operator:
@@ -3471,6 +3446,7 @@ def cmd_update(
         derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
+    resolved_id: list[Optional[str]] = [None]
     reparent_old_parent: list = [None]
     ship_stamp_node: list = [None]
 
@@ -3504,20 +3480,16 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+        resolved_id[0] = node["id"]
 
         if related is not None:
-            from fno.graph.store import set_related
+            from fno.graph.store import apply_related_update
 
-            tokens = _parse_blocker_list(related)
-            desired = (
-                []
-                if tokens == ["null"]
-                else [
-                    _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"])
-                    for t in tokens
-                ]
+            node = apply_related_update(
+                entries, node, related,
+                lambda t: _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"]),
             )
-            set_related(entries, node["id"], desired)
+            projected_node[0] = node
 
         if source_node is not None:
             node["source_node_id"] = (
@@ -3839,12 +3811,7 @@ def cmd_update(
     commit_rows_via_store(_graph_path(), mutator)
     _dispatch_overrides.emit(brief_warning_box[0])
 
-    # Mutation receipts read the committed, recomputed row. Flags express the
-    # caller's intent; only the reread can say whether ownership and dispatch
-    # state actually landed.
-    from fno.graph.load import load_graph
-
-    stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    stored_node = confirm_updated_row(_graph_path(), resolved_id[0] or task_id)
     if locked_by is not None:
         from fno.backlog.requeue import verify_lock_stamp_receipt
 
@@ -3868,7 +3835,7 @@ def cmd_update(
             f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
             f"{ready_effect}"
         )
-    typer.echo(f"Updated {task_id}")
+    typer.echo(f"Updated {stored_node.get('id', task_id)}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row
     # here rather than inside the mutator (which would re-enter the graph lock).
@@ -3932,7 +3899,7 @@ def cmd_unclaim(
     _unclaim_node(task_id)
 
 
-@cli.command("requeue", hidden=True, epilog="Paired verb: fno backlog update <node> --locked-by <worker> re-claims the node.")
+@cli.command("requeue", hidden=True, epilog="Paired verbs: fno agents claim acquire node:<node> takes the lockfile; fno backlog update <node> --locked-by <worker> stamps the graph field.")
 def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
@@ -3982,47 +3949,17 @@ class _ExternalSelectionError(RuntimeError):
 
 
 def _joined_open_candidates() -> list[dict]:
-    """The transient joined selection model: ``list_open`` exactly once, one
+    """The transient joined selection model: the Rust snapshot exactly once.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.tracker import get_tracker
-    from fno.tracker import sidecar as sidecar_store
 
     tracker = get_tracker()
     try:
-        candidates = tracker.list_open()
+        entries = tracker._call("snapshot")["entries"]  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
-        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
-    joined: list[dict] = []
-    for c in candidates:
-        try:
-            sc = sidecar_store.load(c.id)
-        except Exception as exc:  # noqa: BLE001 - name the id, fail closed
-            raise _ExternalSelectionError(f"sidecar read failed for {c.id}: {exc}") from exc
-        row = {
-            "id": c.id,
-            "title": c.title,
-            "state": str(c.state.value),
-            "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
-            "parent": c.parent,
-            "blocked_by": list(c.blocked_by),
-            "priority": c.priority,
-            "rank": c.rank,
-            "created_at": c.created_at,
-            # Footnote-owned selection facts joined before the filters run.
-            "cwd": sc.cwd,
-            "plan_path": sc.plan_path,
-            "pr_number": sc.pr_number,
-            "pr_url": sc.pr_url,
-            "additional_prs": sc.additional_prs,
-            "batch": sc.batch,
-            "contained_in": sc.contained_in,
-            "sessions": sc.sessions,
-            "claimed_at": sc.claimed_at,
-            "cost_usd": sc.cost_usd,
-        }
-        joined.append(row)
-    return joined
+        raise _ExternalSelectionError(f"tracker {tracker.name!r} snapshot failed: {exc}") from exc
+    return [e for e in entries if e.get("state") == "open"]
 
 
     # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#joined-open-candidates-4307
@@ -4456,8 +4393,14 @@ def cmd_undispatched(
     typer.echo(json.dumps(receipt, indent=2))
 
 
-@cli.command("ready", hidden=True)
+@cli.command(
+    "ready", hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    epilog=("Native date filters: --created-before/--created-after/--touched-before/"
+            "--touched-after <Nd|YYYY-MM-DD>, --sort created|touched. Touched falls back to created."),
+)
 def cmd_ready(
+    ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -4488,18 +4431,10 @@ def cmd_ready(
     ),
 ) -> None:
     from fno.graph._intake import repo_root
-    from fno.graph.store import (
-        ClaimsUnavailableError,
-        ReadyParentMissingError,
-        StoreUnavailable,
-        ready as store_ready,
-    )
+    from fno.graph.store import ClaimsUnavailableError, StoreUnavailable, ready as store_ready
     from fno.tracker import active_backend_name
 
-    # Joined selection under an external backend: the same filters and ranking
-    # run over the transient list_open + sidecar join (fail-closed, never the
-    # local graph), so `ready` and `next` cannot drift between backends. The
-    # rows ride IN, the one decision answers both backends.
+    # External backends share the Rust filters and ranking with `next`.
     entries = None
     if active_backend_name() != "graph":
         try:
@@ -4519,11 +4454,12 @@ def cmd_ready(
             include_deferred=include_deferred,
             repo_root=repo_root(),
             entries=entries,
+            filter_args=list(ctx.args or []),
         )
     except StoreUnavailable as exc:
         typer.echo(f"Error: store keeper unavailable; ready selection refused: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    except ReadyParentMissingError as exc:
+    except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except ClaimsUnavailableError as exc:
@@ -6187,110 +6123,13 @@ def cmd_roadmap(
 # -- status --
 
 
-# The stamp a closed-blocker tombstone carries in the live snapshot. Any
-# non-empty string satisfies the consumer's has_stamp checks; a constant (not
-# the real close time) keeps the tombstone honest about being a projection of
-# "this dependency is satisfied", which is the only fact the consumer derives
-# from it.
-_SNAPSHOT_CLOSED_STAMP = "closed"
-
-
-def _build_live_snapshot(tracker=None) -> dict:
-    """The backend-neutral joined live view for non-Python consumers (the mux).
-
-    Enumerates through ``list_open`` (bounded to the open set: a backend with
-    thousands of historical rows is never materialized merely to render a
-    queue), joins each id's sidecar, and emits exactly the live fields the
-    Rust reader derives from. Readiness stays a derivation on the consumer
-    side: open items carry their ``blocked_by`` ids, and a dependency that is
-    already closed rides as a minimal tombstone row so the consumer's
-    read-time blocked/ready logic (which fails closed on an unknown blocker)
-    resolves it without footnote persisting any derived flag.
-    """
-    from fno.graph.slug import derive_base_slug
-    from fno.tracker import get_tracker
-    from fno.tracker import sidecar as sidecar_store
-
-    tracker = tracker or get_tracker()
-    try:
-        candidates = tracker.list_open()
-    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed like selection
-        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
-    open_ids = {c.id for c in candidates}
-
-    # Tombstones for closed dependencies referenced by open items. An
-    # unresolvable blocker id is skipped: the consumer's own fail-closed rule
-    # (unknown dep == blocked) is the correct outcome there, and this loop must
-    # not invent an opinion about a backend read that errored.
-    blocker_ids = {b for c in candidates for b in c.blocked_by} - open_ids
-    tombstones: dict[str, dict] = {}
-    for bid in sorted(blocker_ids):
-        try:
-            node = tracker.read(bid)
-        except Exception:  # noqa: BLE001 - advisory resolution; consumer fails closed
-            continue
-        if str(node.state.value) == "closed":
-            tombstones[bid] = {
-                "id": bid,
-                "status": "done",
-                "completed_at": _SNAPSHOT_CLOSED_STAMP,
-            }
-
-    entries = []
-    for c in candidates:
-        sc = sidecar_store.load(c.id)
-        entries.append(
-            {
-                "id": c.id,
-                # Display handle; transient (graph mode's persistent slugs are
-                # assigned by the store at write time, which a read-only
-                # snapshot must not do).
-                "slug": derive_base_slug(c.title) if c.title else "",
-                "title": c.title,
-                # Same three-way split _joined_open_candidates selects on:
-                # a PR means in_review, else a plan means ready, else idea.
-                # Computed here from evidence at read time, never stored.
-                "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
-                "priority": c.priority,
-                "rank": c.rank,
-                "created_at": c.created_at,
-                "parent": c.parent,
-                "blocked_by": list(c.blocked_by),
-                "plan_path": sc.plan_path,
-                "pr_number": sc.pr_number,
-                "pr_url": sc.pr_url,
-                "cwd": sc.cwd,
-            }
-        )
-    entries.extend(tombstones.values())
-    return {"backend": tracker.name, "entries": entries}
-
-
 @cli.command("status", hidden=True)
 def cmd_status(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
-    snapshot: bool = typer.Option(
-        False,
-        "--snapshot",
-        help=(
-            "Internal: emit the backend-neutral joined live view as one JSON "
-            "document. Consumed by the fno-agents mux reader when an external "
-            "tracker backend is selected; the summary render below is the "
-            "human surface."
-        ),
-    ),
 ) -> None:
     from fno.graph._intake import detect_project
-
-    if snapshot:
-        try:
-            typer.echo(json.dumps(_build_live_snapshot(), indent=2))
-        except _ExternalSelectionError as exc:
-            typer.echo(f"backlog status --snapshot: {exc}", err=True)
-            raise typer.Exit(code=1)
-        return
 
     entries = _display_entries("status.summary")
 
@@ -7360,6 +7199,11 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     node["reopened_at"] = datetime.now(timezone.utc).isoformat()
     node["reopened_reason"] = reason
     node.pop("reopen_warning", None)  # moot once the parent itself is not done
+    # The keeper cannot derive plan rungs; write the ladder's answer directly.
+    from fno.graph.ladder import Rung, plan_rung
+
+    rung = plan_rung(node)
+    node["status"] = "idea" if rung in (Rung.IDEA, Rung.NONE) else "ready"
 
 
 def _auto_closed_note(entry: dict) -> str:
@@ -7467,15 +7311,11 @@ from fno.graph._closures import (  # noqa: E402
 
 def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     """Return rows whose persisted status differs from a fresh derivation.
-
-    The persisted side is read raw, not through ``read_graph``: the latter
-    overlays live dependency readiness as ``blocked``, while
-    ``recompute_statuses`` never persists that read-time value.
-    """
+    Both sides read the store; the derivation is the write path's pipeline."""
     import copy
 
     from fno.graph.statuses import recompute_statuses
-    from fno.graph.store import _read_json
+    from fno.graph.store import _read_json, read_graph_strict
 
     persisted: dict[str, str] = {}
     for entry in _read_json(path):
@@ -7485,7 +7325,7 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
             persisted[node_id] = status
 
     derived: dict[str, str] = {}
-    for entry in recompute_statuses(copy.deepcopy(wire_rows(path=path))):
+    for entry in recompute_statuses(copy.deepcopy(read_graph_strict(path))):
         node_id = entry.get("id") if isinstance(entry, dict) else None
         status = entry.get("status") if isinstance(entry, dict) else None
         if isinstance(node_id, str) and isinstance(status, str):
@@ -8746,7 +8586,7 @@ def cmd_reconcile_findings(
     (). This re-runs the harvest addressed-detection against each open
     retro node's source PR and closes the ones now addressed - the
     reconciliation counterpart to the harvest-side suppression. Dry-run by
-    default; ``--apply`` closes via ``fno backlog done --force``. A PR whose
+    default; ``--apply`` closes via ``fno backlog done --note``. A PR whose
     review state can't be read is skipped, never closed on uncertainty.
     """
     import subprocess
@@ -8776,7 +8616,7 @@ def cmd_reconcile_findings(
             f"addressed on PR #{f.pr_number} ({f.signal}); retro reconcile-findings "
             f"re-check - fix landed without the thread being resolved/replied"
         )
-        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--force", "--reason", reason])
+        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--note", reason])
         if proc.returncode == 0:
             closed += 1
         else:
@@ -8815,8 +8655,8 @@ def cmd_reconcile(
     pr_number: Optional[int] = typer.Option(
         None,
         "--pr-number",
-        help="Bind every node named in this merged PR's exact Backlog-Closure "
-        "trailer to the PR (filling an absent primary or appending to "
+        help="Bind every node named in this merged PR's exact closure line "
+        "(Fixes, or the retired Backlog-Closure: spelling) to the PR (filling an absent primary or appending to "
         "additional_prs) BEFORE the drift scan below runs, so a PR naming "
         "several nodes closes all of them in this one invocation rather than "
         "only the one node stamped at creation. All-or-nothing: an "
@@ -8979,7 +8819,7 @@ def _reconcile_once(
         commit_rows_via_store(_graph_path(), _mutator)
         return (_box["refusal"], _box["bound"])
 
-    # --pr-number: bind every exact Backlog-Closure claim on this PR to its
+    # --pr-number: bind every exact closure-line claim on this PR to its
     # node BEFORE the scan below, so the forward scan (which needs a PR ref to
     # query) can see a node that was named in the body but never individually
     # stamped at creation. Reuses the unchanged scan/close pipeline that
@@ -9104,13 +8944,11 @@ def _reconcile_once(
                         (entry for entry in _entries if entry.get("id") == h.node_id),
                         None,
                     )
-                    if current is None or not node_is_open(current) or node_pr_refs(current):
+                    if current is None or not node_is_open(current) or (node_pr_refs(current) and h.verdict != "rebind"):
                         continue
                     result = bind_pr_rows(
-                        _entries,
-                        [h.node_id],
-                        pr_number=h.pr_number,
-                        pr_url=h.pr_url,
+                        _entries, [h.node_id], pr_number=h.pr_number,
+                        pr_url=h.pr_url, rebind=h.verdict == "rebind",
                     )
                     if result.outcome == "bound" and result.bound_ids:
                         _kept.append({"node": h.node_id, "pr": h.pr_number, "url": h.pr_url})
@@ -9256,7 +9094,7 @@ def _reconcile_once(
     promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
-        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state
+        from fno.graph._reconcile import _merge_postdates_reopen, _reopen_outranks_merge, query_pr_merge_state, reopen_held_reason
 
         gated: list = []
         reopen_expired: list[str] = []
@@ -9285,7 +9123,7 @@ def _reconcile_once(
                 # Expiry first: the record stamps the FIRST merged ref, so a
                 # later ref merging after the reopen closes the node instead.
                 if not _merge_postdates_reopen(gate_node, skip_pr=record.pr_number, query=query_pr_merge_state, cwd=gate_cwd):
-                    promise_held.append((record.node_id, f"reopened after PR #{record.pr_number} merged", "reopen_held"))
+                    promise_held.append((record.node_id, reopen_held_reason(gate_node, record.pr_number), "reopen_held"))
                     continue
                 # Expired: the locked recheck covers only a NEWER reopen.
                 reopen_expired.append(record.node_id)
@@ -9474,11 +9312,7 @@ def _reconcile_once(
                         and _reopen_outranks_merge(node_obj, record.merged_at)
                     ):
                         promise_held.append(
-                            (
-                                record.node_id,
-                                f"reopened after PR #{record.pr_number} merged",
-                                "reopen_held",
-                            )
+                            (record.node_id, reopen_held_reason(node_obj, record.pr_number), "reopen_held")
                         )
                         continue
                     _apply_completion_fields(node_obj, merge_status="merged")
@@ -9945,13 +9779,13 @@ def _reconcile_once(
         try:
             from fno.pr._sync_canonical import run_sync_catchup
 
-            _cu = run_sync_catchup()
+            _cu = run_sync_catchup(echo=not json_out)
             sync_catchup = {
-                "outcome": _cu.outcome, "stale": _cu.stale,
-                "pr_number": _cu.pr_number, "swept": _cu.swept, "detail": _cu.detail,
+                "outcome": _cu["outcome"], "stale": _cu.get("stale", False),
+                "pr_number": _cu.get("pr_number"), "swept": _cu.get("swept", 0), "detail": _cu.get("detail", ""),
             }
-            if _cu.outcome not in ("disabled", "fresh") and not json_out:
-                typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
+            if _cu["outcome"] not in ("disabled", "fresh") and not json_out:
+                typer.echo(f"sync catch-up: {_cu['outcome']}", err=True)
         except Exception as _cu_exc:  # noqa: BLE001 - never abort the sweep
             sync_catchup = {"outcome": "error", "detail": str(_cu_exc)[:200]}
             if not json_out:
@@ -10497,27 +10331,20 @@ def cmd_archive(
         None, "--roadmap-id", help="Restrict the sweep to this roadmap group."
     ),
 ) -> None:
-    """Sweep old terminal (done/superseded) nodes into graph-archive.json.
+    """Sweep old terminal (done/superseded) nodes into archive residency:
+    same store, but they stop answering default reads.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from datetime import datetime, timezone
 
-    from fno.graph.store import (
-        commit_rows_via_store,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-        GraphCorruptError,
-    )
+    from fno.graph.store import commit_rows_via_store
     from fno.graph.archive import (
         _archive_bucket_counts,
         _last_sweep_line,
         _receipt_reason_order,
-        merge_into_archive,
         partition_for_archive,
         release_soft_edges,
         retire_stale_postmortems,
-        stamp_archived_at,
     )
 
     now = datetime.now(timezone.utc)
@@ -10543,7 +10370,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
-        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
+        typer.echo(f"  last sweep: {_last_sweep_line(now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -10575,7 +10402,7 @@ def cmd_archive(
         to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
-            f"older than {older_than_days}d to {_archive_path()}"
+            f"older than {older_than_days}d into archive residency"
         )
         typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
@@ -10591,37 +10418,32 @@ def cmd_archive(
     def mutator(entries):
         entries, retired = retire_stale_postmortems(entries, now)
         receipt["retired"] = len(retired)
-        to_archive, remaining, skipped = _split(entries)
+        to_archive, _remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
             return entries
         receipt["moved"] = len(to_archive)
 
-        # Soft-edge release BEFORE the archive write: strip the soon-archived
-        # ids from staying nodes' related lists / source_node_id, so the working
-        # graph never keeps a soft pointer at an archived id. One write, under
-        # the same lock as everything else here.
+        # Soft-edge release BEFORE the stamp: no live row keeps a pointer
+        # at an archived id.
         arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
-        remaining, stripped = release_soft_edges(remaining, arch_ids)
+        patched, stripped = release_soft_edges(
+            [e for e in entries if e.get("id") not in arch_ids], arch_ids
+        )
         receipt["stripped"] = stripped
 
-        # Archive-first: append (deduped) and write the archive BEFORE returning
-        # `remaining` for the graph write, so a crash leaves a duplicate (healed
-        # on the next sweep) rather than a lost node.
-        archive_path = _archive_path()
-        try:
-            existing = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            typer.echo(f"Warning: {archive_path} corrupt, starting fresh archive", err=True)
-            existing = []
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        stamped = stamp_archived_at(to_archive, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        _write_json(merge_into_archive(existing, stamped), archive_path)
-        return remaining
+        # One atomic write: ALL rows come back or the sweep would drop them.
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        patched_by_id = {e.get("id"): e for e in patched if isinstance(e, dict)}
+        return [
+            {**e, "archived_at": stamp} if isinstance(e, dict) and e.get("id") in arch_ids
+            else patched_by_id.get(e.get("id"), e)
+            for e in entries
+        ]
 
     commit_rows_via_store(_graph_path(), mutator)
     if receipt["moved"]:
-        typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
+        typer.echo(f"Archived {receipt['moved']} terminal node(s)")
     else:
         typer.echo("No terminal nodes eligible to archive.")
     if receipt["retired"]:
@@ -10633,109 +10455,9 @@ def cmd_archive(
 
 
 @cli.command(
-    "archive-dedupe-ids",
-    hidden=True,
-    epilog="The id generator once checked only the working graph, so a freed "
-    "id could be reminted while the archive still held a different node under "
-    "it. mint_node_id now reads the archive too; this repairs what predates "
-    "that fix.",
-)
-def cmd_archive_dedupe_ids(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Remint the colliding archive entries (default: dry-run, report only).",
-    ),
-) -> None:
-    """Remint archive-side ids that collide with a live working-graph id.
-
-    Reminting the working-graph side would break every open reference to it
-    today (blockers, parents, branches, worktrees, open PRs); the archived
-    side is passive history, so IT moves, keeping its old id as
-    ``previous_id`` -- `fno backlog get <old-id>` still resolves it after.
-    """
-    from fno.graph.store import (
-        commit_rows_via_store,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-        GraphCorruptError,
-    )
-    from fno.graph.archive import remint_archive_collisions
-
-    archive_path = _archive_path()
-
-    def _read_archive_or_exit() -> list:
-        try:
-            return _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
-        except GraphCorruptError:
-            typer.echo(f"Error: {archive_path} is corrupt", err=True)
-            raise typer.Exit(code=1)
-
-    if not apply:
-        working_ids = {
-            nid
-            for e in wire_rows(path=_graph_path())
-            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
-        }
-        _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
-        typer.echo(f"[dry-run] would remint {len(remap)} archive id(s):")
-        for old, new in sorted(remap.items()):
-            typer.echo(f"  {old} -> {new}")
-        if remap:
-            typer.echo("Re-run with --apply to write it.")
-        return
-
-    remap_holder: dict = {}
-
-    def mutator(entries):
-        # Never mutates the working graph; runs under its lock only to
-        # serialize the archive read-modify-write against a concurrent
-        # `archive --apply`, which also writes archive.json under this same
-        # lock. Reading the archive HERE (not before the lock) is load-bearing:
-        # a pre-lock read would go stale under that race and the write below
-        # would clobber whatever the concurrent sweep just archived.
-        working_ids = {
-            nid for e in entries if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
-        }
-        patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
-        remap_holder.update(remap)
-        if remap:
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_json(patched, archive_path)
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-
-    if not remap_holder:
-        typer.echo("No colliding archive ids found.")
-        return
-    typer.echo(f"Reminted {len(remap_holder)} archive id(s):")
-    for old, new in sorted(remap_holder.items()):
-        typer.echo(f"  {old} -> {new}")
-
-    try:
-        from fno.events import _build, append_event
-        from fno.paths import state_dir
-
-        # Its own event type, not a zeroed graph_archive_swept: a repair run
-        # recorded as a sweep with age gate 0 corrupts both "did the daily
-        # sweep run" and per-gate hold statistics - the structured channel
-        # lying the same way the bare "ok" stdout did.
-        event = _build(
-            "graph_archive_ids_reminted",
-            "backlog",
-            {"remint_count": len(remap_holder), "remap": remap_holder},
-        )
-        append_event(event, state_dir() / "events.jsonl")
-    except Exception:  # noqa: BLE001 - the repair itself must not fail on a bad event write
-        pass
-
-
-@cli.command(
     "album",
     hidden=True,
-    epilog="Read-only browse over graph-archive.json: the memento book of "
+    epilog="Read-only browse over the archive: the memento book of "
     "shipped work. A card with no gift says so - 43% of archived done nodes "
     "carry no PR, and a gap in the record is itself record. `fno backlog get "
     "<id>` still resolves one archived node by id; `fno backlog unarchive "
@@ -10759,6 +10481,7 @@ def cmd_album(
     214 in the archive against 1741 done) are not ships. Card fields: title,
     id, completed_at, and pr_url present only when one was recorded.
     """
+    from fno.graph.store import read_archive_entries
     from fno.tracker import active_backend_name
 
     # The album renders the local archive's shipped work: guarded local-store
@@ -10770,22 +10493,12 @@ def cmd_album(
         )
         raise typer.Exit(code=2)
 
-
-    archive_path = _archive_path()
-    entries = (
-        [
-            e
-            for e in wire_rows(path=archive_path)
-            if isinstance(e, dict)
-            # The shared row-status read: legacy archive rows carry only completed_at ().
-            and derived_status(e) == "done"
-            # Superseded is derived from superseded_by (graph/types.py), so a
-            # row can carry both; the album shows shipped work only.
-            and not e.get("superseded_by")
-        ]
-        if archive_path.exists()
-        else []
-    )
+    # The album shows shipped (done, not superseded) archive residents.
+    entries = [
+        e for e in read_archive_entries()
+        if isinstance(e, dict) and derived_status(e) == "done"
+        and not e.get("superseded_by")
+    ]
     if project:
         entries = [e for e in entries if e.get("project") == project]
 
@@ -10856,105 +10569,39 @@ def cmd_album(
 def cmd_unarchive(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
 ) -> None:
-    """Move one node from graph-archive.json back into the working graph.
+    """Clear one node's archive stamp: it answers default reads again.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
+    from fno.graph import api
     from fno.graph._intake import _find_node
-    from fno.graph.store import (
-        commit_rows_via_store,
-        GraphCorruptError,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-    )
+    from fno.graph.store import read_archive_entries
 
     _require_node_id(task_id)
 
+    # The default read excludes archived rows, so presence here is live-only.
     if _find_node(wire_rows(path=_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
         return
 
-    archive_path = _archive_path()
-    if not archive_path.exists():
+    archived = read_archive_entries()
+    # Fuzzy-resolve, matching the working-graph lookup and `reopen`'s probe.
+    row = _find_node(archived, task_id)
+    if row is None:
+        # A reminted archive entry keeps its old id as previous_id.
+        row = next((e for e in archived if e.get("previous_id") == task_id), None)
+    if row is None:
         typer.echo(
-            f"Error: {task_id} is in neither the working graph nor {archive_path}",
+            f"Error: {task_id} is in neither the working graph nor the archive",
             err=True,
         )
         raise typer.Exit(code=1)
 
-    # Rationale (15 lines): docs/architecture/graph-cli-rationale.md#cmd-unarchive-11491
-    row_box: list[Optional[dict]] = [None]
-
-    def add_to_working(entries):
-        try:
-            archived = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            typer.echo(f"Error: {archive_path} is corrupt; cannot unarchive", err=True)
-            raise typer.Exit(code=1)
-
-        # Fuzzy-resolve, matching the working-graph lookup above and the archive
-        # probe `reopen` uses: an exact compare made the short id form fail, and
-        # `reopen`'s refusal prints this verb as the remedy.
-        row = _find_node(archived, task_id)
-        if row is None:
-            # Same previous_id fallback cmd_get uses: a reminted archive entry
-            # keeps its old id as previous_id, and the operator holding the
-            # old id must recover the node, not read a plain miss. Without
-            # this, `get` resolved the id one command earlier and `unarchive`
-            # - the remedy the dedupe verb names - refused it.
-            row = next(
-                (e for e in archived if isinstance(e, dict) and e.get("previous_id") == task_id),
-                None,
-            )
-        if row is None:
-            typer.echo(
-                f"Error: {task_id} is in neither the working graph nor {archive_path}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        row_box[0] = row
-        rid = row.get("id")
-        # Idempotent under a race: another unarchive may have landed it already.
-        if any(isinstance(e, dict) and e.get("id") == rid for e in entries):
-            return entries
-        return [*entries, row]
-
-    commit_rows_via_store(_graph_path(), add_to_working)
-
-    resolved = (row_box[0] or {}).get("id") or task_id
-    archive_write_error: list[str] = []
-
-    def drop_from_archive(entries):
-        # Confirm against the just-persisted working graph, not against the
-        # mutator's own return value: if the node is somehow not live, shrinking
-        # the archive would delete the only copy.
-        if not any(isinstance(e, dict) and e.get("id") == resolved for e in entries):
-            archive_write_error.append("node not present in the working graph after the write")
-            return entries
-        try:
-            archived_now = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            archive_write_error.append(f"{archive_path} unreadable")
-            return entries
-        remaining = [
-            e for e in archived_now if not (isinstance(e, dict) and e.get("id") == resolved)
-        ]
-        if len(remaining) != len(archived_now):
-            try:
-                _write_json(remaining, archive_path)
-            except OSError as exc:
-                archive_write_error.append(str(exc))
-        return entries
-
-    commit_rows_via_store(_graph_path(), drop_from_archive)
-
-    for exc in archive_write_error:
-        typer.echo(
-            f"warning: {resolved} is back in the working graph, but the archive copy "
-            f"could not be removed ({exc}); the next `archive` sweep dedupes it",
-            err=True,
-        )
-
+    resolved = row.get("id") or task_id
+    # The store op clears archived_at under the lock; one row, one write.
+    payload = api.unarchive_node(resolved, path=_graph_path())
+    if not payload.success:
+        typer.echo(f"Error: {resolved} could not be unarchived", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"Unarchived {resolved}")
 
 
@@ -11474,18 +11121,17 @@ def cmd_find(
     # a miss, results stamped `_archived`. A corrupt/absent archive is a miss,
     # never a crash (design "Errors").
     if not matched:
-        from fno.paths import graph_archive_json
+        from fno.graph.store import read_archive_entries
         from fno.tracker import active_backend_name
 
         # The archive is default-backend storage; no read-through behind an
         # external selection (stale local rows are the leak the seam closes).
-        archive_path = graph_archive_json() if active_backend_name() == "graph" else None
-        if archive_path is not None and archive_path.exists():
+        if active_backend_name() == "graph":
             # Guard the whole read + resolve + filter: a corrupt archive OR a
             # malformed archived entry must degrade to a miss, never propagate a
             # crash to the caller (design "Errors").
             try:
-                archived = wire_rows(path=archive_path)
+                archived = read_archive_entries(path=_graph_path())
                 hits = [
                     {**e, "_archived": True}
                     for e in _resolve_against(archived)

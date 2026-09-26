@@ -14,6 +14,8 @@ import tempfile
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check-product-md.sh"
 
@@ -126,41 +128,23 @@ def test_ac4_edge_no_executor_impeccable_no_check():
             "Should not add prerequisites block for non-impeccable plan"
 
 
-def test_product_md_fallback_agents_context():
-    """AC2-HP variant: PRODUCT.md found in .agents/context/ fallback path -> no warning."""
+@pytest.mark.parametrize("fallback_dir", [".agents/context", "docs"])
+def test_product_md_fallback_satisfies_check(fallback_dir):
+    """AC2-HP variant: PRODUCT.md in a fallback location satisfies the check."""
     with tempfile.TemporaryDirectory() as tmp:
         repo_root = Path(tmp) / "repo"
         plan_path = repo_root / "plans" / "my-plan.md"
         _make_plan_with_executor(plan_path, "impeccable")
 
-        # Place PRODUCT.md in the fallback location
-        fallback_dir = repo_root / ".agents" / "context"
-        fallback_dir.mkdir(parents=True)
-        (fallback_dir / "PRODUCT.md").write_text("B" * 250 + "\nFallback product context.\n")
+        fallback = repo_root / fallback_dir
+        fallback.mkdir(parents=True)
+        (fallback / "PRODUCT.md").write_text("B" * 250 + "\nFallback product context.\n")
 
         result = _run_check(plan_path, repo_root)
 
         assert result.returncode == 0
         plan_content = plan_path.read_text()
         assert "prerequisites:" not in plan_content, "Fallback PRODUCT.md should satisfy the check"
-
-
-def test_product_md_fallback_docs():
-    """PRODUCT.md in docs/ fallback -> no warning."""
-    with tempfile.TemporaryDirectory() as tmp:
-        repo_root = Path(tmp) / "repo"
-        plan_path = repo_root / "plans" / "my-plan.md"
-        _make_plan_with_executor(plan_path, "impeccable")
-
-        docs_dir = repo_root / "docs"
-        docs_dir.mkdir(parents=True)
-        (docs_dir / "PRODUCT.md").write_text("C" * 300 + "\nDocs product context.\n")
-
-        result = _run_check(plan_path, repo_root)
-
-        assert result.returncode == 0
-        plan_content = plan_path.read_text()
-        assert "prerequisites:" not in plan_content, "docs/ PRODUCT.md should satisfy the check"
 
 
 def test_todo_dominance_treated_as_stale():

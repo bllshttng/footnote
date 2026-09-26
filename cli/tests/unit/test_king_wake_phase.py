@@ -18,6 +18,7 @@ from fno.pr_watch._king_wake import (
     CrownTarget,
     _board_digest,
     _board_rows,
+    _crowned,
     _holder_absent,
     _ask_wake_ceiling,
     _store_board_hash,
@@ -42,6 +43,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
         self.dispatches: list[tuple[str, str, str | None, str | None]] = []
+        self.targets: list[CrownTarget] = []
         self.successor_flags: list[bool] = []
         self.asks: list[tuple[str, int, int]] = []
         self.unread_calls: list[str] = []
@@ -57,6 +59,7 @@ class _Recorder:
         detail: str | None = None,
         successor: bool = False,
     ) -> None:
+        self.targets.append(target)
         self.dispatches.append((target.scope, reason, address, detail))
         self.successor_flags.append(successor)
 
@@ -101,6 +104,7 @@ def _run(
             manifest,
             scope="epic-x",
             harness_session_id=manifest_session_id,
+            owner_cwd=str(root),
             force=True,
         )
     if pre is not None:
@@ -125,6 +129,180 @@ def _run(
         kwargs.update(extra)
     summary = run_king_wake(_settings(armed=armed), **kwargs)
     return rec, summary, manifest
+
+
+_ROWLESS_HOLDER = "11111111-2222-3333-4444-555555555555"
+
+
+def _run_rowless(tmp_path, truth):
+    root = tmp_path / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+    rec = _Recorder()
+
+    truth_calls = []
+
+    def read_truth(holder):
+        truth_calls.append(holder)
+        return truth(holder)
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=_court(crowns),
+        rows_fn=lambda: [],
+        truth_fn=read_truth,
+        unread_fn=lambda address: [object()] if address == _ROWLESS_HOLDER else [],
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *args: None,
+    )
+    return rec, summary, manifest, root, truth_calls
+
+
+def test_manifest_only_crown_is_named_but_not_rooted_at_owner_cwd(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        }
+    ]
+
+    targets, note = _crowned(_court(crowns), lambda: [])
+
+    assert targets == []
+    assert note == "epic-x: unregistered holder"
+
+
+def test_rowless_manifest_paths_are_ignored_when_naming_drops(tmp_path, monkeypatch):
+    import fno.king.state as state_mod
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id=_ROWLESS_HOLDER,
+        owner_cwd=str(root),
+        force=True,
+    )
+    crowns = [
+        {
+            "holder": _ROWLESS_HOLDER,
+            "scope": "epic-x",
+            "status": "manifest-only",
+            "manifest_path": str(manifest),
+        },
+        {
+            "holder": "22222222-3333-4444-5555-666666666666",
+            "scope": "epic-y",
+            "status": "manifest-only",
+            "manifest_path": str(tmp_path / "unreadable.md"),
+        },
+    ]
+
+    def fail_if_read(_path):
+        raise AssertionError("manifest-only crown paths must not be read")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    targets, note = _crowned(_court(crowns), lambda: [])
+
+    assert targets == []
+    assert note == (
+        "epic-x: unregistered holder; epic-y: unregistered holder"
+    )
+
+
+def test_registered_crown_keeps_its_row_root_and_rowless_crown_without_manifest_is_named(
+    monkeypatch, tmp_path
+):
+    import fno.king.state as state_mod
+
+    root = tmp_path / "registered"
+    root.mkdir()
+    manifest = _king_manifest(root)
+    write_manifest(manifest, scope="epic-x", owner_cwd=str(root), force=True)
+
+    def fail_if_read(_path):
+        raise AssertionError("a registered holder must not read manifest_path")
+
+    monkeypatch.setattr(state_mod, "parse_manifest", fail_if_read)
+    crowns = [
+        {
+            "holder": "king-x",
+            "scope": "epic-x",
+            "status": "live",
+            "manifest_path": str(tmp_path / "must-not-read.md"),
+        }
+    ]
+    targets, note = _crowned(
+        _court(crowns),
+        lambda: [SimpleNamespace(name="king-x", cwd=str(root), short_id="aa11bb22")],
+    )
+    assert targets == [CrownTarget("king-x", "epic-x", root, manifest, "aa11bb22")]
+    assert note == ""
+
+    targets, note = _crowned(
+        _court([{"holder": _ROWLESS_HOLDER, "scope": "epic-z"}]), lambda: []
+    )
+    assert targets == []
+    assert note == "epic-z: unregistered holder"
+
+
+def test_rowless_missing_holder_with_mail_is_named_without_waking(tmp_path):
+    rec, summary, _manifest, _root, truth_calls = _run_rowless(
+        tmp_path,
+        lambda _holder: {"state": "unknown", "reason": "not-found"},
+    )
+
+    assert rec.dispatches == []
+    assert rec.targets == []
+    assert truth_calls == []
+    assert summary["crowns"] == 0
+    assert summary["note"] == "epic-x: unregistered holder"
+
+
+def test_rowless_stalled_and_parked_holders_are_never_woken(tmp_path):
+    for state in ("stalled", "done"):
+        case = tmp_path / state
+        case.mkdir()
+        rec, summary, _manifest, _root, truth_calls = _run_rowless(
+            case, lambda _holder, state=state: {"state": state}
+        )
+        assert rec.dispatches == []
+        assert rec.targets == []
+        assert truth_calls == []
+        assert summary["note"] == "epic-x: unregistered holder"
 
 
 def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
@@ -196,7 +374,8 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
     target.manifest.write_text(
-        "---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8"
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
     )
 
     phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
@@ -204,6 +383,32 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     assert argv[argv.index("--wake-address") + 1] == "aa11bb22"
     assert argv[argv.index("--wake-reason") + 1] == "mail"
     assert argv[argv.index("--wake-holder") + 1] == "king-x"
+    # x-8fb2: the walk repeats the crown manifest's pin, so the respawned
+    # king (and every successor the walk mints) runs the crowned model.
+    assert argv[argv.index("--model") + 1] == "glm-5.3-flash[1m]"
+
+
+def test_a_model_less_manifest_refuses_the_walk(tmp_path):
+    # A manifest with no model pin used to spawn a king on the account
+    # default (measured 2026-09-17: opus). The walk refuses and says so in
+    # its wake log; the successor event never fires on a refused spawn.
+    from fno.pr_watch import _king_wake as phase_mod
+
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    spawned = phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
+
+    assert spawned is False
+    log = target.manifest.with_suffix(".md.wake.log").read_text(encoding="utf-8")
+    assert "no model pin" in log
 
 
 def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
@@ -579,7 +784,10 @@ def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path)
         short_id="aa11bb22",
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
-    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
 
     phase_mod._dispatch_walk(target, "mail", "fno-agents", "king-x", None, True)
 
@@ -727,7 +935,69 @@ def test_a_conflicted_scope_is_skipped(tmp_path):
     )
 
     assert rec.dispatches == [], "never wake into a disputed territory"
-    assert "conflicting" in (summary["note"] or "")
+    assert summary["note"] == "epic-x: conflicting holders king-a, king-b"
+
+
+def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
+    # A crown the pass cannot see must be named: epic-y has a court entry
+    # and a registered holder but no manifest on disk, and epic-x is live
+    # and refuses as working. Both words belong in the receipt.
+    from fno.king.state import king_manifest_path, king_state_root, write_manifest
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        king_manifest_path("epic-x", state_root=king_state_root(root)),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    rec = _Recorder()
+    crowns = [
+        {"holder": "king-x", "scope": "epic-x", "status": "live"},
+        {"holder": "king-y", "scope": "epic-y", "status": "live"},
+        # A manifest-only crown: the holder is a session uuid with no
+        # registry row, the production shape the per-scope note must name.
+        {
+            "holder": "88888888-9999-aaaa-bbbb-cccccccccccc",
+            "scope": "epic-z",
+            "status": "manifest-only",
+            "manifest_path": str(
+                king_manifest_path("epic-z", state_root=king_state_root(root))
+            ),
+        },
+        {"holder": "", "scope": "epic-w", "status": "live"},
+        {"holder": "king-empty", "scope": "", "status": "live"},
+    ]
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="king-x", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="king-y", cwd=str(root), status="live", short_id="cc33dd44"),
+        ],
+        truth_fn=lambda h: {"state": "working"},
+        unread_fn=lambda a: [object()] if a == "king-x" else [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert summary["crowns"] == 1, "only epic-x has both row and manifest"
+    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    note = summary["note"] or ""
+    expected_missing = king_manifest_path("epic-y", state_root=king_state_root(root))
+    assert note == "; ".join(
+        (
+            f"epic-y: manifest missing at {expected_missing}",
+            "epic-z: unregistered holder",
+            "epic-w: holderless crown",
+            "(no scope): empty scope",
+        )
+    )
+    assert "(s)" not in note
 
 
 def test_an_unreadable_registry_wakes_nothing(tmp_path):
@@ -964,6 +1234,45 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
     assert payload["board_rows"], "the pass records the rows it could not diff"
 
 
+def test_an_empty_board_stores_an_observation_so_its_first_node_is_a_change(tmp_path):
+    # A scope compiling to zero rows stores board_rows: []; the reader must
+    # call that an observation. Reading it as none kept first_observation
+    # True forever, so the scope's first real node was swallowed as a seed
+    # that is not a trigger, on every pass.
+    elsewhere = [
+        {
+            "id": "o-1",
+            "project": "elsewhere",
+            "status": "ready",
+            "_kanban_column": "ready",
+            "priority": "p1",
+        }
+    ]
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: elsewhere, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    quiet_refill = _BOARD_A_QUIET + [
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
+    ]
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: quiet_refill, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "board", rec.dispatches
+
+
 def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
     import subprocess as subprocess_mod
 
@@ -984,7 +1293,10 @@ def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
         short_id="aa11bb22",
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
-    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
 
     phase_mod._dispatch_walk(
         target, "board", "fno-agents", None, "added: x-2 (ready/p1)"
@@ -1203,7 +1515,7 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
     )
     fill(_king_manifest(root))
 
-    summary = run_king_wake(
+    run_king_wake(
         settings,
         emit=rec.emit,
         now=NOW,
@@ -1364,7 +1676,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
     # Positive control inside the same run: the reader sees the row.
     assert len(scan_unread("aa11bb22")) == 1, "the reader must see the waking row"
 
-    summary = run_king_wake(
+    run_king_wake(
         _settings(),
         emit=rec.emit,
         now=datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc),
@@ -1501,10 +1813,30 @@ def test_five_quiet_crowns_skip_the_truth_read_one_mail_crown_pays_it(tmp_path):
     assert [d[0] for d in rec.dispatches] == ["epic-3"]
 
 
-def test_a_pending_seed_still_reads_truth_but_writes_nothing_for_a_working_holder(tmp_path):
-    # AC1-EDGE: a first observation reads truth, and a holder that is there
-    # but working seeds nothing - the exact write set the truth-first order
-    # produced.
+def test_a_working_holder_seeds_the_sidecar_so_the_next_pass_reads_nothing(tmp_path):
+    # The production case for every live king: truth says working, the seeds
+    # still land, and the next pass costs no truth read. Gating the seeds on
+    # the liveness refusal closed a loop: the read existed to gate the seed,
+    # and the refusal skipped the seed that would have retired the read.
+    _run(tmp_path, truth=lambda h: {"state": "working"}, unread=lambda a: [])
+
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "working"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+    )
+
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload, "a live holder seeds"
+    assert summary["truth_reads"] == 0, f"the seeded pass still paid a read: {summary}"
+
+
+def test_a_working_holder_seeds_a_first_observation_and_pays_no_read(tmp_path):
+    # AC1-EDGE, reordered: seeds record what this pass observed, so they do
+    # not depend on the holder. The truth-first order this test used to pin
+    # was the defect: an unwritten seed re-fires next pass, so the read
+    # meant to be conditional ran for every live king on every tick.
     rec, summary, manifest = _run(
         tmp_path,
         truth=lambda h: {"state": "working"},
@@ -1512,9 +1844,10 @@ def test_a_pending_seed_still_reads_truth_but_writes_nothing_for_a_working_holde
         extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert summary["truth_reads"] == 1, "a pending seed must still read truth"
-    assert not _sidecar(manifest).exists(), "an absent holder seeds nothing"
-    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    assert summary["truth_reads"] == 0, "a crown that cannot wake is not read"
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload and payload["board_rows"], "a live holder seeds"
+    assert summary["refused"] == [], "a skipped crown is not a refusal"
     assert rec.dispatches == []
 
 
@@ -1561,3 +1894,192 @@ def test_a_stopped_pass_rotates_its_starting_crown_per_debounce_window(tmp_path)
     assert [d[0] for d in rec2.dispatches] == [f"epic-{(first + 1) % 5}"], (
         f"the pass must start one crown later: {s2}"
     )
+
+
+def test_arm_writes_the_row_model_pin_onto_the_manifest(tmp_path, monkeypatch):
+    # x-8fb2: the crown manifest is the wake's only model source, so arming
+    # folds the crowned row's requested_model into the manifest. The refuse
+    # side of this contract is test_a_model_less_manifest_refuses_the_walk.
+    from types import SimpleNamespace
+
+    from fno.king import state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    parse_manifest = king_state.parse_manifest
+    path = king_state.arm_king_manifest(
+        "epic-x",
+        "0de85539-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        state_root=tmp_path,
+        row=SimpleNamespace(
+            pid=1,
+            cwd=str(tmp_path),
+            crown_level=1,
+            crown_scope="epic-x",
+            crown_grantor="human",
+            requested_model="glm-5.3-flash[1m]",
+        ),
+    )
+    assert path is not None
+    assert parse_manifest(path)["model"] == "glm-5.3-flash[1m]"
+
+
+def test_a_refused_spawn_says_so_in_the_feed(tmp_path):
+    # The refusal must not be wake-log-only: the trigger still spent a bill,
+    # so the activity feed carries the same king_wake_refused row the other
+    # refusal paths emit.
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "king-x" else [],
+        extra={"dispatch_fn": None},
+    )
+
+    refusals = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refusals and refusals[0][1]["refusal"] == "manifest-carries-no-model-pin"
+    assert summary["refused"] == [
+        {"scope": "epic-x", "refusal": "manifest-carries-no-model-pin"}
+    ]
+
+
+def _manifest_for(root, scope):
+    from fno.king.state import king_manifest_path, king_state_root
+
+    return king_manifest_path(scope, state_root=king_state_root(root))
+
+
+def test_one_bus_read_serves_every_address_in_a_pass(tmp_path, monkeypatch):
+    # AC1-HP: the default mail reader holds ONE bus read per pass; nine
+    # addresses across two crowns must not re-read it.
+    from fno.bus import log as bus_log
+
+    calls = []
+    real_iter = bus_log.iter_messages
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real_iter(*a, **k)
+
+    monkeypatch.setattr(bus_log, "iter_messages", counted)
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    rec = _Recorder()
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1,epic-a2,epic-a3", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1,epic-b2", "status": "live"},
+    ]
+    for scope in ("epic-a1,epic-a2,epic-a3", "epic-b1,epic-b2"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+
+    def rows():
+        return [
+            SimpleNamespace(
+                name="king-a", cwd=str(root), status="live", short_id="aa11bb22"
+            ),
+            SimpleNamespace(
+                name="king-b", cwd=str(root), status="live", short_id="cc22dd33"
+            ),
+        ]
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=rows,
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+    )
+
+    assert summary["evaluated"] == 2, summary
+    assert rec.dispatches == [], "a held empty bus is no trigger"
+    assert len(calls) == 1, f"one bus read per pass, saw {len(calls)}"
+
+
+def test_the_default_court_reads_no_agreement(tmp_path, monkeypatch):
+    # The default court_fn binds agree=False and reports the rowless holder.
+    from fno.agents import court as court_mod
+
+    received = {}
+
+    def spy(rows, **kwargs):
+        received.update(kwargs)
+        return {
+            "crowns": [
+                {
+                    "holder": "ghost",
+                    "scope": "epic-x",
+                    "level": 2,
+                    "grantor": "human",
+                    "status": "manifest-only",
+                    "agree": None,
+                    "reason": "crown lives on the manifest",
+                    "manifest_path": str(_king_manifest(tmp_path / "proj")),
+                }
+            ],
+            "conflicts": [],
+        }
+
+    monkeypatch.setattr(court_mod, "gather_court", spy)
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"court_fn": None},
+    )
+
+    assert received == {"agree": False}
+    assert summary["note"] == "epic-x: unregistered holder"
+    assert summary["evaluated"] == 0
+    assert rec.dispatches == []
+
+
+def test_a_cut_inside_the_compile_reports_the_board_step(tmp_path, monkeypatch):
+    # AC5-HP: the board compile and backstop run under a `board` label - it
+    # follows `graph` for the first crown and `mail` for every later one, so a
+    # cut inside a compile reads king_wake:board, not the step before it.
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rec = _Recorder()
+    steps: list[str] = []
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
+        ],
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+        on_step=steps.append,
+    )
+
+    assert summary["evaluated"] == 2
+    assert steps == ["court", "answers", "mail", "graph", "board", "mail", "board"], steps

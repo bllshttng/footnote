@@ -170,6 +170,9 @@ def test_authorized_target_init_journey(clean_machine):
         [repo / ".fno" / "target-state.md"]
         + list(home.glob(".fno/spaces/*/target-state.md"))
         + list(home.parent.glob("spaces/*/target-state.md"))
+        # A state root that resolves from the process CWD lands one .fno
+        # above the repo: <tmp>/.fno/spaces/<repo-slug>/target-state.md.
+        + list(home.parent.glob(".fno/spaces/*/target-state.md"))
     )
     manifests = [m for m in manifests if m.exists()]
     assert manifests, (

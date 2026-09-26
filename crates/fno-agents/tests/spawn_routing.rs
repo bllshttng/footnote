@@ -475,6 +475,61 @@ fn spawn_claude_receipt_byte_shape() {
     );
 }
 
+// A config-dir account worker writes its session record under the account
+// root's sessions dir. The spawn resolves the full session id only when the
+// ClaudeHome carries that root; on the one-root read the receipt leaves the
+// identity unresolved.
+#[test]
+fn spawn_claude_resolves_a_record_written_under_an_account_root() {
+    use fno_agents::claude_ask::{dispatch_claude_spawn, ClaudeHome};
+
+    let home = AgentsHome::at(tmpdir("spawn-acct-home"));
+    let claude_root = tmpdir("spawn-acct-claude");
+    let acct = tmpdir("spawn-acct-acct");
+    let ch = ClaudeHome::at(&claude_root).with_extra_roots([acct.clone()]);
+    let cwd = tmpdir("spawn-acct-cwd");
+    let bin = tmpdir("spawn-acct-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+    let sessions = acct.join("sessions");
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "acctspawn",
+        "hello",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false, // surface_cwd: explicit --cwd, no default move (x-85fe)
+    );
+
+    assert_eq!(
+        out.exit_code, 0,
+        "spawn claude happy path should exit 0, stderr: {}",
+        out.stderr
+    );
+    let receipt = out.stdout.trim_end_matches('\n');
+    let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
+    assert_eq!(v["status"], "live");
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+    assert_eq!(
+        registry["agents"][0]["harness_session_id"], CLAUDE_SESSION_ID,
+        "a record under the account root must resolve: {}",
+        out.stdout
+    );
+}
+
 // x-85fe: surface_cwd=true appends the effective cwd as the LAST key (AC1-HP /
 // AC1-UI). Byte-parity with the Python cmd_spawn receipt; the unmoved receipt
 // (surface_cwd=false) is proven byte-identical by spawn_claude_receipt_byte_shape.
@@ -1379,7 +1434,7 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
 
 /// x-df08 (PR 1355 review, P2): gemini's `command_surface` reads `refused` -
 /// a deprecated harness with no dispatch lane at all, never a harness that
-/// merely lacks a built thread-spawn arm. `bg_substrate_refusal` must check
+/// merely lacks a built thread-spawn arm. `thread_substrate_refusal` must check
 /// that BEFORE naming a `thread_lane`, or a retired harness reads as future
 /// lane work.
 #[test]

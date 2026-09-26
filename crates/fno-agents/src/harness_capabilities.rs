@@ -37,6 +37,41 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 /// cannot disagree about which contracts are legal.
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
+const PROVIDER_ACTIONS: [&str; 3] = ["compact", "goal_get", "goal_set"];
+
+/// Name the reason a harness cannot use the thread spawn lane.
+pub fn thread_substrate_refusal(harness: &str) -> String {
+    use crate::claude_ask::py_repr;
+
+    let head = format!(
+        "substrate 'thread' (detached interactive session) is unavailable on harness {}",
+        py_repr(harness)
+    );
+    let tail = "use --substrate headless for a one-shot";
+    let contract = HarnessContract::packaged().ok();
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    match contract.and_then(|contract| contract.thread_lane(harness).ok()) {
+        Some("none") => {
+            format!("{head}: it declares no resume form, so no thread lane exists for it - {tail}")
+        }
+        Some(lane) => format!(
+            "{head}: fno has not built this harness's {lane} lane spawn arm yet, and that gap is \
+             in fno, never a harness limitation - {tail}"
+        ),
+        None => format!(
+            "{head}: its thread lane could not be resolved from the capability contract - {tail}"
+        ),
+    }
+}
 /// How a probe declaration says a field can be settled. `declared`: the
 /// vendor states it about its own interface (help/version), and reading that
 /// is not inference. `behavioral`: only a scratch-PTY run checking a
@@ -70,6 +105,17 @@ const FEATURE_KEYS: [&str; 11] = [
 /// routing boolean and name tuple this dimension replaced could not say
 /// that.
 const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
+/// How a live pane session becomes a persistent thread, one value per
+/// `[harness.<name>.conversion]` stanza. Closed so the classifier can branch
+/// on the strategy alone - never on a harness name - and a typo is a parse
+/// error rather than a silent new dimension. Documented beside the stanzas
+/// at the tail of harness_capabilities.toml.
+pub const CONVERSION_STRATEGIES: [&str; 4] = [
+    "keeper-rebind",
+    "server-resume",
+    "client-resume",
+    "unsupported",
+];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("harness capability contract: {0}")]
@@ -110,6 +156,16 @@ pub struct ProbeDecl {
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
+    /// The mux composer's effort-picker list. `None` = no effort surface at
+    /// all; `Some([])` = the axis exists but values are provider passthrough
+    /// (free text); a filled list is the enumerable choices. Absent on a row
+    /// whose authority names no surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<String>>,
+    /// The mux composer's permission-picker list, same three states as
+    /// `efforts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_modes: Option<Vec<String>>,
     pub resume: String,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,
@@ -171,6 +227,52 @@ pub struct HarnessCapabilities {
     /// [`HarnessContract::validate`].
     #[serde(default)]
     pub features: BTreeMap<String, FeatureClaim>,
+    /// Provider-owned action recipes. An absent action means the caller must
+    /// use the identity-pinned pane transaction.
+    #[serde(default)]
+    pub provider_actions: BTreeMap<String, ProviderAction>,
+    /// The pane-to-thread lifecycle move (`fno agents resume <name>
+    /// --substrate thread`), one stanza per harness. ABSENT reads
+    /// `unsupported` at the accessor with a named refusal - absence is the
+    /// default-off, never a guess - so only rows that measured a conversion
+    /// carry one.
+    #[serde(default)]
+    pub conversion: Option<ConversionRow>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAction {
+    pub transport: String,
+    pub method: String,
+    pub proof: String,
+}
+
+/// One harness's `[harness.<name>.conversion]` stanza: HOW a live pane of
+/// this harness becomes a persistent thread under its own session id, and
+/// whether that id survives. `refusal` is required on an `unsupported` row
+/// and refused on a supported one (checked in `validate_row`), so an
+/// unsupported row always answers the operator's why.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversionRow {
+    /// One of [`CONVERSION_STRATEGIES`].
+    pub strategy: String,
+    pub preserves_id: bool,
+    /// Why conversion is refused. Required on `unsupported`, empty
+    /// elsewhere - a supported row's refusal would contradict its strategy.
+    #[serde(default)]
+    pub refusal: String,
+}
+
+/// The conversion contract RESOLVED for the caller: what the row declared,
+/// or the absent-stanza default (`unsupported` + named refusal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConversion {
+    /// One of [`CONVERSION_STRATEGIES`].
+    pub strategy: String,
+    pub preserves_id: bool,
+    pub refusal: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -314,6 +416,10 @@ impl HarnessCapabilities {
     pub fn state_root_stance(&self, substrate: &str) -> Option<&str> {
         self.state_root_grant.get(substrate).map(String::as_str)
     }
+
+    pub fn provider_action(&self, action: &str) -> Option<&ProviderAction> {
+        self.provider_actions.get(action)
+    }
 }
 
 impl HarnessContract {
@@ -403,12 +509,56 @@ impl HarnessContract {
         self.render_session_argv_with_ids(harness, lane, session_id, None)
     }
 
+    fn compose_maybe(&self, form: &ResumeForm, tokens: Vec<String>, compose: bool) -> Vec<String> {
+        if compose {
+            with_pre_exec(form, tokens)
+        } else {
+            tokens
+        }
+    }
+
     pub fn render_session_argv_with_ids(
         &self,
         harness: &str,
         lane: &str,
         session_id: Option<&str>,
         short_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_composed(harness, lane, session_id, short_id, true)
+    }
+
+    /// The raw render: tokens only, `pre_exec` NOT composed ahead. A caller
+    /// that must SPLICE lane-owned tokens into the argv (the codex grant and
+    /// `--cd` ride before the subcommand) renders raw, splices, and composes
+    /// last via [`compose_pre_exec`] - splicing a composed `sh -c` script
+    /// would put the grant outside the codex command.
+    pub fn render_session_argv_raw(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_composed(harness, lane, session_id, None, false)
+    }
+
+    /// The declared `pre_exec` for one lane, so a raw-render caller can
+    /// compose after its own splices.
+    pub fn form_pre_exec(&self, harness: &str, lane: &str) -> Result<Vec<String>, ContractError> {
+        let caps = self.capabilities(harness)?;
+        let form =
+            caps.resume_strategy.forms.get(lane).ok_or_else(|| {
+                field_error(harness, "resume_strategy", &format!("no lane {lane:?}"))
+            })?;
+        Ok(form.pre_exec.clone())
+    }
+
+    fn render_session_argv_composed(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+        short_id: Option<&str>,
+        compose: bool,
     ) -> Result<Vec<String>, ContractError> {
         let caps = self.capabilities(harness)?;
         let form =
@@ -439,7 +589,7 @@ impl HarnessContract {
             };
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         if short_id.is_some_and(|id| !id.is_empty()) {
             return Err(field_error(
@@ -449,12 +599,12 @@ impl HarnessContract {
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
-            return Ok(with_pre_exec(form, form.tokens.clone()));
+            return Ok(self.compose_maybe(form, form.tokens.clone(), compose));
         };
         if let Some(id) = session_id.filter(|id| !id.is_empty()) {
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         if lane.ends_with("create") {
             let start = index
@@ -463,7 +613,7 @@ impl HarnessContract {
                 .unwrap_or(index);
             let mut tokens = form.tokens.clone();
             tokens.drain(start..=index);
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         Err(field_error(
             harness,
@@ -529,6 +679,29 @@ impl HarnessContract {
             .get("interactive_attach")
             .map(|form| !form.pre_exec.is_empty())
             .unwrap_or(false))
+    }
+
+    /// This harness's pane-to-thread conversion contract, resolved for the
+    /// classifier: the strategy, whether the session id survives, and the
+    /// operator-facing refusal. A row with NO stanza reads `unsupported`
+    /// with the named refusal - absence is the declared default-off, so a
+    /// new harness refuses conversion until it measures a strategy instead
+    /// of inheriting claude's path or falling through a derivation. The
+    /// classifier branches on `strategy` alone; it never names a harness.
+    pub fn conversion(&self, harness: &str) -> Result<ResolvedConversion, ContractError> {
+        let caps = self.capabilities(harness)?;
+        Ok(match caps.conversion.as_ref() {
+            Some(row) => ResolvedConversion {
+                strategy: row.strategy.clone(),
+                preserves_id: row.preserves_id,
+                refusal: row.refusal.clone(),
+            },
+            None => ResolvedConversion {
+                strategy: "unsupported".to_string(),
+                preserves_id: false,
+                refusal: format!("no conversion declared for {harness}"),
+            },
+        })
     }
 
     pub fn permission_response_keys(
@@ -745,6 +918,22 @@ fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractErro
 }
 
 fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
+    for (action, recipe) in &caps.provider_actions {
+        if !PROVIDER_ACTIONS.contains(&action.as_str()) {
+            return Err(field_error(
+                harness,
+                "provider_actions",
+                &format!("unknown action {action:?}"),
+            ));
+        }
+        if recipe.transport != "app-server" || recipe.method.is_empty() || recipe.proof.is_empty() {
+            return Err(field_error(
+                harness,
+                &format!("provider_actions.{action}"),
+                "needs the implemented app-server transport, method, and proof",
+            ));
+        }
+    }
     for (key, claim) in &caps.features {
         if !FEATURE_KEYS.contains(&key.as_str()) {
             return Err(field_error(
@@ -1005,6 +1194,41 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
     {
         return Err(field_error(harness, "session_binding", "invalid strategy"));
     }
+    if let Some(conversion) = &caps.conversion {
+        if !CONVERSION_STRATEGIES.contains(&conversion.strategy.as_str()) {
+            return Err(field_error(
+                harness,
+                "conversion.strategy",
+                "unknown strategy",
+            ));
+        }
+        // An unsupported row must say WHY in operator-facing text, and a
+        // supported row must not carry a refusal that contradicts its own
+        // strategy. preserves_id rides the same coherence: only an
+        // unsupported row may declare the id does not survive.
+        if conversion.strategy == "unsupported" {
+            if conversion.refusal.is_empty() {
+                return Err(field_error(
+                    harness,
+                    "conversion.refusal",
+                    "an unsupported conversion must name its refusal",
+                ));
+            }
+            if conversion.preserves_id {
+                return Err(field_error(
+                    harness,
+                    "conversion.preserves_id",
+                    "an unsupported conversion cannot preserve the id",
+                ));
+            }
+        } else if !conversion.refusal.is_empty() || !conversion.preserves_id {
+            return Err(field_error(
+                harness,
+                "conversion",
+                "a supported conversion preserves the id and carries no refusal",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1049,6 +1273,32 @@ pub fn render_session_argv(
     HarnessContract::packaged()?.render_session_argv(harness, lane, session_id)
 }
 
+/// The raw tokens (no `pre_exec` composition), for callers that splice
+/// lane-owned tokens into the argv before shipping it.
+pub fn render_session_argv_raw(
+    harness: &str,
+    lane: &str,
+    session_id: Option<&str>,
+) -> Result<Vec<String>, ContractError> {
+    HarnessContract::packaged()?.render_session_argv_raw(harness, lane, session_id)
+}
+
+/// Compose a lane's declared `pre_exec` ahead of a (raw-rendered, spliced)
+/// argv.
+pub fn compose_pre_exec(
+    harness: &str,
+    lane: &str,
+    argv: Vec<String>,
+) -> Result<Vec<String>, ContractError> {
+    let contract = HarnessContract::packaged()?;
+    let pre = contract.form_pre_exec(harness, lane)?;
+    if pre.is_empty() {
+        return Ok(argv);
+    }
+    let script = format!("{}; exec {}", sh_join(&pre), sh_join(&argv));
+    Ok(vec!["sh".to_string(), "-c".to_string(), script])
+}
+
 pub fn render_session_argv_with_ids(
     harness: &str,
     lane: &str,
@@ -1078,7 +1328,7 @@ mod tests {
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
-        let contract = HarnessContract::packaged().unwrap();
+        let mut contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             [
@@ -1120,6 +1370,18 @@ mod tests {
                 .kind,
             "menu_walk"
         );
+        let compact = contract
+            .capabilities("codex")
+            .unwrap()
+            .provider_action("compact")
+            .expect("Codex compact must have a declared provider action recipe");
+        assert_eq!(compact.transport, "app-server");
+        assert_eq!(compact.method, "thread/compact/start");
+        assert_eq!(compact.proof, "context-compaction");
+
+        let codex = contract.harness.get_mut("codex").unwrap();
+        codex.provider_actions.get_mut("compact").unwrap().transport = "pane".into();
+        assert!(validate_row("codex", codex).is_err());
     }
 
     /// The lane assignment, pinned per harness: lane A where the attach form
@@ -1259,11 +1521,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("short_id"));
+        // The resume row carries the same shared-daemon ownership assertion
+        // as attach: `--remote unix://` makes a daemon-down resume LOUD
+        // instead of silently private, and the render composes the declared
+        // daemon start ahead of the argv.
         assert_eq!(
             contract
                 .render_session_argv("codex", "interactive_resume", Some("cx-1"))
                 .unwrap(),
-            ["codex", "resume", "cx-1"]
+            [
+                "sh",
+                "-c",
+                "'codex' 'app-server' 'daemon' 'start'; exec 'codex' 'resume' 'cx-1' '--remote' 'unix://'",
+            ]
         );
         assert_eq!(
             contract
@@ -1699,5 +1969,93 @@ mod tests {
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
+    }
+
+    #[test]
+    fn every_harness_declares_a_conversion_strategy_and_the_supported_ones_match_the_plan_matrix() {
+        let contract = HarnessContract::packaged().unwrap();
+        let want = [
+            ("claude", "client-resume", true),
+            ("codex", "server-resume", true),
+            ("gemini", "unsupported", false),
+            ("agy", "keeper-rebind", true),
+            ("opencode", "unsupported", false),
+            ("pi", "keeper-rebind", true),
+            ("cursor-agent", "keeper-rebind", true),
+            ("grok", "keeper-rebind", true),
+        ];
+        for (harness, strategy, preserves_id) in want {
+            let got = contract.conversion(harness).unwrap();
+            assert_eq!(
+                got.strategy, strategy,
+                "harness {harness} strategy mismatch"
+            );
+            assert_eq!(
+                got.preserves_id, preserves_id,
+                "harness {harness} preserves_id mismatch"
+            );
+        }
+        // The unsupported rows must carry operator-facing why; the supported
+        // rows must not carry a refusal at all.
+        for harness in ["gemini", "opencode"] {
+            let refusal = contract.conversion(harness).unwrap().refusal;
+            assert!(!refusal.is_empty(), "{harness} needs a refusal");
+        }
+        for harness in ["claude", "codex", "agy", "pi", "cursor-agent", "grok"] {
+            let got = contract.conversion(harness).unwrap();
+            assert!(got.refusal.is_empty(), "{harness} carries no refusal");
+        }
+    }
+
+    #[test]
+    fn a_missing_conversion_stanza_reads_unsupported_with_the_named_refusal() {
+        // Every packaged row carries a stanza, so drop one to read the
+        // absent default.
+        let stripped = CAPABILITY_TOML.replacen(
+            "[harness.grok.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true\n",
+            "",
+            1,
+        );
+        let contract = HarnessContract::parse(&stripped).unwrap();
+        let got = contract.conversion("grok").unwrap();
+        assert_eq!(got.strategy, "unsupported");
+        assert!(!got.preserves_id);
+        assert_eq!(got.refusal, "no conversion declared for grok");
+    }
+
+    #[test]
+    fn an_unsupported_conversion_without_a_refusal_is_a_parse_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "refusal = \"gemini is deprecated in favor of agy; there is nothing to convert\"",
+            "",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("gemini"), "{err}");
+        assert!(err.contains("refusal"), "{err}");
+    }
+
+    #[test]
+    fn a_supported_conversion_cannot_carry_a_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true",
+            "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true\nrefusal = \"never\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("agy"), "{err}");
+        assert!(err.contains("conversion"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_conversion_strategy_is_a_parse_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.pi.conversion]\nstrategy = \"keeper-rebind\"",
+            "[harness.pi.conversion]\nstrategy = \"keeper-re-bind\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("pi"), "{err}");
+        assert!(err.contains("strategy"), "{err}");
     }
 }

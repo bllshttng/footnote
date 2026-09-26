@@ -23,6 +23,14 @@ The old `fno decide` spelling remains as a one-release compatibility shim. It pr
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
 
+## Closing a question
+
+`fno inbox outstanding clear <qid> --answer "..."` writes a graph decision, mirrors it to both decision stores, and closes the question in the project journal and question store. It prints an id receipt before node projection and mail delivery.
+
+When the same answer is cleared again, the graph decision supplies the resume key. The transport reuses its id and fills missing mirrors or close rows. A different answer is refused with the existing decision id and the safe close or retract path.
+
+When every id succeeds, clear exits 0. An unknown id exits 4, a different-answer refusal exits 3, and a write failure exits 1. The final line reports counts for closed, resumed, already closed, unknown, and refused ids. No line is a bare count.
+
 ## Authority lanes
 
 Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
@@ -87,6 +95,8 @@ There is no new recording gate, and none is needed. `crates/fno-agents/src/loopc
 | Decision index | Local project-policy recall | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
 
+Rust readers do not read the JSONL alone. `decision_index::default_store_live` reads graph.db decisions plus the JSONL rows the db lacks. The merge keys match `_read_index`, so a ruling the db holds is never invisible to a Rust reader.
+
 One `fno backlog decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
 
 It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno backlog decide-reindex` as the recovery.
@@ -149,9 +159,19 @@ The command is idempotent by decision id, so a second run adds nothing.
 
 The index remains append-only. A retraction is a new `decision_retracted` event, never an edit or delete: `fno backlog decide-retract d-1a2b3c4d --reason "the decision no longer applies"`. The command resolves the target first, refuses a blank reason or unknown id, and requires the operator lane to retract law. If the project journal is durable but the recall-index append fails, the command names `fno backlog decide-reindex` and never recommends retrying the retraction.
 
-Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker, and JSON includes `lifecycle`, reason, and any positive closure evidence. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. If a coord row is stamped to a node, it expires only after that node's graph entry has positive closure evidence. If a repository-scoped PR row exists, it expires only after its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
+Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, `unknown`, or `unscoped`. Human output leads with that marker, and JSON includes `lifecycle`, reason, and any positive closure evidence. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. If a coord row is stamped to a node, it expires only after that node's graph entry has positive closure evidence. If a repository-scoped PR row exists, it expires only after its exact graph binding is marked merged. A failed graph read makes the lifecycle `unknown`; the verb names the unread graph on stderr, and every state filter keeps the row. Missing or ambiguous closure evidence is `unscoped`. Neither `unknown` nor `unscoped` is live. Law does not expire because a node or PR closes.
 
 The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and a damaged index is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+
+## Law carries a scope
+
+Law is recorded where it is made, and scope names who it governs. The vocabulary has two values: `global` and `project:<slug>`. The slug is the settings project name, the same vocabulary a graph node's `project` field uses. A law and the nodes it governs answer one resolver.
+
+The law door (`fno inbox law set`) stamps the recording session's project by default. Widening to `global` is explicit on the law-match crate verb: its `record-scope` request carries `global`, because law is never inherited by silence. A repo outside the work map makes the door refuse and name the path it failed to place. The door fails closed so a guessed stamp never lands, while every reader fails open.
+
+Every law reader filters. Global law reaches every session. A project law reaches only that project's sessions. A row with no scope reaches only fno sessions, because all 82 pre-scope rows were recorded in fno. The general ones get promoted by an explicit re-record widened on the crate verb.
+
+Readers return the count they withheld, and the report's JSON carries the note. The stage block lists a law's scope on its line. A workspace tier (`workspace:<name>`) is a rung nobody has reached. The field is a free string, so adding it later needs a reader branch and no migration.
 
 ## Where law reaches a session
 
@@ -165,7 +185,7 @@ The review-coverage gate is the reference consumer. Its merge predicate, its `fn
 
 The standing query reaches a reader who goes looking. The failure this hook closes is the session that never looks. Measured on the live set: 11 laws govern review under 10 subjects, and two of those subjects are bare node ids. The same three rulings were re-derived twice in one day while agents rebuilt rules a live law already carried. So the governing laws are put at the decision point, not behind a search.
 
-Two events trigger the read. Claude fires `hooks/law-stage-inject.sh` on `PostToolUse` with matcher `Skill`. Claude and Codex also fire it on `UserPromptSubmit`, which covers typed and mailed review verbs. `PreToolUse` is not used because its output contract carries `permissionDecision` and `updatedInput` only, with no channel for context. `PostToolUse` and `UserPromptSubmit` accept `hookSpecificOutput.additionalContext`. That output lands beside the review instructions the skill itself prints, and `hooks/review-hold.sh` runs on the same Skill event. The verb is the existing hidden `fno-agents law-match` with a new `mode: stage`. d-fe66560a bars new verbs. The laws come from `decision_index::live_laws`, a direct read of the index. Measured 2026-09-14: the Python read took 67.0s real at load 345 and hits a 10s hook bound. The direct read of the 1.2 MB index takes milliseconds.
+Two events trigger the read. Claude fires `hooks/law-stage-inject.sh` on `PostToolUse` with matcher `Skill`. Claude and Codex also fire it on `UserPromptSubmit`, which covers typed and mailed review verbs. `PreToolUse` is not used because its output contract carries `permissionDecision` and `updatedInput` only, with no channel for context. `PostToolUse` and `UserPromptSubmit` accept `hookSpecificOutput.additionalContext`. That output lands beside the review instructions the skill itself prints, and `hooks/review-hold.sh` runs on the same Skill event. The verb is the existing hidden `fno-agents law-match` with a new `mode: stage`. d-fe66560a bars new verbs. The laws come from `decision_index::live_laws`, a direct read of the index. Measured 2026-09-14: the Python read took 67.0s real at load 345 and hits a 10s hook bound. The direct read of the 1.2 MB index takes milliseconds. The hook's timeout wrapper passes stdin through to the matcher. The stage block lists every matched law: summarized under the 2000-byte cap, then one short id line per law the cap cut.
 
 Classification is a keyword stage table with one row today. The verb names `code-review`, `review`, `review-changes` and `sigma-review` classify the pending action as the review stage. These are the same four names `hooks/review-hold.sh` carries. The hold keeps its own list on purpose: a shell hold is never ported onto a binary exec its shell tests cannot stub. The laws surface by keyword over the lowercased subject and decision text. The recall was measured against the live corpus with the 11 review laws labeled by hand:
 
@@ -211,6 +231,8 @@ Three rules bind the gate:
 - **A contradicted citation refuses whatever is attached.** The contradiction can be an untracked path. It can be an ambiguous basename or a line past EOF. The refusal fires before any read runs. The note lane (`fno backlog note`) splits on purpose. A contradicted citation refuses the note, even under `--quiet`. A claim with no read only warns: the note verb advises and never refuses a body.
 
 The gate lives inside `record_decision` beside the session gates, not in the command bodies. The library is importable. A check only the CLI enforces is a check anything using the library walks around. The claim vocabulary is two shapes and nothing else. One shape is a `path:line` citation over a source extension. The other is a count bound to a fixed noun list, negatives included: `lines`, `call sites`, `callers`, `consumers`, `usages`, `occurrences`, `matches`, `files`. The list lives in one constant in `crates/fno-agents/src/evidence.rs`, so a reviewer audits it in one read. A false positive on ordinary prose is the failure that gets this gate disabled.
+
+A decision id is a citable fact too. A worker once named a deletion-offset ruling that was never made, and only a hand read of the record caught it. The gate now refuses the citable shape. `check_decision_citations` refuses any `\bd-[0-9a-f]{8}\b` id that no ruling on this machine carries. The shape is case-sensitive, so the all-capitals form is the escape for an illustrative id. It runs on four surfaces. The note lane and the ruling lane cover `fno backlog note`, `fno inbox decide`, and `fno inbox law set`. The commit-message scan covers every `fno do pr push`. The PR check covers the title plus body at `fno-agents pr-body-check` before `gh pr create`. The predicate is no-row, not no-LIVE-row. Supersession history honestly cites retired ids, so retired ids stay known to the gate. A retired id presented as in force remains with review. Some surfaces stay uncovered. A ruling named in prose with no id stays with review. Mail bodies stay unchecked because the mail CLI is shrink-only. A body edited after create with `gh pr edit` is unchecked. A raw `git push` outside the guarded verb is unchecked. `fno backlog update --details` is unchecked. There is no CI arm: the decision store is local to the machine, so a CI copy refuses every real citation.
 
 ## The chat-law trade, measured
 

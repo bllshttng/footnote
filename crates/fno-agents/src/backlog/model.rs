@@ -326,8 +326,6 @@ pub struct SessionRecord {
     pub ended_by: Option<String>,
     /// JSON values per the schema (observed_model is a dict on most rows).
     pub effort: Option<Value>,
-    pub at: Option<Value>,
-    pub claimed_at: Option<Value>,
     pub observed_model: Option<Value>,
     pub merge_grant: Option<Value>,
 }
@@ -348,10 +346,11 @@ pub struct Comment {
     pub extras: Map<String, Value>,
 }
 
-/// One encounters[] item.
+/// One encounters[] item. The wire key is `created_at`; the reader still
+/// accepts the old `ts` (see [`LEGACY_ITEM_KEYS`]).
 #[derive(Clone, Debug)]
 pub struct Encounter {
-    pub ts: String,
+    pub created_at: String,
     pub evidence: String,
     pub session_id: Option<String>,
     pub voter_key: Option<String>,
@@ -361,6 +360,21 @@ pub struct Encounter {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub extras: Map<String, Value>,
+}
+
+/// One findings[] item: a blocking review finding that holds the loop gate
+/// until `resolved_at` is stamped (a findings row; JSON key `findings`).
+#[derive(Clone, Debug)]
+pub struct Finding {
+    pub finding_id: String,
+    pub created_at: Option<String>,
+    pub body: String,
+    pub block_cmd: Option<String>,
+    pub block_excerpt: Option<String>,
+    pub source_session_id: Option<String>,
+    pub source_harness: Option<String>,
+    pub resolved_at: Option<String>,
+    pub resolved_by_session_id: Option<String>,
 }
 
 /// One decisions[] item. Waves 4 to 11 store these in node extras; wave 12
@@ -489,6 +503,7 @@ pub struct Node {
     pub sessions: Option<Vec<SessionRecord>>,
     pub comments: Option<Vec<Comment>>,
     pub encounters: Option<Vec<Encounter>>,
+    pub findings: Option<Vec<Finding>>,
     pub decisions: Option<Vec<DecisionRef>>,
     pub relations: Relations,
     pub supersession: Option<Supersession>,
@@ -654,6 +669,7 @@ impl Node {
             sessions: session_list(row)?,
             comments: comment_list(row)?,
             encounters: encounter_list(row)?,
+            findings: finding_list(row)?,
             decisions: decision_list(row)?,
             relations: Relations {
                 blocked_by: opt_str_list(row, "blocked_by")?,
@@ -1080,6 +1096,13 @@ impl Node {
                 .unwrap_or(Value::Null),
         );
         put(
+            "findings",
+            self.findings
+                .clone()
+                .map(|list| Value::Array(list.iter().map(finding_to_json).collect()))
+                .unwrap_or(Value::Null),
+        );
+        put(
             "decisions",
             self.decisions
                 .clone()
@@ -1125,9 +1148,10 @@ impl Node {
         Value::Object(out)
     }
 
-    /// The typed aggregates with no wave-4 table, as JSON keyed by their
-    /// graph.json names. nodes.rs stores these in the extras column;
-    /// [`Node::apply_residual`] reverses it on load.
+    /// The typed aggregates with no table of their own, as JSON keyed by
+    /// their graph.json names. nodes.rs stores these in the extras column,
+    /// except a cost_sessions list node_costs can hold, which moves to that
+    /// table; [`Node::apply_residual`] reverses it on load.
     pub fn residual_json(&self) -> Map<String, Value> {
         let mut out = Map::new();
         let mut put = |key: &str, value: Option<Value>| {
@@ -1135,12 +1159,6 @@ impl Node {
                 out.insert(key.to_string(), v);
             }
         };
-        if let Some(v) = &self.provenance.origin_evidence {
-            put("origin_evidence", Some(json!(v)));
-        }
-        if let Some(v) = &self.provenance.request_origin {
-            put("request_origin", Some(json!(v)));
-        }
         if let Some(list) = &self.costs {
             put(
                 "cost_sessions",
@@ -1343,11 +1361,59 @@ macro_rules! obj_list {
     };
 }
 
+/// The old item keys the reader still accepts, as (list, old key, new key),
+/// for one release after schema 4 (user ruling 2026-09-23). A session's
+/// `at` and `claimed_at` held its stamp time, the fact `started_at` now
+/// carries; an encounter's `ts` is its `created_at`. Writers emit only the
+/// new names; delete this map, and the folds that read it, one release on.
+pub const LEGACY_ITEM_KEYS: &[(&str, &str, &str)] = &[
+    ("sessions", "at", "started_at"),
+    ("sessions", "claimed_at", "started_at"),
+    ("encounters", "ts", "created_at"),
+];
+
+/// A session's started_at, folding a legacy key that holds a UTC ISO-8601
+/// string. A legacy value that is not one stays in the item's extras, so
+/// nothing is lost and the column CHECK never refuses a fold.
+fn session_started_at(o: &Map<String, Value>) -> (Option<String>, Vec<&'static str>) {
+    let mut started_at = sub_opt_str(o, "started_at");
+    let mut consumed = Vec::new();
+    for (list, old, _) in LEGACY_ITEM_KEYS {
+        if *list != "sessions" {
+            continue;
+        }
+        let Some(value) = o.get(*old).and_then(Value::as_str) else {
+            continue;
+        };
+        if !crate::backlog::schema_v4::is_utc_iso(value) {
+            continue;
+        }
+        consumed.push(*old);
+        if started_at.is_none() {
+            started_at = Some(value.to_string());
+        }
+    }
+    (started_at, consumed)
+}
+
 obj_list!(
     session_list,
     "sessions",
     SessionRecord,
     |o: &Map<String, Value>| -> Result<SessionRecord, ModelError> {
+        let (started_at, consumed) = session_started_at(o);
+        let mut known = vec![
+            "phase",
+            "harness",
+            "session_id",
+            "started_at",
+            "ended_at",
+            "ended_by",
+            "effort",
+            "observed_model",
+            "merge_grant",
+        ];
+        known.extend(consumed);
         Ok(SessionRecord {
             phase: sub_opt_str(o, "phase")
                 .ok_or_else(|| ModelError("sessions item needs phase".into()))?,
@@ -1355,30 +1421,13 @@ obj_list!(
                 .ok_or_else(|| ModelError("sessions item needs harness".into()))?,
             session_id: sub_opt_str(o, "session_id")
                 .ok_or_else(|| ModelError("sessions item needs session_id".into()))?,
-            started_at: sub_opt_str(o, "started_at"),
+            started_at,
             ended_at: sub_opt_str(o, "ended_at"),
             ended_by: sub_opt_str(o, "ended_by"),
             effort: sub_opt_value(o, "effort"),
-            at: sub_opt_value(o, "at"),
-            claimed_at: sub_opt_value(o, "claimed_at"),
             observed_model: sub_opt_value(o, "observed_model"),
             merge_grant: sub_opt_value(o, "merge_grant"),
-            extras: leftovers(
-                o,
-                &[
-                    "phase",
-                    "harness",
-                    "session_id",
-                    "started_at",
-                    "ended_at",
-                    "ended_by",
-                    "effort",
-                    "at",
-                    "claimed_at",
-                    "observed_model",
-                    "merge_grant",
-                ],
-            ),
+            extras: leftovers(o, &known),
         })
     },
     session_to_json
@@ -1389,8 +1438,13 @@ obj_list!(
     "progress_notes",
     Comment,
     |o: &Map<String, Value>| -> Result<Comment, ModelError> {
+        // A ts that is not UTC ISO-8601 stays in extras, like a session's
+        // legacy `at`, so the column CHECK never refuses a stored note.
+        let created_at =
+            sub_opt_str(o, "ts").filter(|ts| crate::backlog::schema_v4::is_utc_iso(ts));
+        let ts_key = if created_at.is_some() { "ts" } else { "" };
         Ok(Comment {
-            created_at: sub_opt_str(o, "ts"),
+            created_at,
             body: sub_opt_str(o, "text"),
             kind: sub_opt_str(o, "kind"),
             title: sub_opt_str(o, "title"),
@@ -1402,7 +1456,7 @@ obj_list!(
             extras: leftovers(
                 o,
                 &[
-                    "ts",
+                    ts_key,
                     "text",
                     "kind",
                     "title",
@@ -1419,13 +1473,36 @@ obj_list!(
 );
 
 obj_list!(
+    finding_list,
+    "findings",
+    Finding,
+    |o: &Map<String, Value>| -> Result<Finding, ModelError> {
+        Ok(Finding {
+            finding_id: sub_opt_str(o, "finding_id")
+                .ok_or_else(|| ModelError("findings item needs finding_id".into()))?,
+            created_at: sub_opt_str(o, "created_at"),
+            body: sub_opt_str(o, "body")
+                .ok_or_else(|| ModelError("findings item needs body".into()))?,
+            block_cmd: sub_opt_str(o, "block_cmd"),
+            block_excerpt: sub_opt_str(o, "block_excerpt"),
+            source_session_id: sub_opt_str(o, "source_session_id"),
+            source_harness: sub_opt_str(o, "source_harness"),
+            resolved_at: sub_opt_str(o, "resolved_at"),
+            resolved_by_session_id: sub_opt_str(o, "resolved_by_session_id"),
+        })
+    },
+    finding_to_json
+);
+
+obj_list!(
     encounter_list,
     "encounters",
     Encounter,
     |o: &Map<String, Value>| -> Result<Encounter, ModelError> {
         Ok(Encounter {
-            ts: sub_opt_str(o, "ts")
-                .ok_or_else(|| ModelError("encounters item needs ts".into()))?,
+            created_at: sub_opt_str(o, "created_at")
+                .or_else(|| sub_opt_str(o, "ts"))
+                .ok_or_else(|| ModelError("encounters item needs created_at".into()))?,
             evidence: sub_opt_str(o, "evidence")
                 .ok_or_else(|| ModelError("encounters item needs evidence".into()))?,
             session_id: sub_opt_str(o, "session_id"),
@@ -1438,6 +1515,7 @@ obj_list!(
             extras: leftovers(
                 o,
                 &[
+                    "created_at",
                     "ts",
                     "evidence",
                     "session_id",
@@ -1558,8 +1636,6 @@ fn session_to_json(s: &SessionRecord) -> Value {
     }
     for (key, value) in [
         ("effort", &s.effort),
-        ("at", &s.at),
-        ("claimed_at", &s.claimed_at),
         ("observed_model", &s.observed_model),
         ("merge_grant", &s.merge_grant),
     ] {
@@ -1573,8 +1649,9 @@ fn session_to_json(s: &SessionRecord) -> Value {
 
 pub(crate) fn comment_to_json(c: &Comment) -> Value {
     let mut obj = Map::new();
-    if let Some(v) = &c.created_at {
-        obj.insert("ts".into(), json!(v));
+    let ts = c.created_at.as_ref().map(|v| json!(v));
+    if let Some(v) = ts.or_else(|| c.extras.get("ts").cloned()) {
+        obj.insert("ts".into(), v);
     }
     if let Some(v) = &c.body {
         obj.insert("text".into(), json!(v));
@@ -1596,9 +1673,29 @@ pub(crate) fn comment_to_json(c: &Comment) -> Value {
     Value::Object(obj)
 }
 
+pub(crate) fn finding_to_json(f: &Finding) -> Value {
+    let mut obj = Map::new();
+    obj.insert("finding_id".into(), json!(f.finding_id));
+    obj.insert("body".into(), json!(f.body));
+    for (key, value) in [
+        ("created_at", &f.created_at),
+        ("block_cmd", &f.block_cmd),
+        ("block_excerpt", &f.block_excerpt),
+        ("source_session_id", &f.source_session_id),
+        ("source_harness", &f.source_harness),
+        ("resolved_at", &f.resolved_at),
+        ("resolved_by_session_id", &f.resolved_by_session_id),
+    ] {
+        if let Some(v) = value {
+            obj.insert(key.to_string(), json!(v));
+        }
+    }
+    Value::Object(obj)
+}
+
 fn encounter_to_json(e: &Encounter) -> Value {
     let mut obj = Map::new();
-    obj.insert("ts".into(), json!(e.ts));
+    obj.insert("created_at".into(), json!(e.created_at));
     obj.insert("evidence".into(), json!(e.evidence));
     for (key, value) in [
         ("session_id", &e.session_id),
@@ -1831,6 +1928,7 @@ fn is_known_key(key: &str) -> bool {
             | "sessions"
             | "progress_notes"
             | "encounters"
+            | "findings"
             | "decisions"
             | "blocked_by"
             | "related"

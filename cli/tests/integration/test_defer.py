@@ -7,7 +7,6 @@ Covers:
 - ``--include-deferred`` flag on ``ready`` / ``next``
 - ``status`` summary surfaces a ``deferred`` count
 - ``triage`` proposal action (validate + apply)
-- Legacy ``completed_at: "deferred:<ts>"`` rows migrate to the new schema
 """
 from __future__ import annotations
 
@@ -54,7 +53,11 @@ def _invoke(*args, input=None):
 
 
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so post-command
+    # assertions read store rows, not the file.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _seed_with_plan(tmp_path, title: str = "Plan") -> str:
@@ -62,12 +65,9 @@ def _seed_with_plan(tmp_path, title: str = "Plan") -> str:
     plan.write_text(f"---\ncreated: 2026-05-05\ntitle: {title}\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output
-    entries = json.loads(open(plan.parent.parent / "graph.json").read_text())["entries"] \
-        if (plan.parent.parent / "graph.json").exists() else []
-    if not entries:
-        # Resolve via the runner's graph_path (tmp_graph fixture sets it).
-        from fno.graph._constants import GRAPH_JSON
-        entries = json.loads(Path(GRAPH_JSON).read_text())["entries"]
+    from fno.graph._constants import GRAPH_JSON
+
+    entries = _read_entries(Path(GRAPH_JSON))
     return next(e["id"] for e in entries if e.get("plan_path") == str(plan))
 
 
@@ -116,20 +116,24 @@ def test_deferred_overrides_blocked(tmp_graph, tmp_path):
 def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     """Done wins over deferred. A completed node stays done."""
     node_id = _seed_with_plan(tmp_path, "Plan Done")
+    _invoke("backlog", "update", node_id, "--completion-note", "done-beats-deferred fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "done"
 
-    # Force-set deferred_at via direct mutation; recompute should still pick done.
-    import fno.graph._constants as gc
-    data = json.loads(gc.GRAPH_JSON.read_text())
-    for e in data["entries"]:
-        if e["id"] == node_id:
-            e["deferred_at"] = "2026-04-30T00:00:00+00:00"
-            e["deferred_reason"] = "should not surface"
-    gc.GRAPH_JSON.write_text(json.dumps(data))
+    # Force-set deferred_at via direct store mutation; recompute should still pick done.
+    from fno.graph.store import commit_rows_via_store
+
+    def stamp_deferred(rows):
+        for e in rows:
+            if e["id"] == node_id:
+                e["deferred_at"] = "2026-04-30T00:00:00+00:00"
+                e["deferred_reason"] = "should not surface"
+        return rows
+
+    commit_rows_via_store(tmp_graph, stamp_deferred)
 
     # Trigger recompute via any mutation
     _invoke("backlog", "add", "trigger")
@@ -138,41 +142,6 @@ def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     assert node.get("status") == "done", (
         f"done must beat deferred; got {node.get('status')!r}"
     )
-
-
-def test_legacy_deferred_completed_at_migrates(tmp_graph):
-    """Pre-feature rows with ``completed_at: "deferred:<ts>"`` flip to the new schema."""
-    legacy_ts = "2026-04-01T12:00:00+00:00"
-    tmp_graph.write_text(json.dumps({
-        "entries": [
-            {
-                "id": "ab-legacy42",
-                "title": "Legacy deferred row",
-                "type": "feature",
-                "priority": "p2",
-                "domain": "code",
-                "blocked_by": [],
-                "session_id": None,
-                "claimed_at": None,
-                "completed_at": f"deferred:{legacy_ts}",
-                "plan_path": "plan.md",
-                "created_at": "2026-04-01T00:00:00+00:00",
-            }
-        ]
-    }))
-
-    # Trigger recompute via any mutation.
-    _invoke("backlog", "add", "trigger migration")
-
-    entries = _read_entries(tmp_graph)
-    legacy = next(e for e in entries if e["id"] == "ab-legacy42")
-    assert legacy.get("completed_at") in (None, ""), (
-        f"legacy completed_at prefix should be cleared; got {legacy.get('completed_at')!r}"
-    )
-    assert legacy.get("deferred_at") == legacy_ts, (
-        f"deferred_at should be migrated from the prefix; got {legacy.get('deferred_at')!r}"
-    )
-    assert legacy.get("status") == "deferred"
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +212,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
     the patch door exists to close.
     """
     node_id = _seed_with_plan(tmp_path, "Plan Done Then Defer")
+    _invoke("backlog", "update", node_id, "--completion-note", "done-door fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
@@ -262,6 +232,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
 def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     """Triage apply lands the same done -> deferred transition cleanly."""
     node_id = _seed_with_plan(tmp_path, "Plan Triage Done Then Defer")
+    _invoke("backlog", "update", node_id, "--completion-note", "triage defer fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     proposal = tmp_path / "p.json"
@@ -374,11 +345,12 @@ def test_status_summary_shows_deferred_count(tmp_graph, tmp_path):
 def test_triage_defer_proposal_validates_and_applies(tmp_graph, tmp_path):
     """A proposal with a defer entry validates clean and applies the defer."""
     node_id = _seed_with_plan(tmp_path, "Plan Triage Defer")
-    graph = json.loads(tmp_graph.read_text())
-    graph["entries"].append(
+    # The file is a frozen mirror; the folded child seeds through the store.
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(tmp_graph, lambda rows: rows + [
         {"id": "x-f01d", "title": "Folded", "contained_in": node_id, "status": "ready"}
-    )
-    tmp_graph.write_text(json.dumps(graph))
+    ])
 
     proposal = tmp_path / "proposal.json"
     proposal.write_text(json.dumps({
@@ -589,6 +561,7 @@ def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path)
     """x-665f: the door refuses leaving done, so a batch naming a done node
     (first) refuses before the other ids are written."""
     done_node = _seed_with_plan(tmp_path, "Batch Done")
+    _invoke("backlog", "update", done_node, "--completion-note", "batch defer fixture")
     _invoke("backlog", "done", done_node, "--skip-stamp")
     idea_node = _seed_idea("Batch Idea")
 

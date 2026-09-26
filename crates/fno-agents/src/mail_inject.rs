@@ -35,8 +35,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
-use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
-use crate::claude_roster::{read_control_key, ClaudeRoster};
+use crate::claude_drive::{
+    contains_detach_sentinel, find_transcript_in, transcript_len, DriveError,
+};
+use crate::claude_roster::{read_control_key_in, ClaudeRoster};
 use crate::codex_inject::discover_loaded_threads;
 use crate::paths::AgentsHome;
 
@@ -484,9 +486,10 @@ pub fn mail_send_receipt(stdout: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Did the send land? Exit 0 covers both `delivered (hosted)` and
-/// `queued (durable)`, so only the receipt says which.
-pub fn mail_send_landed(code: i32, stdout: &str) -> bool {
+/// Did the send get accepted? Exit 0 covers both `delivered (hosted)` and
+/// `queued (durable)`, so only the receipt says which. Acceptance is not landing:
+/// see `fno agents mail sent`.
+pub fn mail_send_accepted(code: i32, stdout: &str) -> bool {
     code == 0 && mail_send_receipt(stdout).contains("delivered (hosted)")
 }
 
@@ -497,17 +500,23 @@ fn emit(delivered: bool, reason: &str) -> i32 {
 }
 
 /// Bracketed-paste guards (xterm DEC mode 2004): the recipient TUI treats
-/// everything between them as ONE paste event. Required because a `<fno_mail>`
-/// envelope is multi-line (`open_tag\nbody\n</fno_mail>`), and a raw multi-line
-/// write without them submits line-by-line -- the recipient records the open tag
-/// alone (enough to satisfy the content confirm) while the body arrives as
-/// separate input, dropping the message. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
+/// everything between them as ONE paste event. Required whenever the payload
+/// carries a control byte (the envelope renderer emits one clean line unless
+/// the body itself does not): a raw multi-line write without them submits
+/// line-by-line -- the recipient records the open tag alone (enough to satisfy
+/// the content confirm) while the body arrives as separate input, dropping the
+/// message; a lone CR or tab fires inside the input box, an ESC opens an
+/// escape sequence. A clean single-line payload is typed as ordinary
+/// keystrokes, unwrapped, so it never wears the operator-clipboard paste
+/// label. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
 const PASTE_BEGIN: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
-/// Paste the envelope as RAW BYTES on the ATTACHED transport -- wrapped in
-/// bracketed-paste guards so a multi-line body lands as ONE paste -- settle, then
-/// send a separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a
+/// Type the envelope as RAW BYTES on the ATTACHED transport -- bracketed-paste
+/// guards whenever it carries a control byte, so that form lands as ONE paste
+/// while a clean single-line envelope arrives as typed keystrokes, unlabelled
+/// -- settle, then send a separate raw `\r` byte as the Enter. Post-attach the
+/// `control.sock` is a
 /// raw keystroke pipe (node x-aaaa): an `op:'reply'` JSON write here lands its
 /// frames -- auth key included -- as literal text in the recipient input box,
 /// unsent. So we type the turn exactly as a human would: paste, then a wire-level
@@ -523,8 +532,19 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
     }
+    // Guards whenever the payload carries anything the raw-keystroke path
+    // would act on: a newline splits the submit, a lone CR or tab fires
+    // inside the input box, an ESC opens an escape sequence. One control
+    // char anywhere demotes the whole write to paste content, where every
+    // byte is inert. A clean single-line payload stays typed keystrokes, so
+    // it never wears the operator-clipboard paste label.
+    let line = if text.chars().any(char::is_control) {
+        format!("{PASTE_BEGIN}{text}{PASTE_END}")
+    } else {
+        text.to_string()
+    };
     transport
-        .send_line(&format!("{PASTE_BEGIN}{text}{PASTE_END}"))
+        .send_line(&line)
         .map_err(|e| DriveError::Io(e.to_string()))?;
     std::thread::sleep(settle);
     transport
@@ -598,14 +618,27 @@ fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Resu
 /// call it, so a probe cannot disagree with the send it predicts -- a second
 /// implementation of these four steps would drift the moment resolution changes,
 /// and a probe that says yes where the send says no is worse than no probe.
-fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static str> {
-    let roster = ClaudeRoster::load_default().map_err(|_| NOT_INJECTABLE)?;
+fn resolve_target_in(
+    session: &str,
+    daemon_dir: &Path,
+    projects_base: &Path,
+) -> Result<(PathBuf, String, PathBuf), &'static str> {
+    let roster = ClaudeRoster::load(&daemon_dir.join("roster.json")).map_err(|_| NOT_INJECTABLE)?;
     let worker = roster.find(session).ok_or(NOT_INJECTABLE)?;
     let sock = worker.resolve_control_sock().ok_or(NOT_INJECTABLE)?;
     // No transcript yet == we cannot confirm landing, so there is no usable path
     // even though the socket resolved.
-    let transcript = find_transcript(&worker.session_id).ok_or("no-transcript")?;
+    let transcript =
+        find_transcript_in(projects_base, &worker.session_id).ok_or("no-transcript")?;
     Ok((sock, worker.short_id().to_string(), transcript))
+}
+
+fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static str> {
+    resolve_target_in(
+        session,
+        &crate::claude_roster::daemon_dir(),
+        &crate::claude_drive::claude_projects_dir(),
+    )
 }
 
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
@@ -628,8 +661,31 @@ pub fn deliver_via_control_sock(
     interval_ms: u64,
     enter_delay_ms: u64,
 ) -> Result<(), &'static str> {
-    let (sock, short, transcript) = resolve_target(session)?;
-    let auth = read_control_key();
+    deliver_via_control_sock_in(
+        &crate::claude_roster::daemon_dir(),
+        &crate::claude_drive::claude_projects_dir(),
+        session,
+        text,
+        attempts,
+        interval_ms,
+        enter_delay_ms,
+    )
+}
+
+/// Deliver through an explicitly selected Claude account root. The roster,
+/// control key and transcript all come from that same root, so an isolated
+/// account can never attach to or confirm against the ambient account.
+pub fn deliver_via_control_sock_in(
+    daemon_dir: &Path,
+    projects_base: &Path,
+    session: &str,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    let (sock, short, transcript) = resolve_target_in(session, daemon_dir, projects_base)?;
+    let auth = read_control_key_in(daemon_dir);
 
     let mut transport = UnixControlTransport::connect(&sock).map_err(|_| "io-error")?;
     if perform_attach(
@@ -740,7 +796,12 @@ enum KeeperConfirm {
         baseline: u64,
     },
     /// The file does not exist yet; every line it ever has is new signal.
-    PendingStore,
+    /// The variant carries the hosted harness, so the confirm closure
+    /// re-looks the store up in THAT harness's session store instead of
+    /// hard-coding pi.
+    PendingStore {
+        harness: String,
+    },
     /// The hosted harness keeps no locally greppable accepted-turn record
     /// (cursor-agent: the chat store lives server-side; agy: a sqlite db,
     /// not a per-turn transcript). The pty stream was once grepped for a
@@ -755,20 +816,47 @@ enum KeeperConfirm {
     Refused(&'static str),
 }
 
-fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
+fn resolve_keeper_confirm(
+    target: &KeeperTarget,
+    session: &str,
+    pi_store: Option<&crate::pi::PiStore>,
+    grok_root: &Path,
+) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
         // cursor-agent's chat store is remote (measured: the id appears in no
         // file under its state root after two live turns) and agy keeps its
         // conversations in a sqlite db - neither has a per-turn transcript a
-        // confirm could grep, and pty paint is not acceptance evidence
-        //. Both type and stay unconfirmed.
+        // confirm could grep, and pty paint is not acceptance evidence.
+        // Both type and stay unconfirmed.
         "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
-        "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
+        "pi" => {
+            let Some(store) = pi_store else {
+                return KeeperConfirm::Refused("session-store-unreadable");
+            };
+            match crate::pi::lookup_sessions_in(store, &target.cwd, session) {
+                crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+                    baseline: transcript_len(&file),
+                    path: file,
+                },
+                crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                    harness: "pi".to_string(),
+                },
+                crate::pi::SessionLookup::Duplicate { .. } => {
+                    KeeperConfirm::Refused("duplicate-session-store")
+                }
+                crate::pi::SessionLookup::Unknown { .. } => {
+                    KeeperConfirm::Refused("session-store-unreadable")
+                }
+            }
+        }
+        "grok" => match crate::grok_store::lookup_session(grok_root, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
                 path: file,
             },
-            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore,
+            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                harness: "grok".to_string(),
+            },
             crate::pi::SessionLookup::Duplicate { .. } => {
                 KeeperConfirm::Refused("duplicate-session-store")
             }
@@ -798,7 +886,8 @@ pub fn deliver_via_keeper_socket(
 ) -> Result<(), &'static str> {
     deliver_via_keeper_socket_in(
         &crate::paths::AgentsHome::from_env(),
-        &crate::pi::pi_sessions_root(),
+        None,
+        &crate::grok_store::grok_sessions_root(),
         session,
         text,
         attempts,
@@ -807,12 +896,17 @@ pub fn deliver_via_keeper_socket(
     )
 }
 
-/// Deliver `text` to a keeper-hosted lane-B thread against an explicit agents
-/// home and pi sessions root: the seam the keeper journey test drives, so the
-/// fixtures resolve rows and confirm targets exactly as the verb does.
+/// Deliver `text` to a keeper-hosted lane-B thread against an explicit
+/// agents home, pi session store, and grok sessions root: the seam the
+/// keeper journey test drives, so the fixtures resolve rows and confirm
+/// targets exactly as the verb does. `pi_store` of `None` resolves the
+/// store for the row's cwd exactly as production does, honoring
+/// `PI_CODING_AGENT_DIR` and the session-dir settings; a test injects a
+/// scratch store through `Some`.
 pub fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
-    pi_root: &Path,
+    pi_store: Option<&crate::pi::PiStore>,
+    grok_root: &Path,
     session: &str,
     text: &str,
     attempts: u32,
@@ -820,13 +914,22 @@ pub fn deliver_via_keeper_socket_in(
     enter_delay_ms: u64,
 ) -> Result<(), &'static str> {
     let target = resolve_keeper_target_in(home, session)?;
-    // Connect BEFORE resolving the confirm (the claude lane's ordering: a
-    // failed connect is a transport miss, never a not-confirmed turn, and the
-    // transcript baseline that confirm resolution takes must postdate the
-    // connect).
     let stream =
         std::os::unix::net::UnixStream::connect(&target.sock).map_err(|_| "no-keeper-listener")?;
-    let confirm = resolve_keeper_confirm(&target, session, pi_root);
+    let store_fallback;
+    let store: Option<&crate::pi::PiStore> = match pi_store {
+        Some(s) => Some(s),
+        None => match crate::pi::pi_store(&target.cwd) {
+            Ok(s) => {
+                store_fallback = s;
+                Some(&store_fallback)
+            }
+            // The store cannot be resolved for this cwd, so no confirm is
+            // possible; the typed refusal names it and nothing gets typed.
+            Err(_) => None,
+        },
+    };
+    let confirm = resolve_keeper_confirm(&target, session, store, grok_root);
     if let KeeperConfirm::Refused(reason) = confirm {
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
@@ -869,8 +972,15 @@ pub fn deliver_via_keeper_socket_in(
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
             }
-            KeeperConfirm::PendingStore => {
-                match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
+            KeeperConfirm::PendingStore { harness } => {
+                let hit = match harness.as_str() {
+                    "pi" => match store {
+                        Some(s) => crate::pi::lookup_sessions_in(s, &target.cwd, session),
+                        None => return false,
+                    },
+                    _ => crate::grok_store::lookup_session(grok_root, session),
+                };
+                match hit {
                     crate::pi::SessionLookup::One { file } => {
                         confirm_content_after(&file, marker, 0).unwrap_or(false)
                     }
@@ -1041,13 +1151,13 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
     enforce_body_cap(text.len(), warn, refuse)
 }
 
-/// Refuse an unframed payload that is not a single line. The invariant this
-/// door pins: an unframed payload is ONE line, typed verbatim - a slash
-/// command, a codex skill verb, a plain word (law d-5976045c). Authored
-/// multi-line prose is style-checked and wrapped by `fno agents mail send`; a
-/// `<fno_mail>` / `<cross-session-message>` envelope is framed and skipped.
-/// `Some(exit)` refuses before delivery and before the audit record; `None`
-/// proceeds.
+/// Refuse an unframed payload that is not a single command line. The
+/// invariant this door pins: an unframed payload is ONE line typed verbatim
+/// and it is a command, so it starts with / or $ (law d-f6570dc9, amending
+/// d-5976045c). Authored prose is style-checked and wrapped by `fno agents
+/// mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is framed
+/// and skipped. `Some(exit)` refuses before delivery and before the audit
+/// record; `None` proceeds.
 fn single_line_decision(text: &str) -> Option<i32> {
     if is_framed_envelope(text) {
         return None;
@@ -1060,6 +1170,16 @@ fn single_line_decision(text: &str) -> Option<i32> {
         eprintln!(
             "mail-inject: an unframed payload must be a single line. A second line rides \
              in as trailing content on the submitted turn."
+        );
+        return Some(1);
+    }
+    // Raw exists to run a command, not to carry a message: an unwrapped
+    // payload lands as user-role text, so a message here impersonates the
+    // operator. The wrapped lane keeps the sender visible.
+    if !(trimmed.starts_with('/') || trimmed.starts_with('$')) {
+        eprintln!(
+            "mail-inject: raw is for running a command only: the payload must start with / \
+             or $. Drop --raw and send the message wrapped."
         );
         return Some(1);
     }
@@ -1456,12 +1576,11 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
-    // Single-line predicate on UNWRAPPED bodies. Any single line rides verbatim
-    // (slash command, codex verb, plain word); a second content line is the one
-    // refusal. A direct binary call is one unwrapped door and the Python raw
-    // send is the other, so the same predicate lives here. Refuses before
-    // delivery and before the audit record, matching the byte cap. Framed
-    // envelopes skip it.
+    // Single-line command predicate on UNWRAPPED bodies: one line, and it is a
+    // command (starts with / or $); a message goes wrapped. A direct binary
+    // call is one unwrapped door and the Python raw send is the other, so the
+    // same predicate lives here. Refuses before delivery and before the audit
+    // record, matching the byte cap. Framed envelopes skip it.
     if let Some(code) = single_line_decision(&text) {
         return code;
     }
@@ -1580,23 +1699,26 @@ mod tests {
     }
 
     #[test]
-    fn mail_send_landed_hosted_receipt_is_true() {
-        assert!(mail_send_landed(0, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_hosted_receipt_is_true() {
+        assert!(mail_send_accepted(0, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_queued_receipt_is_false() {
-        assert!(!mail_send_landed(0, "msg-1 queued (durable) [live-miss]\n"));
+    fn mail_send_accepted_queued_receipt_is_false() {
+        assert!(!mail_send_accepted(
+            0,
+            "msg-1 queued (durable) [live-miss]\n"
+        ));
     }
 
     #[test]
-    fn mail_send_landed_nonzero_exit_is_false() {
-        assert!(!mail_send_landed(1, "msg-1 delivered (hosted)\n"));
+    fn mail_send_accepted_nonzero_exit_is_false() {
+        assert!(!mail_send_accepted(1, "msg-1 delivered (hosted)\n"));
     }
 
     #[test]
-    fn mail_send_landed_empty_stdout_is_false() {
-        assert!(!mail_send_landed(0, "\n"));
+    fn mail_send_accepted_empty_stdout_is_false() {
+        assert!(!mail_send_accepted(0, "\n"));
         assert_eq!(mail_send_receipt("  \n"), "");
     }
 
@@ -1654,8 +1776,7 @@ mod tests {
             true,
         );
 
-        let lines: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap()
+        let lines: Vec<String> = crate::events::committed_journal_text(&path)
             .lines()
             .map(String::from)
             .collect();
@@ -1686,8 +1807,7 @@ mod tests {
             true,
         );
         let last: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&path)
-                .unwrap()
+            crate::events::committed_journal_text(&path)
                 .lines()
                 .last()
                 .unwrap(),
@@ -1705,6 +1825,58 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mailinj-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("t.jsonl")
+    }
+
+    #[test]
+    fn pinned_mail_target_uses_the_supplied_roster_and_projects_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon_dir = temp.path().join("alt/daemon");
+        let projects_base = temp.path().join("alt/projects");
+        let session = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let short = "0a1b2c3d";
+        let spare = daemon_dir.join("deadbeef/spare");
+        let project = projects_base.join("encoded-project");
+        std::fs::create_dir_all(&spare).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let control = daemon_dir.join("deadbeef/control.sock");
+        std::fs::write(&control, b"").unwrap();
+        let pty = spare.join(format!("{short}.pty.sock"));
+        std::fs::write(&pty, b"").unwrap();
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(&transcript, b"").unwrap();
+        let roster = serde_json::json!({
+            "workers": {
+                short: {
+                    "sessionId": session,
+                    "ptySock": pty.to_string_lossy(),
+                }
+            }
+        });
+        std::fs::write(
+            daemon_dir.join("roster.json"),
+            serde_json::to_vec(&roster).unwrap(),
+        )
+        .unwrap();
+
+        let (sock, got_short, got_transcript) =
+            resolve_target_in(session, &daemon_dir, &projects_base).unwrap();
+
+        assert_eq!(sock, control);
+        assert_eq!(got_short, short);
+        assert_eq!(got_transcript, transcript);
+    }
+
+    #[test]
+    fn pinned_mail_control_key_comes_from_the_supplied_daemon_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon_dir = temp.path().join("alt/daemon");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        std::fs::write(daemon_dir.join("control.key"), "pinned-key\n").unwrap();
+
+        assert_eq!(
+            read_control_key_in(&daemon_dir).as_deref(),
+            Some("pinned-key")
+        );
     }
 
     #[test]
@@ -1732,6 +1904,39 @@ mod tests {
         assert!(
             !t.sent[0].contains("auth"),
             "raw paste must never carry the control auth key"
+        );
+    }
+
+    #[test]
+    fn inject_with_submit_single_line_types_keystrokes_without_paste_guards() {
+        // A single-line envelope is ordinary keystrokes -- no
+        // bracketed-paste guards, so it never wears the operator-clipboard
+        // paste label. The separate wire-level CR is unchanged.
+        let mut t = Fake { sent: Vec::new() };
+        let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">hi MARKER</fno_mail>";
+        inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
+        assert_eq!(t.sent, vec![envelope.to_string(), "\r".to_string()]);
+        assert!(
+            !t.sent[0].contains(PASTE_BEGIN),
+            "single line must not be paste-labelled"
+        );
+    }
+
+    #[test]
+    fn inject_with_submit_control_byte_payload_still_pastes() {
+        // A lone CR inside a one-line body is the Enter keystroke on this
+        // transport, and the CLI preserves it in bodies by design. A control
+        // byte demotes the whole write to paste content, where every byte is
+        // inert.
+        let mut t = Fake { sent: Vec::new() };
+        let payload = "one\rline MARKER";
+        inject_with_submit(&mut t, payload, Duration::ZERO).unwrap();
+        assert_eq!(
+            t.sent,
+            vec![
+                format!("{PASTE_BEGIN}{payload}{PASTE_END}"),
+                "\r".to_string()
+            ]
         );
     }
 
@@ -1796,34 +2001,36 @@ mod tests {
             ),
             None
         );
-        // An unwrapped single line is the documented unframed shape: a slash
-        // command, a codex skill verb, a plain word.
+        // An unwrapped single line is the documented unframed shape: a command
+        // line, slash or dollar prefixed. A message goes wrapped.
         assert_eq!(single_line_decision("/code-review"), None);
         assert_eq!(single_line_decision("  /compact  "), None);
-        assert_eq!(single_line_decision("hello"), None);
         assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
-        assert_eq!(single_line_decision("  hello  "), None);
         // A trailing terminator (the newline `echo` appends) is harmless and passes.
         assert_eq!(single_line_decision("/code-review\n"), None);
         assert_eq!(single_line_decision("/compact\r\n"), None);
     }
 
     #[test]
-    fn single_line_passes_prose_and_prefix_lookalikes() {
-        // d-5976045c: a raw payload need not start with a slash. Plain words and
-        // codex skill verbs ride this lane verbatim.
-        assert_eq!(single_line_decision("hello there"), None);
-        assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
-        assert_eq!(single_line_decision("  hello  "), None);
-        // A framed-looking word that does not start the payload is one line of
-        // prose here; the forged-envelope decision refuses a real embedded tag.
-        assert_eq!(single_line_decision("see <fno_mail> mid-sentence"), None);
-        // A prefix lookalike is NOT a framed envelope: it passes this predicate,
-        // and the forged-envelope tests still refuse a real embedded tag.
+    fn single_line_refuses_prose_and_non_command_lookalikes() {
+        // d-f6570dc9: raw runs a command only. A plain word is a message, and a
+        // message goes wrapped so its sender stays visible.
+        assert_eq!(single_line_decision("hello"), Some(1));
+        assert_eq!(single_line_decision("  hello  "), Some(1));
+        assert_eq!(single_line_decision("hello there"), Some(1));
+        // A framed-looking word that does not start the payload is prose here;
+        // the forged-envelope decision refuses a real embedded tag.
+        assert_eq!(single_line_decision("see <fno_mail> mid-sentence"), Some(1));
+        // A prefix lookalike is NOT a framed envelope: it fails the
+        // command-prefix decision here, and the forged-envelope tests still
+        // refuse a real embedded tag.
         assert!(!is_framed_envelope("<fno_mailicious prose here"));
-        assert_eq!(single_line_decision("<fno_mailicious prose here"), None);
+        assert_eq!(single_line_decision("<fno_mailicious prose here"), Some(1));
         assert!(!is_framed_envelope("<cross-session-messager bypass"));
-        assert_eq!(single_line_decision("<cross-session-messager bypass"), None);
+        assert_eq!(
+            single_line_decision("<cross-session-messager bypass"),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2306,7 +2513,7 @@ mod tests {
         let attempts = 2 * CR_RESUBMIT_EVERY; // two resubmit windows
         let r = confirm_with_cr_retry(&mut t, attempts, Duration::ZERO, || false);
         assert_eq!(r, Err("not-confirmed"));
-        // paste + initial CR (inject_with_submit) + one CR per resubmit window.
+        // payload + initial CR (inject_with_submit) + one CR per resubmit window.
         assert_eq!(t.sent.len() as u32, 2 + attempts / CR_RESUBMIT_EVERY);
         // Every write after the paste is a bare raw CR -- no JSON, no auth.
         for line in &t.sent[1..] {
@@ -2903,6 +3110,172 @@ mod tests {
         assert!(parse_args(&argv(&["--session", "s1", "--harness", "notaharness"])).is_err());
     }
 
+    /// A fake keeper that records the submitted turn the way grok does: a
+    /// JSON-escaped line appended to
+    /// `<grok_root>/<group>/<session>/chat_history.jsonl` on the wire CR.
+    fn spawn_grok_recording_keeper_handle(
+        sock: &Path,
+        text: &str,
+        grok_root: &Path,
+        session: &str,
+    ) -> std::thread::JoinHandle<()> {
+        use crate::pane_keeper::{decode, Decode, Frame};
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        let text = text.to_string();
+        let grok_root = grok_root.to_path_buf();
+        let session = session.to_string();
+        std::thread::Builder::new()
+            .name("fake-grok-keeper".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                'outer: loop {
+                    loop {
+                        match decode(&buf) {
+                            Decode::NeedMore => break,
+                            Decode::Violation(_) => break 'outer,
+                            Decode::Frame(frame, used) => {
+                                buf.drain(..used);
+                                let is_cr =
+                                    matches!(&frame, Frame::Input(b) if b.as_slice() == b"\r");
+                                if is_cr {
+                                    let dir = grok_root.join("%2Fcwd").join(&session);
+                                    std::fs::create_dir_all(&dir).unwrap();
+                                    let line = serde_json::json!({ "text": text }).to_string();
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(dir.join("chat_history.jsonl"))
+                                        .unwrap();
+                                    writeln!(f, "{line}").unwrap();
+                                }
+                            }
+                        }
+                    }
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break 'outer,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_confirms_from_the_session_store() {
+        // AC5-HP pending shape: the store does not exist at resolve time and
+        // materializes once the keeper records the CR'd turn; the confirm
+        // closure re-looks the grok store and greps the marker from byte 0.
+        let (home, base) = keeper_mail_home("grokok");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        // The store ROOT exists with no session in it yet: the pending shape.
+        let grok_root = base.join("grokstore");
+        std::fs::create_dir_all(&grok_root).unwrap();
+        let sock = base.join("mux/threads/wk-grok-ok.sock");
+        let text = "<fno_mail from=\"g\">grok body\n</fno_mail>";
+        keeper_mail_row(&home, "wk-grok-ok", "grok", "sess-grok-ok", &cwd, &sock);
+        let _keeper = spawn_grok_recording_keeper_handle(&sock, text, &grok_root, "sess-grok-ok");
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &grok_root,
+            "sess-grok-ok",
+            text,
+            12,
+            25,
+            0,
+        );
+        assert_eq!(outcome, Ok(()), "grok store confirm");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_confirms_after_the_baseline() {
+        // AC5-HP baseline shape: the store exists BEFORE the send, so the
+        // confirm polls only lines appended after the baseline byte.
+        let (home, base) = keeper_mail_home("grokbas");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore");
+        let pre = grok_root.join("%2Fcwd").join("sess-grok-bas");
+        std::fs::create_dir_all(&pre).unwrap();
+        std::fs::write(
+            pre.join("chat_history.jsonl"),
+            "{\"text\":\"earlier turn\"}\n",
+        )
+        .unwrap();
+        let sock = base.join("mux/threads/wk-grok-bas.sock");
+        let text = "<fno_mail from=\"g\">grok body\n</fno_mail>";
+        keeper_mail_row(&home, "wk-grok-bas", "grok", "sess-grok-bas", &cwd, &sock);
+        let _keeper = spawn_grok_recording_keeper_handle(&sock, text, &grok_root, "sess-grok-bas");
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &grok_root,
+            "sess-grok-bas",
+            text,
+            12,
+            25,
+            0,
+        );
+        assert_eq!(outcome, Ok(()), "grok baseline confirm");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_refuses_a_duplicate_session_store() {
+        // AC5-ERR: two store directories for one grok session id refuse the
+        // send before any keystroke.
+        let (home, base) = keeper_mail_home("grokdup");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore");
+        for group in ["%2Frepo-a", "%2Frepo-b"] {
+            let dir = grok_root.join(group).join("sess-grok-dup");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("chat_history.jsonl"), "{}\n").unwrap();
+        }
+        let sock = base.join("mux/threads/wk-grok-dup.sock");
+        keeper_mail_row(&home, "wk-grok-dup", "grok", "sess-grok-dup", &cwd, &sock);
+        // A live listener is required: the lane connects first, and only a
+        // connected socket gets the before-typing refusal.
+        let _parked = spawn_recording_keeper_handle(
+            &sock,
+            "<fno_mail>ping</fno_mail>",
+            &pi_root,
+            &cwd,
+            "sess-grok-dup",
+        );
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &grok_root,
+            "sess-grok-dup",
+            "<fno_mail>ping</fno_mail>",
+            2,
+            10,
+            0,
+        );
+        assert_eq!(outcome, Err("duplicate-session-store"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn mail_inject_keeper_delivers_input_frames_and_confirms_by_content() {
         use crate::pane_keeper::Frame;
@@ -2919,7 +3292,16 @@ mod tests {
         let text = "<fno_mail from=\"t\">body line\n</fno_mail>";
         let handle = spawn_recording_keeper_handle(&sock, text, &pi_root, &cwd, session);
 
-        let outcome = deliver_via_keeper_socket_in(&home, &pi_root, session, text, 12, 25, 0);
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &base.join("grokstore"),
+            session,
+            text,
+            12,
+            25,
+            0,
+        );
         assert_eq!(outcome, Ok(()), "the envelope lands and confirms");
 
         let frames = handle.join().unwrap();
@@ -2953,7 +3335,8 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &base.join("grokstore"),
             "sess-dead",
             "<fno_mail>ping</fno_mail>",
             2,
@@ -2966,14 +3349,15 @@ mod tests {
 
     #[test]
     fn mail_inject_keeper_refuses_before_typing_without_a_confirm_source() {
-        // A hosted harness with no transcript resolver here refuses BEFORE any
-        // frame is typed: an honest durable demotion beats an unverifiable
-        // delivered.
+        // An UNREADABLE grok session store refuses BEFORE any frame is typed:
+        // an honest durable demotion beats an unverifiable delivered. The
+        // no-confirm-source token is left for harnesses with no arm at all.
         let (home, base) = keeper_mail_home("nosrc");
         let cwd = base.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
         let pi_root = base.join("pistore");
         std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore").join("absent");
         let sock = base.join("mux/threads/wk-grok.sock");
         keeper_mail_row(&home, "wk-grok", "grok", "sess-grok", &cwd, &sock);
         let _parked = spawn_recording_keeper_handle(
@@ -2986,14 +3370,15 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
+            &grok_root,
             "sess-grok",
             "<fno_mail>ping</fno_mail>",
             2,
             10,
             0,
         );
-        assert_eq!(outcome, Err("no-confirm-source"));
+        assert_eq!(outcome, Err("session-store-unreadable"));
         // The parked fake keeper thread never receives a connection (the lane
         // refused before connecting) and ends with the test process.
         std::fs::remove_dir_all(&base).ok();

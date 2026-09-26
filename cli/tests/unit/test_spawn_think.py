@@ -41,14 +41,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(events_path: Path) -> list[dict]:
-    if not events_path.exists():
-        return []
-    return [
-        event
-        for line in events_path.read_text().splitlines()
-        if line.strip()
-        and not (event := json.loads(line))["type"].startswith("claim_")
-    ]
+    from tests._event_rows import event_rows
+
+    return [e for e in event_rows(events_path) if not e["type"].startswith("claim_")]
 
 
 def _node(**over) -> dict:
@@ -778,6 +773,26 @@ def test_spawn_worker_default_provider_claude_no_model(monkeypatch):
     assert "--model" not in cmd
 
 
+def test_spawn_failure_keeps_a_non_gate_error_line(monkeypatch):
+    """AC2-ERR (x-d769): no spawn-gate line on stderr -> the whole stderr is
+    the message. The verdict reader's fallback must not eat it."""
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: pane launch failed\n"
+
+    def fake_run(cmd, **kw):
+        if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        return _Proc()
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+    with pytest.raises(st.SpawnError) as ei:
+        st._spawn_think_worker("x-1", "prompt", None, "slug")
+    assert "Error: pane launch failed" in str(ei.value)
+
+
 def test_spawn_worker_tags_the_spawn_subprocess_with_its_cause(monkeypatch):
     """x-42c5: the reason this spawn happened rides FNO_SPAWN_TRIGGER in the
     `fno agents spawn` subprocess's own environment, so the registry row it
@@ -828,6 +843,9 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
 
     def fake_run(cmd, **kw):
         if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; it is not the spawn argv.
             return _REAL_SUBPROCESS_RUN(cmd, **kw)
         seen["cmd"] = cmd
         return _Proc()
@@ -1049,9 +1067,9 @@ def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
     monkeypatch.setenv("FNO_THINK_SPAWN", "0")
     reached = []
     monkeypatch.setattr(st, "maybe_spawn_think", lambda *a, **k: reached.append(1))
-    # Any graph re-read would import read_graph; assert it is never called.
+    # Any graph re-read would import read_graph_strict; assert it is never called.
     import fno.graph.store as gs
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read"))
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read"))
     assert st.on_node_born(_node()) is None
     assert reached == []
 
@@ -1136,7 +1154,7 @@ def test_on_node_born_persisted_skips_reread(iso, monkeypatch):
 
     import fno.graph.store as gs
     reached: list = []
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read") or [])
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read") or [])
 
     st.on_node_born(_node(slug="durable-slug"), persisted=True)
 
@@ -1733,7 +1751,7 @@ def test_an_empty_session_is_not_stamped_over_the_node(monkeypatch, tmp_path):
         captured["out"] = mutator(entries)
 
     monkeypatch.setattr(
-        "fno.graph.store.locked_mutate_graph", fake_mutate, raising=False
+        "fno.graph.store.commit_rows_via_store", fake_mutate, raising=False
     )
     st._stamp_forward("x-1", "", None, output_path="/tmp/doc.md")
     if "out" in captured:

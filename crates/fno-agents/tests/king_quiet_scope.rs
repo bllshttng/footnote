@@ -37,12 +37,10 @@ fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// A quiet board with undelivered scope is NOT done: it never exits NoWork,
-/// and it blocks while the reign might still be delivering. Bounded, though:
-/// a count that never shrinks is a reign that cannot stop on its own, so the
-/// third unchanged fire parks NoProgress and asks the operator.
+/// A quiet board with undelivered scope may stop while it waits for CI or a
+/// worker; the next beat or delivery event wakes it again.
 #[test]
-fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
+fn a_quiet_board_with_undelivered_scope_stops_while_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let bin = dir.path().join("bin");
@@ -63,7 +61,11 @@ fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
         ),
     )
     .unwrap();
-    write_exec(&bin, "fno-py", "#!/bin/sh\nprintf '[]\\n'");
+    write_exec(
+        &bin,
+        "fno-py",
+        "#!/bin/sh\nprintf '{\"questions\":[],\"verdicts\":{}}\\n'",
+    );
     let gh = write_exec(&bin, "gh", "#!/bin/sh\nprintf '[]\\n'");
     let fno = write_exec(
         dir.path(),
@@ -92,6 +94,8 @@ fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
         set_env("FNO_CONFIG", &config),
         set_env("FNO_AGENTS_HOME", dir.path().join("agents")),
         set_env("FNO_CLAIMS_ROOT", dir.path().join("claims")),
+        set_env("FNO_SPACES_DIR", dir.path().join("spaces")),
+        set_env("FNO_PY", bin.join("fno-py")),
         set_env("PATH", path),
     ];
 
@@ -130,35 +134,18 @@ fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
     .map(str::to_string)
     .collect::<Vec<_>>();
 
-    for fire in 0..2 {
-        let (code, output) = run_loop_check_capture(&args);
-        let payload: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(code, 0, "fire {fire}: {output}");
-        assert_eq!(payload["decision"], "block", "fire {fire}: {output}");
-        assert!(
-            payload["termination_reason"].is_null(),
-            "fire {fire}: {output}"
-        );
-        assert!(
-            payload["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("undelivered")),
-            "fire {fire}: {output}"
-        );
-    }
-
     let (code, output) = run_loop_check_capture(&args);
     let payload: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(code, 0, "terminal fire: {output}");
-    assert_eq!(payload["decision"], "allow", "terminal fire: {output}");
+    assert_eq!(code, 0, "wait fire: {output}");
+    assert_eq!(payload["decision"], "allow", "wait fire: {output}");
     assert_eq!(
-        payload["termination_reason"], "NoProgress",
-        "the third unchanged fire must park, not block forever: {output}"
+        payload["termination_reason"], "NoWork",
+        "the quiet board may stop while waiting: {output}"
     );
     assert!(
         payload["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("nothing cleared")),
-        "the park must name why: {output}"
+            .is_some_and(|reason| reason.starts_with("waiting on CI or a worker")),
+        "the wait must name why: {output}"
     );
 }

@@ -407,18 +407,19 @@ frontmatter_contains "$S5_FILE" "$S5_SESSION" && pass "s5: backfill includes ses
 frontmatter_contains "$S5_FILE" "$S5_PR_URL" && pass "s5: backfill includes pr_url" \
     || fail "s5: backfill missing pr_url"
 
-# Structural check: assert the stop hook wiring that triggers stamp/graduate.
+# Structural check: assert the stop-path wiring that triggers stamp/graduate.
 # Stamping no longer lives inline in the shell hook - it moved into the Rust
-# finalize WRITER (crates/fno-agents/src/finalize.rs's stamp_and_graduate,
-# invoked via `"$BIN" finalize` on every terminal-allow), so the checks below
-# target the current wiring: the hook's finalize invocation, and finalize.rs's
+# finalize WRITER (crates/fno-agents/src/finalize.rs's stamp_and_graduate),
+# and the shell wrapper is a plain exec of the native stop handler, which is
+# what invokes finalize on every terminal-allow. The checks below target that
+# current wiring: the native handler's run_finalize call, and finalize.rs's
 # own call into fno.plan._stamp.
-HOOK_FILE="$REPO_ROOT/hooks/target-stop-hook.sh"
+STOP_RS="$REPO_ROOT/crates/fno-agents/src/hook/stop.rs"
 FINALIZE_RS="$REPO_ROOT/crates/fno-agents/src/finalize.rs"
 
-grep -q '"\$BIN" finalize' "$HOOK_FILE" 2>/dev/null \
-    && pass "s5: hook invokes the finalize writer on terminal-allow (wiring present)" \
-    || fail "s5: hook missing finalize invocation (grep for '\"\$BIN\" finalize' failed)"
+grep -q 'run_finalize' "$STOP_RS" 2>/dev/null \
+    && pass "s5: native stop handler invokes the finalize writer on terminal-allow (wiring present)" \
+    || fail "s5: stop.rs missing finalize invocation (grep for 'run_finalize' failed)"
 
 grep -q 'fno\.plan\._stamp' "$FINALIZE_RS" 2>/dev/null \
     && pass "s5: finalize.rs invokes fno.plan._stamp (call site present)" \

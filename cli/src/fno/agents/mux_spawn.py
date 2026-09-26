@@ -79,8 +79,8 @@ from fno.agents.registry import (
 from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
-    grant_error,
     journal_spawn_crown,
+    plan_spawn_crown,
     settle_spawn_crown,
 )
 
@@ -502,72 +502,23 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
 
     Fail-closed (Locked Decision 1): an unmappable (provider, value) pair raises
     before any spawn - permissions are a trust boundary, never a silent
-    downgrade. agy ``skip`` returns ``[]`` because its argv already carries
-    ``--dangerously-skip-permissions`` unconditionally."""
-    if not mode:
-        raise DispatchAskError("--permission-mode requires a value", exit_code=2)
-    if provider == "claude":
-        # Exact passthrough; claude's own CLI validates the vocabulary.
-        return ["--permission-mode", mode]
-    if provider == "gemini":
-        return ["--yolo"] if mode == "yolo" else ["--approval-mode", mode]
-    if provider == "codex":
-        if mode == "full-auto":
-            return ["--full-auto"]
-        if mode == "yolo":
-            return ["--dangerously-bypass-approvals-and-sandbox"]
-        sandbox, sep, approval = mode.partition(":")
-        if sep and sandbox and approval:
-            return ["--sandbox", sandbox, "--ask-for-approval", approval]
-        raise DispatchAskError(
-            f"codex --permission-mode {mode!r} unmappable; use a shortcut "
-            "(full-auto, yolo) or the <sandbox>:<approval> form "
-            "(e.g. workspace-write:on-request)",
-            exit_code=2,
-        )
-    if provider == "opencode":
-        if mode == "auto":
-            return ["--auto"]
-        raise DispatchAskError(
-            f"opencode --permission-mode {mode!r} unmappable; only 'auto' maps "
-            "(--auto). Per-tool permissions are config-only (permission table).",
-            exit_code=2,
-        )
-    if provider == "agy":
-        if mode == "skip":
-            return []
-        raise DispatchAskError(
-            f"agy --permission-mode {mode!r} unmappable; only 'skip' maps "
-            "(--dangerously-skip-permissions). Finer control is config-only "
-            "(toolPermission).",
-            exit_code=2,
-        )
-    if provider == "pi":
-        raise DispatchAskError(
-            f"pi --permission-mode {mode!r} unmappable, and this is an absence in "
-            "pi rather than a gap in fno: pi ships NO permission popups (its own "
-            "docs say so) and `pi --help` carries no bypass flag, so there is "
-            "nothing to answer and nothing to skip. `--approve` trusts "
-            "project-local FILES, a different axis, and stays an operator choice.",
-            exit_code=2,
-        )
-    if provider == "cursor-agent":
-        if mode in {"force", "yolo"}:
-            return ["--force"]
-        raise DispatchAskError(
-            f"cursor-agent --permission-mode {mode!r} unmappable; only "
-            "'force' maps to --force; --auto-review and --sandbox are separate settings",
-            exit_code=2,
-        )
-    if provider == "grok":
-        # grok's `--permission-mode <MODE>` carries the same vocabulary claude
-        # does (default, acceptEdits, auto, dontAsk, bypassPermissions, plan
-        # per `grok --help` on 1.0.13), so this is exact passthrough and
-        # grok's own CLI validates it. `--always-approve` is the bypass AXIS
-        # and stays the yolo spelling, not a permission-mode value.
-        return ["--permission-mode", mode]
-    raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
+    downgrade. The vocabulary lives in Rust (crates/fno-agents/src/codex_posture.rs),
+    so this is a transport bridge: one subprocess round-trip.
+    agy ``skip`` maps to ``[]`` because its argv already carries
+    ``--dangerously-skip-permissions`` unconditionally. An empty mode is
+    refused by the owner (the same literal, one source)."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
+    try:
+        answer = verb_call("permission-tokens", {"provider": provider, "mode": mode}, VerbUnavailable)
+    except VerbUnavailable as exc:
+        raise DispatchAskError(
+            f"the permission vocabulary owner (fno-agents) is unavailable: {exc}",
+            exit_code=2,
+        ) from exc
+    if answer.get("refusal"):
+        raise DispatchAskError(answer["refusal"], exit_code=2)
+    return [str(token) for token in answer.get("tokens") or []]
 
 def tier3_pane_tokens(
     provider: str,
@@ -1198,18 +1149,15 @@ def build_pane_argv(
         return argv
     if provider == "agy":
         effort_argv = effort_tokens("agy", effort) if effort else []
-        # agy (Antigravity) interactive pane (US1). Mirrors AgyProvider in
-        # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
-        # so an unattended pane can't wedge on its first approval. This LANE
-        # mints no session id (the thread lane does), so no --session-id pin;
-        # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
-        # NOT be used for a pane. The shared readiness gate submits the seed
-        # after trust and the composer are ready.
-        argv = ["agy", "--dangerously-skip-permissions"]
+        # agy (Antigravity) interactive pane (US1). Posture tokens are the
+        # Rust owner's answer (agy_launch.keeper_posture, lane pane): the lane
+        # default is the never-prompt bypass and an explicit mode REPLACES it.
+        # This LANE mints no session id; `-p`/`--print` is agy's HEADLESS form
+        # and must NOT be used for a pane. The readiness gate submits the seed.
+        from fno.agents.spawn_axes_client import keeper_posture
+
+        argv = ["agy", *keeper_posture("agy", "pane", permission_mode, yolo)]
         argv += effort_argv
-        if permission_mode:
-            # skip -> [] (argv already carries the flag); anything else raises.
-            argv += permission_pane_tokens("agy", permission_mode)
         if model:
             argv += ["--model", model]
         argv += tier3
@@ -1261,15 +1209,13 @@ def build_pane_argv(
         # file). Opening a NOT-yet-existing id is a CREATE, the unserialised
         # half - the spawn lane serialises via
         # `fno.agents.harnesses.pi.create_decision`; this builder only composes
-        # argv. `--provider` AND `--model` both, always (provider alone falls
-        # through to Bedrock and dies naming an expired AWS SSO session). pi
-        # ships no permission popups, so `yolo` maps to nothing; `--approve`
-        # trusts files, a different axis, and stays an operator choice.
-        from fno.agents.harnesses.pi import pi_model, pi_provider
+        # argv. The ONE pi route owner (keeper and pane share it). pi ships
+        # no permission popups, so `yolo` maps to nothing.
+        from fno.agents.spawn_axes_client import spawn_axes_call
+        from fno.agents.keeper_thread import _pi_axes
 
-        argv = [*identity, "--provider", pi_provider(), "--model", model or pi_model()]
-        if effort:
-            argv += effort_tokens("pi", effort)
+        route = spawn_axes_call({"pi_route": _pi_axes(model, effort, None, None)})
+        argv = [*identity, *(str(t) for t in route["tokens"])]
         if permission_mode:
             argv += permission_pane_tokens("pi", permission_mode)
         argv += tier3
@@ -3413,19 +3359,18 @@ def dispatch_spawn_pane(
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
+    crown_plan: Optional[dict] = None
+    crown_caller_name: Optional[str] = None
     if crown_level is not None:
-        # Same authorization rule as the bg seam: a grant must be a strict subset
-        # of what the grantor holds. Both paths check, because either is a door.
-        succession_caller = calling_agent_row()
-        succession_caller_name = getattr(succession_caller, "name", None)
-        grant_problem = grant_error(
-            crown_scope or "",
-            succession_caller,
-            allow_terminal_recovery=True,
-            allow_succession=succession,
+        # Same authorization + occupancy rule as the bg seam: a grant must be a
+        # strict subset of what the grantor holds, and a live holder blocks an
+        # heir from launching uncrowned. Both doors check, either is a door.
+        crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
+        crown_refusal, crown_plan = plan_spawn_crown(
+            crown_scope or "", caller_row, succession,
         )
-        if grant_problem is not None:
-            raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
+        if crown_refusal is not None:
+            raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
 
     conflict = pane_placement_conflict(
         pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
@@ -4514,11 +4459,9 @@ def dispatch_spawn_pane(
                 crown_scope = None
                 crown_grantor_val = None
             if crown_level is not None and crown_scope:
+                assert crown_plan is not None  # set by the pre-launch call above
                 rows, crown_outcome, crown_cleared = settle_spawn_crown(
-                    rows,
-                    scope=crown_scope,
-                    succession=succession,
-                    succession_caller_name=succession_caller_name,
+                    rows, scope=crown_scope, plan=crown_plan,
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True
@@ -4623,6 +4566,7 @@ def dispatch_spawn_pane(
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
+                    node_reason=os.environ.pop("FNO_NODE_REASON", None),
                     fno_id=stored_session_uuid or name,
                     route_provider_id=route_provider_id,
                     model_name=model_name,
@@ -4674,14 +4618,17 @@ def dispatch_spawn_pane(
                     file=sys.stderr,
                 )
             if crown_succeeded and _declined_scope:
+                vacated_names = {row.name for row, cause in crown_cleared if cause == "succession"}
+                vacated = sorted(vacated_names)
+                noted = crown_caller_name in vacated
                 print(
-                    f"spawn: crown over {_declined_scope!r} transferred from this "
-                    f"session to {name} (succession). You no longer hold it.",
+                    f"spawn: crown over {_declined_scope!r} transferred from {', '.join(vacated)} "
+                    f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
                     file=sys.stderr,
                 )
             if _declined_scope and king_loop_armed is False:
                 why = (
-                    f": {king_unarmed_reason}"
+                    f": {king_unarmed_reason}; the manifest arms when this worker self-identifies"
                     if king_unarmed_reason
                     else "; king loop disabled, no scope manifest armed"
                 )

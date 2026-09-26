@@ -4,7 +4,7 @@
      and skills/*/SKILL.md frontmatter. -->
 # Verb x harness matrix
 
-Which fno verb runs on which harness, rendered from the capability table (`map_version 19`) and each skill's `metadata.requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
+Which fno verb runs on which harness, rendered from the capability table (`map_version 21`) and each skill's `metadata.requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
 
 A cell is a projection, never a fresh measurement. The rule, in order:
 
@@ -27,13 +27,11 @@ The needs vocabulary is `loop`, every feature key the table declares a probe for
 | fno-me | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | groom | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | growth-launch | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| king-for-a-day | loop, spawn | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
+| intel | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | law | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | mail | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
-| pm-plan-draft | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
-| pm-plan-review | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
-| pr | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| reign | loop | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
+| pr | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
+| reign | loop, spawn | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
 | review | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | setup | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | ship | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
@@ -41,6 +39,7 @@ The needs vocabulary is `loop`, every feature key the table declares a probe for
 | speculate | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 | target | loop | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
 | tdd | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
+| test-audit | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | think | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | triage | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
 | using-fno | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |

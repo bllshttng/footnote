@@ -687,16 +687,6 @@ def _component_convergence(
     ]
 
 
-def _plugin_registry_path() -> Path:
-    """The claude plugin install registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-
-
-def _known_marketplaces_path() -> Path:
-    """Claude's marketplace registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
-
-
 def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
     """One ``plugin-install --check`` probe (module-level so tests stub it).
     Transport failures come back as exit -1 with the reason, never raise."""
@@ -707,157 +697,31 @@ def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
-def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
-    """Stage-drift verdict when Claude runs the plugin from the fno stage.
-
-    A directory marketplace never mints a ``gitCommitSha``, so for that
-    install shape freshness is a byte comparison of the stage against source
-    HEAD. Returns None when this install is not a directory marketplace; any
-    transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
-    ``install_location`` (where Claude actually execs) wins over the
-    marketplace path when both exist.
-    """
-    try:
-        data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
-        source = data["footnote"]["source"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(source, dict) or source.get("source") != "directory":
-        return None
-    stage_path = install_location or str(source.get("path") or "")
-    if not stage_path:
-        return None
-
+def _plugin_cache_report() -> dict[str, Any]:
+    """Root freshness, folded natively by the Rust verb; transport only."""
     def unknown(detail: str) -> dict[str, Any]:
-        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": stage_path}
+        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": None, "roots": []}
 
     binary = _cargo_bin_path()
     src = _resolve_source(None)
-    if not binary:
-        return unknown("no cargo fno-agents binary to run the stage check")
-    if src is None:
-        return unknown("no source checkout to compare against")
+    if not binary or src is None:
+        return unknown(
+            "no cargo fno-agents binary to run the stage check"
+            if not binary
+            else "no source checkout to compare against"
+        )
     code, out, err = _run_stage_check(
-        [binary, "plugin-install", "--check", "--json",
-         "--stage", stage_path, "--source", str(src)]
+        [binary, "plugin-install", "--check", "--json", "--source", str(src)]
     )
-    if code not in (0, 3):
+    if code not in (0, 3, 4):
         return unknown(f"plugin-install --check exited {code}: {(err or out).strip()}")
     try:
         verdict = json.loads(out)
     except ValueError:
-        return unknown("plugin-install --check printed no JSON")
-    if not isinstance(verdict, dict):
-        return unknown("plugin-install --check printed a non-object")
-    verdict["kind"] = "stage"
-    verdict.setdefault("stage", stage_path)
-    verdict["sha"] = verdict.pop("source_head", None)
-    verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
+        verdict = None
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("roots"), list) or not verdict["roots"]:
+        return unknown("plugin-install --check named no readable plugin root")
     return verdict
-
-
-def _plugin_cache_report() -> dict[str, Any]:
-    """Freshness of the deployed CLAUDE plugin cache the hooks run from.
-
-    ``fno doctor`` already owns source-vs-installed staleness for the wheel and
-    the cargo bins, but not for ``~/.claude/plugins/cache/footnote``: the copy
-    ``hooks/helpers/init-target-state.sh`` (resolved via CLAUDE_PLUGIN_ROOT)
-    actually executes in every Claude session. A cache pinned to a pre-feature
-    sha ships hooks that predate provenance writers while every Python-side
-    check reads green - the exact gap that left armed manifests reporting
-    ``auto_merge_source: unknown`` after.
-
-    Uses the module's staleness vocabulary: ``fresh`` when the pinned sha IS
-    the source HEAD, ``stale`` when the sha is a proven ancestor of HEAD (and
-    not HEAD), ``unknown`` when the installed-plugins file is missing, the sha
-    is unknown to this clone, or git is unavailable. Never asserts staleness on
-    absent evidence (same rule as the exit-code contract at module top).
-
-    When stale, the report also carries ``deleted_hook_scripts`` iff the
-    pinned..HEAD range deleted a script the pinned revision's hook config
-    referenced - the case that bricks live sessions rather than merely
-    lagging, and the only stale worth interrupting an operator for.
-    """
-    # Any, not Optional[str]: the stale branch adds deleted_hook_scripts,
-    # a list, beside the string fields.
-    report: dict[str, Any] = {
-        "status": "unknown",
-        "sha": None,
-        "installed_at": None,
-        "detail": None,
-    }
-    try:
-        registry = _plugin_registry_path()
-        data = json.loads(registry.read_text(encoding="utf-8"))
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        entries = (
-            plugins.get("fno@footnote") if isinstance(plugins, dict) else None
-        ) or []
-        entry = entries[0] if isinstance(entries, list) and entries else {}
-    except (OSError, ValueError, IndexError, AttributeError, TypeError, KeyError):
-        # A hand-edited, corrupted, or future-version registry is exactly the
-        # broken install this advisory leg exists to describe: any malformed
-        # shape degrades to unknown, never a traceback through doctor_command's
-        # unwrapped call sites.
-        report["detail"] = "no installed_plugins.json entry for fno@footnote"
-        return report
-    sha = entry.get("gitCommitSha")
-    if not sha:
-        # The stage is the artifact; Claude execs from the registry path.
-        return _stage_check_report(str(entry.get("installLocation") or "")) or report | {
-            "detail": "installed_plugins.json carries no gitCommitSha"
-        }
-    report["sha"] = sha
-    report["installed_at"] = entry.get("installedAt")
-
-    src = _resolve_source(None)
-    if src is None:
-        report["detail"] = "no source checkout to compare against"
-        return report
-    try:
-        head = subprocess.run(
-            ["git", "-C", str(src), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if head.returncode != 0:
-            report["detail"] = "git rev-parse failed in the source checkout"
-            return report
-        if head.stdout.strip() == sha:
-            report["status"] = "fresh"
-            return report
-        ancestor = subprocess.run(
-            ["git", "-C", str(src), "merge-base", "--is-ancestor", sha, "HEAD"],
-            capture_output=True,
-            timeout=15,
-        )
-        if ancestor.returncode == 0:
-            report["status"] = "stale"
-        else:
-            # Not HEAD and not an ancestor: a foreign sha. Unknown, never
-            # stale-on-absent-evidence.
-            report["detail"] = "pinned sha is not known as an ancestor of HEAD"
-    except (OSError, subprocess.SubprocessError):
-        report["detail"] = "git unavailable"
-        return report
-
-    # Stale fires after EVERY merge, so it cannot by itself separate benign
-    # lag from brick risk. The separator: did this range delete a hook script
-    # the pinned revision's config referenced? Only that case takes every
-    # pre-merge session's Bash away. Same never-assert-on-absent-evidence
-    # rule: a git failure adds no key rather than claiming the all-clear.
-    from fno.hook_config import stubless_deletions
-
-    head_sha = head.stdout.strip()
-    deleted = (
-        stubless_deletions(src, sha, head_sha)
-        if report["status"] == "stale"
-        else None
-    )
-    if deleted:
-        report["deleted_hook_scripts"] = deleted
-    return report
 
 
 # ---------------------------------------------------------------------------
@@ -1245,12 +1109,16 @@ def _archive_id_collisions() -> dict[str, Any]:
     so this count grows on its own; it changes doctor's exit code rather than
     reporting quietly.
 
-    The archive is read via ``_read_json``, NOT ``read_graph``: the read path
+    The archive is read as a plain file, NOT ``read_graph``: the read path
     swallows corruption to an empty list, which would report 0 collisions and
-    exit green in exactly the state where the ids cannot be checked.
+    exit green in exactly the state where the ids cannot be checked. A plain
+    read also keeps the alarm off the store spawn path - the advisory file
+    must never gain a store, or a spawn failure reads as a clean zero.
     """
     try:
-        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+        import json as _json
+
+        from fno.graph.store import _apply_graph_defaults
         from fno.paths import graph_archive_json
         from fno.tracker.metadata import read_entries
 
@@ -1265,8 +1133,11 @@ def _archive_id_collisions() -> dict[str, Any]:
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         try:
-            archive_entries = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
+            document = _json.loads(archive_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                return {"count": 0, "ids": [], "unreadable": True}
+            archive_entries = _apply_graph_defaults(document.get("entries", []))
+        except (ValueError, UnicodeDecodeError, OSError):
             return {"count": 0, "ids": [], "unreadable": True}
         archive_ids = {
             nid for e in archive_entries
@@ -1297,10 +1168,10 @@ def _post_merge_sync_health() -> dict[str, Any]:
         # invisible exactly when it has lasted longest.
         st = sync_staleness(fetch=True)
         return {
-            "state": st.state,
-            "stale": st.state == "stale",
-            "behind": st.behind,
-            "detail": st.detail,
+            "state": st["state"],
+            "stale": st["state"] == "stale",
+            "behind": st["behind"],
+            "detail": st["detail"],
         }
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
@@ -1343,36 +1214,42 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
 
 
 def _launch_agent_failures() -> dict[str, Any]:
-    """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
+    """Dead launchd labels, from the Rust fold the loops table runs.
 
-    Generic over the label prefix rather than groom-specific: two unrelated fno
-    agents were dead and silent when this was written, so one loop is both
-    smaller and wider than a bespoke check per agent. Column 2 is the last exit,
-    not current state - a ``-`` in column 1 is normal for a periodic job.
+    One launchctl reader, not two: the Rust ``loops table --json`` payload
+    carries the dead list (any ``sh.fno.*`` or autocorrect label with a
+    nonzero last exit), so doctor reads the same truth the arms table
+    prints, and the labels the old ``sh.fno.`` prefix filter missed
+    (``com.user.autocorrect*``) show up here too. Exit 1 is the table's own
+    red verdict, not an error: the payload still parses.
     """
-    if sys.platform != "darwin" or not shutil.which("launchctl"):
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
         return {"applicable": False, "dead": []}
     try:
         proc = subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+            [str(binary), "loops", "table", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except Exception:  # noqa: BLE001 - an unrunnable probe must not fabricate an alarm
         return {"applicable": False, "dead": []}
-    if proc.returncode != 0:
+    if proc.returncode not in (0, 1):
         return {"applicable": False, "dead": []}
-
-    dead: list[dict[str, Any]] = []
-    for line in (proc.stdout or "").splitlines():
-        cols = line.split("\t")
-        if len(cols) < 3 or not cols[2].startswith("sh.fno."):
-            continue
-        try:
-            status = int(cols[1])
-        except ValueError:
-            continue  # "-" or a header; only a numeric exit proves a failure
-        if status != 0:
-            dead.append({"label": cols[2].strip(), "exit": status})
-    return {"applicable": True, "dead": dead}
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {"applicable": False, "dead": []}
+    section = payload.get("launchd") if isinstance(payload, dict) else None
+    if not isinstance(section, dict):
+        return {"applicable": False, "dead": []}
+    dead = section.get("dead")
+    if not isinstance(dead, list):
+        dead = []
+    return {"applicable": bool(section.get("applicable")), "dead": list(dead)}
 
 
 # --------------------------------------------------------------------------
@@ -1396,13 +1273,13 @@ def _mission_active_count() -> int:
     broke this function's own ``never crashes`` promise."""
     try:
         from fno import paths as _paths
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
             return 0
 
-        entries = read_graph(_paths.graph_json())
+        entries = read_graph_strict(_paths.graph_json())
         return sum(
             1
             for e in entries
@@ -1598,8 +1475,10 @@ def _silent_switch_report(
         if armed.get("unknown"):
             cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
             # A stale STAGE is a different artifact with its own fix; this
-            # cause line is about the git-cached claude plugin only.
-            if cache.get("status") == "stale" and cache.get("kind") != "stage":
+            # cause line is about the legacy sha-pinned cache shape only (a
+            # report with roots names each stale root in its own line, and a
+            # byte-stale installPath tree has no sha pin to refresh).
+            if cache.get("status") == "stale" and not cache.get("roots"):
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
@@ -2018,14 +1897,6 @@ def _blockers(result: dict[str, Any]) -> list[str]:
             f"LaunchAgent {agent.get('label')} last exited {agent.get('exit')}."
         )
 
-    collisions = result.get("archive_id_collisions") or {}
-    if collisions.get("unreadable"):
-        blockers.append("archive is unreadable; id collisions cannot be counted.")
-    elif collisions.get("count"):
-        blockers.append(
-            f"{collisions['count']} node id(s) collide with the archive."
-        )
-
     fd_limit = result.get("fd_limit") or {}
     if fd_limit.get("verdict") == "low":
         blockers.append(
@@ -2038,6 +1909,9 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
+    blockers.extend(r["blocker"] for r in plugin_cache.get("roots") or [] if r.get("blocker"))
+    if plugin_cache.get("roots"):
+        return blockers
     if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
         sample = plugin_cache.get("sample") or []
         drift = plugin_cache.get("differing_count", 0) + plugin_cache.get("missing_count", 0)
@@ -2564,7 +2438,10 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno config setup` to install it."
         )
+    elif isinstance(oc, str):
+        out(f"fno doctor: opencode {oc}")
     _emit_codex_context_window(result, out=out)
+
     dupes = surf.get("codex_marketplace_duplicates") or []
     if dupes:
         out(
@@ -2607,21 +2484,6 @@ def _emit_human(
             "and ~/.fno/groom.err.log."
         )
 
-    ids = result.get("archive_id_collisions") or {}
-    if ids.get("unreadable"):
-        out(
-            "fno doctor: graph-archive.json is corrupt; node id collisions "
-            "could not be checked. Restore it from the .bak read_graph left, "
-            "or rebuild it, then re-run doctor."
-        )
-    if ids.get("count"):
-        shown = ", ".join(ids["ids"][:10])
-        more = f" (+{ids['count'] - 10} more)" if ids["count"] > 10 else ""
-        out(
-            f"fno doctor: {ids['count']} node id(s) collide between the working "
-            f"graph and the archive: {shown}{more}; run "
-            "`fno backlog archive-dedupe-ids --apply` to remint the archived side."
-        )
 
     export = result.get("graph_export") or {}
     if export.get("stale"):
@@ -2733,10 +2595,14 @@ def _emit_human(
             f"run `{finding['command']}` or let the reaper restore it."
         )
 
-    # Deployed claude plugin cache: the hooks actually executed by
-    # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
+    # Deployed fno plugin roots: one line per root, rendered by the Rust fold.
     pc = result.get("plugin_cache") or {}
-    if pc.get("kind") == "stage" and pc.get("status") == "stale":
+    for root in pc.get("roots") or []:
+        role = "live" if root.get("live") else "second copy"
+        out(f"fno doctor: plugin root ({root.get('origin')}, {role}): {root.get('path')}: {root.get('status')}{root.get('note') or ''}")
+    if pc.get("roots"):
+        pass
+    elif pc.get("kind") == "stage" and pc.get("status") == "stale":
         sample = pc.get("sample") or []
         out(
             f"fno doctor: plugin stage STALE ({pc.get('differing_count', 0)} differing, "
@@ -3539,32 +3405,25 @@ def _drained_msg_ids() -> set[str]:
     Read once per sweep so the dead-letter sweep prefers a positive drain marker
     over cursor inference: a message with a marker was drained and never
     escalates, while cursor logic stays as the fallback for legacy mail written
-    before the marker existed. A torn or unreadable log reads as empty, so the
+    before the marker existed. A torn or unreadable store reads as empty, so the
     sweep degrades to cursor-only (its prior behavior) rather than crashing or
     silently clearing its findings.
     """
     from fno.paths import state_dir
 
-    path = state_dir() / "events.jsonl"
     ids: set[str] = set()
     try:
-        # Stream line-by-line: the events log grows unboundedly, so never slurp
-        # it whole just to collect drained ids (mirrors gate_escape.py's reader).
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if "agent_mail_drained" not in line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("kind") == "agent_mail_drained":
-                    mid = rec.get("msg_id")
-                    if isinstance(mid, str) and mid:
-                        ids.add(mid)
-    except OSError:
+        # Committed rows, not journal bytes: the store commit is the write
+        # boundary, so a marker the emitter committed is only visible there.
+        from fno.events.store_client import query_rows
+
+        for rec in query_rows(state_dir() / "events.jsonl", types=["agent_mail_drained"]):
+            mid = rec.get("msg_id")
+            if not isinstance(mid, str):
+                mid = (rec.get("data") or {}).get("msg_id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
+    except Exception:
         return ids
     return ids
 
@@ -3714,19 +3573,48 @@ def _harness_surface_report() -> dict[str, Any]:
     registered twice). Never blocks/exits; a missing harness is simply silent."""
     report: dict[str, Any] = {}
     try:
-        from fno.setup.integration import (
-            _opencode_is_installed,
-            _opencode_plugin_dest,
-            _opencode_plugins_dir,
-        )
-
         # Only when opencode is actually set up (its plugins dir exists), so a
-        # non-opencode user is never nagged.
-        if _opencode_plugins_dir().exists():
-            if not _opencode_plugin_dest().exists():
-                report["opencode"] = "missing"
-            elif not _opencode_is_installed():
-                report["opencode"] = "stale"
+        # non-opencode user is never nagged. The opencode leg reads one JSON
+        # receipt from the fno-agents door: what the manifest says is
+        # installed, what the --pure catalogs say is loaded, and the
+        # difference by name.
+        oc_home = Path(
+            os.environ.get("OPENCODE_CONFIG_DIR") or Path.home() / ".config/opencode"
+        )
+        if (oc_home / "plugins").is_dir():
+            from fno.rust_binary import call_binary_json
+
+            err, receipt = call_binary_json(
+                "plugin-install", ["--status", "--json", "opencode"]
+            )
+            if err is None and isinstance(receipt, dict):
+                status = receipt.get("status")
+                # The message is built here so the printer stays string-only:
+                # partial names what never loaded, stale names version drift,
+                # and a legacy bridge-only machine learns what the bridge
+                # never carried.
+                if status == "stale":
+                    report["opencode"] = (
+                        f"surface is STALE: installed at footnote {receipt.get('version')}, "
+                        f"footnote ships {receipt.get('source_version')}; re-run "
+                        "`fno config plugin install opencode`."
+                    )
+                elif status == "partial":
+                    names = ", ".join(str(n) for n in (receipt.get("missing") or []))
+                    report["opencode"] = (
+                        "surface is PARTIAL: installed but not loaded: "
+                        + names
+                        + "; re-run `fno config plugin install opencode`."
+                    )
+                elif status == "absent":
+                    if receipt.get("bridge_present"):
+                        report["opencode"] = (
+                            "carries only the legacy stop bridge; the fno: "
+                            "commands, agents and skills are not installed; "
+                            "re-run `fno config plugin install opencode`."
+                        )
+                    else:
+                        report["opencode"] = "missing"
     except Exception:
         pass
 
@@ -4560,10 +4448,10 @@ def doctor_command(
                 rmsg, _ = refresh_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,
                     fno_binary=_resolve_fno_binary(),
-                    install_path=os.environ.get("PATH", "/usr/bin:/bin"),
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
                     caller="doctor-fix",
+                    force_bounce=True,
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:
@@ -4580,7 +4468,7 @@ def doctor_command(
         # in silence. Advisory, like the two around it - the exit code is settled
         # by the blocker list, and the defect this closes is the silence.
         pc = result.get("plugin_cache") or {}
-        if pc.get("status") == "stale" and not json_out:
+        if pc.get("status") == "stale" and not pc.get("roots") and not json_out:
             typer.echo(
                 "fno doctor: --fix cannot refresh the claude plugin cache; that "
                 "registry belongs to claude. Run: `claude plugin update "
@@ -4630,6 +4518,32 @@ def doctor_command(
             # Rust-only stale: call the refresh helper directly (no needless
             # Python reinstall). src cannot be None here because rust_stale
             # requires rust_source_rev, which requires a resolved source.
+            # Same gate as update_command: an unresolvable or refused pin
+            # means the source is unproven or a worktree whose HEAD is not
+            # an ancestor of origin/main, and refreshing from it installs
+            # unmerged code machine-wide. A pin resolved to a DIFFERENT
+            # path than src is the same hazard: a concurrent `--source`
+            # repin between the verdict read and here would gate one
+            # checkout and refresh another. Name the path so the reader
+            # sees the worktree.
+            pin = update._resolve_source_pin(source)
+            if (
+                pin is None
+                or pin.get("decision") == "refuse"
+                or not pin.get("path")
+                or src is None
+                or Path(pin["path"]) != src
+            ):
+                rpath = (pin or {}).get("path") or src
+                reason = (pin or {}).get("refusal") or (
+                    "resolved pin does not match the source the verdict measured"
+                )
+                typer.echo(
+                    "fno doctor: --fix refused: source "
+                    f"{rpath} failed the source-pin gate: {reason}.",
+                    err=True,
+                )
+                raise typer.Exit(1)
             if update._target_in_progress():
                 typer.echo(
                     "fno doctor: --fix refused: target-state.md shows status: IN_PROGRESS. "
@@ -4671,10 +4585,6 @@ def doctor_command(
             typer.echo("fno doctor: nothing to fix.", err=True)
 
     dead_agents = bool((result.get("launch_agents") or {}).get("dead"))
-    id_collisions = bool(
-        (result.get("archive_id_collisions") or {}).get("count")
-        or (result.get("archive_id_collisions") or {}).get("unreadable")
-    )
     # A stale stage runs its hooks byte for byte; drift there is a blocker,
     # not the after-every-merge advisory the git cache kind stays as.
     pc = result.get("plugin_cache") or {}
@@ -4684,7 +4594,6 @@ def doctor_command(
         if result["status"] == "stale"
         or source_checkout_blocked
         or dead_agents
-        or id_collisions
         or stage_stale
         else 0
     )

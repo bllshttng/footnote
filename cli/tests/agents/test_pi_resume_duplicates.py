@@ -24,7 +24,6 @@ from fno.agents.harnesses.pi import (  # noqa: E402
     duplicate_resume_refusal,
     encode_cwd,
     lookup_sessions,
-    session_dir,
 )
 
 CWD = "/repo/worktrees/pi-dupes"
@@ -39,10 +38,11 @@ STAMPS = (
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("PI_HOME", str(tmp_path / "pi-home"))
-    directory = session_dir(CWD)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    directory = (tmp_path / "pi-agent" / "sessions" / encode_cwd(CWD))
     directory.mkdir(parents=True, exist_ok=True)
-    return directory
+    session_dir_fixture = directory
+    return session_dir_fixture
 
 
 def _seed(directory: Path, stamp: str, *, body: str) -> Path:
@@ -120,7 +120,7 @@ def test_an_unreadable_store_reads_unknown_and_never_none(tmp_path, monkeypatch)
     "no duplicates" would be the absence-is-not-an-outcome trap, and it would
     certify exactly the state the create race produces.
     """
-    monkeypatch.setenv("PI_HOME", str(tmp_path / "no-such-pi-home"))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "no-such-pi-agent"))
     lookup = lookup_sessions(CWD, SESSION_ID)
     assert lookup.state == "unknown", lookup
     assert lookup.reason, "an unknown reading must say why it could not read"
@@ -144,12 +144,29 @@ def test_the_cwd_encoding_matches_three_observed_directories():
 def test_one_id_in_two_worktrees_is_two_sessions(tmp_path, monkeypatch):
     """The identity is the PAIR, so a resume from canonical cannot see a
     worktree's session - and must not silently look somewhere else."""
-    monkeypatch.setenv("PI_HOME", str(tmp_path / "pi-home"))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     canonical = "/repo"
     worktree = "/repo/worktrees/feature"
-    directory = session_dir(worktree)
+    directory = tmp_path / "pi-agent" / "sessions" / encode_cwd(worktree)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{STAMPS[0]}_{SESSION_ID}.jsonl").write_text("{}\n")
 
     assert lookup_sessions(worktree, SESSION_ID).state == "one"
     assert lookup_sessions(canonical, SESSION_ID).state == "unknown"
+
+
+def test_AC4_ERR_a_missing_owner_reads_unknown_never_none(monkeypatch):
+    """The store read degrades to unknown when the Rust owner is absent.
+
+    Reading a missing owner as ``none`` would read "no duplicate" out of "no
+    instrument", which is exactly the collapse the enum exists to forbid.
+    """
+    import fno.rust_binary as rust_binary
+
+    # The dev checkout's own build outranks every other finder by design, so
+    # the honest way to simulate "no owner at all" is to empty the finders.
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    lookup = lookup_sessions("/repo/worktrees/pi-ownerless", SESSION_ID)
+    assert lookup.state == "unknown", lookup
+    assert "fno doctor update --rust" in lookup.reason, lookup

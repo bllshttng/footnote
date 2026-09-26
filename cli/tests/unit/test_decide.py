@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from fno.decide.cli import decide_app
 from fno.paths import project_log
+from fno.tracker.metadata import ExternalMetadataUnavailable
 
 runner = CliRunner()
 
@@ -308,7 +309,7 @@ def test_backlog_decide_skips_claim_read_for_non_node_subject(
     )
 
     assert result.exit_code == 0, result.output
-    assert "subject names no graph node" in result.stderr
+    assert "'area:coordination' names no graph node" in result.stderr
     assert calls == []
 
 
@@ -426,16 +427,62 @@ def test_top_level_decide_lazy_entry_points_to_the_shim():
     assert LAZY_SUBCOMMANDS["decide"][0] == "fno.decide.cli:shim_app"
 
 
+def _index_rows(index: Path) -> list[dict]:
+    """The index's committed envelopes, in commit order."""
+    from tests._event_rows import event_rows
+
+    return event_rows(Path(index))
+
+
+def _drop_index(index: Path) -> None:
+    """Delete the index in both shapes: raw bytes and store."""
+    from fno.events.store_client import store_db_path
+
+    index = Path(index)
+    index.unlink(missing_ok=True)
+    store = store_db_path(index)
+    if store.exists():
+        store.unlink()
+
+
 @pytest.fixture
 def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The machine-wide decision index, pinned into the sandbox.
 
     Every test takes this: without it a test writes to the developer's real
-    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there.
+    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there. The
+    ledger root moves with it because the CLI hint re-derives the index from
+    ``paths.ledger_json()`` at call time; recorder and hint must see one file.
     """
     path = tmp_path / "state" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: path)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: path)
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: tmp_path / "state" / "ledger.json")
     return path
+
+
+def _node_entry(tmp_graph: Path, node_id: str = "x-7d94") -> dict:
+    """The node's store row. graph.json is the seed mirror now, not the read
+    seam: projections land in the store and only read back through it."""
+    from fno.graph.store import read_graph_strict
+
+    for entry in read_graph_strict(tmp_graph):
+        if entry.get("id") == node_id:
+            return entry
+    raise AssertionError(f"no store row for {node_id}")
+
+
+def _seed_projection(tmp_graph: Path, rows: list[dict]) -> None:
+    """Put legacy projection rows ON the store node, the way the pre-store
+    writer left them: on the node's decisions list, never in the seed file."""
+    from fno.graph.store import commit_rows_via_store
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        for entry in entries:
+            if entry.get("id") == "x-7d94":
+                entry.setdefault("decisions", []).extend(dict(row) for row in rows)
+        return entries
+
+    commit_rows_via_store(tmp_graph, mutator)
 
 
 @pytest.fixture
@@ -452,12 +499,6 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # The guarded metadata reader (decide's read side) resolves through
     # paths.graph_json at call time; pin it to the same hermetic file.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    # entries_with_archive resolves the archive through fno.paths, which is
-    # graph_json().parent / "graph-archive.json"; pin both so the read-through
-    # test stays hermetic.
-    monkeypatch.setattr(
-        "fno.paths.graph_archive_json", lambda: tmp_path / "graph-archive.json"
-    )
     return g
 
 
@@ -479,11 +520,9 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(root: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(project_log("events.jsonl", project_root=root))
 
 
 def _write_decision_index(index: Path, *rows: dict) -> None:
@@ -541,6 +580,35 @@ def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
     rows = {row["decision_id"]: row for row in json.loads(history.stdout)["decisions"]}
     assert rows["d-coord0001"]["lifecycle"] == "expired"
     assert rows["d-law00001"]["lifecycle"] == "live"
+
+
+def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.decide import list_decisions
+
+    entries = json.loads(tmp_graph.read_text())
+    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-coordreuse",
+            "decision": "coordinate this node",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.decide._graph_entries",
+        lambda **_: pytest.fail("list_decisions reread the graph"),
+    )
+
+    _, rows, _ = list_decisions(
+        "x-7d94", state="all", entries=entries["entries"]
+    )
+    assert rows[0]["lifecycle"] == "expired"
 
 
 def test_ambiguous_coord_without_positive_closure_evidence_is_unscoped(
@@ -687,7 +755,7 @@ def test_reindex_preserves_distinct_retractions_for_one_target(
             ["decide-retract", decision_id, "--reason", reason, "--authority", "agent"],
         )
         assert result.exit_code == 0, result.output
-    index.unlink()
+    _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 3
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     row = json.loads(listed.stdout)["decisions"][0]
@@ -738,7 +806,7 @@ def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
         ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
     )
     assert retracted.exit_code == 0, retracted.output
-    index.unlink()
+    _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 2
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     assert json.loads(listed.stdout)["decisions"][0]["decision_id"] == decision_id
@@ -987,7 +1055,7 @@ def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
 ):
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?", "--ask", "finish the lane"])
     question_id = asked.stdout.strip().splitlines()[-1]
     cleared = runner.invoke(
         outstanding_app,
@@ -1027,12 +1095,13 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     # claim one, and the reader's `unattributed` lane covers it.
     assert data["decided_by"]
 
-    entry = json.loads(tmp_graph.read_text())["entries"][0]
+    entry = _node_entry(tmp_graph)
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
     assert entry["decisions"][0]["rationale"].startswith("a fold is a read")
     assert entry["decisions"][0]["graduation"] == {"kind": "guidance"}
     assert entry["decisions"][0]["options"] == ["fold first", "migrate first"]
-    assert entry["decisions"][0]["superseded_by"] is None
+    # Null fields do not ride the store row; absence IS not-superseded.
+    assert entry["decisions"][0].get("superseded_by") is None
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1063,10 +1132,10 @@ def test_explicit_enforced_graduation_reaches_every_decision_store(
         "artifact": "test:tests.unit.test_decide::test_operator_only",
     }
     assert _events(root)[0]["data"]["graduation"] == expected
-    indexed = json.loads(index.read_text().splitlines()[0])["data"]
+    indexed = _index_rows(index)[0]["data"]
     assert indexed["decision_id"] == decision_id
     assert indexed["graduation"] == expected
-    projected = json.loads(tmp_graph.read_text())["entries"][0]["decisions"][0]
+    projected = _node_entry(tmp_graph)["decisions"][0]
     assert projected["decision_id"] == decision_id
     assert projected["graduation"] == expected
 
@@ -1122,7 +1191,7 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
     )
     assert second.exit_code == 0, second.output
 
-    entry = json.loads(tmp_graph.read_text())["entries"][0]
+    entry = _node_entry(tmp_graph)
     by_id = {d["decision_id"]: d for d in entry["decisions"]}
     assert by_id[first]["superseded_by"] is not None
     assert by_id[first]["superseded_by"].startswith("d-")
@@ -1133,13 +1202,13 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
 
 
 def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, index: Path):
-    """A decision recorded pre-archive is still listable post-archive
-    through entries_with_archive."""
+    """A decision recorded pre-archive is still listable post-archive: the
+    archived row stays in the same store, stamped, so the read needs no
+    sidecar."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     entries = json.loads(tmp_graph.read_text())["entries"]
-    archive = tmp_graph.parent / "graph-archive.json"
-    archive.write_text(json.dumps({"entries": entries}) + "\n")
-    tmp_graph.write_text(json.dumps({"entries": []}) + "\n")
+    entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1540,7 +1609,7 @@ def test_a_subjectless_decision_is_reachable_only_without_a_subject(
     decision with subject=None. A subject-less list is the only way to it."""
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -1779,7 +1848,7 @@ def test_reindex_recovers_journal_records_and_is_idempotent(
     journal = project_log("events.jsonl", project_root=root)
     for subject in ("pr-923", "pr-921", "x-6352-worktree"):
         runner.invoke(decide_app, ["--subject", subject, "--decision", f"on {subject}"])
-    index.unlink()  # the state before the index existed: journal only
+    _drop_index(index)  # the state before the index existed: journal only
 
     counts = reindex(sources=[journal])
     assert counts["added"] == 3, counts
@@ -1802,7 +1871,7 @@ def test_reindex_reads_one_journal_once_through_a_symlink(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     from fno.paths import project_log
 
@@ -1826,16 +1895,17 @@ def test_reindex_recovers_a_projection_row_that_stored_no_subject(
     the recovered decision answers no query at all."""
     from fno.decide import reindex
 
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {
-            "decision_id": "d-legacy1",
-            "decision": "fold every project's inbox first",
-            "decided_by": "operator",
-            "ts": "2026-08-15T00:31:06.178560Z",
-        }
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    _seed_projection(
+        tmp_graph,
+        [
+            {
+                "decision_id": "d-legacy1",
+                "decision": "fold every project's inbox first",
+                "decided_by": "operator",
+                "ts": "2026-08-15T00:31:06.178560Z",
+            }
+        ],
+    )
 
     assert reindex(sources=[])["added"] == 1
     payload = json.loads(
@@ -1863,7 +1933,7 @@ def test_reindex_folds_every_project_root_the_graph_names(
     did = record_decision(
         decision="the sibling repo ruled this", subject="pr-777", events_root=sibling
     )["decision_id"]
-    index.unlink()
+    _drop_index(index)
 
     from fno.paths import project_log
 
@@ -1934,7 +2004,7 @@ def test_reindex_counts_a_journal_row_and_its_own_projection_once(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
-    index.unlink()
+    _drop_index(index)
 
     counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert (counts["added"], counts["already"]) == (1, 0), counts
@@ -1975,11 +2045,10 @@ def test_a_legacy_projection_row_with_no_ts_sorts_oldest(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "recent"])
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"].append(
-        {"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}
+    _seed_projection(
+        tmp_graph,
+        [{"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}],
     )
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
     assert reindex(sources=[])["added"] == 1
     payload = json.loads(
@@ -2031,14 +2100,31 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
     aborts on the first bad row and loses the journal half of the fold too."""
     from fno.decide import reindex
 
-    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
-    index.unlink()
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
-        {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    recorded = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
+    if not index.exists():
+        # The fresh front commits the event into the store beside the index
+        # and leaves the raw file unwritten; the record is still the record.
+        from fno.events.store_client import native_rows
+
+        if not native_rows(index):
+            raise AssertionError(
+                f"record rc={recorded.exit_code} out={recorded.output!r}"
+                f" exc={recorded.exception!r} index={index}"
+            )
+    # A clean slate either way: the backfill's `added` counts rows it folds
+    # from the journal and the graph, so a surviving store row would dedupe
+    # one of them back out of the count.
+    from fno.events.store_client import store_db_path
+
+    store_db_path(index).unlink(missing_ok=True)
+    index.unlink(missing_ok=True)
+    _seed_projection(
+        tmp_graph,
+        [
+            {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
+            {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
+        ],
+    )
 
     counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["added"] == 2, counts
@@ -2062,30 +2148,23 @@ def test_an_unreachable_index_is_a_failed_read_not_an_empty_one(
     assert "cannot read the decision index" in listed.output
 
 
-def test_the_second_producer_also_refuses_to_ask_for_a_retry(
-    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_second_producer_surfaces_decision_index_failure(
+    root: Path, tmp_graph: Path, index: Path
 ):
     """`fno outstanding clear --answer` is the other operator_decision writer.
-    A guard on one of two producer paths is decorative."""
-    import fno.events as events_mod
+    Its store failure must be reported with the safe retry path."""
     from fno.outstanding.cli import outstanding_app
+    from fno.events.store_client import store_db_path
 
     qid = runner.invoke(
-        outstanding_app, ["ask", "which lane owns the retry?"]
+        outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"]
     ).stdout.strip().splitlines()[-1]
 
-    real = events_mod.append_event
-
-    def boom(event, events_path=None, **kw):
-        if events_path is not None and Path(events_path) == index:
-            raise OSError("read-only file system")
-        return real(event, events_path=events_path, **kw)
-
-    monkeypatch.setattr(events_mod, "append_event", boom)
+    store_db_path(index).mkdir(parents=True)
     res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
     assert res.exit_code == 1
-    assert "fno backlog decide-reindex" in res.output
-    assert "records the same ruling a second time" in res.output
+    assert "decision index mirror failed" in res.output
+    assert "rerun the same clear to finish" in res.output
 
 
 def test_equal_timestamps_do_not_invert_newest_first(
@@ -2095,12 +2174,13 @@ def test_equal_timestamps_do_not_invert_newest_first(
     sort keeps file order for ties - silently reversing the stated contract."""
     from fno.decide import reindex
 
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
-        {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    _seed_projection(
+        tmp_graph,
+        [
+            {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
+            {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
+        ],
+    )
     assert reindex(sources=[])["added"] == 2
 
     payload = json.loads(
@@ -2117,7 +2197,7 @@ def test_a_torn_journal_does_not_make_reindex_impossible(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
     from fno.paths import project_log
 
     journal = project_log("events.jsonl", project_root=root)
@@ -2139,9 +2219,9 @@ def test_a_failed_projection_never_reports_a_lost_capture(
     import fno.graph.store as gs
 
     def boom(*a, **kw):
-        raise SystemExit(1)  # what locked_mutate_graph does on a corrupt graph
+        raise SystemExit(1)  # what commit_rows_via_store does on a corrupt graph
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    monkeypatch.setattr(gs, "commit_rows_via_store", boom)
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     assert res.exit_code == 0, res.output
     assert "graph projection failed" in res.output
@@ -2150,6 +2230,59 @@ def test_a_failed_projection_never_reports_a_lost_capture(
         runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
     )
     assert [d["decision"] for d in payload["decisions"]] == ["fold first"]
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "exc", "expected"),
+    [
+        pytest.param(
+            "fno.graph.api.decision_record",
+            RuntimeError("database is locked"),
+            "the graph store refused the ruling",
+            id="store-refusal",
+        ),
+        pytest.param(
+            "fno.decide._project",
+            OSError("disk full"),
+            "the graph projection failed",
+            id="projection-raise",
+        ),
+        pytest.param(
+            "fno.tracker.metadata.read_entries",
+            RuntimeError("connection refused"),
+            "the graph could not be read",
+            id="precheck-read-error",
+        ),
+        pytest.param(
+            "fno.tracker.metadata.read_entries",
+            ExternalMetadataUnavailable("tracker is external"),
+            "the active tracker is external",
+            id="external-tracker",
+        ),
+    ],
+)
+def test_a_failed_or_skipped_projection_names_its_path(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_target: str,
+    exc: Exception,
+    expected: str,
+):
+    """Every None node_id names the path that produced it. A live node subject
+    must never read as "names no graph node" - that line is the false receipt
+    that sent a blueprint to rediscover a live hold."""
+    def boom(*a, **kw):
+        raise exc
+
+    monkeypatch.setattr(patch_target, boom)
+    res = runner.invoke(
+        decide_app, ["--subject", "x-7d94", "--decision", "hold the merge"]
+    )
+    assert res.exit_code == 0, res.output
+    assert expected in res.stderr
+    assert "names no graph node" not in res.stderr
 
 
 def test_a_node_subject_folds_case_in_both_directions(
@@ -2195,7 +2328,7 @@ def test_reindex_exits_nonzero_when_the_index_cannot_be_written(
     import fno.events as events_mod
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     real = events_mod.append_event
 
@@ -2218,10 +2351,10 @@ def test_an_unreadable_graph_says_recall_degraded(
     Degrading in silence is indistinguishable from no such decision."""
     runner.invoke(decide_app, ["--subject", "fold-the-inbox", "--decision", "fold"])
 
-    # A REAL half-written graph, not a monkeypatched raise. read_graph swallows
-    # corruption and answers [], so a guard exercised through a patched
-    # exception stays green on a path production never takes.
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    # A REAL unreadable store, not a monkeypatched raise. The keeper serves
+    # reads from graph.db; tearing the seed mirror would leave every read
+    # green on a path production never takes.
+    tmp_graph.with_suffix(".db").write_bytes(b"this is not a sqlite database" * 8)
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -2285,7 +2418,7 @@ def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     import fno.events as events_mod
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     real = events_mod.validate
     calls = {"n": 0}
@@ -2412,7 +2545,7 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     ]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [
         unattributed_rows[0]["decision_id"],
@@ -2489,7 +2622,7 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     journal_events = [e for e in _events(root) if e["type"] == "operator_decision"]
     index_events = [
         json.loads(line)
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ]
     assert [e["data"]["decision_id"] for e in journal_events] == [
@@ -2535,7 +2668,7 @@ def test_backlog_decide_records_non_operator_authority_in_coord(
     ]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [decision["decision_id"]]
 
@@ -2597,7 +2730,7 @@ def test_backlog_decide_still_refuses_operator_authority_before_any_write(
     assert [e["data"]["decision_id"] for e in _events(root)] == [decision_id]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [decision_id]
 
@@ -2658,7 +2791,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     assert [e["data"]["decision_id"] for e in _events(root)] == [did]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [did]
 
@@ -2695,17 +2828,16 @@ def test_no_identity_explicit_operator_authority_records(
     assert _events(root)[0]["data"]["authority_source"] == "operator"
 
 
-def test_a_torn_archive_also_stops_the_backfill(
+def test_a_torn_archive_does_not_stop_the_backfill(
     root: Path, tmp_graph: Path, index: Path
 ):
-    """entries_with_archive reads the archive softly. A guard on the working
-    graph alone would drop every archived node's decisions from a backfill that
-    still printed "+0" and exited 0."""
+    """The advisory file left behind by an old export is dead weight: the
+    backfill reads archived residents through the store, so a torn file is
+    ignored, not an incident."""
     (tmp_graph.parent / "graph-archive.json").write_text('{"entries": [{"id": "x-ar')
 
     res = runner.invoke(decide_app, ["reindex"])
-    assert res.exit_code == 1, res.output
-    assert "backlog decide-reindex: failed" in res.output
+    assert res.exit_code == 0, res.output
 
 
 def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
@@ -2728,9 +2860,9 @@ def test_one_id_is_one_row_even_if_the_index_holds_it_twice(
     """reindex is read-then-write with no lock across the fold, so a decide
     landing mid-backfill can be appended twice under one id."""
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    duplicate = index.read_text(encoding="utf-8")
+    duplicate = json.dumps(_index_rows(index)[0])
     with index.open("a", encoding="utf-8") as fh:
-        fh.write(duplicate)
+        fh.write(duplicate + "\n" + duplicate + "\n")
 
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout

@@ -1,8 +1,8 @@
 //! The machine janitor: `fno-agents reclaim`, surfaced as `fno doctor reclaim`.
 //! Removes disk bloat footnote development piles up:
-//! plugin-cache build copies, leaked test HOMEs, stale test scratch, and
-//! unregistered worktree targets, then prunes the shared uv cache under a
-//! timeout. Everything removed is rebuilt or downloaded again on demand.
+//! plugin-cache build copies, Codex converge backups, leaked test HOMEs, stale
+//! test scratch, and unregistered worktree targets, then prunes the shared uv
+//! cache under a timeout. Everything removed is rebuilt or downloaded again on demand.
 //!
 //! Dry run by default; `--apply` removes and rewrites
 //! `<state-root>/reclaim/last-run.json` with the bytes each lane reclaimed.
@@ -56,7 +56,7 @@ impl Lane {
 
 /// Recursive byte count that never follows a symlink out of the tree it was
 /// given: a link's target is someone else's tree, not this path's bulk.
-fn tree_bytes(path: &Path) -> u64 {
+pub(crate) fn tree_bytes(path: &Path) -> u64 {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
@@ -111,21 +111,26 @@ fn tagged_crate_targets(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+fn fno_plugin_dir(root: &Path) -> PathBuf {
+    root.join("fno")
+}
+
 fn plugin_cache_copies() -> Vec<PathBuf> {
     // Cargo output and worktrees copied into harness plugin caches. The
     // plugin runs from these copies, but nothing reads a cargo target or a
     // worktree there.
     let home = dirs_home();
     let mut found = Vec::new();
-    for cache_root in [
-        home.join(".claude/plugins/cache"),
-        home.join(".codex/plugins/cache"),
-    ] {
+    let mut cache_roots = vec![home.join(".claude/plugins/cache")];
+    if let Some(codex_home) = crate::codex_store::codex_home() {
+        cache_roots.push(codex_home.join("plugins/cache"));
+    }
+    for cache_root in cache_roots {
         let Ok(harnesses) = std::fs::read_dir(&cache_root) else {
             continue;
         };
         for harness in harnesses.flatten() {
-            let Ok(checkouts) = std::fs::read_dir(harness.path().join("fno")) else {
+            let Ok(checkouts) = std::fs::read_dir(fno_plugin_dir(&harness.path())) else {
                 continue;
             };
             for checkout in checkouts.flatten() {
@@ -140,6 +145,129 @@ fn plugin_cache_copies() -> Vec<PathBuf> {
         }
     }
     found
+}
+
+fn codex_cache_quarantines() -> (Lane, Option<std::fs::File>) {
+    let mut lane = Lane::new("codex_cache_quarantines", Vec::new());
+    let Some(home) = crate::codex_store::codex_home() else {
+        lane.note = "kept: codex home unresolved".to_string();
+        return (lane, None);
+    };
+    let quarantine_root = home.join("footnote");
+    if !quarantine_root.is_dir() {
+        return (lane, None);
+    }
+
+    let lock_path = quarantine_root.join("plugin-channel.lock");
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    else {
+        lane.note = "kept: codex plugin converge in flight".to_string();
+        return (lane, None);
+    };
+    if lock.try_lock().is_err() {
+        lane.note = "kept: codex plugin converge in flight".to_string();
+        return (lane, None);
+    }
+
+    let marker_path = quarantine_root.join("plugin-channel.json");
+    let Some(marker) = std::fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .and_then(|object| {
+            Some((
+                object.get("marketplace")?.as_str()?.to_string(),
+                object.get("source")?.as_str()?.to_string(),
+            ))
+        })
+    else {
+        lane.note = "kept: live copy unreadable (plugin-channel.json)".to_string();
+        return (lane, None);
+    };
+    let (marketplace, source) = marker;
+    if marketplace != "footnote" && marketplace != "footnote-dev" {
+        lane.note = "kept: live copy unreadable (plugin-channel.json)".to_string();
+        return (lane, None);
+    }
+
+    let live_cache = fno_plugin_dir(&home.join("plugins/cache").join(&marketplace));
+    if !live_cache.is_dir() {
+        lane.note = format!("kept: live cache {} not found", live_cache.display());
+        return (lane, None);
+    }
+    match std::fs::symlink_metadata(quarantine_root.join("rollback-failure.json")) {
+        Ok(_) => {
+            lane.note = "kept: rollback-failure.json present".to_string();
+            return (lane, Some(lock));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            lane.note = "kept: rollback-failure.json present".to_string();
+            return (lane, Some(lock));
+        }
+    }
+
+    let Ok(live_cache) = live_cache.canonicalize() else {
+        lane.note = format!("kept: live cache {} not found", live_cache.display());
+        return (lane, Some(lock));
+    };
+    let source = PathBuf::from(source);
+    let source = source
+        .is_dir()
+        .then(|| source.canonicalize().ok())
+        .flatten();
+    let protected = source
+        .as_deref()
+        .into_iter()
+        .chain(std::iter::once(live_cache.as_path()))
+        .collect::<Vec<_>>();
+
+    let Ok(entries) = std::fs::read_dir(&quarantine_root) else {
+        return (lane, Some(lock));
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let suffix = name
+            .strip_prefix(".footnote.")
+            .or_else(|| name.strip_prefix(".footnote-dev."));
+        let Some(suffix) = suffix else {
+            continue;
+        };
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            continue;
+        }
+        if !fno_plugin_dir(&path).is_dir() {
+            continue;
+        }
+        let Ok(candidate) = path.canonicalize() else {
+            continue;
+        };
+        if protected.iter().any(|protected| {
+            candidate == *protected
+                || candidate.starts_with(protected)
+                || protected.starts_with(&candidate)
+        }) {
+            continue;
+        }
+        lane.paths.push(path);
+    }
+    (lane, Some(lock))
 }
 
 fn is_old_leaked_home(entry: &Path, cutoff: SystemTime) -> bool {
@@ -296,6 +424,50 @@ fn uv_prune_apply() -> bool {
     }
 }
 
+/// Every root this run's cargo-build-dirs lane sweeps: every registry root,
+/// plus the cwd's canonical repo when `include_cwd_root` says so. That extra
+/// root is a HAND-run convenience only (a person typing `fno doctor reclaim
+/// --apply` from inside a repo wants that repo swept even if it never
+/// registered) - the daemon's own daily tick passes `false` so an arbitrary
+/// launch cwd, real or a test's, never adds a sweep root the registry did
+/// not already name.
+fn cargo_build_dirs_roots(home: &AgentsHome, include_cwd_root: bool) -> Vec<String> {
+    let mut roots = crate::daemon::worktree_sweep::registry_repo_roots(home);
+    if include_cwd_root {
+        if let Some(repo) = canonical_repo_root(&std::env::current_dir().unwrap_or_default()) {
+            let repo = repo.to_string_lossy().into_owned();
+            if !roots.contains(&repo) {
+                roots.push(repo);
+            }
+        }
+    }
+    roots
+}
+
+/// The build-base lane: `cargo_build_dirs::sweep` per root from
+/// [`cargo_build_dirs_roots`]. Roots with no `crates/*/Cargo.toml` are
+/// skipped - sweeping a manifest-less root under a shared base could only
+/// ever misjudge rows it cannot resolve. The note carries each root's summary
+/// line; bytes are reclaimed (apply) or projected (dry run).
+fn cargo_build_dirs_lane(home: &AgentsHome, apply: bool, include_cwd_root: bool) -> Lane {
+    let mut lane = Lane::new("cargo_build_dirs", Vec::new());
+    let roots = cargo_build_dirs_roots(home, include_cwd_root);
+    let mut notes: Vec<String> = Vec::new();
+    for root in roots {
+        let root = PathBuf::from(&root);
+        if crate::cargo_build_dirs::workspace_manifests(&root).is_empty() {
+            continue;
+        }
+        let rep = crate::cargo_build_dirs::sweep(&root, apply, SystemTime::now());
+        lane.bytes += rep.projected_bytes;
+        if let Some(summary) = rep.lines.last() {
+            notes.push(summary.clone());
+        }
+    }
+    lane.note = notes.join("; ");
+    lane
+}
+
 fn write_receipt(home: &AgentsHome, lanes: &[Lane]) -> std::io::Result<()> {
     let path = receipt_path(home);
     if let Some(parent) = path.parent() {
@@ -347,7 +519,11 @@ fn now_stamp() -> String {
 
 /// The daemon's daily gate: run `--apply` when the receipt is missing or
 /// older than a day. Receipt and effect are one file, so a crashed child
-/// simply reads as stale on the next tick.
+/// simply reads as stale on the next tick. Goes straight to
+/// [`run_reclaim_lanes`] with `include_cwd_root = false`: the daemon's launch
+/// cwd is not a repo a person asked to sweep, it is wherever the process
+/// happened to start (a test's checkout, an arbitrary shell) - the cwd
+/// fallback in `cargo_build_dirs_roots` is a hand-run convenience only.
 pub fn maybe_run_daily(home: &AgentsHome) {
     let stale = match std::fs::metadata(receipt_path(home)) {
         Ok(meta) => meta
@@ -359,11 +535,46 @@ pub fn maybe_run_daily(home: &AgentsHome) {
         Err(_) => true,
     };
     if stale {
-        let _ = run_reclaim(&["--apply".to_string()], home);
+        run_reclaim_lanes(home, true, false, false);
     }
 }
 
 pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
+    // Leading subcommands. `remove-for <tree> [--json]` is the best-effort
+    // tree-removal reclaim; it never errors. `cargo-build-dirs [--apply]`
+    // runs only the build-base lane for the cwd's canonical repo.
+    match args.first().map(String::as_str) {
+        Some("remove-for") => {
+            let Some(tree) = args.get(1) else {
+                eprintln!("fno doctor reclaim remove-for: usage: remove-for <tree> [--json]");
+                return 2;
+            };
+            let json = args.iter().skip(2).any(|a| crate::json_output::is_flag(a));
+            let removed = crate::cargo_build_dirs::remove_for(Path::new(tree));
+            if json {
+                println!("{{\"removed\": {removed}}}");
+            } else {
+                println!("removed {removed} build dir(s)");
+            }
+            return 0;
+        }
+        // `occupancy-login`: the idle login shell verdict (R6). An argument of
+        // the reclaim action, never a new action (law d-fe66560a); the
+        // occupancy bridge shells here before the Python classifier.
+        Some("occupancy-login") => {
+            return crate::occupancy_login::run(&args[1..]);
+        }
+        Some("cargo-build-dirs") => {
+            let apply = args.iter().skip(1).any(|a| a == "--apply");
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let root = canonical_repo_root(&cwd).unwrap_or(cwd);
+            crate::cargo_build_dirs::sweep(&root, apply, SystemTime::now());
+            crate::cargo_build_dirs::reclaim_idle_trees(&root, apply, SystemTime::now());
+            return 0;
+        }
+        _ => {}
+    }
+
     let mut apply = false;
     let mut verbose = false;
     for arg in args {
@@ -376,7 +587,16 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
+    // A hand run: the cwd is wherever the person typing this ran it from, so
+    // the cargo-build-dirs lane sweeps that repo too even if unregistered.
+    run_reclaim_lanes(home, apply, verbose, true)
+}
 
+/// The full lane set (every `run_reclaim` lane but the leading subcommands),
+/// shared by the hand-run CLI path and the daemon's daily tick. Only
+/// `include_cwd_root` differs between the two callers - see
+/// [`cargo_build_dirs_roots`].
+fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_root: bool) -> i32 {
     let mut lanes = vec![
         Lane::new("plugin_cache_build_copies", plugin_cache_copies()),
         Lane::new("leaked_test_homes", leaked_test_homes()),
@@ -391,6 +611,16 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
+    let (mut codex_quarantines, codex_lock) = codex_cache_quarantines();
+    codex_quarantines.bytes = codex_quarantines.paths.iter().map(|p| tree_bytes(p)).sum();
+    if apply {
+        for path in &codex_quarantines.paths {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    lanes.push(codex_quarantines);
+    drop(codex_lock);
+    lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {
         None => uv.note = "uv not found".to_string(),
@@ -451,19 +681,76 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serializes the tests that repoint the process-global env: a concurrent
     /// reader can catch the root mid-flip and sweep the REAL temp dir (the
-    /// same ENV_LOCK shape king_board's HOME_LOCK uses).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// same ENV_LOCK shape king_board's HOME_LOCK uses). Shared with
+    /// cargo_build_dirs' tests, which mutate the same vars.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_lane_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fno-reclaim-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn install_fake_uv(root: &Path) {
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::write_exec_stub(
+            &bin,
+            "uv",
+            "#!/bin/sh\nif [ \"$1\" = cache ] && [ \"$2\" = dir ]; then printf '/dev/null\\n'; fi\nexit 0\n",
+        );
+        let old = std::env::var_os("PATH");
+        let paths = std::iter::once(bin)
+            .chain(std::env::split_paths(old.as_deref().unwrap_or_default()))
+            .collect::<Vec<_>>();
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    }
+
+    struct ReclaimTestEnv {
+        cwd: PathBuf,
+        vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ReclaimTestEnv {
+        fn new() -> Self {
+            const VARS: &[&str] = &[
+                "PATH",
+                "HOME",
+                "CODEX_HOME",
+                "FNO_RECLAIM_TEMP_ROOT",
+                "FNO_RECLAIM_STATE_ROOT",
+                "CARGO",
+                "CBD_FNO",
+                "CBD_FB",
+                "FNO_CARGO_TARGETS_BASE",
+            ];
+            ReclaimTestEnv {
+                cwd: std::env::current_dir().unwrap(),
+                vars: VARS
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for ReclaimTestEnv {
+        fn drop(&mut self) {
+            for (name, value) in self.vars.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+            let _ = std::env::set_current_dir(&self.cwd);
+        }
     }
 
     fn age(path: &Path, minutes: u64) {
@@ -514,17 +801,24 @@ mod tests {
         age(&fresh, 1);
 
         let state = temp_lane_root("state");
+        let codex = state.join("codex");
+        let fake_home = state.join("home");
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(&root);
+        std::env::set_current_dir(&root).unwrap();
+        std::env::set_var("HOME", &fake_home);
         std::env::set_var("FNO_RECLAIM_TEMP_ROOT", &root);
         std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+        std::env::set_var("CODEX_HOME", &codex);
         let home = AgentsHome::at(state.join("agents"));
         let rc = run_reclaim(&["--apply".to_string()], &home);
-        std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+        drop(process_env);
         assert_eq!(rc, 0);
         assert!(!old.exists(), "the aged fake HOME is removed");
         assert!(fresh.exists(), "the fresh fake HOME survives");
         let receipt = std::fs::read_to_string(state.join("reclaim/last-run.json")).unwrap();
         assert!(receipt.contains("leaked_test_homes"));
+        assert!(receipt.contains("codex_cache_quarantines"));
         assert!(receipt.contains("total_bytes"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&state);
@@ -545,5 +839,458 @@ mod tests {
         std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
         assert_eq!(found, vec![junk]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC6: the daily run's receipt carries the lane's reclaimed bytes and
+    /// the orphan hash dir is gone. Registry seed + fake cargo + sandbox
+    /// bases, per cargo_build_dirs' harness.
+    #[test]
+    fn apply_runs_the_cargo_build_dirs_lane_and_receipts_the_bytes() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_lane_root("cargo-lane");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("crates/fake")).unwrap();
+        std::fs::write(
+            repo.join("crates/fake/Cargo.toml"),
+            "[package]\nname = 'fakepkg'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        let git_init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "the sandbox repo must initialize");
+        let fno_base = root.join("fno-base");
+        let fb_base = root.join("fb-base");
+        std::fs::create_dir_all(&fno_base).unwrap();
+        std::fs::create_dir_all(&fb_base).unwrap();
+        // Fake cargo keyed on CARGO_BUILD_BUILD_DIR, like the sibling suite.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let script = crate::write_exec_stub(
+            &root.join("bin"),
+            "cargo",
+            "#!/bin/sh\nif [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FNO\"\n\
+             else\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FB\"\n\
+             fi\n",
+        );
+
+        // One orphan: fingerprinted, quiet 7h, no tree resolves to it.
+        let orphan = fb_base.join("00").join("cafefe12");
+        std::fs::create_dir_all(orphan.join("debug/deps")).unwrap();
+        std::fs::create_dir_all(orphan.join("debug/.fingerprint")).unwrap();
+        std::fs::write(orphan.join("CACHEDIR.TAG"), b"Signature: x\n").unwrap();
+        std::fs::write(orphan.join("debug/deps/payload"), vec![0u8; 4096]).unwrap();
+        std::fs::write(orphan.join("debug/.fingerprint/fakepkg-beef"), b"").unwrap();
+        let expected = tree_bytes(&orphan);
+        let old = SystemTime::now() - Duration::from_secs(7 * 3600);
+        for entry in ["", "debug", "debug/deps", "debug/.fingerprint"] {
+            let p = if entry.is_empty() {
+                orphan.clone()
+            } else {
+                orphan.join(entry)
+            };
+            let file = std::fs::File::options().read(true).open(&p).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        for name in [
+            "debug/deps/payload",
+            "debug/.fingerprint/fakepkg-beef",
+            "CACHEDIR.TAG",
+        ] {
+            let file = std::fs::File::options()
+                .read(true)
+                .open(orphan.join(name))
+                .unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+
+        let state = temp_lane_root("cargo-lane-state");
+        let codex = state.join("codex");
+        let fake_home = state.join("home");
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(&root);
+        std::env::set_current_dir(&repo).unwrap();
+        std::env::set_var("HOME", &fake_home);
+        std::env::set_var("FNO_RECLAIM_TEMP_ROOT", &root);
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+        std::env::set_var("CODEX_HOME", &codex);
+        std::env::set_var("CARGO", &script);
+        std::env::set_var("CBD_FNO", fno_base.join("00").join("aaaa11"));
+        std::env::set_var("CBD_FB", fb_base.join("00").join("bbbb22"));
+        std::env::set_var("FNO_CARGO_TARGETS_BASE", &fno_base);
+        // Seed the registry so the lane finds the sandbox repo normally.
+        let home = AgentsHome::at(state.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({
+                "entries": [{"name": "seed", "cwd": repo.display().to_string()}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rc = run_reclaim(&["--apply".to_string()], &home);
+
+        drop(process_env);
+        assert_eq!(rc, 0);
+        assert!(!orphan.exists(), "the orphan hash dir is reaped");
+        let receipt: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state.join("reclaim/last-run.json")).unwrap(),
+        )
+        .unwrap();
+        let bytes = receipt["lanes"]["cargo_build_dirs"]["bytes"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(bytes, expected, "receipt carries the reclaimed bytes");
+        assert!(
+            receipt["lanes"]["cargo_build_dirs"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("cargo-build-dirs mode=apply"),
+            "the note names each root's summary line"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    fn codex_home_fixture(tag: &str) -> PathBuf {
+        let home = temp_lane_root(tag);
+        std::fs::create_dir_all(home.join("footnote")).unwrap();
+        std::fs::File::create(home.join("footnote/plugin-channel.lock")).unwrap();
+        home
+    }
+
+    fn write_codex_marker_for_channel(home: &Path, channel: &str, marketplace: &str, source: &str) {
+        std::fs::write(
+            home.join("footnote/plugin-channel.json"),
+            serde_json::to_vec(&json!({
+                "channel": channel,
+                "marketplace": marketplace,
+                "source": source,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_codex_marker(home: &Path, marketplace: &str, source: &str) {
+        write_codex_marker_for_channel(home, "dev", marketplace, source);
+    }
+
+    fn codex_live_cache(home: &Path, marketplace: &str) -> PathBuf {
+        let live = home
+            .join("plugins/cache")
+            .join(marketplace)
+            .join("fno/0.3.2");
+        std::fs::create_dir_all(&live).unwrap();
+        live
+    }
+
+    fn codex_backup(home: &Path, prefix: &str, suffix: &str) -> PathBuf {
+        let backup = home.join("footnote").join(format!("{prefix}{suffix}"));
+        std::fs::create_dir_all(backup.join("fno")).unwrap();
+        std::fs::write(backup.join("fno/payload"), b"stale").unwrap();
+        backup
+    }
+
+    fn run_codex_reclaim(codex: &Path, state: &Path, temp: &Path) -> String {
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(temp);
+        std::env::set_current_dir(temp).unwrap();
+        std::env::set_var("HOME", temp);
+        std::env::set_var("CODEX_HOME", codex);
+        assert_eq!(
+            PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()),
+            codex
+        );
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", state);
+        std::env::set_var("FNO_RECLAIM_TEMP_ROOT", temp);
+        let home = AgentsHome::at(state.join("agents"));
+        let rc = run_reclaim(&["--apply".to_string()], &home);
+        let receipt = std::fs::read_to_string(state.join("reclaim/last-run.json"));
+        drop(process_env);
+        assert_eq!(rc, 0);
+        let receipt = receipt.unwrap();
+        receipt
+    }
+
+    #[test]
+    fn codex_quarantine_reclaims_valid_backups_and_receipts_bytes() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = temp_lane_root("codex-valid-temp");
+        let state = temp_lane_root("codex-valid-state");
+        let codex = codex_home_fixture("codex-valid-home");
+        let live = codex_live_cache(&codex, "footnote");
+        write_codex_marker(&codex, "footnote", "https://example.invalid/fno.git");
+        let backup = codex_backup(&codex, ".footnote.", "0123456789abcdef0123456789abcdef");
+        let dev_backup = codex_backup(&codex, ".footnote-dev.", "abcdef0123456789abcdef0123456789");
+        let expected = tree_bytes(&backup) + tree_bytes(&dev_backup);
+
+        let receipt = run_codex_reclaim(&codex, &state, &temp);
+
+        assert!(!backup.exists());
+        assert!(!dev_backup.exists());
+        assert!(live.exists());
+        let receipt: Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(
+            receipt["lanes"]["codex_cache_quarantines"]["bytes"],
+            expected
+        );
+        let _ = std::fs::remove_dir_all(temp);
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn codex_quarantine_keeps_unreadable_markers() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (tag, marker) in [("missing", None), ("invalid", Some(b"not json".as_slice()))] {
+            let temp = temp_lane_root(&format!("codex-{tag}-temp"));
+            let state = temp_lane_root(&format!("codex-{tag}-state"));
+            let codex = codex_home_fixture(&format!("codex-{tag}-home"));
+            codex_live_cache(&codex, "footnote");
+            let backup = codex_backup(&codex, ".footnote.", "0123456789abcdef0123456789abcdef");
+            if let Some(marker) = marker {
+                std::fs::write(codex.join("footnote/plugin-channel.json"), marker).unwrap();
+            }
+            let receipt = run_codex_reclaim(&codex, &state, &temp);
+            assert!(backup.exists());
+            assert!(receipt.contains("kept: live copy unreadable (plugin-channel.json)"));
+            let _ = std::fs::remove_dir_all(temp);
+            let _ = std::fs::remove_dir_all(state);
+            let _ = std::fs::remove_dir_all(codex);
+        }
+    }
+
+    #[test]
+    fn codex_quarantine_keeps_backups_while_converge_holds_lock() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = temp_lane_root("codex-lock-temp");
+        let state = temp_lane_root("codex-lock-state");
+        let codex = codex_home_fixture("codex-lock-home");
+        codex_live_cache(&codex, "footnote");
+        write_codex_marker(&codex, "footnote", "https://example.invalid/fno.git");
+        let backup = codex_backup(&codex, ".footnote.", "0123456789abcdef0123456789abcdef");
+        let lock_path = codex.join("footnote/plugin-channel.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)
+            .unwrap();
+        lock_file.try_lock().unwrap();
+
+        let receipt = run_codex_reclaim(&codex, &state, &temp);
+
+        assert!(backup.exists());
+        assert!(receipt.contains("kept: codex plugin converge in flight"));
+        let _ = std::fs::remove_dir_all(temp);
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn codex_quarantine_keeps_backups_with_rollback_failure() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for dangling_link in [false, true] {
+            let tag = if dangling_link {
+                "codex-failure-link"
+            } else {
+                "codex-failure-file"
+            };
+            let temp = temp_lane_root(&format!("{tag}-temp"));
+            let state = temp_lane_root(&format!("{tag}-state"));
+            let codex = codex_home_fixture(&format!("{tag}-home"));
+            codex_live_cache(&codex, "footnote");
+            write_codex_marker(&codex, "footnote", "https://example.invalid/fno.git");
+            let receipt_path = codex.join("footnote/rollback-failure.json");
+            if dangling_link {
+                std::os::unix::fs::symlink("missing-receipt", &receipt_path).unwrap();
+            } else {
+                std::fs::write(&receipt_path, b"{} ").unwrap();
+            }
+            let backup = codex_backup(&codex, ".footnote.", "0123456789abcdef0123456789abcdef");
+
+            let receipt = run_codex_reclaim(&codex, &state, &temp);
+
+            assert!(backup.exists());
+            assert!(receipt.contains("kept: rollback-failure.json present"));
+            let _ = std::fs::remove_dir_all(temp);
+            let _ = std::fs::remove_dir_all(state);
+            let _ = std::fs::remove_dir_all(codex);
+        }
+    }
+
+    #[test]
+    fn codex_quarantine_spares_live_symlink_and_source_dir() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = temp_lane_root("codex-safety-temp");
+        let state = temp_lane_root("codex-safety-state");
+        let codex = codex_home_fixture("codex-safety-home");
+        let live = codex_live_cache(&codex, "footnote");
+        let source = codex_backup(&codex, ".footnote.", "abcdefabcdefabcdefabcdefabcdefab");
+        write_codex_marker(&codex, "footnote", &source.display().to_string());
+        let link = codex
+            .join("footnote")
+            .join(".footnote.0123456789abcdef0123456789abcdef");
+        std::os::unix::fs::symlink(&live, &link).unwrap();
+        let stale = codex_backup(&codex, ".footnote.", "fedcbafedcbafedcbafedcbafedcbafe");
+
+        let _ = run_codex_reclaim(&codex, &state, &temp);
+
+        assert!(live.exists());
+        assert!(source.exists());
+        assert!(link.exists());
+        assert!(!stale.exists());
+        let _ = std::fs::remove_dir_all(temp);
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn codex_quarantine_handles_release_and_foreign_marketplaces() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = temp_lane_root("codex-release-temp");
+        let state = temp_lane_root("codex-release-state");
+        let codex = codex_home_fixture("codex-release-home");
+        codex_live_cache(&codex, "footnote");
+        write_codex_marker_for_channel(
+            &codex,
+            "release",
+            "footnote",
+            "https://github.com/example/fno.git",
+        );
+        let release_backup = codex_backup(&codex, ".footnote.", "0123456789abcdef0123456789abcdef");
+        let _ = run_codex_reclaim(&codex, &state, &temp);
+        assert!(!release_backup.exists());
+
+        write_codex_marker_for_channel(
+            &codex,
+            "release",
+            "other",
+            "https://github.com/example/other.git",
+        );
+        let foreign_backup = codex_backup(&codex, ".footnote.", "abcdef0123456789abcdef0123456789");
+        let receipt = run_codex_reclaim(&codex, &state, &temp);
+        assert!(foreign_backup.exists());
+        assert!(receipt.contains("kept: live copy unreadable (plugin-channel.json)"));
+        let _ = std::fs::remove_dir_all(temp);
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn plugin_cache_copies_resolves_codex_home_override() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _process_env = ReclaimTestEnv::new();
+        let codex = codex_home_fixture("codex-cache-home");
+        let target = codex.join("plugins/cache/footnote/fno/0.3.2/crates/fno-agents/target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), b"Signature: x\n").unwrap();
+        std::env::set_var("CODEX_HOME", &codex);
+        let found = plugin_cache_copies();
+        std::env::remove_var("CODEX_HOME");
+        assert!(found.contains(&target));
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn plugin_cache_copies_ignores_missing_codex_cache() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _process_env = ReclaimTestEnv::new();
+        let codex = codex_home_fixture("codex-empty-cache-home");
+        std::env::set_var("CODEX_HOME", &codex);
+        assert_eq!(
+            PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()),
+            codex
+        );
+        let found = plugin_cache_copies();
+        std::env::remove_var("CODEX_HOME");
+        assert!(!found.iter().any(|path| path.starts_with(&codex)));
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn codex_quarantine_ignores_near_miss_names_and_source_trees() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = temp_lane_root("codex-near-miss-temp");
+        let state = temp_lane_root("codex-near-miss-state");
+        let codex = codex_home_fixture("codex-near-miss-home");
+        codex_live_cache(&codex, "footnote");
+        write_codex_marker(&codex, "footnote", "https://example.invalid/fno.git");
+        let names = [
+            ".footnote.ts.123.tmp",
+            ".footnote.0123456789abcdef0123456789abcde",
+            ".footnote.0123456789abcdef0123456789ABCDEF",
+            "footnote.0123456789abcdef0123456789abcdef",
+            ".footnote.0123456789abcdef0123456789abcdef",
+        ];
+        let mut survivors = Vec::new();
+        for name in names {
+            let path = codex.join("footnote").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            survivors.push(path);
+        }
+        let regular = codex.join("footnote/.footnote.abcdef0123456789abcdef0123456789");
+        std::fs::write(&regular, b"not a directory").unwrap();
+        survivors.push(regular);
+        let source_tree = codex.join("footnote/src/fno/target");
+        std::fs::create_dir_all(&source_tree).unwrap();
+        std::fs::write(source_tree.join("CACHEDIR.TAG"), b"Signature: x\n").unwrap();
+
+        let _ = run_codex_reclaim(&codex, &state, &temp);
+
+        for survivor in survivors {
+            assert!(
+                survivor.exists(),
+                "near-miss survived: {}",
+                survivor.display()
+            );
+        }
+        assert!(source_tree.exists());
+        let _ = std::fs::remove_dir_all(temp);
+        let _ = std::fs::remove_dir_all(state);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    /// The incident this guards against: a test daemon's first idle tick ran
+    /// `maybe_run_daily` with its cwd still inside the real checkout, and
+    /// `cargo_build_dirs_lane` added that checkout as a sweep root the
+    /// registry never named. With an empty registry the cwd fallback is the
+    /// ONLY way a root can appear, so `include_cwd_root = false` (the
+    /// daemon's own path) must come back empty every time, whatever the
+    /// process's actual cwd is.
+    #[test]
+    fn cargo_build_dirs_roots_excludes_cwd_unless_asked() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_lane_root("cargo-roots");
+        let home = AgentsHome::at(state.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({"entries": []})).unwrap(),
+        )
+        .unwrap();
+
+        let daemon_roots = cargo_build_dirs_roots(&home, false);
+        let hand_roots = cargo_build_dirs_roots(&home, true);
+
+        assert!(
+            daemon_roots.is_empty(),
+            "the daemon path must never add the cwd repo root: {daemon_roots:?}"
+        );
+        if let Some(this_repo) = canonical_repo_root(&std::env::current_dir().unwrap()) {
+            assert!(
+                hand_roots.contains(&this_repo.to_string_lossy().into_owned()),
+                "a hand run still sweeps its own cwd repo: {hand_roots:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&state);
     }
 }

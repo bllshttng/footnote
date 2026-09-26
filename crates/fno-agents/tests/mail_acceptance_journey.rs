@@ -40,6 +40,7 @@ struct Rig {
     dir: PathBuf,
     home: AgentsHome,
     pi_root: PathBuf,
+    grok_root: PathBuf,
     cwd: PathBuf,
     sock: PathBuf,
 }
@@ -55,9 +56,12 @@ fn rig(tag: &str) -> Rig {
     std::fs::create_dir_all(&cwd).unwrap();
     let pi_root = dir.join("pistore");
     std::fs::create_dir_all(pi_root.join(encode_cwd(&cwd))).unwrap();
+    let grok_root = dir.join("grokstore");
+    std::fs::create_dir_all(&grok_root).unwrap();
     Rig {
         home,
         pi_root,
+        grok_root,
         cwd,
         sock: dir.join("mux/threads/wk.sock"),
         dir,
@@ -232,8 +236,16 @@ fn accepted_turn_after_painted_draft_confirms_exactly_once() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-acc", ENVELOPE, 12, 25, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-acc",
+        ENVELOPE,
+        12,
+        25,
+        0,
+    );
     assert_eq!(outcome, Ok(()), "the accepted turn is the delivery proof");
     let frames = handle.join().unwrap();
     assert_eq!(submit_count(&frames), 2, "paste + CR, no extra submits");
@@ -252,8 +264,16 @@ fn painted_draft_without_acceptance_stays_unconfirmed() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-draft", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-draft",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -273,8 +293,16 @@ fn fragmented_paint_stays_unconfirmed() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-frag", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-frag",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -297,8 +325,16 @@ fn same_prefix_paint_stays_unconfirmed() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-prefix", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-prefix",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -313,8 +349,16 @@ fn stale_accepted_record_before_the_send_stays_unconfirmed() {
     row_for(&rig, "pi", "sess-stale");
     record_turn(&rig, "sess-stale", ENVELOPE);
     let handle = spawn_keeper(&rig, ENVELOPE, Script::default());
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-stale", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-stale",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -335,8 +379,16 @@ fn newly_accepted_record_confirms_past_an_existing_baseline() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-fresh", ENVELOPE, 12, 25, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-fresh",
+        ENVELOPE,
+        12,
+        25,
+        0,
+    );
     assert_eq!(outcome, Ok(()));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -355,8 +407,16 @@ fn wrong_session_record_stays_unconfirmed() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-mine", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-mine",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     assert_eq!(submit_count(&handle.join().unwrap()), 2);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -373,8 +433,16 @@ fn unavailable_reader_refuses_before_typing() {
     let dir = rig.pi_root.join(encode_cwd(&rig.cwd));
     std::fs::write(dir.join("20260902T000000Z_sess-dup.jsonl"), "").unwrap();
     let handle = spawn_keeper(&rig, ENVELOPE, Script::default());
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-dup", ENVELOPE, 4, 20, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-dup",
+        ENVELOPE,
+        4,
+        20,
+        0,
+    );
     assert_eq!(outcome, Err("duplicate-session-store"));
     assert_eq!(submit_count(&handle.join().unwrap()), 0);
     std::fs::remove_dir_all(&rig.dir).ok();
@@ -397,8 +465,16 @@ fn unconfirmable_lane_keeps_draining_keeper_output() {
         ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
-    let outcome =
-        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-drain", ENVELOPE, 30, 25, 0);
+    let outcome = deliver_via_keeper_socket_in(
+        &rig.home,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
+        &rig.grok_root,
+        "sess-drain",
+        ENVELOPE,
+        30,
+        25,
+        0,
+    );
     assert_eq!(outcome, Err("not-confirmed"));
     rx.recv_timeout(Duration::from_secs(5))
         .expect("the injector must drain keeper Output while unconfirmable");

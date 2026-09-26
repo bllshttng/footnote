@@ -64,7 +64,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -74,6 +73,7 @@ from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses.agy import conversation_store_path
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 LIVE = os.environ.get("FNO_AGY_LIVE") == "1"
 AGY_ON_PATH = (
@@ -275,18 +275,23 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
     monkeypatch.setenv("USERPROFILE", str(real_home))
 
     # Install the shipped Stop adapter through the REAL integration arm - the
-    # same code `fno config setup` runs. Snapshot first so the finally can
-    # restore exactly what was there.
+    # same code `fno config setup` runs - but into the JOURNEY's workspace
+    # customization file (.agents/hooks.json in the cwd agy runs in), never
+    # the global ~/.gemini/config/hooks.json: a live test must not mutate the
+    # operator's machine.
     from fno.setup import integration as I
 
-    hooks_json = I._agy_hooks_json()
-    pre_hooks = hooks_json.read_text(encoding="utf-8") if hooks_json.exists() else None
+    journey_root = tmp_path / "journey"
+    (journey_root / ".agents").mkdir(parents=True, exist_ok=True)
+    workspace_hooks = journey_root / ".agents" / "hooks.json"
+    monkeypatch.setattr(I, "_agy_hooks_json", lambda: workspace_hooks)
+    pre_hooks = workspace_hooks.read_text(encoding="utf-8") if workspace_hooks.exists() else None
     install_res = I._agy_install()
     assert install_res.ok, f"the agy Stop adapter install failed: {install_res.note}"
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not: the same short-state move the pi journey makes.
-    short_state = Path(tempfile.mkdtemp(prefix="fnoagy-"))
+    short_state = short_bind_root("fnoagy-")
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",

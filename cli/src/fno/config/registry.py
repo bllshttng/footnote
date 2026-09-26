@@ -114,17 +114,19 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.blueprint.* ---
     "blueprint.max_prs_per_epic": Meta("advanced", "Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it."),
+    "blueprint.python_repair_added_lines": Meta("advanced", "Added lines a king-approved repair may add to cli/src/fno Python under law d-a9cddc93 (default 30). Added lines only: deletions do not offset, so larger work ports to crates/ even when it deletes more than it adds. Read by the plan gate in validate-plan.sh and by the push-time tally in check-file-budget.sh."),
     # --- config.backlog.* ---
     "backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
     "backlog.maintain.validity_days": Meta("advanced", "Age (days) before a stale idea enters the validity sweep."),
     "backlog.maintain.validity_batch_size": Meta("advanced", "Oldest-first validity-sweep batch size (clamped to 100)."),
-    "backlog.maintain.abandoned_do_row_hours": Meta("advanced", "Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone."),
+    "backlog.maintain.abandoned_do_row_hours": Meta("advanced", "Idle hours before `maintain --apply` and `requeue` settle an open do row with no live claim and no reachable worker on its node."),
     "backlog.maintain.budget_seconds": Meta("advanced", "Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in."),
     "backlog.staleness_days": Meta(
         "advanced",
         "Age (days) before an unmoved ready node is quarantined from selection.",
     ),
+    "backlog.epic_max_open_children": Meta("advanced", "Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install."),
     "backlog.id_prefix": Meta(
         "always", "Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).",
         question="Backlog node-ID prefix?", default_source="repo-slug",
@@ -322,8 +324,6 @@ FIELD_META: dict[str, Meta] = {
     "agents.state_reap.locks_retain_days": Meta("advanced", "Days to retain inactive lock files before state cleanup removes them (default 7).", default_source="default"),
     "agents.state_reap.expired_claims_retain_days": Meta("advanced", "Days to retain claims moved into the expired-claims graveyard (default 30).", default_source="default"),
     "agents.state_reap.pr_status_cache_retain_days": Meta("advanced", "Days to retain expendable PR-status cache files (default 14).", default_source="default"),
-    "graph.commit_mode": Meta("advanced", "Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).", default_source="default"),
-    "graph.read_source": Meta("advanced", "Authoritative graph backend: json or sqlite. Owned by `fno doctor graph backend`; do not set by hand.", default_source="default"),
     "agents.single_flight_ttl_seconds": Meta("advanced", "Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.", default_source="default"),
     "agents.single_flight_join_budget_seconds": Meta("advanced", "Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents.", default_source="default"),
     "agents.orphan_reap_after_seconds": Meta("advanced", "Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.", default_source="default"),
@@ -335,7 +335,6 @@ FIELD_META: dict[str, Meta] = {
     "agents.max_swap_pct": Meta("advanced", "Swap-pressure ceiling in percent used for spawn preflight, checked beside agents.min_free_gb on EVERY spawn; spawn refuses when swap used is at or above the cap AND the machine swaps in at 1 MiB/s or more over a 1 s sample (<= 0 disables; default 90). macOS keeps swap allocated after pressure ends, so allocation alone refused every spawn with 69 percent of RAM free and no paging. The receipt names the failing term; raising min_free_gb does not fix a swap refusal.", default_source="default"),
     "agents.max_load_per_cpu": Meta("advanced", "DEPRECATED and ignored since 2026-09-09: admission decides on the fleet's CPU share (agents.max_fleet_cpu_share) on every spawn, never on a load trigger - the 1-minute load moved 101 points in three minutes with no change in real work. The key parses for one release and prints one deprecation line when set; delete it.", default_source="default"),
     "agents.max_fleet_cpu_share": Meta("advanced", "Share of CPU capacity the fleet may hold, checked on EVERY spawn (default 0.5). An attribution gap widens the share to an interval bounded above by the whole machine's measured CPU: over by its own attributed work the gate holds and re-samples; the ceiling inside the interval refuses and names both bounds plus the gap; above the interval the gate admits and says the reading was an upper bound. Leave 0.5 unless the box is dedicated, then 0.6.", default_source="default"),
-    "agents.hard_max_load_per_cpu": Meta("advanced", "Absolute machine backstop for spawn preflight, read on the FIFTEEN-minute load average: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Fifteen minutes because the backstop should fire only on a box that has been dying for a while, not on a transient spike. Leave it alone.", default_source="default"),
     "agents.footprint_sustained_cpu_cores": Meta("advanced", "Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%.", default_source="default"),
     "agents.worker_qos": Meta("advanced", "Worker CPU/IO priority: utility (background QoS, default) or off.", default_source="default"),
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
@@ -349,6 +348,7 @@ FIELD_META: dict[str, Meta] = {
     "dispatch.auto_merge": Meta("advanced", "DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none|dispatch>`. Formerly the per-project merge posture for autonomous dispatch.", default_source="default"),
     "dispatch.on_exhaustion": Meta("advanced", "On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.", default_source="default"),
     "dispatch.cutover_low_after_minutes": Meta("advanced", "Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.", default_source="default"),
+    "dispatch.blueprint_floor": Meta("advanced", "The blueprint floor for a plan-less node (lean dispatch). 'high' (the default) routes a plan-less node to /blueprint only when its difficulty is high, its size is L, or an open premise question blocks it (the premise-question tag); every other plan-less node goes straight to /target, which states its own scope. 'medium' restores the pre-lean table (blueprint for medium and up). Any unknown value degrades to 'high'.", default_source="default"),
     # --- config.autonomy.* ---
     "autonomy.enabled": Meta("never", "The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled."),
     # --- config.auto_continue.* ---
@@ -593,7 +593,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
-        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
+        "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context, context_measured_at, context_source} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. A row's context counts as a measured window only beside a context_measured_at date; an unmeasured model falls back to the id-based default. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
     ),
     "routing.objective": Meta(
         "advanced", "How the grid orders candidates that already clear the band: cheapest-that-clears (default), best-available, or prefer-harness. A value outside those three degrades to the default, so a typo can never select an objective nobody named.",
@@ -629,6 +629,9 @@ FIELD_META: dict[str, Meta] = {
     "sideline.colors.row": Meta(
         "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
     ),
+    "sideline.layout": Meta(
+        "advanced", "The sideline's row shape: \"card\" renders each session as a padded two-line card (state glyph, name, PR, then harness, king, message, age); \"list\" (default) keeps the one-row table. An unknown value reads as list; a change takes effect on the next attach.",
+    ),
     # --- config.model_routing.* (role-based per-spawn model routing) ---
     "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.",
@@ -658,12 +661,12 @@ FIELD_META: dict[str, Meta] = {
     "king.wake_debounce_seconds": Meta("advanced", "Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm."),
     "king.wake_backstop_seconds": Meta("advanced", "Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement."),
     "king.blocked_child_grace_minutes": Meta("advanced", "Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing."),
-    "king.implementation_guard": Meta("advanced", "What a crowned court session may write through the king-delegation-guard hook: refuse (default) denies a write whose target resolves outside the plans directory and the crown handoff doc, naming the rejected path, warn prints the refusal on stderr and allows (adopt the guard mid-reign without a surprise), off silences the guard. An unknown value degrades to refuse."),
+    "king.implementation_guard": Meta("advanced", "What a crowned court session may write through the king-delegation-guard hook. refuse (default) denies a write whose target resolves inside the repo, outside its .fno state tree, build output and any king.write_roots entry, and names the rejected path. warn prints the refusal on stderr and allows, so a reign adopts the guard without a surprise. off silences the guard. An unknown value degrades to refuse."),
+    "king.write_roots": Meta("advanced", "In-repo paths a crowned court session may still write through the king-delegation-guard hook. A relative entry resolves against the repo root, and a leading ~/ against $HOME. The match is by realpath, so a symlinked entry covers its target. Default empty: every in-repo path outside .fno and build output is source and refused. A blank entry is dropped. '.' allows the whole repo, the same as implementation_guard = off. Paths outside the repo always allow and need no entry."),
     # --- config.auto_heal.* (the pr-watch tick's heal drive loop; default off) ---
-    "auto_heal.enabled": Meta("advanced", "Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs."),
-    "king.checkin_interval": Meta("advanced", "The /loop interval a reign self-injects (default 4h heartbeat). Fail-safe: a value that is not <digits>[smhd] degrades to 4h at load, never raises."),
+    "auto_heal.enabled": Meta("advanced", "Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop over every project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true."),
+    "king.checkin_interval": Meta("advanced", "The /loop interval a reign self-injects on Claude (default 55m, under the one-hour prompt cache). Fail-safe: a value that is not <digits>[smhd] degrades to 55m at load, never raises."),
     "king.checkin_text": Meta("advanced", "The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle)."),
-    "king.goal_text": Meta("advanced", "The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress)."),
     "king.compaction_ceiling": Meta("advanced", "The verdict's compaction bound (default 3): post-compact context snapshots tolerated for one crowned session before `fno agents king verdict` reads degraded. Default 3 because one crown on one node produced two compaction-caused retractions in one evening."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),

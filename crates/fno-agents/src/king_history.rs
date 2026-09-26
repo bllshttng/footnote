@@ -34,7 +34,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const REIGN_CHECKIN: &str = "reign_checkin";
 pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
@@ -46,8 +46,9 @@ fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// One stored row's verdict: matched, rejected (with optional legacy
 /// evidence when one of its scope spellings names the requested crown).
 /// Shared by scope-stamped and NULL-scope result sets, so the canonical and
-/// legacy tests apply identically to both.
-fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
+/// legacy tests apply identically to both. A `None` scope matches every
+/// canonical row and attributes no legacy row.
+fn classify(event: &Value, scope: Option<&str>) -> (bool, bool, Option<Value>) {
     let Some(data) = event.get("data").and_then(|d| d.as_object()) else {
         // A reign_checkin without an object payload is legacy evidence
         // too; it names no scope, so it counts but attributes nowhere.
@@ -62,10 +63,11 @@ fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
     let row_scope = s_str(&data, "scope").unwrap_or("");
     let canonical = !row_scope.is_empty() && data.get("change").is_some() && aliases.is_empty();
     if canonical {
-        return (row_scope == scope, false, None);
+        return (scope.is_none_or(|wanted| row_scope == wanted), false, None);
     }
-    let names_this_crown =
-        row_scope == scope || aliases.iter().any(|k| s_str(&data, k) == Some(scope));
+    let names_this_crown = scope.is_some_and(|wanted| {
+        row_scope == wanted || aliases.iter().any(|k| s_str(&data, k) == Some(wanted))
+    });
     let legacy = names_this_crown.then(|| {
         let missing: Vec<&str> = ["scope", "change"]
             .iter()
@@ -80,9 +82,10 @@ fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
     (false, true, legacy)
 }
 
-/// The stored reign rows for one store: exact-scope rows, then NULL-scope
-/// rows (non-canonical scope spellings), each oldest first within its set.
-fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
+/// The stored reign rows for one store. With a scope: exact-scope rows,
+/// then NULL-scope rows (non-canonical scope spellings). With none: every
+/// reign row whatever its scope spelling. Oldest first within each set.
+fn reign_rows(store: &Connection, scope: Option<&str>) -> Result<Vec<String>, String> {
     let mut rows: Vec<String> = Vec::new();
     let read = |stmt: &mut rusqlite::Statement,
                 args: &[&dyn rusqlite::ToSql],
@@ -96,6 +99,13 @@ fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
         rows.extend(found);
         Ok(())
     };
+    let Some(scope) = scope else {
+        let mut all = store
+            .prepare("SELECT line FROM events WHERE type = ?1 ORDER BY ts_ms")
+            .map_err(|e| e.to_string())?;
+        read(&mut all, &[&REIGN_CHECKIN], &mut rows)?;
+        return Ok(rows);
+    };
     let mut scoped = store
         .prepare("SELECT line FROM events WHERE scope = ?1 AND type = ?2 ORDER BY ts_ms")
         .map_err(|e| e.to_string())?;
@@ -107,7 +117,7 @@ fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
     Ok(rows)
 }
 
-pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Result<Value, String> {
     // Generations and mirrors collapse here: one live journal, one store.
     let mut lives: Vec<PathBuf> = Vec::new();
     for path in events_paths {
@@ -140,8 +150,8 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
     let mut seen: HashSet<String> = HashSet::new();
     let mut duplicates: u64 = 0;
     for live in &lives {
-        let receipt = crate::events_store::sync(live)?;
-        let store = crate::events_store::open_read(&receipt.store)?;
+        let receipt = crate::event_store::import_all(live)?;
+        let store = crate::event_store::open_read(&crate::event_store::store_path(live))?;
         let rows = reign_rows(&store, scope)?;
         let mut scanned = 0u64;
         let mut matched = 0u64;
@@ -206,6 +216,10 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
     Ok(payload)
 }
 
+pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+    scan_scopes(events_paths, Some(scope))
+}
+
 fn render(payload: &Value) -> String {
     let mut lines: Vec<String> = Vec::new();
     for event in payload["events"].as_array().unwrap() {
@@ -268,7 +282,10 @@ fn render(payload: &Value) -> String {
     lines.join("\n")
 }
 
-/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json|-J]`
+/// `king-history [--scope SCOPE] --events-path PATH [--events-path PATH ...] [--json|-J]`
+///
+/// With no `--scope`, the caller's crown scope is resolved natively from the
+/// registry (the retired Python `resolve_scope`).
 ///
 /// rc 0 read (any match count), 1 a store that cannot be opened or synced
 /// (the message names the store path), 2 usage failure.
@@ -294,15 +311,25 @@ pub fn run_king_history(args: &[String]) -> i32 {
             other => {
                 eprintln!("fno-agents king-history: unknown flag {other}");
                 eprintln!(
-                    "fno-agents king-history: --scope SCOPE --events-path PATH \
+                    "fno-agents king-history: [--scope SCOPE] --events-path PATH \
                      [--events-path PATH ...] [--json|-J]"
                 );
                 return 2;
             }
         }
     }
-    if scope.is_empty() || events_paths.is_empty() {
-        eprintln!("fno-agents king-history: --scope and --events-path are required");
+    if scope.is_empty() {
+        let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+        match crate::king_verdict_inputs::resolve_scope(None, &registry_path) {
+            Ok(resolved) => scope = resolved,
+            Err(msg) => {
+                eprintln!("king: {msg}");
+                return 2;
+            }
+        }
+    }
+    if events_paths.is_empty() {
+        eprintln!("fno-agents king-history: --events-path is required");
         return 2;
     }
     match scan(&events_paths, &scope) {
@@ -507,7 +534,18 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
     (v, bounds)
 }
 
-/// One journal walk over the five verdict row kinds, with the same mirror
+/// The six verdict row kinds `scan_readings` keeps, one vocabulary for the
+/// store query.
+const READING_TYPES: &[&str] = &[
+    KING_LOOP_CHECK,
+    TERMINATION,
+    REIGN_CHECKIN,
+    CONTEXT_SNAPSHOT,
+    LOOP_CHECK_CONFIG,
+    KING_CONTEXT_NUDGE,
+];
+
+/// One journal walk over the verdict row kinds, with the same mirror
 /// dedupe `scan` applies. `fno_id` keys the loop rows, `harness_session_id`
 /// the compaction snapshots, `scope` the context nudges. `crown_start`
 /// bounds the compaction count to THIS reign: a harness session that
@@ -531,13 +569,11 @@ fn scan_readings(
     let mut fires_ts: Vec<(String, Option<i64>)> = Vec::new();
     let mut terminations: Vec<String> = Vec::new();
     for path in events_paths {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            if !path.exists() {
-                journals.push((path.display().to_string(), 0));
-                continue;
-            }
-            return Err(format!("{}: unreadable journal", path.display()));
-        };
+        let content = crate::event_store::journal_text_checked(
+            path,
+            &crate::event_store::EventQuery::of_types(READING_TYPES),
+        )
+        .map_err(|_| format!("{}: unreadable journal", path.display()))?;
         let mut file_scanned: u64 = 0;
         for raw in content.lines() {
             let line = raw.trim();
@@ -587,7 +623,7 @@ fn scan_readings(
                     terminations.push(s_str(&data, "reason").unwrap_or("unknown").to_string());
                 }
                 REIGN_CHECKIN => {
-                    let (canonical, _, _) = classify(&event, scope);
+                    let (canonical, _, _) = classify(&event, Some(scope));
                     if canonical
                         && s_str(&event, "source") == Some("loop")
                         && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start)
@@ -727,6 +763,10 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
     let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
+    let crown_lineage = CrownLineage {
+        inherited: inputs.crown_inherited,
+        from_session: inputs.crown_from_session.clone(),
+    };
     let crown_start = manifest.created_at.clone().unwrap_or_default();
     let (mut readings, scanned, duplicates, journals) = match scan_readings(
         &events_paths,
@@ -771,6 +811,14 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         None
     };
     let term_reading = crate::king_term::reading(&manifest, now, term_transcript.as_deref());
+    let hygiene_transcript = hygiene_transcript_for_holder(&harness, &harness_session_id);
+    let hygiene = hygiene_reading(
+        &harness,
+        &harness_session_id,
+        &manifest.shape,
+        hygiene_transcript.as_deref(),
+        &crown_lineage,
+    );
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -784,6 +832,9 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "inherited_undelivered": inputs.inherited_undelivered,
         "filed_undelivered": inputs.filed_undelivered,
         "inherited_closed_in_window": inputs.inherited_closed_in_window,
+        "generation_start": inputs.generation_start,
+        "generation_start_source": inputs.generation_start_source,
+        "hygiene": hygiene,
         "window": inputs.window,
         "fires": readings.fires,
         "last_actionable": readings.last_actionable,
@@ -862,6 +913,144 @@ pub(crate) fn bound_summary(v: Verdict, bounds: &[BoundRow]) -> String {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct CrownLineage {
+    inherited: Option<bool>,
+    from_session: Option<String>,
+}
+
+fn hygiene_transcript_for_holder(harness: &str, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    match harness {
+        "claude" => crate::claude_drive::find_transcript_in(
+            &crate::claude_drive::claude_projects_dir(),
+            session_id,
+        ),
+        "codex" => {
+            let sessions = crate::codex_store::codex_home()?.join("sessions");
+            crate::daemon::index_tree(&sessions, 0)
+                .ok()?
+                .into_iter()
+                .find_map(|(name, path)| {
+                    crate::codex_store::codex_rollout_matches(&name, session_id).then_some(path)
+                })
+        }
+        _ => None,
+    }
+}
+
+fn hygiene_reading(
+    harness: &str,
+    session_id: &str,
+    shape: &str,
+    transcript: Option<&Path>,
+    crown: &CrownLineage,
+) -> Value {
+    let crown = json!({
+        "inherited": crown.inherited,
+        "from_session": crown.from_session,
+    });
+    let Some(transcript) = transcript else {
+        return json!({
+            "state": "unmeasurable",
+            "reason": format!("transcript not found for {harness} session {session_id}"),
+            "transcript": null,
+            "applicable": 0,
+            "declared": 5,
+            "violations": [],
+            "crown": crown,
+        });
+    };
+    let entries = match crate::reign_hygiene::entries_from_transcript(harness, transcript) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return json!({
+                "state": "unmeasurable",
+                "reason": error,
+                "transcript": transcript.display().to_string(),
+                "applicable": 0,
+                "declared": 5,
+                "violations": [],
+                "crown": crown,
+            });
+        }
+    };
+    let checks = crate::reign_hygiene::run_checks(&entries, Some(shape));
+    let applicable = checks.iter().filter(|check| check.applicable).count();
+    let violations = checks
+        .iter()
+        .filter(|check| check.status == "violation")
+        .map(|check| {
+            json!({
+                "check": check.check,
+                "index": check.index,
+                "detail": check.detail,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "state": "measured",
+        "reason": null,
+        "transcript": transcript.display().to_string(),
+        "applicable": applicable,
+        "declared": checks.len(),
+        "violations": violations,
+        "crown": crown,
+    })
+}
+
+fn render_hygiene_line(hygiene: &Value) -> String {
+    if hygiene["state"].as_str() != Some("measured") {
+        return format!(
+            "hygiene: unmeasurable ({})",
+            hygiene["reason"].as_str().unwrap_or("reading unavailable")
+        );
+    }
+    let violations = hygiene["violations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let count = violations.len();
+    let noun = if count == 1 {
+        "violation"
+    } else {
+        "violations"
+    };
+    let mut line = format!(
+        "hygiene: {} of {} checks applicable, {count} {noun}",
+        hygiene["applicable"].as_u64().unwrap_or(0),
+        hygiene["declared"].as_u64().unwrap_or(5)
+    );
+    if !violations.is_empty() {
+        let details = violations
+            .iter()
+            .map(|violation| {
+                let check = violation["check"].as_str().unwrap_or("unknown check");
+                match violation["index"].as_u64() {
+                    Some(index) => format!("{check} at call {index}"),
+                    None => check.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!(" ({details})"));
+    }
+    match hygiene["crown"]["inherited"].as_bool() {
+        Some(true) => {
+            if let Some(session) = hygiene["crown"]["from_session"].as_str() {
+                line.push_str(&format!("; crown inherited from {session}"));
+            } else {
+                line.push_str("; crown inherited");
+            }
+        }
+        Some(false) => line.push_str("; crown not inherited"),
+        None => {}
+    }
+    line
+}
+
 fn render_verdict(payload: &Value) -> String {
     let mut lines = vec![format!(
         "verdict: {}",
@@ -897,6 +1086,9 @@ fn render_verdict(payload: &Value) -> String {
         lines.push(format!("compactions read: {error}"));
     }
     lines.push(render_term_line(&payload["term"]));
+    if let Some(hygiene) = payload.get("hygiene") {
+        lines.push(render_hygiene_line(hygiene));
+    }
     lines.join("\n")
 }
 
@@ -1546,6 +1738,34 @@ mod tests {
     }
 
     #[test]
+    fn scope_optional_scan_returns_all_canonical_scopes_and_rejections() {
+        let (_dir, path) = journal(&[
+            checkin(
+                "2026-09-10T08:00:00Z",
+                json!({"scope": "fno", "change": "fno change"}),
+            ),
+            checkin(
+                "2026-09-10T09:00:00Z",
+                json!({"scope": "x-bbbb", "change": "epic change"}),
+            ),
+            checkin(
+                "2026-09-10T10:00:00Z",
+                json!({"crown": "fno", "change": "legacy"}),
+            ),
+        ]);
+        let payload = scan_scopes(std::slice::from_ref(&path), None).unwrap();
+        assert_eq!(payload["matched"], json!(2));
+        assert_eq!(payload["rejected"], json!(1));
+        let scopes: Vec<&str> = payload["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["data"]["scope"].as_str())
+            .collect();
+        assert_eq!(scopes, ["x-bbbb", "fno"]);
+    }
+
+    #[test]
     fn newest_first_with_evidence_intact() {
         let (_dir, path) = journal(&[
             checkin(
@@ -1804,5 +2024,227 @@ mod tests {
             "2026-09-10T11:59:59.999Z",
             "2026-09-10T12:00:00Z"
         ));
+    }
+
+    #[test]
+    fn scan_readings_counts_a_store_committed_fire() {
+        // AC4-CROWN
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let line = json!({
+            "ts": "2026-09-10T12:00:01Z", "type": KING_LOOP_CHECK, "source": "hook",
+            "data": {"session_id": "crown-1", "actionable": 0}
+        });
+        crate::event_store::append_envelope(&journal, &line.to_string(), None).unwrap();
+        let (r, scanned, _dupes, journals) =
+            scan_readings(&[journal], "crown-1", "", "fno", "2026-09-10T12:00:00Z").unwrap();
+        assert_eq!(r.fires, 1, "{r:?}");
+        assert_eq!(scanned, 1);
+        assert_eq!(journals.len(), 1);
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn verdict_payload(hygiene: Value) -> Value {
+        json!({
+            "verdict": "healthy",
+            "manifest": {"path": "/tmp/king.md"},
+            "bounds": [],
+            "fires": 0,
+            "checkins": 0,
+            "checkins_expected": false,
+            "checkins_stale": false,
+            "compactions": 0,
+            "compactions_source": "manifest",
+            "compactions_error": null,
+            "inherited_undelivered": 0,
+            "inherited_closed_in_window": 0,
+            "scanned": 0,
+            "journals": [],
+            "term": {
+                "spec": "span:96h",
+                "declared": false,
+                "state": "within",
+                "used": "0h",
+                "of": "96h",
+                "unreadable_reason": null
+            },
+            "hygiene": hygiene
+        })
+    }
+
+    fn claude_tool(name: &str, input: Value) -> Value {
+        json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": name, "input": input}]
+            }
+        })
+    }
+
+    #[test]
+    fn holder_hygiene_is_measured_and_renders_after_term() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let projects = tempfile::tempdir().unwrap();
+        let project = projects.path().join("-Users-x-code-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let session_id = "a1b2c3d4-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session_id}.jsonl"));
+        let rows = [
+            claude_tool(
+                "Read",
+                json!({"file_path":"crates/fno-agents/src/king_history.rs"}),
+            ),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "crates/fno-agents/src/king_history.rs:40 owns the reading."}]
+                }
+            }),
+            claude_tool("Bash", json!({"command":"fno agents court --json"})),
+            claude_tool("Bash", json!({"command":"fno do pr watch status"})),
+            claude_tool("Bash", json!({"command":"fno whoami context"})),
+            claude_tool("Bash", json!({"command":"fno agents spawn worker"})),
+            claude_tool("Bash", json!({"command":"fno agents mail send ruling"})),
+        ];
+        std::fs::write(
+            &transcript,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let _projects_env = EnvRestore::set(crate::claude_drive::PROJECTS_DIR_ENV, projects.path());
+        let transcript = hygiene_transcript_for_holder("claude", session_id);
+        let crown = CrownLineage {
+            inherited: Some(true),
+            from_session: Some("grantor-session".to_string()),
+        };
+        let hygiene = hygiene_reading("claude", session_id, "court", transcript.as_deref(), &crown);
+        assert_eq!(hygiene["state"], "measured");
+        assert_eq!(hygiene["applicable"], 4);
+        assert_eq!(hygiene["declared"], 5);
+        assert!(hygiene["violations"].as_array().unwrap().is_empty());
+        assert_eq!(hygiene["crown"]["inherited"], true);
+        assert_eq!(hygiene["crown"]["from_session"], "grantor-session");
+
+        let rendered = render_verdict(&verdict_payload(hygiene));
+        let term_at = rendered.find("term:").expect("term line present");
+        let hygiene_at = rendered.find("hygiene:").expect("hygiene line present");
+        assert!(term_at < hygiene_at, "{rendered}");
+        assert!(rendered.contains(
+            "hygiene: 4 of 5 checks applicable, 0 violations; crown inherited from grantor-session"
+        ));
+    }
+
+    #[test]
+    fn missing_holder_transcript_is_unmeasurable() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let projects = tempfile::tempdir().unwrap();
+        let _projects_env = EnvRestore::set(crate::claude_drive::PROJECTS_DIR_ENV, projects.path());
+        let session_id = "a1b2c3d4-1111-2222-3333-444455556667";
+        let transcript = hygiene_transcript_for_holder("claude", session_id);
+        assert!(transcript.is_none());
+        let hygiene = hygiene_reading(
+            "claude",
+            session_id,
+            "court",
+            transcript.as_deref(),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "unmeasurable");
+        assert!(hygiene["reason"]
+            .as_str()
+            .unwrap()
+            .contains("claude session a1b2c3d4-1111-2222-3333-444455556667"));
+        let rendered = render_verdict(&verdict_payload(hygiene));
+        assert!(rendered.contains("hygiene: unmeasurable ("), "{rendered}");
+        assert!(rendered.starts_with("verdict: healthy"), "{rendered}");
+    }
+
+    #[test]
+    fn codex_rollout_context_probe_is_measured() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let session_id = "codex-thread-123";
+        let rollout = home
+            .path()
+            .join("sessions/2026/09/24/rollout-2026-codex-thread-123.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rollout,
+            concat!(
+                "{\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"How much context remains?\"}}\n",
+                "{\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"fno whoami context\"}}\n"
+            ),
+        )
+        .unwrap();
+        let _codex_env = EnvRestore::set("CODEX_HOME", home.path());
+        let transcript = hygiene_transcript_for_holder("codex", session_id)
+            .expect("matching rollout is found under CODEX_HOME");
+        assert_eq!(transcript, rollout);
+        let hygiene = hygiene_reading(
+            "codex",
+            session_id,
+            "court",
+            Some(&transcript),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "measured");
+        assert!(hygiene["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["check"] == "check5_context_timing_heuristic" }));
+    }
+
+    #[test]
+    fn oversized_holder_transcript_is_unmeasurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("large.jsonl");
+        let file = std::fs::File::create(&transcript).unwrap();
+        file.set_len(crate::reign_hygiene::CHECKIN_TRANSCRIPT_BUDGET_BYTES + 1)
+            .unwrap();
+        let hygiene = hygiene_reading(
+            "claude",
+            "large-session",
+            "court",
+            Some(&transcript),
+            &CrownLineage::default(),
+        );
+        assert_eq!(hygiene["state"], "unmeasurable");
+        assert!(hygiene["reason"]
+            .as_str()
+            .unwrap()
+            .contains("transcript over cap"));
     }
 }

@@ -118,6 +118,37 @@ reconcile_maybe_fire() {
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
         "$2" agents prove-it-verdicts --route >/dev/null 2>&1 || true
+        # Orphan-plan binder, best-effort like every co-fired verb: a plan
+        # whose `claims:` bind write never landed keeps its node unplanned
+        # forever, so retry the bind inside the same window. The result
+        # publishes whenever the binary produced JSON, exit code aside: exit 1
+        # is the bind_failed verdict, and that verdict is exactly what the
+        # SessionStart hook surfaces.
+        obin="$(command -v fno-agents 2>/dev/null || true)"
+        if [[ -z "$obin" ]]; then obin="${FNO_AGENTS_BIN:-}"; fi
+        if [[ -z "$obin" ]]; then
+            fself="$(command -v -- "$2" 2>/dev/null || true)"
+            if [[ -z "$fself" ]] && [[ -x "$2" ]]; then fself="$2"; fi
+            if [[ -n "$fself" ]]; then
+                cand="$(dirname "$fself")/fno-agents"
+                if [[ -x "$cand" ]]; then obin="$cand"; fi
+            fi
+        fi
+        # A project that relocates the graph store (paths.graph_json) makes
+        # the default-store write the WRONG store; the Python-owned resolver
+        # decides, the binder never parses config. Skip when a config file
+        # sets the key (the verb prints `source: default` only when unset).
+        oconf="$("$2" config get paths.graph_json 2>/dev/null || true)"
+        odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]] \
+            && [[ "$oconf" == *"source: default"* ]]; then
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]]; then
+            "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
+                > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null || true
+            [[ -s "$1/.fno/.orphan-plans-result.json.tmp" ]] \
+                && mv -f "$1/.fno/.orphan-plans-result.json.tmp" \
+                    "$1/.fno/.orphan-plans-result.json" 2>/dev/null || true
+        fi
     ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 

@@ -111,7 +111,6 @@ def test_ac3hp_install_prints_plist_before_writing(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -132,7 +131,6 @@ def test_ac3hp_install_writes_file_on_confirm(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -152,7 +150,6 @@ def test_ac3hp_dry_run_prints_plist_writes_nothing(
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=True,
     )
 
@@ -177,7 +174,6 @@ def test_ac3err_decline_writes_nothing(tmp_home, tmp_launch_agents, monkeypatch)
         m.install(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/usr/local/bin/fno",
-            install_path="/usr/bin:/bin",
             dry_run=False,
         )
 
@@ -198,7 +194,6 @@ def test_ac3err_decline_message_contains_not_installed(
         m.install(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/usr/local/bin/fno",
-            install_path="/usr/bin:/bin",
             dry_run=False,
         )
 
@@ -291,30 +286,26 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
     events_file.write_text(
         json.dumps({
             "type": "pr_watch_tick",
-            "ts": "2026-06-14T01:00:00Z",
+            "ts": "2026-09-16T01:00:00Z",
             "data": {"open_prs": 2, "acted": 1},
         }) + "\n"
     )
 
-    # Seed a watermark store with one parked PR
+    # The parked block reads the one owner (the pr-park action), so the
+    # answer is stubbed: the store fixture below only proves the paths are
+    # threaded through. Bucket-level behavior is the action's own tests.
     state_file = tmp_home / ".fno" / "pr-watcher-state.json"
-    state_file.write_text(
-        json.dumps({
-            "owner/repo#42": {
-                "parked": "retries-exhausted",
-                "last_seen_state": "OPEN",
-                "merge_dispatched": False,
-                "last_review_ts": None,
-                "retries": 3,
-            },
-            "owner/repo#43": {
-                "parked": None,
-                "last_seen_state": "OPEN",
-                "merge_dispatched": False,
-                "last_review_ts": None,
-                "retries": 0,
-            },
-        })
+    state_file.write_text("{}")
+    monkeypatch.setattr(
+        m, "subprocess",
+        _FakeSubprocess(json.dumps({"rows": [
+            {"key": "owner/repo#42", "bucket": "open", "reason": "retries-exhausted",
+             "reason_detail": "failed; checks are red", "age_hours": 2,
+             "node": "x-abc", "node_status": "in_review"},
+        ]})),
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents"),
     )
 
     # Stub launchctl list so we don't run the real binary
@@ -328,7 +319,7 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
 
     captured = capsys.readouterr()
     out = captured.out
-    assert "2026-06-14T01:00:00Z" in out, "last tick time should appear"
+    assert "2026-09-16T01:00:00Z" in out, "last tick time should appear"
     assert "2" in out, "open-PR count should appear"
     assert "owner/repo#42" in out or "42" in out, "parked PR should appear"
 
@@ -347,19 +338,55 @@ def test_status_open_count_reads_observed_state_not_graph(tmp_path):
     assert _observed_open_pr_count(state_file) == 1
 
 
-def test_parked_prs_includes_pending_delivery_failures(tmp_path):
-    from fno.pr_watch._install import _parked_prs
+def test_parked_block_shows_three_counts_and_only_open_rows_in_full(tmp_path, monkeypatch):
+    """`fno do pr watch status` reads the parked block from the pr-park action:
+    one header with the three bucket counts, open rows in full, the other two
+    buckets as count lines."""
+    import fno.pr_watch._install as m
+    from typer.testing import CliRunner
+    from fno.cli import app
 
-    state_file = tmp_path / "pr-watcher-state.json"
-    state_file.write_text("{}")
-    delivery_file = tmp_path / "pr-watcher-state-delivery.json"
-    delivery_file.write_text(json.dumps({
-        "owner/repo#7": {"retries": 3, "parked": "retries-exhausted"}
-    }))
+    # The action's answer for the fixture store: one of each bucket.
+    rows = [
+        {"key": "owner/repo#101", "bucket": "open", "reason": "retries-exhausted",
+         "reason_detail": "failed; checks are red", "age_hours": 2,
+         "node": "x-open", "node_status": "in_review"},
+        {"key": "owner/repo#42", "bucket": "finished", "reason": "retries-exhausted"},
+        {"key": "other/repo#55", "bucket": "foreign", "reason": "max-age"},
+    ]
+    monkeypatch.setattr(
+        m, "subprocess", _FakeSubprocess(json.dumps({"rows": rows})),
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents"),
+    )
 
-    assert _parked_prs(state_file) == {
-        "owner/repo#7 [delivery]": "retries-exhausted"
-    }
+    # Hermetic: the launchd read is stubbed; the parked block reads the action.
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    monkeypatch.setattr(m, "liveness_report_live", lambda **_kw: {
+        "enabled": True, "verdict": "dead", "detail": "no tick",
+        "fix": "fno do pr watch install", "loaded": True, "last_tick": None,
+    })
+    result = CliRunner().invoke(app, ["pr-watch", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Parked PRs (1 open, 1 finished, 1 foreign):" in result.output
+    assert "owner/repo#101" in result.output
+    assert "checks are red" in result.output
+    assert "node x-open" in result.output
+    assert "finished: 1" in result.output
+    assert "foreign: 1" in result.output
+
+
+class _FakeSubprocess:
+    """Answers one canned stdout for run()."""
+
+    def __init__(self, stdout: str) -> None:
+        self._stdout = stdout
+        self.ran: list[list[str]] = []
+
+    def run(self, cmd, **_kwargs):
+        self.ran.append(cmd)
+        return type("P", (), {"stdout": self._stdout, "returncode": 0})()
 
 
 def test_status_json_emits_liveness_verdict(monkeypatch):
@@ -1018,7 +1045,6 @@ def test_install_activates_by_default(tmp_home, tmp_launch_agents, capsys, monke
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1038,7 +1064,6 @@ def test_install_no_activate_skips_load(tmp_home, tmp_launch_agents, capsys, mon
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=False,
     )
@@ -1060,7 +1085,6 @@ def test_install_reload_bounces_when_loaded(tmp_home, tmp_launch_agents, monkeyp
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1085,7 +1109,6 @@ def test_ensure_activated_rerenders_existing_plist(tmp_home, tmp_launch_agents, 
     m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     )
 
     content = plist.read_text()
@@ -1107,7 +1130,6 @@ def test_install_activation_failure_is_loud(tmp_home, tmp_launch_agents, capsys,
     m.install(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
         dry_run=False,
         activate=True,
     )
@@ -1248,10 +1270,9 @@ def test_bounce_records_caller_sidecar_and_event(tmp_launch_agents):
     assert isinstance(sidecar["parent"], str)
     assert sidecar["deferred"] is False
     assert _time.time() - sidecar["ts"] < 60
-    events = [
-        json.loads(line)
-        for line in (state_root / "events.jsonl").read_text().splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(state_root / "events.jsonl")
     bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
     assert len(bounces) == 1
     assert bounces[0]["data"]["caller"] == "heal"
@@ -1274,10 +1295,9 @@ def test_bounce_defer_emits_event_but_no_sidecar(tmp_launch_agents, monkeypatch)
     assert calls == []
     state_root = Path(fno.paths.state_dir())
     assert not (state_root / "pr-watch-bounce.json").exists()
-    events = [
-        json.loads(line)
-        for line in (state_root / "events.jsonl").read_text().splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(state_root / "events.jsonl")
     bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
     assert len(bounces) == 1
     assert bounces[0]["data"]["deferred"] is True
@@ -1381,7 +1401,6 @@ def test_refresh_watcher_rerenders_then_bounces(tmp_launch_agents):
         msg, rc = m.refresh_watcher(
             launch_agents_dir=tmp_launch_agents,
             fno_binary="/fresh/bin/fno-py",
-            install_path="/usr/bin:/bin",
         )
     finally:
         mod._run_launchctl_timed = orig
@@ -1401,7 +1420,6 @@ def test_refresh_watcher_write_failure_is_error(tmp_path, monkeypatch):
     msg, rc = m.refresh_watcher(
         launch_agents_dir=blocker / "LaunchAgents",
         fno_binary="/x/fno-py",
-        install_path="/usr/bin:/bin",
     )
     assert rc == 1 and "failed to write plist" in msg
 
@@ -1444,7 +1462,6 @@ def test_ensure_activated_noop_when_loaded(tmp_home, tmp_launch_agents, monkeypa
     assert m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     ) == "already-running"
 
 
@@ -1458,7 +1475,6 @@ def test_ensure_activated_installs_and_loads(tmp_home, tmp_launch_agents, monkey
     outcome = m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     )
 
     assert outcome == "activated"
@@ -1475,7 +1491,6 @@ def test_ensure_activated_reports_load_failure(tmp_home, tmp_launch_agents, monk
     assert m.ensure_activated(
         launch_agents_dir=tmp_launch_agents,
         fno_binary="/usr/local/bin/fno",
-        install_path="/usr/bin:/bin",
     ) == "load-failed"
 
 
@@ -1937,3 +1952,226 @@ def test_status_prints_scanned_in_merge_scan_line(
     m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
     out = capsys.readouterr().out
     assert re.search(r"^Merge scan: +.*scanned=13", out, re.M), out
+
+
+# ---------------------------------------------------------------------------
+# The Heal: readout line (status, install, refresh)
+# ---------------------------------------------------------------------------
+
+
+def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
+):
+    """auto_heal.enabled false -> `Heal: unarmed` plus the exact arm command,
+    and the heal readout never shells the binary. status itself still shells
+    it for the parked-PR read, so the stub records every invocation and the
+    assert is scoped to the heal verb."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            auto_heal=SimpleNamespace(enabled=False),
+            pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+            # state_dir() reads this field off the settings object whenever
+            # the parked-PR read needs a path; a stub without it fails only
+            # when no earlier test warmed the paths cache, which is why it
+            # passed on some shard orders and not others.
+            state_dir=str(tmp_path / "fno"),
+        ),
+    )
+    argv_log = tmp_path / "stub-argv.log"
+    stub = tmp_path / "fno-agents"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
+    monkeypatch.setattr(
+        m,
+        "liveness_report_live",
+        lambda **_kw: {"verdict": "healthy", "detail": "test"},
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents)
+    out = capsys.readouterr().out
+    assert (
+        "Heal: unarmed (auto_heal.enabled=false; "
+        "arm with: fno config set auto_heal.enabled true)"
+    ) in out, out
+    argv = argv_log.read_text().splitlines()
+    assert not any("pr-heal" in a for a in argv), "the unarmed readout shelled pr-heal"
+
+
+def test_status_shells_pr_heal_status_when_armed(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
+):
+    """Armed, status passes --status --armed --events-file to the binary and
+    prints its line verbatim. The parked-PR read shells the same stub, so the
+    log is appended to and the heal argv is asserted as one contiguous run."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            auto_heal=SimpleNamespace(enabled=True),
+            pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+            state_dir=str(tmp_path / "fno"),
+        ),
+    )
+    argv_log = tmp_path / "stub-argv.log"
+    line = "Heal: armed; last run 2026-09-17T12:00:00Z (12m ago); healed 1, escalated 3, in-flight none"
+    stub = tmp_path / "fno-agents"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
+        f"echo '{line}'\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
+    monkeypatch.setattr(
+        m,
+        "liveness_report_live",
+        lambda **_kw: {"verdict": "healthy", "detail": "test"},
+    )
+
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert line in out, out
+    argv = argv_log.read_text().splitlines()
+    expected = ["pr-heal", "--status", "--armed", "--events-file", str(events_file)]
+    assert any(
+        argv[i : i + len(expected)] == expected for i in range(len(argv))
+    ), argv
+
+
+def test_armed_status_with_no_binary_degrades_to_a_line_that_says_so(
+    tmp_home, monkeypatch
+):
+    """An armed machine whose binary is missing is reported, never silence."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(auto_heal=SimpleNamespace(enabled=True)),
+    )
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+
+    line = m.heal_status_line()
+    assert line.startswith("Heal: armed; readout unavailable"), line
+
+
+def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
+    """A fresh refresh output carries the same Heal: readout status prints."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: ("bounced", 0))
+    monkeypatch.setattr(m, "heal_status_line", lambda events_path=None: "Heal: armed; never ran")
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert "Heal: armed; never ran" in result.stdout, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# An unchanged refresh must not re-register the agent
+# (launchd posts a macOS background-activity notice on every re-registration)
+# ---------------------------------------------------------------------------
+
+
+def test_default_agent_path_ignores_the_caller_environment(tmp_home, monkeypatch):
+    """Two callers with different PATHs derive the same launchd PATH."""
+    m = _install()
+    monkeypatch.setenv(
+        "PATH", "/var/run/com.apple.security.cryptexd/codex.system/usr/bin"
+    )
+    codex_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+    monkeypatch.setenv("PATH", "/Users/claude/only/bin")
+    claude_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+
+    assert codex_view == claude_view
+    assert "/opt/homebrew/bin" in codex_view and "/usr/bin" in codex_view
+
+
+def test_refresh_unchanged_skips_write_and_bounce(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+    )
+
+    assert rc == 0 and "unchanged" in msg
+    assert bounces == [], "an unchanged refresh must not re-register the agent"
+
+
+def test_refresh_changed_reregisters(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist>stale</plist>")
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+    )
+
+    assert rc == 0 and len(bounces) == 1
+    assert "stale" not in plist.read_text()
+
+
+def test_refresh_force_bounce_reregisters_an_unchanged_plist(
+    tmp_home, tmp_launch_agents, monkeypatch
+):
+    """A dead/wedged verdict needs the re-bootstrap even with identical bytes."""
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        interval=600,
+        force_bounce=True,
+    )
+
+    assert rc == 0 and len(bounces) == 1

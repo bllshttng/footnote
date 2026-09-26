@@ -103,8 +103,8 @@ def test_ac1_hp_intake_adopts_plan(tmp_graph, tmp_path):
     assert r.exit_code == 0, r.output
     assert "intake ab-" in r.output or "ab-" in r.output
 
-    graph = json.loads(tmp_graph.read_text())
-    entries = graph["entries"]
+    graph = _read_store(tmp_graph)
+    entries = graph
     assert len(entries) == 1, f"expected 1 entry, got {entries!r}"
     assert entries[0]["source"] == "intake", (
         f"writer must emit source: 'intake', got {entries[0].get('source')!r}"
@@ -156,7 +156,7 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "done", node_id)
+    r = _invoke("backlog", "done", node_id, "--note", "marks the node completed")
     assert r.exit_code == 0, r.output
 
     # Fetch and assert completed_at is set
@@ -172,7 +172,7 @@ def test_ac3_edge_done_is_idempotent(tmp_graph):
     """Running `done` on an already-done node is a safe no-op (exit 0)."""
     add = _invoke("--json", "backlog", "add", "IdemTest")
     node_id = json.loads(add.stdout)["id"]
-    _invoke("backlog", "done", node_id)
+    _invoke("backlog", "done", node_id, "--note", "idempotency fixture")
     r2 = _invoke("backlog", "done", node_id)
     assert r2.exit_code == 0, r2.output
     assert "already" in r2.output.lower() or "done" in r2.output.lower()
@@ -310,8 +310,7 @@ def test_intake_project_flag_overrides_frontmatter(tmp_graph, tmp_path):
     )
     r = _invoke("--json", "backlog", "intake", str(plan), "--project", "from-flag")
     assert r.exit_code == 0, r.output
-    g = json.loads(tmp_graph.read_text())
-    nodes = g.get("entries") or []
+    nodes = _read_store(tmp_graph)
     assert any(n.get("project") == "from-flag" for n in nodes), (
         f"expected node with project=from-flag, got: {[n.get('project') for n in nodes]}"
     )
@@ -360,10 +359,19 @@ def test_intake_empty_project_flag_errors(tmp_graph, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _read_store(g: Path) -> list[dict]:
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
+
+
 def _seed_node(tmp_graph: Path, node: dict) -> None:
-    g = json.loads(tmp_graph.read_text())
-    g["entries"].append(node)
-    tmp_graph.write_text(json.dumps(g))
+    # The file is a frozen mirror; seeds go through the store write seam.
+    from fno.graph.store import commit_rows_via_store
+
+    commit_rows_via_store(tmp_graph, lambda rows: rows + [node])
 
 
 def test_cmd_update_project_repoints_node(tmp_graph):
@@ -375,8 +383,7 @@ def test_cmd_update_project_repoints_node(tmp_graph):
     r = _invoke("backlog", "update", "ab-12345678", "--project", "example-pipeline")
     assert r.exit_code == 0, r.output
 
-    g = json.loads(tmp_graph.read_text())
-    node = next(e for e in g["entries"] if e["id"] == "ab-12345678")
+    node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-12345678")
     assert node["project"] == "example-pipeline"
     assert node["cwd"] == "/old/cwd"
 
@@ -394,8 +401,7 @@ def test_cmd_update_project_and_cwd_atomic(tmp_graph):
     )
     assert r.exit_code == 0, r.output
 
-    g = json.loads(tmp_graph.read_text())
-    node = next(e for e in g["entries"] if e["id"] == "ab-aaaaaaaa")
+    node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-aaaaaaaa")
     assert node["project"] == "example-pipeline"
     assert node["cwd"] == "/tmp/example-pipeline"
 
@@ -432,8 +438,7 @@ def test_cmd_update_cwd_expands_tilde(tmp_graph, monkeypatch):
     r = _invoke("backlog", "update", "ab-dddddddd", "--cwd", "~/code/foo")
     assert r.exit_code == 0, r.output
 
-    g = json.loads(tmp_graph.read_text())
-    node = next(e for e in g["entries"] if e["id"] == "ab-dddddddd")
+    node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-dddddddd")
     assert node["cwd"] == "/Users/testuser/code/foo"
 
 
@@ -463,8 +468,7 @@ def test_intake_routes_to_frontmatter_project_end_to_end(tmp_graph, tmp_path, mo
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output
 
-    g = json.loads(tmp_graph.read_text())
-    nodes = g.get("entries") or []
+    nodes = _read_store(tmp_graph)
     assert len(nodes) == 1
     assert nodes[0]["project"] == "from-frontmatter", (
         f"expected node project=from-frontmatter, got: {nodes[0].get('project')}"

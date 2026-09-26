@@ -224,21 +224,17 @@ def _push_to_parent(
         msg += f" node={node}"
     if reason:
         msg += f": {reason}"
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("push: note: fno-agents unavailable, skipped parent push", err=True)
+        return False
+    argv = [str(binary), "machine-mail-send", "--arm", "events-push"]
+    argv.extend(["--timeout-secs", "20", "--to", parent, "--", msg])
     try:
         result = subprocess.run(
-            [
-                "fno",
-                "agents",
-                "mail",
-                "send",
-                parent,
-                msg,
-                "--origin",
-                "scheduler",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=20,
+            argv, check=False, capture_output=True, timeout=20
         )
     except FileNotFoundError:
         typer.echo("push: note: fno unavailable, skipped parent push", err=True)
@@ -432,7 +428,7 @@ def emit(
         "with --events.",
     ),
 ) -> None:
-    """Emit a single canonical event to events.jsonl.
+    """Emit a single canonical event to the project event store (events.db beside the journal path).
 
     The envelope is ``{ts, type, source, data}`` (see
     ``cli/src/fno/events/schema.yaml``). Validation runs before the
@@ -647,12 +643,11 @@ def emit(
         except Exception as exc:  # noqa: BLE001 - never fail the emit
             typer.echo(f"bot-review: skipped (mirror error: {exc})", err=True)
 
-    # Push leg: blocked + run_summary notify the parent when spawn
-    # lineage exists. Fired AFTER the durable append so the events.jsonl record
-    # is independent of the push (AC1-FR). No lineage -> silent skip.
-    # (run_summary is normally pushed by Rust finalize's native emit; a
-    # CLI-emitted one pushes here too for uniformity.)
-    if type_ in ("blocked", "run_summary"):
+    # Push leg: blocked notifies the parent when spawn lineage exists. Fired
+    # AFTER the durable append so the events.jsonl record is independent of the
+    # push (AC1-FR). No lineage -> silent skip. run_summary is pushed only by
+    # Rust finalize, which dedups on run plus reason; this emit path never pushes it.
+    if type_ == "blocked":
         _parent = event.get("parent")  # already resolved into the envelope above
         if _parent:
             _push_to_parent(
@@ -944,11 +939,39 @@ def _find_file_stats(
         "kind_counts": {},
         "matching_rows": [],
     }
+    # SQL authority: a store beside the journal answers first. Only a
+    # store-less path falls back to the raw file (fixtures, pre-cutover
+    # journal bytes nothing has imported yet).
+    from fno.events.store_client import EventStoreUnavailable, query_rows, store_db_path
+
+    if store_db_path(path).exists():
+        try:
+            rows = query_rows(path)
+        except EventStoreUnavailable as exc:
+            stats["status"] = "unreadable"
+            stats["error"] = str(exc)
+            stats["rows"] = 0
+            stats["matches"] = 0
+            stats["keys"] = {field: 0 for field in _QUERY_FIELDS}
+            stats["kind_counts"] = {}
+            stats["matching_rows"] = []
+            return stats
+        timestamps: list[tuple[datetime, str]] = []
+        _fold_rows(stats, rows, kind=kind, field_filters=field_filters, since=since,
+                   session=session, limit=limit, timestamps_out=timestamps)
+        if timestamps:
+            timestamps.sort(key=lambda item: item[0])
+            stats["span"] = {
+                "earliest": timestamps[0][1],
+                "latest": timestamps[-1][1],
+            }
+        return stats
     if not path.exists() and not _ROTATED_SUFFIX.search(path.name):
         stats["status"] = "absent"
         return stats
-    timestamps: list[tuple[datetime, str]] = []
+    timestamps = []
     try:
+        rows = []
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
@@ -959,34 +982,12 @@ def _find_file_stats(
                 except (json.JSONDecodeError, TypeError):
                     stats["malformed"] = stats.get("malformed", 0) + 1
                     continue
-                if not isinstance(row, dict):
+                if isinstance(row, dict):
+                    rows.append(row)
+                else:
                     stats["malformed"] = stats.get("malformed", 0) + 1
-                    continue
-                event_name, key = _event_kind(row)
-                if key is not None:
-                    stats["keys"][key] += 1
-                raw_timestamp = row.get("ts") or row.get("timestamp")
-                timestamp = _parse_event_timestamp(raw_timestamp)
-                if timestamp is not None and isinstance(raw_timestamp, str):
-                    timestamps.append((timestamp, raw_timestamp))
-                if _find_row_matches(
-                    row,
-                    kind=kind,
-                    field_filters=field_filters,
-                    since=since,
-                    session=session,
-                ):
-                    stats["matches"] += 1
-                    if len(stats["matching_rows"]) < limit:
-                        stats["matching_rows"].append({"row": row, "key": key})
-                    if event_name is not None:
-                        counts = stats["kind_counts"].setdefault(
-                            event_name,
-                            {"count": 0, "keys": {field: 0 for field in _QUERY_FIELDS}},
-                        )
-                        counts["count"] += 1
-                        if key is not None:
-                            counts["keys"][key] += 1
+        _fold_rows(stats, rows, kind=kind, field_filters=field_filters, since=since,
+                   session=session, limit=limit, timestamps_out=timestamps)
     except OSError as exc:
         stats["status"] = "rotated-away" if not path.exists() else "unreadable"
         stats["error"] = str(exc)
@@ -1003,6 +1004,51 @@ def _find_file_stats(
             "latest": timestamps[-1][1],
         }
     return stats
+
+
+def _fold_rows(
+    stats: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    kind: str | None,
+    field_filters: list[tuple[str, str]],
+    since: datetime | None,
+    session: str | None,
+    limit: int,
+    timestamps_out: list[tuple[datetime, str]] | None = None,
+) -> None:
+    """Match + count one path's parsed rows into the stats fold. Shared by
+    the store query path and the raw-file fallback so the two can never
+    disagree about what matched."""
+    for row in rows:
+        if timestamps_out is None:
+            stats["rows"] += 1
+        event_name, key = _event_kind(row)
+        if key is not None:
+            stats["keys"][key] += 1
+        raw_timestamp = row.get("ts") or row.get("timestamp")
+        timestamp = _parse_event_timestamp(raw_timestamp)
+        if timestamp is not None and isinstance(raw_timestamp, str):
+            if timestamps_out is not None:
+                timestamps_out.append((timestamp, raw_timestamp))
+        if _find_row_matches(
+            row,
+            kind=kind,
+            field_filters=field_filters,
+            since=since,
+            session=session,
+        ):
+            stats["matches"] += 1
+            if len(stats["matching_rows"]) < limit:
+                stats["matching_rows"].append({"row": row, "key": key})
+            if event_name is not None:
+                counts = stats["kind_counts"].setdefault(
+                    event_name,
+                    {"count": 0, "keys": {field: 0 for field in _QUERY_FIELDS}},
+                )
+                counts["count"] += 1
+                if key is not None:
+                    counts["keys"][key] += 1
 
 
 def _find_span(stats: list[dict[str, Any]]) -> dict[str, str] | None:

@@ -127,17 +127,22 @@ impl PaneSendAudit {
             "source": "daemon",
             "data": data,
         });
-        let _ = (|| -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            writeln!(file, "{event}")
-        })();
+        let _ = append_agents_event(path, &event);
     }
+}
+
+/// One O_APPEND line to the agents events journal, creating the parent dir.
+/// The raw row append both the pane-send floor and the `operator_submit`
+/// witness share; each write is best-effort and names its own failure.
+pub(crate) fn append_agents_event(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{row}")
 }
 
 /// A submit key is a control byte, not a dispatch: the CRs, Tabs and ESC
@@ -212,7 +217,7 @@ fn pane_send_registry_identity(
 /// (`~/.fno/agents/events.jsonl`, `FNO_AGENTS_HOME` redirects tests), mirrored
 /// from fno-agents' `AgentPaths` - the crates share no types, the FILE is the
 /// contract.
-fn pane_send_audit_events_path() -> PathBuf {
+pub(crate) fn pane_send_audit_events_path() -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_AGENTS_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(&home).join("events.jsonl");
     }
@@ -234,6 +239,17 @@ mod tests {
         args.iter().map(OsString::from).collect()
     }
 
+    fn op_of(word: &str) -> crate::cli_args::PaneOp {
+        use crate::cli_args::{MuxTail, PaneOp};
+        let t = || MuxTail { tail: Vec::new() };
+        match word {
+            "ls" => PaneOp::Ls(t()),
+            "read" => PaneOp::Read(t()),
+            "send" => PaneOp::Send(t()),
+            _ => panic!("no test op mapping for {word}"),
+        }
+    }
+
     fn control_test_sock(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
     }
@@ -250,9 +266,12 @@ mod tests {
     #[test]
     fn pane_send_parse_source_flag_declares_provenance() {
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "hi", "--source", "mail"]))
-                .unwrap()
-                .cmd,
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--source", "mail"])
+            )
+            .unwrap()
+            .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Text("hi".into()),
@@ -267,8 +286,8 @@ mod tests {
         // A valueless flag and a non-send verb are usage errors, mirroring
         // --style-exception: a silently ignored flag would read as "the row
         // carried the declared source".
-        assert!(parse_pane_args(&os(&["send", "2", "--text", "hi", "--source"])).is_err());
-        assert!(parse_pane_args(&os(&["read", "2", "--source", "mail"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi", "--source"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--source", "mail"])).is_err());
     }
 
     #[test]

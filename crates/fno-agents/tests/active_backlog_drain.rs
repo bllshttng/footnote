@@ -43,15 +43,12 @@ fn journal_in(tmp: &Path) -> (Journal, PathBuf) {
 }
 
 fn journal_events(project_journal: &Path) -> Vec<String> {
-    if !project_journal.exists() {
-        return vec![];
+    // Committed rows are the journal's durable content; raw bytes are an
+    // implementation detail the store owns.
+    match fno_agents::event_store::query_events(project_journal, &Default::default()) {
+        Ok(rows) => rows.into_iter().map(|r| r.line).collect(),
+        Err(_) => vec![],
     }
-    fs::read_to_string(project_journal)
-        .unwrap()
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|s| s.to_string())
-        .collect()
 }
 
 fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {

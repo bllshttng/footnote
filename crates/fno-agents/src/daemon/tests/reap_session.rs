@@ -101,7 +101,7 @@ fn x2774_terminal_harness_state_releases_an_open_work_row() {
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, working_agents);
     assert!(summary.retired.is_empty(), "{summary:?}");
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-term".to_string(),
             "N1".to_string(),
@@ -114,7 +114,7 @@ fn x2774_terminal_harness_state_releases_an_open_work_row() {
     let unreadable = crate::claude_roster::ClaudeAgentsSnapshot::unknown("staged: unreadable");
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, unreadable);
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
 
     // Terminal roster state: the row retires on the session question. APPLY
     // mode, run LAST: the basis is an effect-outcome artifact, so
@@ -245,7 +245,7 @@ fn x2774_supersession_and_its_fail_closed_corner() {
         "{summary:?}"
     );
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-new".to_string(),
             "N1".to_string(),
@@ -269,7 +269,7 @@ fn x2774_supersession_and_its_fail_closed_corner() {
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, false, both_quiet, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 2, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 2, "{summary:?}");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -312,7 +312,7 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -336,7 +336,7 @@ fn x2774_open_work_keeps_name_their_reader() {
     };
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-name".to_string(),
             "N2".to_string(),
@@ -410,7 +410,7 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     let dry = x2774_sweep(&home, &emitter, 900, true, &picks, roster.clone());
     let acting = x2774_sweep(&home, &emitter, 900, false, &picks, roster);
     assert_eq!(
-        dry.kept_open_work, acting.kept_open_work,
+        dry.kept_open_work_stale, acting.kept_open_work_stale,
         "open-work bucket agrees"
     );
     assert_eq!(dry.kept_active, acting.kept_active, "active bucket agrees");

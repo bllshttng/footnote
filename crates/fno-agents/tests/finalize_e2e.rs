@@ -441,17 +441,34 @@ fn calls(env: &Env) -> String {
 fn events_text(p: &Path) -> String {
     fs::read_to_string(p).unwrap_or_default()
 }
+/// The committed rows as one text blob: events the binary writes land only in
+/// the store, so content assertions on them read here, never the journal.
+fn store_text(p: &Path) -> String {
+    let _ = fno_agents::event_store::import_all(p);
+    fno_agents::event_store::query_events(p, &fno_agents::event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 fn count_event(p: &Path, kind: &str, session_id: &str) -> usize {
-    events_text(p)
-        .lines()
-        .filter(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
+    // Committed rows, not journal bytes: the cutover stopped journal appends,
+    // so a session_finalized written by the binary lives only in the store.
+    let _ = fno_agents::event_store::import_all(p);
+    let rows = fno_agents::event_store::query_events(
+        p,
+        &fno_agents::event_store::EventQuery {
+            types: vec![kind.to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
+    rows.iter()
+        .filter(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.line)
                 .ok()
-                .map(|v| {
-                    v.get("type").and_then(|t| t.as_str()) == Some(kind)
-                        && v.pointer("/data/session_id").and_then(|s| s.as_str())
-                            == Some(session_id)
-                })
+                .map(|v| v.pointer("/data/session_id").and_then(|s| s.as_str()) == Some(session_id))
                 .unwrap_or(false)
         })
         .count()
@@ -460,6 +477,28 @@ fn handoff_files(env: &Env) -> Vec<PathBuf> {
     fs::read_dir(&env.handoffs)
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
         .unwrap_or_default()
+}
+
+/// Count run_summary rows for one run in an events log (envelope-level `run`,
+/// the join `count_run_tasks` and `run_summary_already_emitted` use).
+fn count_run_summary(p: &Path, run: &str) -> usize {
+    let _ = fno_agents::event_store::import_all(p);
+    fno_agents::event_store::query_events(
+        p,
+        &fno_agents::event_store::EventQuery {
+            types: vec!["run_summary".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default()
+    .iter()
+    .filter(|r| {
+        serde_json::from_str::<serde_json::Value>(&r.line)
+            .ok()
+            .map(|v| v.get("run").and_then(|r| r.as_str()) == Some(run))
+            .unwrap_or(false)
+    })
+    .count()
 }
 fn postmortem_files(env: &Env) -> Vec<PathBuf> {
     fs::read_dir(&env.postmortems)
@@ -562,7 +601,7 @@ fn finalize_binary_repairs_a_prior_ship_before_returning() {
     fs::write(
         &env.events,
         format!(
-            "{{\"type\":\"session_finalized\",\"data\":{{\"session_id\":\"{run}\",\"ship\":true}}}}\n"
+            "{{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{{\"session_id\":\"{run}\",\"ship\":true}}}}\n"
         ),
     )
     .unwrap();
@@ -772,7 +811,7 @@ fn generic_completion_finalize_consumes_selected_verdict_without_pr_paths() {
         .unwrap_or_default()
         .is_empty());
     assert_eq!(count_event(&env.events, "termination", "S-delivery"), 1);
-    assert!(events_text(&env.events).contains("DoneDelivery"));
+    assert!(store_text(&env.events).contains("DoneDelivery"));
 }
 
 #[test]
@@ -809,7 +848,7 @@ fn generic_completion_finalize_rejects_incomplete_selected_verdict() {
     assert!(!out.status.success());
     assert!(!calls(&env).contains("stamp-plan"));
     assert!(handoff_files(&env).is_empty());
-    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert!(store_text(&env.events).contains("delivery_receipt"));
     assert_eq!(
         count_event(&env.events, "termination", "S-delivery-incomplete"),
         0
@@ -834,7 +873,7 @@ fn generic_completion_finalize_does_not_revive_an_older_passing_verdict() {
     assert!(!out.status.success());
     assert!(!calls(&env).contains("stamp-plan"));
     assert!(handoff_files(&env).is_empty());
-    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert!(store_text(&env.events).contains("delivery_receipt"));
     assert_eq!(
         count_event(&env.events, "termination", "S-delivery-newest"),
         0
@@ -929,7 +968,7 @@ fn generic_completion_finalize_missing_selected_event_fails_closed() {
         count_event(&env.events, "session_finalize_failed", "S-delivery-missing"),
         1
     );
-    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert!(store_text(&env.events).contains("delivery_receipt"));
     assert_eq!(
         count_event(&env.events, "termination", "S-delivery-missing"),
         0
@@ -992,7 +1031,7 @@ fn finalize_nonfatal_partial_failure() {
         "session_finalized NOT emitted on partial failure (so a re-fire retries)"
     );
     // The failure event names the failing step.
-    let txt = events_text(&env.events);
+    let txt = store_text(&env.events);
     assert!(
         txt.contains("\"ledger\""),
         "failed_steps names ledger: {txt}"
@@ -1012,7 +1051,7 @@ fn finalize_missing_manifest_is_noop() {
         "no scripts run"
     );
     assert!(
-        events_text(&env.events).is_empty(),
+        store_text(&env.events).is_empty(),
         "no events on missing manifest"
     );
 }
@@ -1330,6 +1369,58 @@ fn finalize_skips_stamp_when_no_pr() {
     );
 }
 
+/// Run-summary dedup: a session parked at DoneAwaitingMerge re-runs finalize
+/// on every stop; only the first fire for a (run, reason) pair emits and
+/// pushes. A changed reason (Budget then DoneAwaitingMerge) pushes again.
+#[test]
+fn run_summary_push_runs_once_across_repeat_fires() {
+    let env = setup("S-dedup", false);
+    for _ in 0..3 {
+        let out = run_finalize_shimmed(&env, "DoneAwaitingMerge", GH_PR_358);
+        assert!(out.status.success());
+    }
+    let c = calls(&env);
+    assert_eq!(
+        c.matches("push-parent --type run_summary").count(),
+        1,
+        "exactly one run_summary push across three fires: {c}"
+    );
+    assert_eq!(
+        count_run_summary(&env.events, "S-dedup"),
+        1,
+        "exactly one run_summary row across three fires"
+    );
+}
+
+#[test]
+fn run_summary_pushes_again_when_reason_changes() {
+    let env = setup("S-bdg", false);
+    let budget = run_finalize_shimmed(&env, "Budget", GH_PR_358);
+    assert!(budget.status.success());
+    let dam = run_finalize_shimmed(&env, "DoneAwaitingMerge", GH_PR_358);
+    assert!(dam.status.success());
+    let c = calls(&env);
+    let push_lines: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("push-parent --type run_summary"))
+        .collect();
+    assert_eq!(
+        push_lines.len(),
+        2,
+        "Budget then DoneAwaitingMerge pushes twice: {}",
+        calls(&env)
+    );
+    assert!(push_lines.iter().any(|l| l.contains("--reason Budget")));
+    assert!(push_lines
+        .iter()
+        .any(|l| l.contains("--reason DoneAwaitingMerge")));
+    assert_eq!(
+        count_run_summary(&env.events, "S-bdg"),
+        2,
+        "both rows are in the log; the emit is deduped with the push"
+    );
+}
+
 /// AC2-FR: a raw-prose session (graph_node_id null) -> stamp skipped entirely,
 /// even though gh would return a PR.
 #[test]
@@ -1511,14 +1602,19 @@ fn configure_optional_codex(env: &Env) {
 }
 
 fn finalized_event(env: &Env, session_id: &str) -> serde_json::Value {
-    events_text(&env.events)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|event| {
-            event.get("type").and_then(|v| v.as_str()) == Some("session_finalized")
-                && event.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id)
-        })
-        .expect("session_finalized event")
+    let _ = fno_agents::event_store::import_all(&env.events);
+    fno_agents::event_store::query_events(
+        &env.events,
+        &fno_agents::event_store::EventQuery {
+            types: vec!["session_finalized".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.line).ok())
+    .find(|event| event.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id))
+    .expect("session_finalized event")
 }
 
 #[test]
@@ -2103,6 +2199,10 @@ fn finalize_files_outstanding_question_on_stuck_terminal() {
 
     let c = fno_calls(&env);
     assert!(c.contains("outstanding ask"), "{c}");
+    // The rescued question records as a pin: the ask argv carries --ask,
+    // which the ask port requires now that it refuses context-free asks.
+    assert!(c.contains("--ask"), "{c}");
+    assert!(c.contains("the asker went quiet on this question"), "{c}");
     assert!(
         env.outstanding_store.exists(),
         "the stub must have recorded the filed question"

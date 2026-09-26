@@ -218,8 +218,8 @@ def test_malformed_payload_is_a_usage_error_not_a_verdict(tmp_path):
     Reporting ``not-injectable`` here would assert exactly the kind of unestablished
     claim ``--check`` exists to prevent: a caller gating advice would tell a session
     with a perfectly good path to go ask its operator. A multi-line payload is the
-    standing malformed shape (a plain word became a legal payload under law
-    d-5976045c).
+    standing malformed shape (a non-command payload became a usage refusal under
+    law d-f6570dc9).
     """
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID)])
     out, code = _run(

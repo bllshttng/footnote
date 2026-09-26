@@ -87,15 +87,20 @@ fn counts_in_order(fold: &Value) -> Vec<(String, i64)> {
     out
 }
 
-fn active_sum(fold: &Value) -> i64 {
-    ACTIVE_STATUSES
-        .iter()
-        .filter_map(|s| {
-            fold.get("counts")
-                .and_then(|c| c.get(*s))
-                .and_then(|v| v.as_i64())
-        })
-        .sum()
+/// Sum of the ACTIVE_STATUSES buckets under `key` (`counts` or
+/// `owned_counts`). `None` when the key is null or absent, so an unmeasured
+/// owned count is never read as a zero.
+fn active_sum(fold: &Value, key: &str) -> Option<i64> {
+    let counts = fold.get(key)?;
+    if counts.is_null() {
+        return None;
+    }
+    Some(
+        ACTIVE_STATUSES
+            .iter()
+            .filter_map(|s| counts.get(*s).and_then(|v| v.as_i64()))
+            .sum(),
+    )
 }
 
 fn chip_td(status: &str) -> String {
@@ -267,15 +272,24 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
         esc(s_str(crown, "scope").unwrap_or("-")),
         esc(status),
     );
-    out.push_str(&format!(
-        "<p class=\"holder\">held by <b>{}</b> · granted by {}</p>",
-        esc(s_str(crown, "holder").unwrap_or("-")),
-        esc(s_str(crown, "grantor").unwrap_or("-")),
-    ));
+    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
+    let holder_line = match s_str(&fold, "name") {
+        Some(name) => format!(
+            "<p class=\"holder\">held by <b>{}</b> ({}) · granted by {}</p>",
+            esc(name),
+            esc(s_str(crown, "holder").unwrap_or("-")),
+            esc(s_str(crown, "grantor").unwrap_or("-")),
+        ),
+        None => format!(
+            "<p class=\"holder\">held by <b>{}</b> · granted by {}</p>",
+            esc(s_str(crown, "holder").unwrap_or("-")),
+            esc(s_str(crown, "grantor").unwrap_or("-")),
+        ),
+    };
+    out.push_str(&holder_line);
     if let Some(reason) = s_str(crown, "reason") {
         out.push_str(&format!("<p class=\"holder\">{}</p>", esc(reason)));
     }
-    let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
     if s_str(&fold, "status") == Some("unresolved") {
         out.push_str(&format!(
             "<p class=\"holder\">scope fold: unresolved - {}</p>",
@@ -287,10 +301,14 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
             .and_then(|c| c.get("done"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let owned = match active_sum(&fold, "owned_counts") {
+            Some(n) => format!("<span><b>{n}</b> owned active</span>"),
+            None => "<span>owned unmeasured</span>".to_string(),
+        };
         out.push_str(&format!(
-            "<div class=\"stats\"><span><b>{}</b> nodes</span><span><b>{}</b> active</span><span><b>{done}</b> done</span></div>",
+            "<div class=\"stats\">{owned}<span><b>{}</b> nodes</span><span><b>{}</b> active</span><span><b>{done}</b> done</span></div>",
             as_i64(&fold, "total"),
-            active_sum(&fold),
+            active_sum(&fold, "counts").unwrap_or(0),
         ));
         out.push_str(&bar_and_legend(&fold));
         let rows: String = fold
@@ -342,9 +360,25 @@ fn fact(v: Option<&Value>, label: &str, bad: bool) -> String {
     format!("<div class=\"{cls}\"><span class=\"fv\">{shown}</span><span class=\"fl\">{label}</span></div>")
 }
 
+/// The tile for a reading that could not run at all: a dash, never 0 and
+/// never ?, because nothing was measured rather than a count the reader
+/// dropped. Distinct from [`fact`]'s "?" on purpose: a missing summary key
+/// and a read that failed are different facts.
+fn fact_unmeasured(label: &str) -> String {
+    format!(
+        "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">{label}</span></div>"
+    )
+}
+
 /// Four states, never a falsely healthy page: the court cannot be read, it
-/// holds no crowns, it agrees with itself, or it disagrees with itself.
-fn verdict_card(court: &Value, summary: &Value) -> String {
+/// holds no crowns, it agrees with itself, or it disagrees with itself. The
+/// registry split read arrives precomputed so the card stays pure and a
+/// test can pass a fabricated reading.
+fn verdict_card(
+    court: &Value,
+    summary: &Value,
+    split_read: &Result<crate::crown_split::CrownSplits, String>,
+) -> String {
     let crowns = court.get("crowns").and_then(|c| c.as_array());
     let (cls, body) = match crowns {
         None => (
@@ -364,13 +398,44 @@ fn verdict_card(court: &Value, summary: &Value) -> String {
             let disagreements = as_i64(summary, "disagreements");
             let unknowns = as_i64(summary, "unknowns");
             let splits = as_i64(summary, "splits");
-            let (cls, mark, text) = if disagreements == 0 && unknowns == 0 && splits == 0 {
+            let (double_ruled, split_tiles, split_note) = match split_read {
+                Ok(cs) => {
+                    let d = cs.double_ruled.len() as i64;
+                    let s = cs.stale.len() as i64;
+                    (
+                        Some(d),
+                        format!(
+                            "{}{}",
+                            fact(Some(&json!(d)), "double ruled", d > 0),
+                            fact(Some(&json!(s)), "stale crowns", s > 0),
+                        ),
+                        String::new(),
+                    )
+                }
+                Err(reason) => (
+                    None,
+                    format!(
+                        "{}{}",
+                        fact_unmeasured("double ruled"),
+                        fact_unmeasured("stale crowns")
+                    ),
+                    format!(
+                        "<p class=\"vnote\">crown split read failed: {}</p>",
+                        esc(reason)
+                    ),
+                ),
+            };
+            let (cls, mark, text) = if disagreements == 0
+                && unknowns == 0
+                && splits == 0
+                && double_ruled.unwrap_or(0) == 0
+            {
                 ("verdict", "✓", "The court agrees with itself.")
             } else {
                 ("verdict bad", "!", "The court disagrees with itself.")
             };
             let tiles = format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 fact(summary.get("total"), "crowns", false),
                 fact(summary.get("splits"), "splits", splits > 0),
                 fact(summary.get("disagreements"), "disagreements", disagreements > 0),
@@ -380,12 +445,13 @@ fn verdict_card(court: &Value, summary: &Value) -> String {
                     "manifest only",
                     as_i64(summary, "manifest_only") > 0
                 ),
+                split_tiles,
             );
             (
                 cls,
                 format!(
                     "<div class=\"vmain\"><span class=\"mark\">{mark}</span><span>{text}</span></div>\
-                     <div class=\"facts\">{tiles}</div>"
+                     <div class=\"facts\">{tiles}</div>{split_note}"
                 ),
             )
         }
@@ -606,7 +672,7 @@ footer{font-family:var(--mono);font-size:11px;color:var(--ink-mut);border-top:1p
 
 /// The shared page-reload script, inlined into every operator page this
 /// crate renders. `build.rs` copies the same file to the Python package.
-const PAGE_RELOAD_JS: &str = include_str!("page_reload.js");
+pub(crate) const PAGE_RELOAD_JS: &str = include_str!("page_reload.js");
 
 /// The crown_ledger arm's beat: the age after which the /crown route in
 /// crates/fno/src/web.rs starts its own render, so the file on disk and the
@@ -712,7 +778,7 @@ fn maybe_tick_with(
 
 /// `backlog.page_reload_s`: seconds between self-reloads of an open page.
 /// Unset, negative, or not an integer reads as the 60-second default.
-fn reload_secs(value: Option<toml::Value>) -> i64 {
+pub(crate) fn reload_secs(value: Option<toml::Value>) -> i64 {
     value
         .and_then(|v| v.as_integer())
         .filter(|s| *s >= 0)
@@ -734,7 +800,13 @@ fn read_court(path: &Path, stdin: &mut dyn std::io::Read) -> Result<String, Stri
 
 /// The whole page. Four verdict states; an unreadable registry and an empty
 /// court are measurements, never a blank or falsely healthy page.
-pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) -> String {
+pub fn render(
+    court: &Value,
+    entries: &[Value],
+    generated: &str,
+    reload_s: i64,
+    split_read: &Result<crate::crown_split::CrownSplits, String>,
+) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
     let summary = court.get("summary").cloned().unwrap_or(json!({}));
@@ -753,7 +825,7 @@ pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) 
          <p class=\"dek\">Who rules which territory in the fleet, what each crown still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
          </header>"
     );
-    out.push_str(&verdict_card(court, &summary));
+    out.push_str(&verdict_card(court, &summary, split_read));
     if let Some(crowns) = &crowns {
         if !crowns.is_empty() {
             // Rungs: level ascending, null level last, court order within a
@@ -819,7 +891,14 @@ pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) 
                     "{} nodes in the root scope",
                     as_i64(&fold, "total")
                 ));
-                parts.push(format!("{} active", active_sum(&fold)));
+                parts.push(format!(
+                    "{} active",
+                    active_sum(&fold, "counts").unwrap_or(0)
+                ));
+                parts.push(match active_sum(&fold, "owned_counts") {
+                    Some(n) => format!("{n} owned active"),
+                    None => "owned unmeasured".to_string(),
+                });
             }
         }
     }
@@ -843,7 +922,7 @@ pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) 
     out
 }
 
-fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -932,7 +1011,16 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
         &std::env::current_dir().unwrap_or_default(),
         &["backlog", "page_reload_s"],
     ));
-    if let Err(e) = write_atomic(&out_path, &render(&court, &entries, &generated, reload)) {
+    // The split read is the ledger's own registry read, once per render,
+    // fed to the verdict card alongside the court payload.
+    let split_read =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+            .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
+            .map_err(|e| e.to_string());
+    if let Err(e) = write_atomic(
+        &out_path,
+        &render(&court, &entries, &generated, reload, &split_read),
+    ) {
         eprintln!("fno-agents reign-ledger: {e}");
         return 1;
     }
@@ -946,7 +1034,13 @@ mod tests {
     use serde_json::json;
 
     fn page(court: Value, entries: Vec<Value>) -> String {
-        render(&court, &entries, "2026-09-12T00:00:00Z", 60)
+        render(
+            &court,
+            &entries,
+            "2026-09-12T00:00:00Z",
+            60,
+            &Ok(crate::crown_split::CrownSplits::default()),
+        )
     }
 
     fn base_crown() -> Value {
@@ -954,6 +1048,7 @@ mod tests {
             "holder": "king", "level": 2, "scope": "e-1", "grantor": "human",
             "status": "live", "agree": true, "reason": null, "crown_source": "both",
             "scope_nodes": {"status": "ok", "counts": {"in_progress": 1, "done": 2},
+                "owned_counts": {"in_progress": 1},
                 "total": 3, "omitted": 1,
                 "nodes": [{"id": "x-1", "status": "in_progress", "worker": "w1",
                            "pr_number": 7, "sessions": ["s1"]}]}
@@ -1068,9 +1163,13 @@ mod tests {
 
     #[test]
     fn writes_atomically_and_names_the_path() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1096,6 +1195,7 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftovers);
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1103,9 +1203,13 @@ mod tests {
     #[cfg(unix)]
     fn publishes_reign_html_at_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-mode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1127,6 +1231,7 @@ mod tests {
         assert_eq!(run_reign_ledger(&args), 0);
         let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1174,6 +1279,69 @@ mod tests {
         assert!(page.contains(
             "<div class=\"fact\"><span class=\"fv\">1</span><span class=\"fl\">crowns</span></div>"
         ));
+    }
+
+    #[test]
+    fn double_rule_flips_the_verdict_and_marks_the_tile_bad() {
+        let splits = Ok(crate::crown_split::CrownSplits {
+            double_ruled: vec![crate::crown_split::ScopeSplit {
+                scope: "shared".into(),
+                holders: vec!["king-a".into(), "king-b".into()],
+            }],
+            stale: Vec::new(),
+        });
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &splits,
+        );
+        assert!(page.contains("The court disagrees with itself."));
+        assert!(page.contains(
+            "<div class=\"fact bad\"><span class=\"fv\">1</span><span class=\"fl\">double ruled</span></div>"
+        ));
+    }
+
+    #[test]
+    fn stale_crowns_mark_their_tile_without_flipping_the_verdict() {
+        let splits = Ok(crate::crown_split::CrownSplits {
+            double_ruled: Vec::new(),
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-dead".into(),
+                scope: "shared".into(),
+                stored_status: "orphaned".into(),
+            }],
+        });
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &splits,
+        );
+        assert!(page.contains("The court agrees with itself."));
+        assert!(page.contains(
+            "<div class=\"fact bad\"><span class=\"fv\">1</span><span class=\"fl\">stale crowns</span></div>"
+        ));
+    }
+
+    #[test]
+    fn an_unread_registry_renders_dashes_with_the_reason_never_zero() {
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &Err("crown split read failed: boom".to_string()),
+        );
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">double ruled</span></div>"
+        ));
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">stale crowns</span></div>"
+        ));
+        assert!(page.contains("crown split read failed: boom"));
     }
 
     #[test]
@@ -1233,11 +1401,33 @@ mod tests {
     fn crown_card_shows_stats_bar_and_legend() {
         let page = page(base_court(json!([base_crown()])), vec![]);
         assert!(page.contains(
-            "<span><b>3</b> nodes</span><span><b>1</b> active</span><span><b>2</b> done</span>"
+            "<span><b>1</b> owned active</span><span><b>3</b> nodes</span><span><b>1</b> active</span><span><b>2</b> done</span>"
         ));
         assert!(page.contains("style=\"flex:1\""));
         assert!(page.contains("style=\"flex:2\""));
         assert!(page.contains("aria-label=\"in progress 1, done 2\""));
+    }
+
+    /// AC18-ERR: a null owned_counts renders `owned unmeasured` on the card
+    /// and in the footer; nodes, active and done still render.
+    #[test]
+    fn a_null_owned_count_reads_unmeasured_on_card_and_footer() {
+        let mut crown = base_crown();
+        crown["level"] = json!(1);
+        crown["scope_nodes"]["owned_counts"] = Value::Null;
+        let page = page(base_court(json!([crown])), vec![]);
+        assert!(page.contains("<span>owned unmeasured</span>"), "{page}");
+        assert!(page.contains("· owned unmeasured</span>"), "{page}");
+        assert!(page.contains("<b>3</b> nodes</span><span><b>1</b> active</span>"));
+    }
+
+    /// AC17-HP footer leg: the root scope's line carries the owned count.
+    #[test]
+    fn the_footer_carries_the_root_scopes_owned_active_count() {
+        let mut crown = base_crown();
+        crown["level"] = json!(1);
+        let page = page(base_court(json!([crown])), vec![]);
+        assert!(page.contains("1 owned active"), "{page}");
     }
 
     #[test]
@@ -1350,7 +1540,7 @@ mod tests {
         let o = emit_one(&h, || Ok(()));
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert_eq!(
             log.matches("\"arm\":\"crown_ledger\"").count(),
             1,
@@ -1366,7 +1556,7 @@ mod tests {
         let o = emit_one(&h, || Err("exit 1: graph unreadable".to_string()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("error"));
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert!(log.contains("\"acted\":0"), "log: {log}");
         assert!(log.contains("\"skip_reason\":\"error\""), "log: {log}");
         assert!(log.contains("graph unreadable"), "log: {log}");
@@ -1379,5 +1569,31 @@ mod tests {
         *arm.last_tick.lock().unwrap() = Some(std::time::Instant::now());
         maybe_tick_with(&arm, h.clone(), || panic!("arm must be gated"));
         assert!(!h.events_jsonl().exists(), "a gated tick wrote no row");
+    }
+
+    #[test]
+    fn a_named_fold_renders_the_name_on_the_holder_line() {
+        let crown = json!({
+            "scope": "x-aaaa", "level": 2, "status": "live",
+            "holder": "king-fno-g7", "grantor": "user",
+            "scope_nodes": {"status": "ok", "name": "Barnaby II"},
+        });
+        let card = crown_card(&crown, &BTreeMap::new());
+        assert!(
+            card.contains("held by <b>Barnaby II</b> (king-fno-g7)"),
+            "{card}"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_fold_leaves_the_holder_line_unchanged() {
+        let crown = json!({
+            "scope": "x-aaaa", "level": 2, "status": "live",
+            "holder": "king-fno-g7", "grantor": "user",
+            "scope_nodes": {"status": "ok"},
+        });
+        let card = crown_card(&crown, &BTreeMap::new());
+        assert!(card.contains("held by <b>king-fno-g7</b>"), "{card}");
+        assert!(!card.contains("Barnaby"), "{card}");
     }
 }

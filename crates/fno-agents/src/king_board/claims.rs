@@ -36,6 +36,10 @@ pub(crate) fn read_claims_in(dirs: &[PathBuf]) -> SourceRead {
                     "holder": rec.holder,
                     "host": rec.host,
                     "pid": rec.pid,
+                    "session_id": rec.session_id,
+                    // Epoch MILLISECONDS; the distress staleness compare
+                    // divides by 1000 before reading it against a row ts.
+                    "acquired_at": rec.acquired_at,
                 })
             })
             .collect(),
@@ -129,6 +133,41 @@ mod tests {
         let rows = read_claims_in(&[dir.clone()]).rows();
         assert_eq!(rows.len(), 1, "expired handover must stay: {rows:?}");
         assert_eq!(rows[0]["state"], "stale");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_row_names_its_holder_session_and_when_it_took_the_claim() {
+        // AC1: the projection stamps session_id and acquired_at, the two
+        // keys claim_session_by_node (king_board.rs) and the distress
+        // staleness compare read. A pre-change lockfile carries neither;
+        // its row stays with session_id null, never an error or a drop.
+        let dir = scan_dir("session-id");
+        let now = crate::claims::now_ms();
+        let yaml = format!(
+            "schema_version: 1\nkey: \"node:x-cccc\"\nholder: \"target-session:a6d2ce6a-1da0\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nsession_id: \"target-session:a6d2ce6a-1da0\"\n",
+            now + 900_000
+        );
+        std::fs::write(dir.join("node%3Ax-cccc.lock"), yaml).expect("write claim");
+        let (name, pre_change) =
+            handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-requeue");
+        std::fs::write(dir.join(name), pre_change).expect("write pre-change claim");
+        let rows = read_claims_in(&[dir.clone()]).rows();
+        assert_eq!(rows.len(), 2, "both rows stay in scope: {rows:?}");
+        let named = rows
+            .iter()
+            .find(|r| r["key"] == "node:x-cccc")
+            .expect("session-carrying row present");
+        assert_eq!(named["session_id"], "target-session:a6d2ce6a-1da0");
+        assert_eq!(named["acquired_at"], now, "epoch milliseconds, unchanged");
+        let pre = rows
+            .iter()
+            .find(|r| r["key"] == "node:x-requeue")
+            .expect("pre-change row present");
+        assert!(
+            pre["session_id"].is_null(),
+            "absent session_id reads null, not a parse error: {pre:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

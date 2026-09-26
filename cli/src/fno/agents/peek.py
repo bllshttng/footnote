@@ -111,15 +111,18 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
 
+_TAIL_BYTES = 4 << 20  # 4 MiB holds the last 40 records of every live king transcript
+
 
 def _records_from_jsonl(
-    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]]
+    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]], tail: bool = True
 ) -> list[Record]:
     """Parse the last ``n`` renderable records from a JSONL transcript.
 
     Streams line-by-line into a bounded deque so memory stays O(n). A torn or
     non-JSON line (mid-write tail, AC2-EDGE) is skipped, never raised. ``n`` of
     0 or negative returns ``[]``; ``None`` returns every record.
+    Seeks to the last ``_TAIL_BYTES``, reading the whole file when the tail is short.
     """
     import collections
 
@@ -127,7 +130,9 @@ def _records_from_jsonl(
         return []
     dq: "collections.deque[Record]" = collections.deque(maxlen=n)
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("rb") as fh:
+            start = max(0, fh.seek(0, 2) - _TAIL_BYTES) if tail and n else 0
+            fh.seek(start)  # a partial first line fails the parse below and is skipped
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -143,6 +148,8 @@ def _records_from_jsonl(
                     dq.append(record)
     except OSError:
         return []
+    if start and n is not None and len(dq) < n:
+        return _records_from_jsonl(path, n, parse, tail=False)
     return list(dq)
 
 
@@ -940,10 +947,11 @@ def _try_mux_pane(
     """Observe a pane-substrate worker, or None when the handle is not one.
 
     Called when the live-session resolver misses. If the registry holds a
-    ``mux`` row for ``handle``, read the pane scrollback and render it; on any
-    read failure emit a refusal that names the working surface (``fno mux pane
-    read <id>``) rather than listing unrelated peers - the misdirecting refusal
-    that manufactured false-liveness verdicts on 2026-08-04.
+    ``mux`` row for ``handle``, read the pane scrollback and render it; a
+    failed read the falsifier classifies as pane-gone falls through to the
+    registry-row read with the resume command; the refusal naming
+    ``fno mux pane read <id>`` fires only when the mux cannot say the pane
+    is gone.
 
     Returns an exit code when it handled the handle (read or named refusal),
     None to let the caller fall through to ``peer not found``.
@@ -957,6 +965,14 @@ def _try_mux_pane(
     reader = mux_reader or _read_mux_pane
     rc, text = reader(session, pane_id, n)
     if rc != 0 or not text.strip():
+        from fno.agents.reachability import pane_falsifier
+
+        if pane_falsifier({"session": session, "pane_id": pane_id}) == "pane-gone":
+            err.write(
+                f"{handle}: pane {pane_id} is gone; the worker exited. "
+                f"Resume: fno agents resume {handle}\n"
+            )
+            return None
         err.write(
             f"{handle} is a pane worker (mux pane {pane_id}, session {session}); "
             f"the mux did not answer. Read it directly: fno mux pane read {pane_id}\n"

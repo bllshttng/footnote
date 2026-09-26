@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import fcntl
+import sys
 import time
 
 import pytest
@@ -66,6 +67,94 @@ def _assert_locked(real_flock, lock_path):
     with lock_path.open("a") as contender:
         with pytest.raises(BlockingIOError):
             real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+# The real mint helper, captured at import time before the autouse fixture
+# patches it; the mint-contract tests restore it over the fixture's patch.
+_REAL_MERGE_DECISION_KEY = _cache._merge_decision_key
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_cache_key(monkeypatch):
+    """Pin the row key to the head-only fallback shape: the owner-minted key
+    (x-53c5) reads live machine state, and these suites test the cache, not
+    the mint. The mint's own contract is tested separately below."""
+    monkeypatch.setattr(
+        _cache,
+        "_merge_decision_key",
+        lambda slug_key, pr, info, cwd: f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}",
+    )
+
+
+def test_the_row_key_is_minted_by_the_owner_op(monkeypatch, cache_env):
+    """AC8 (x-53c5): the key comes from the status-cache-key op, which hashes
+    every fact the merge decision reads; the payload carries the head, the PR
+    state, and the slug so the owner can see them without a fetch."""
+    import fno.rust_binary as rust_binary
+
+    # The module's autouse fixture pins the head-only fallback key; the mint
+    # contract needs the REAL helper, so restore it over the fixture's patch.
+    monkeypatch.setattr(_cache, "_merge_decision_key", _REAL_MERGE_DECISION_KEY)
+
+    seen = []
+
+    def fake_verb_call(verb, payload, timeout=0):
+        seen.append({"verb": verb, **payload})
+        return {"key": f"minted-{payload.get('pr')}"}
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake_verb_call)
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    # The run_status read also drives other ops through this door (the
+    # durable-grant projection); the mint is the one that names the cache.
+    mint = [row for row in seen if row.get("op") == "status-cache-key"]
+    assert len(mint) == 1
+    assert mint[0]["verb"] == "authorized-merge"
+    assert mint[0]["pr"] == 42
+    assert mint[0]["head_sha"] == head["sha"]
+    assert (cache_dir / "minted-42.json").exists(), "the owner's key names the row file"
+
+
+def test_a_rekeyed_row_serves_live_inside_the_ttl(monkeypatch, cache_env, capsys):
+    """AC8 (x-53c5): a hold release, a slot move, or a merge changes the
+    owner's key, so the next read inside the TTL is LIVE - the cached row
+    that named the old state can never serve."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN, _GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    monkeypatch.setattr(
+        _cache, "_merge_decision_key",
+        lambda slug_key, pr, info, cwd: f"{slug_key}-{pr}-held",
+    )
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    # The hold releases: the owner mints a different key.
+    monkeypatch.setattr(
+        _cache, "_merge_decision_key",
+        lambda slug_key, pr, info, cwd: f"{slug_key}-{pr}-free",
+    )
+    assert _cache.cached_status("42") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "cached" not in out, "a rekeyed read must be live, not served from the old row"
+    assert calls["n"] == 2
+
+
+def test_an_unreachable_owner_falls_back_to_the_head_key(monkeypatch, cache_env):
+    """The mint is best-effort: when the owner cannot answer, the key degrades
+    to today's head-only shape and the cache keeps working."""
+    import fno.rust_binary as rust_binary
+
+    def boom(verb, payload, timeout=0):
+        raise rust_binary.VerbUnavailable("no binary")
+
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    assert _row_path(cache_dir).exists(), "the fallback key keeps today's row shape"
 
 
 def test_a_live_ledger_backoff_serves_the_fresh_row_with_zero_gh_calls(
@@ -418,10 +507,10 @@ def test_ttl_hit_serves_the_human_verdict_line(cache_env, monkeypatch, capsys):
 
 
 def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
-    """AC5-EDGE: a degraded serve renders unknown, unsettled and NOT-ready,
-    and the blockers clause carries stale_reason - the stale arm rewrites
-    `ready` without touching `ready_blockers`, so without the reason in the
-    clause the line would read NOT-ready beside `no blockers`."""
+    """AC5-EDGE + AC9 (x-53c5): a degraded serve renders unknown, unsettled
+    and NOT-ready, `ready_blockers` collapses to status_stale - a stale row's
+    gate answers are history, never replayed beside an unreadable read - and
+    the blockers clause carries stale_reason."""
     cache_dir, head = cache_env
     fetch, calls = _fetch_spy([_GREEN])
     monkeypatch.setattr(_status, "_fetch", fetch)
@@ -436,6 +525,7 @@ def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
     assert " unknown " in line
     assert "unsettled" in line
     assert "NOT-ready" in line
+    assert out["ready_blockers"] == ["status_stale"]
     assert "stale_serve" in line
     assert "secondary rate limit" in line
 
@@ -778,6 +868,68 @@ def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
     assert "failing:" not in cap.err
     assert "smoke failed" not in cap.err
     assert '"failures"' not in cap.out
+
+
+def test_a_crash_after_the_payload_exits_4_with_the_payload(cache_env, monkeypatch, capsys):
+    """AC1-HP (x-4c00): a reader that wrote its red payload and THEN raised
+    used to die inside the capture buffer - empty stdout, exit 1, the same
+    code as the red PR itself (the PR 2229 specimen). The payload survives,
+    the crash reads exit 4, and stderr names the exception."""
+    cache_dir, head = cache_env
+
+    def write_then_boom(pr, cwd, prior=None):
+        sys.stdout.write(json.dumps(
+            {"pr": "42", "verdict": "red", "settled": True, "green": False}
+        ) + "\n")
+        raise RuntimeError("boom after the write")
+
+    monkeypatch.setattr(_status, "run_status", write_then_boom)
+    assert _cache.cached_status("42") == 4
+    cap = capsys.readouterr()
+    lines = cap.out.strip().splitlines()
+    assert len(lines) == 1, f"exactly one JSON line, got: {lines}"
+    out = json.loads(lines[0])
+    assert out["verdict"] == "red"
+    assert "boom after the write" in out["reader_error"]
+    assert "reader failed: RuntimeError" in cap.err
+    assert not _row_path(cache_dir).exists(), "a crashed read writes no cache row"
+
+
+def test_a_crash_before_any_payload_exits_4_with_the_error_shape(
+    cache_env, monkeypatch, capsys
+):
+    """AC2-ERR (x-4c00): a reader that raises before writing anything still
+    answers one JSON line with verdict error and a reason naming the failure,
+    never a bare traceback beside empty stdout."""
+    cache_dir, head = cache_env
+
+    def boom(pr, cwd, prior=None):
+        raise ValueError("exploded before the write")
+
+    monkeypatch.setattr(_status, "run_status", boom)
+    assert _cache.cached_status("42") == 4
+    cap = capsys.readouterr()
+    lines = cap.out.strip().splitlines()
+    assert len(lines) == 1, f"exactly one JSON line, got: {lines}"
+    out = json.loads(lines[0])
+    assert out["verdict"] == "error"
+    assert out["reason"].startswith("reader failed:")
+    assert out["settled"] is False
+    assert out["green"] is False
+
+
+def test_tool_missing_still_exits_127_through_the_cache(cache_env, monkeypatch, capsys):
+    """AC3-EDGE (x-4c00): the crash guard re-raises ToolMissing, so the
+    gh-missing exit stays 127 - the generic arm must never swallow the one
+    refusal that names its own exit."""
+    cache_dir, head = cache_env
+    from fno.pr._proc import ToolMissing
+
+    def no_gh(pr, cwd, prior=None):
+        raise ToolMissing("gh")
+
+    monkeypatch.setattr(_status, "run_status", no_gh)
+    assert _status.main(["42"]) == 127
 
 
 def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path, monkeypatch):

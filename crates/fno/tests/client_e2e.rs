@@ -147,6 +147,84 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
 }
 
 #[test]
+fn launcher_one_esc_closes_the_dock() {
+    // R1 (x-5026): one Esc press must close the composer dock. The chord
+    // scanner already holds the lone byte and flushes it after the 40ms quiet
+    // window, so a trailing lone ESC at the end of a launcher chunk is always
+    // a bare Esc press - the rule pick_keys_from_read already applies.
+    // On main the dock's own carry re-buffers the flushed byte
+    // and the dock survives both the Esc and the next key.
+    //
+    // Every screen match here is `contains`, never line-exact: at 120 columns
+    // the sideline is visible and paints the pane title onto the same rows as
+    // the shell output, salting every line. And each marker is spelled so the
+    // tty ECHO of the typed command cannot contain it - only the pane's
+    // OUTPUT can - so `contains` still proves a round trip.
+    let scratch = Scratch::new("esc-dock");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    // The input path must forward bytes before the composer chord means
+    // anything. `printf 'read%s' y-marker` prints `ready-marker`; the echoed
+    // command carries neither half joined.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        h.type_bytes(b"printf 'read%s' y-marker\r");
+        let attempt = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < attempt {
+            if h.screen().contains("ready-marker") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if h.screen().contains("ready-marker") {
+            break;
+        }
+    }
+    assert!(
+        h.screen().contains("ready-marker"),
+        "client input never became ready\n{}",
+        h.diagnostics()
+    );
+    // prefix+i opens the composer. The open marker is its hint row:
+    // `tab next` exists only while the composer is painted, and the chip
+    // row's own labels ellipsize (`La…`) on the 27-column panel.
+    let dock_open = |s: &str| s.contains("tab next");
+    h.type_bytes(b"\x02i");
+    h.wait_screen(15, |s| dock_open(s));
+    let before = h.screen();
+    // The PR's rendered evidence: R1_DUMP=1 prints the opened dock's screen
+    // (the after render; the before render is the recorded main failure).
+    if std::env::var("R1_DUMP").is_ok() {
+        eprintln!("--- x-5026 dock render (open, after) ---\n{before}");
+        // Change 7's render: the harness picker, open on the first field
+        // (dock focus starts at Harness), filtered to `co`. The catalog's
+        // inventory read is bounded at 5s; let it settle so the picker lists
+        // real rows instead of the `reading...` placeholder. Esc then closes
+        // ONLY the picker, so the lone-Esc proof below stays one Esc.
+        std::thread::sleep(Duration::from_secs(6));
+        h.type_bytes(&[0x0d]); // enter: open the picker on Harness
+        std::thread::sleep(Duration::from_millis(500));
+        h.type_bytes(b"co");
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("--- x-5026 picker render (filter: co) ---\n{}", h.screen());
+        h.type_bytes(&[0x1b]); // close the picker, dock stays
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Exactly one Esc byte, then silence.
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = h.screen();
+    assert!(
+        !dock_open(&after),
+        "one Esc must close the dock; screen still shows it:\n{after}\n--- screen before Esc ---\n{before}"
+    );
+    // The next key reaches the shell, not the dock (which would swallow it
+    // as its close key). Quoting splits the marker in the echo.
+    h.type_bytes(b"echo after-\"esc\"\r");
+    h.wait_screen(15, |s| s.contains("after-esc"));
+}
+
+#[test]
 fn output_line_matcher_survives_a_late_prompt() {
     // The 2026-09-10 screen (main run 34438652586, persistence_kill_nine):
     // CR nudges queued while the shell was still starting printed their
@@ -209,4 +287,101 @@ fn output_line_guard_finds_no_exact_trim_match() {
          common::screen_has_line / common::strip_prompts; hits:\n{}",
         hits.join("\n")
     );
+}
+
+/// The shared R-shape: one lone ESC byte after an open overlay, then quiet
+/// past the 40ms flush window, then the overlay's marker gone and the next
+/// command reaching the shell.
+fn assert_overlay_closes_on_lone_esc(h: &mut ClientHarness, chord: &[u8], marker: &'static str) {
+    h.type_bytes(chord);
+    h.wait_screen(15, |s| s.contains(marker));
+    let before = h.screen();
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = h.screen();
+    assert!(
+        !after.contains(marker),
+        "one Esc must close it; {marker:?} still on screen:\n{after}\n--- screen before Esc ---\n{before}"
+    );
+    // The keyboard returned: the next command runs in the shell.
+    h.type_bytes(b"echo after-\"esc\"\r");
+    h.wait_screen(15, |s| s.contains("after-esc"));
+}
+
+/// Input readiness at 24x120. `wait_input_ready` matches the round-trip
+/// line exactly, and at this width the sideline paints its border glyph
+/// onto the pane's rows, salting every line (the launcher test's own
+/// caveat). The marker is spelled split so the tty ECHO of the typed
+/// command carries neither half joined; only the pane's OUTPUT does.
+fn wait_ready_split_marker(h: &mut ClientHarness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        h.type_bytes(b"printf 'fno-input-%s' ready\r");
+        let attempt = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < attempt {
+            if h.screen().contains("fno-input-ready") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if h.screen().contains("fno-input-ready") {
+            return;
+        }
+    }
+    panic!("client input never became ready\n{}", h.diagnostics());
+}
+
+#[test]
+fn a_lone_esc_closes_the_which_key_table() {
+    // R1: a raw-fed overlay stalls on a lone Esc until the next key
+    // on main; the client's quiet-window flush releases it. The marker is
+    // the `a` binding's label: the global (no prefix) section pushed the
+    // `?` row below the 24-row fold at scroll 0, so the old marker
+    // ("this key table") no longer renders at this height.
+    let scratch = Scratch::new("esc-which-key");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    wait_ready_split_marker(&mut h);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02?", "answer queue");
+}
+
+#[test]
+fn a_lone_esc_closes_the_search_input() {
+    // R2: the search input line (` /_`) is gone after one Esc and
+    // one quiet window, with no second key.
+    let scratch = Scratch::new("esc-search");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    wait_ready_split_marker(&mut h);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02/", " /_");
+}
+
+#[test]
+fn a_lone_esc_closes_the_navigator() {
+    // R3: the navigator's `find` line is gone after one Esc and
+    // one quiet window.
+    let scratch = Scratch::new("esc-navigator");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    wait_ready_split_marker(&mut h);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02f", " find \u{203a} ");
+}
+
+#[test]
+fn a_lone_esc_closes_the_row_selector() {
+    // R4: the selector paints no text of its own, so the proof is
+    // behavioral. On the stalled build the lone ESC sits in the selector's
+    // carry: the next `q` resolves it (Esc close, q swallowed) and nothing
+    // reaches the shell. With the flush the selector closed in the quiet
+    // window, so `q` runs in the shell and sh answers "not found".
+    let scratch = Scratch::new("esc-selector");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    wait_ready_split_marker(&mut h);
+    h.type_bytes(b"\x02w");
+    std::thread::sleep(Duration::from_millis(200));
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    h.type_bytes(b"q\r");
+    h.wait_screen(15, |s| s.contains("not found"));
 }

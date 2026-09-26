@@ -28,9 +28,15 @@ pub struct RestartArgs {
     /// Break-glass: SIGKILL the lockfile holder before any probe; plain restart drains gracefully
     #[arg(long)]
     pub force: bool,
+    /// Also restart live mux servers: --stale-idle (pane-less stale-wire ones) by default, every live one with --mux
+    #[arg(long)]
+    pub mux: bool,
     /// Chain-only: swap only when the running daemon measures drifted; quiet exit 0 on fresh, down, or unknown
     #[arg(long)]
     pub if_drifted: bool,
+    /// Internal: run ONLY the stale-store-keeper cycle and print the keepers summary; never restarts the daemon or mux servers. The post-mux pass `fno agents restart --mux` drives after each kill.
+    #[arg(long)]
+    pub keepers_only: bool,
     #[command(flatten)]
     pub json: JsonOnly,
 }
@@ -300,6 +306,9 @@ mod tests {
         let a = RestartArgs::try_parse_from(["--if-drifted"]).expect("--if-drifted parses");
         assert!(a.if_drifted);
         assert!(!a.force);
+        let a = RestartArgs::try_parse_from(["--keepers-only"]).expect("--keepers-only parses");
+        assert!(a.keepers_only);
+        assert!(!a.mux, "the keeper-only leg implies no mux leg");
         let a = RestartArgs::try_parse_from(["-J"]).expect("-J is the json alias");
         assert!(a.json.json);
     }

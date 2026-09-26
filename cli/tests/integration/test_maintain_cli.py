@@ -44,6 +44,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     import fno.graph.maintain as gm
 
     monkeypatch.setattr(gm, "load_workspaces", lambda: {})
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
     return g
 
 
@@ -52,7 +55,11 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _node(node_id: str, **over) -> dict:
@@ -162,7 +169,7 @@ def test_maintain_apply_refuses_when_live_claim_state_is_unavailable(
 ):
     import fno.graph.cli as gcli
 
-    entries = [_node("ab-leak03", cwd="/tmp/pytest-of-x/pytest-9/p")]
+    entries = [_node("ab-leak03", cwd="/tmp/pytest-of-x/pytest-9/p", status="idea")]
     _seed(tmp_graph, entries)
 
     def unavailable(*args, **kwargs):
@@ -174,7 +181,11 @@ def test_maintain_apply_refuses_when_live_claim_state_is_unavailable(
 
     assert result.exit_code == 1
     assert "live claim state is unavailable" in result.output
-    assert _read(tmp_graph) == entries
+    # The refused apply must not have mutated the graph: same ids, same cwd.
+    after = _read(tmp_graph)
+    assert [(e["id"], e.get("cwd"), e.get("status")) for e in after] == [
+        (e["id"], e.get("cwd"), e.get("status")) for e in entries
+    ]
 
 
 # --- AC2-HP / AC2-ERR: judgment legs propose, never mutate -----------------
@@ -186,9 +197,12 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
     _seed(
         tmp_graph,
         [
-            # two near-duplicate ideas (no plan_path -> status idea)
-            _node("ab-dup01", title="Same idea", created_at=old),
-            _node("ab-dup02", title="same  idea!", created_at=old),
+            # two near-duplicate ideas (no plan_path -> status idea).
+            # Slugs are explicit: the import derives slugs from titles, so
+            # rows whose titles normalize identically collide on the slug
+            # index and only one survives.
+            _node("ab-dup01", title="Same idea", created_at=old, slug="same-idea"),
+            _node("ab-dup02", title="same  idea!", created_at=old, slug="same-idea-b"),
         ],
     )
     # Even WITH --apply, dedup + drain must not mutate.
@@ -423,9 +437,12 @@ def _events_file() -> Path:
 
 
 def _seed_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("".join(json.dumps(r) + "\n" for r in records))
+    for i, r in enumerate(records):
+        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **r}, p)
 
 
 def _ev_fail(nid: str) -> dict:
@@ -437,11 +454,15 @@ def _ev_parked(nid: str) -> dict:
 
 
 def _append_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as fh:
-        for r in records:
-            fh.write(json.dumps(r) + "\n")
+    n = 0
+    for r in records:
+        n += 1
+        emit_envelope({"ts": f"2026-01-0{min(n // 3600 + 1, 9)}T{n // 60 % 60:02d}:{n % 60:02d}:00Z",
+                       "source": "test", **r}, p)
 
 
 @pytest.fixture(autouse=True)
@@ -457,9 +478,10 @@ def _clean_events():
 
 
 def _ready(node_id: str, **over) -> dict:
-    # A node with a plan_path and no completed/deferred state derives status:
-    # ready (the auto-defer candidate filter only considers ready nodes).
-    return _node(node_id, plan_path=f"plans/{node_id}.md", **over)
+    # Ready is stored state now (the plan-presence derivation died with the
+    # json leg), so the seed carries it explicitly. The auto-defer candidate
+    # filter only considers ready nodes.
+    return _node(node_id, plan_path=f"plans/{node_id}.md", status="ready", **over)
 
 
 def test_maintain_cli_auto_defer_at_threshold(tmp_graph):
@@ -651,7 +673,9 @@ def test_e2e_blocker_done_auto_readies_dependents(tmp_graph):
     _seed(
         tmp_graph,
         [
-            _node("ab-blkE2E"),  # blocker (no plan_path -> done skips the stamp)
+            # blocker carries an artifact link so the close-evidence rule
+            # passes; no plan_path still keeps the stamp skip.
+            _node("ab-blkE2E", artifact_url="https://example.test/artifact"),
             _ready("ab-depE2E", blocked_by=["ab-blkE2E"]),
         ],
     )
@@ -902,37 +926,41 @@ def no_roster_workers(monkeypatch):
     )
 
 
-def test_maintain_abandoned_leg_reaps_gone_holds_active(
+def test_maintain_abandoned_leg_settles_gone_holds_active(
     tmp_graph, tmp_path, no_roster_workers, monkeypatch
 ):
-    """AC1-HP + AC3-HP at the CLI level: a node whose only open do row names a
-    session with a quiet transcript is reaped (row_removed true, status_after
-    idea); its active-transcript twin is held by name and keeps the row."""
-    _fixture_transcript(tmp_path, monkeypatch, _SID_GONE, age_hours=72)
-    _fixture_transcript(tmp_path, monkeypatch, _SID_LIVE, age_hours=0)
+    """AC1-HP + AC3-HP: idle rows past the bound settle; fresh rows hold."""
+    now = datetime.now(timezone.utc)
+    gone_at = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed(tmp_graph, [
         _node("ab-gone01", cwd="/repo/x", sessions=[
             {"phase": "do", "harness": "claude", "session_id": _SID_GONE,
-             "started_at": "2026-09-09T15:46:29Z"},
+             "started_at": gone_at},
         ]),
         _node("ab-held01", cwd="/repo/x", sessions=[
             {"phase": "do", "harness": "claude", "session_id": _SID_LIVE,
-             "started_at": "2026-09-09T15:46:29Z"},
+             "started_at": live_at},
         ]),
     ])
 
     result = _invoke(["--apply", "--no-validity"])
 
     assert result.exit_code == 0, result.output
-    assert "row_removed true" in result.output
+    assert "settled do row ab-gone01" in result.output
+    assert "row_closed true" in result.output
     assert "status_after idea" in result.output
     assert "ab-held01" in result.output
-    assert "transcript active" in result.output
+    assert "row idle 1h, inside the 24h bound" in result.output
 
     by_id = {n["id"]: n for n in _read(tmp_graph)}
-    assert by_id["ab-gone01"]["sessions"] == []
+    gone_rows = by_id["ab-gone01"]["sessions"]
+    assert len(gone_rows) == 1, "the settled do row is filled and kept"
+    assert gone_rows[0]["ended_at"]
     assert by_id["ab-gone01"]["status"] == "idea"
     live_rows = by_id["ab-held01"]["sessions"]
     assert len(live_rows) == 1
+    assert live_rows[0].get("ended_at") is None
     assert live_rows[0]["session_id"] == _SID_LIVE
-    assert "ended_at" not in live_rows[0]
+    # Store rows normalize an open session to ended_at=None.
+    assert live_rows[0].get("ended_at") is None

@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.rust_binary import find_dev_binary
+from fno.graph.store import read_graph_strict
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -65,7 +66,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _related(g: Path, node_id: str) -> list[str]:
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     return next(e for e in entries if e["id"] == node_id).get("related", [])
 
 
@@ -130,6 +131,34 @@ def test_replace_semantics_unlink_the_dropped_peer(tmp_graph):
     assert _related(tmp_graph, "x-cccc") == ["x-aaaa"]
 
 
+def test_set_related_keeps_held_row_references_live(monkeypatch):
+    """A mutator holding a node dict keeps writing to the row that persists."""
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(
+        gs, "_pure",
+        lambda entries, name, params: [dict(e, related=["x-bbbb"]) for e in entries],
+    )
+    entries = [_node("x-aaaa")]
+    held = entries[0]
+    gs.set_related(entries, "x-aaaa", ["x-bbbb"])
+    held["details"] = "marker-5934"
+    assert entries[0]["details"] == "marker-5934"
+    assert entries[0]["related"] == ["x-bbbb"]
+
+
+def test_related_keeps_the_other_fields_of_the_same_update(tmp_graph):
+    """--related rewrites the rows; a flag applied after it must still land."""
+    result = runner.invoke(
+        app,
+        ["backlog", "update", "x-aaaa", "--details", "marker-5934", "--related", "x-bbbb"],
+    )
+    assert result.exit_code == 0, result.output
+    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
+    assert node["related"] == ["x-bbbb"]
+    assert node["details"] == "marker-5934"
+
+
 def test_related_accepts_slugs_and_repeated_flags(tmp_graph):
     result = runner.invoke(
         app,
@@ -176,7 +205,7 @@ def test_related_is_non_blocking(tmp_graph):
     def _statuses() -> dict[str, tuple]:
         # Read back the CANONICAL key: the writer migrates the legacy `_status`
         # to `status` and deletes it, so a round-tripped entry has only `status`.
-        entries = json.loads(tmp_graph.read_text())["entries"]
+        entries = read_graph_strict(tmp_graph)
         return {e["id"]: (e["status"], tuple(e["blocked_by"])) for e in entries}
 
     # A no-op write first, so the baseline reflects derivation, not the seed.
@@ -204,12 +233,12 @@ def test_ac7_hp_related_at_filing_time(tmp_graph):
 
 
 def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
-    before = len(json.loads(tmp_graph.read_text())["entries"])
+    before = len(read_graph_strict(tmp_graph))
     result = runner.invoke(
         app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium"]
     )
     assert result.exit_code != 0
-    assert len(json.loads(tmp_graph.read_text())["entries"]) == before
+    assert len(read_graph_strict(tmp_graph)) == before
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +364,7 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     assert runner.invoke(
         app, ["backlog", "remove", "x-aaaa", "--force"]
     ).exit_code == 0
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = read_graph_strict(tmp_graph)
     node = next(e for e in entries if e["id"] == new_id)
     assert node["source_node_id"] is None
 
@@ -387,3 +416,37 @@ def test_a_related_chain_holds_back_transitively():
     ]
     to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
     assert to_archive == [], "b waits on c, and a waits on b"
+
+
+# ---------------------------------------------------------------------------
+# x-129e: --related alongside other flags in one `update` call
+# ---------------------------------------------------------------------------
+
+
+def test_related_combined_with_other_flags_lands_every_field(tmp_graph):
+    """A multi-flag `update` must write every flag, not just --related.
+
+    set_related round-trips `entries` through the keeper's pure_op and
+    replaces every element (`entries[:] = out`), which used to orphan the
+    `node` dict captured earlier in the mutator: every field written on
+    `node` after the --related block (size, blocked_by, details, ...) landed
+    on a copy no longer reachable from `entries` and silently vanished on
+    commit, while --related itself (which writes straight to `entries`)
+    always looked like it worked.
+    """
+    r = runner.invoke(
+        app,
+        [
+            "backlog", "update", "x-aaaa",
+            "--related", "x-bbbb",
+            "--add-blocker", "x-cccc",
+            "--size", "L",
+            "--details", "multi-flag update",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
+    assert node.get("related") == ["x-bbbb"]
+    assert node.get("blocked_by") == ["x-cccc"]
+    assert node.get("size") == "L"
+    assert node.get("details") == "multi-flag update"

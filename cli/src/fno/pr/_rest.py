@@ -427,6 +427,9 @@ def fetch_pr_info_rest(
     auto_merge = pr_data.get("auto_merge")
     if auto_merge is not None and not isinstance(auto_merge, dict):
         return None, "gh api pulls/<n> carried a malformed auto_merge object"
+    merge_state = pr_data.get("mergeable_state")
+    if merge_state is not None and not isinstance(merge_state, str):
+        return None, "gh api pulls/<n> carried malformed mergeable_state"
     return (
         {
             "pr": int(pr),
@@ -440,6 +443,10 @@ def fetch_pr_info_rest(
             "head_ref": head_ref,
             "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
+            # The REST spelling of GraphQL mergeStateStatus: same states,
+            # lowercase values ("behind", not "BEHIND"). The Rust stop gate
+            # reads either spelling on one pr view read, case-insensitively.
+            "merge_state_status": merge_state,
             "merged_at": merged_at,
             "merge_sha": merge_sha,
             "author": author,
@@ -528,6 +535,25 @@ def resolve_current_pr_number_rest(
     return number, ""
 
 
+def _zero_job_rows(
+    slug: str, cwd: Optional[str], sha: str, check_runs: list
+) -> "tuple[list, list, str]":
+    """Zero-job failure rows plus the runs listing; the rule is Rust's."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    payload = {"op": "status-zero-job-runs", "slug": slug, "cwd": cwd, "sha": sha,
+               "check_runs": check_runs}
+    try:
+        out = verb_call("authorized-merge", payload, timeout=20)
+    except VerbUnavailable as exc:
+        return [], [], f"zero-job run read failed: {exc}"
+    rows, listing = out.get("rows"), out.get("listing")
+    if out.get("error") or not isinstance(rows, list) or not isinstance(listing, list):
+        return [], [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
+    check_runs[:] = out.get("check_runs") or check_runs
+    return rows, listing, ""
+
+
 def fetch_pr_rest(
     pr: str,
     cwd: Optional[str] = None,
@@ -578,33 +604,11 @@ def fetch_pr_rest(
         if not isinstance(total, int) or len(check_runs) >= total or not page < 10:
             break
         page += 1
-    # The workflow name is the generated selector's dedup dimension for
-    # same-named jobs (several workflows here define `self-test`), but the
-    # REST check-run object carries no workflow field. One head_sha-scoped
-    # workflow-run listing supplies it: an Actions row's details_url embeds
-    # the run id, and a run entry's `name` is its workflow's name. A check
-    # run whose URL matches no run (an external app) keeps "", which keys
-    # exactly like the pre-workflow selector did; the GraphQL rollup blob
-    # (pr_json.statusCheckRollup) has no selectable workflow field either,
-    # so its rows degrade the same way. Failure is loud: a name the read
-    # could not fetch cannot prove the slot collapse it would hide.
-    runs = runner(
-        ["gh", "api", f"repos/{slug}/actions/runs?head_sha={sha}&per_page=100"],
-        cwd=cwd,
-    )
-    if not runs.ok:
-        return None, _rest_reason(runs, runner=runner, cwd=cwd)
-    try:
-        runs_payload = json.loads(runs.stdout)
-        if not isinstance(runs_payload, dict):
-            return None, "gh api actions runs returned a JSON value that is not an object"
-        run_rows = runs_payload.get("workflow_runs")
-        if not isinstance(run_rows, list) or not all(
-            isinstance(row, dict) for row in run_rows
-        ):
-            return None, "gh api actions runs carried malformed workflow_runs"
-    except json.JSONDecodeError:
-        return None, "gh api actions runs returned output that is not JSON"
+    # One listing read serves everything: the op's zero-job scan and the
+    # workflow-name mapping below (a check run matching no run keeps "").
+    zero_rows, run_rows, zero_reason = _zero_job_rows(slug, cwd, sha, check_runs)
+    if zero_reason:
+        return None, zero_reason
     run_names: dict[str, str] = {}
     for run_row in run_rows:
         run_id = run_row.get("id")
@@ -629,8 +633,11 @@ def fetch_pr_rest(
                 # Per-run workflow name from the listing above; "" when the
                 # details_url names no run the listing knows.
                 "workflow": run_names.get(run_id.group(1), "") if run_id else "",
+                **({"timeout": cr["timeout"]} if cr.get("timeout") else {}),
             }
         )
+
+    rollup.extend(zero_rows)
 
     # Legacy StatusContexts ride the combined-status endpoint. This read is a
     # separate check class, so failure is always loud: green CheckRuns do not
@@ -676,6 +683,8 @@ def fetch_pr_rest(
             # validates head.ref on the same request.
             "headRefName": info["head_ref"],
             "mergeable": info["mergeable"],
+            "mergeStateStatus": info["merge_state_status"],
+            "baseRefName": info["base_ref"],
             # The raw listing the workflow-name mapping above already read:
             # run_status hands it to rerun_recovery, which then skips its own
             # actions/runs read - one listing per miss, not two.
@@ -742,6 +751,7 @@ def list_prs_rest(
                         "title": row["title"],
                         "headRefName": head["ref"],
                         "url": row["html_url"],
+                        "mergedAt": row.get("merged_at"),
                         "body": row.get("body") or "",
                     }
                 )
@@ -753,7 +763,7 @@ def list_prs_rest(
         # rows. Loud on purpose: the old gh pr list path logged "possibly
         # truncated" for the same condition, and a silent ceiling is a sweep
         # that reads complete while missing its tail.
-        log.warning(
+        (log.warning if max_pages > 1 else log.debug)(
             "gh api pulls list for %s hit the max_pages=%d ceiling with a full last page:"
             " listing is possibly truncated after %d rows",
             slug,

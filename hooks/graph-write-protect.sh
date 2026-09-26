@@ -28,6 +28,10 @@
 # Exit 0 always (hook result is communicated via stdout JSON).
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _REPO_ROOT="$(cd "${_HOOK_DIR}/.." && pwd)"
 # shellcheck source=../scripts/lib/drive-authority.sh
@@ -76,7 +80,7 @@ _bash_targets_protected() {
     # Second arm: the manifest moved into the repo's space
     # (`~/.fno/spaces/<slug>[/worktrees/<name>]/target-state.md`); the old
     # checkout path stays matched so an edit to a stale copy is still refused.
-    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>"'\'']|$)'
+    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>)`"'\'']|$)'
     # A run of non-separator chars (stays inside one command clause), and a
     # clause tail that ends at a protected path. Kept in vars because an inline
     # `[^;|&]` breaks `[[ =~ ]]` parsing (`;`/`|` are shell-special there).
@@ -185,7 +189,7 @@ case "$TOOL" in
         if drive_authority_active && declare -F emit_event >/dev/null 2>&1; then
             emit_event "hook" "gate_edit_forged_during_drive" \
                 "$(jq -nc --arg fp "$FILE_PATH" '{file_path:$fp, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
-                2>/dev/null || true
+                || true
         fi
         _block "$_MANIFEST_REASON"
     fi
@@ -196,7 +200,7 @@ case "$TOOL" in
                 "$(jq -nc --arg fp "$FILE_PATH" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                     '{action_type:"artifact_edited_operator_initiated", file_path:$fp, last_operator_edit:$ts, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
                 "hook" \
-                2>/dev/null || true
+                || true
         fi
         _approve
     fi

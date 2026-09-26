@@ -28,6 +28,21 @@ impl Core {
             let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
             self.backlog_pr.get(&node_id).copied()
         };
+        // The attach handle joins through the SAME node resolution the pr
+        // join uses: a row only shows an attach handle when it shows a pr.
+        let session_from_name = |name: &str| -> Option<String> {
+            let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
+            self.backlog_driver.get(&node_id).cloned()
+        };
+        let session_by_holder: HashMap<&str, String> = self
+            .backlog_holders
+            .iter()
+            .filter_map(|(node, holder)| {
+                self.backlog_driver
+                    .get(node)
+                    .map(|d| (holder.as_str(), d.clone()))
+            })
+            .collect();
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
         //    bare shell pane a first-class row.
@@ -51,6 +66,14 @@ impl Core {
                     // used).
                     let pane_entry = self.panes.get(&pid);
                     let pane_dead = pane_entry.is_none();
+                    // A portal seat is never a row of its own. A seat hosting
+                    // a matched registry row renders as THAT row (the mark
+                    // below rides it); a seat matching nothing - a held seat
+                    // whose viewer died, an idle shell - is daemon inventory,
+                    // not live work, so it mints no bare row.
+                    if matched.is_none() && self.portal_of(Some(pid)).is_some() {
+                        continue;
+                    }
                     let row = match matched {
                         Some(i) => {
                             consumed[i] = true;
@@ -70,13 +93,15 @@ impl Core {
                                 route: a.route.clone(),
                                 spawned_by_session: a.spawned_by_session.clone(),
                                 lineage_kind: a.lineage_kind.clone(),
+                                spawned_by_name: a.spawned_by_name.clone(),
+                                lineage_reason: a.lineage_reason.clone(),
                                 harness_session_id: a.harness_session_id.clone(),
                                 squad: Some(squad.id),
                                 name: a.name.clone(),
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.row_portal_marker(a),
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
@@ -105,9 +130,12 @@ impl Core {
                                 updated_at: a.updated_at,
                                 pr: pr_from_name(&a.name)
                                     .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                                pr_session_short: session_from_name(&a.name)
+                                    .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
+                                crown_name: a.crown_name.clone(),
                                 basis: self.truth_basis(a),
                                 last_activity_age_s: self.truth_age(a),
                                 resumable: false,
@@ -137,6 +165,8 @@ impl Core {
                                 route: None,
                                 spawned_by_session: None,
                                 lineage_kind: None,
+                                spawned_by_name: None,
+                                lineage_reason: None,
                                 harness_session_id: None,
                                 squad: Some(squad.id),
                                 name: pane_label(
@@ -148,7 +178,7 @@ impl Core {
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.portal_marker(Some(pid)),
                                 badge: None,
                                 reason: None,
                                 exited: pane_dead
@@ -177,11 +207,13 @@ impl Core {
                                 last_activity_age_s: e.map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
                                 pr: None,
+                                pr_session_short: None,
                                 tail: None,
                                 // A bare shell pane has no registry entry, so
                                 // no crown and no reachability probe either.
                                 crown_level: None,
                                 crown_scope: None,
+                                crown_name: None,
                                 basis: None,
                                 resumable: false,
                                 no_pane_reason: None,
@@ -235,6 +267,8 @@ impl Core {
                         route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         lineage_kind: a.lineage_kind.clone(),
+                        spawned_by_name: a.spawned_by_name.clone(),
+                        lineage_reason: a.lineage_reason.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
@@ -265,9 +299,12 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
                             .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                        pr_session_short: session_from_name(&a.name)
+                            .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
+                        crown_name: a.crown_name.clone(),
                         basis: self.truth_basis(a),
                         last_activity_age_s: self.truth_age(a),
                         resumable,
@@ -302,11 +339,16 @@ impl Core {
                         route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         lineage_kind: a.lineage_kind.clone(),
+                        spawned_by_name: a.spawned_by_name.clone(),
+                        lineage_reason: a.lineage_reason.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
-                        portal: None,
+                        // No pane of its own, but a portal seat can still be
+                        // SHOWING this row: the mark rides the row the seat's
+                        // key answers (absent means not shown, never unknown).
+                        portal: self.row_portal_marker(a),
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
@@ -330,9 +372,12 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
                             .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                        pr_session_short: session_from_name(&a.name)
+                            .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
+                        crown_name: a.crown_name.clone(),
                         basis: self.truth_basis(a),
                         last_activity_age_s: self.truth_age(a),
                         resumable: self.row_resumable_in_session(a),
@@ -446,6 +491,8 @@ impl Core {
                 route: None,
                 spawned_by_session: None,
                 lineage_kind: None,
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness_session_id: None,
                 squad,
                 name: r.name.clone(),
@@ -476,12 +523,14 @@ impl Core {
                 // those cells stay EMPTY rather than inferred (AC4-ERR).
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 // An external-daemon row is not an fno-registry worker: no
                 // crown, and its liveness lives in its own daemon, so no
                 // reachability reading either.
                 crown_level: None,
                 crown_scope: None,
+                crown_name: None,
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
@@ -512,7 +561,6 @@ impl Core {
             AgentNoPaneReason::MissingHarness => "harness is missing",
             AgentNoPaneReason::MissingSessionId => "session id is missing",
             AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
-            AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
             AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
         }
     }
@@ -528,7 +576,12 @@ impl Core {
                         row.tombstone
                             .then(|| "tombstoned member; dismissable".into())
                     })
-                    .or_else(|| row.exited.then(|| "exited; renders dim".into()));
+                    // A resumable row is actionable, so it carries no note:
+                    // "exited; renders dim" on a resumable row reads as a
+                    // refusal the receipt does not make.
+                    .or_else(|| {
+                        (row.exited && !row.resumable).then(|| "exited; renders dim".into())
+                    });
                 AgentRowReceipt {
                     name: row.name.clone(),
                     harness: row.harness.clone(),

@@ -43,15 +43,15 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
-from fno.agents.harnesses.pi import lookup_sessions, pi_sessions_root
+from fno.agents.harnesses.pi import encode_cwd, lookup_sessions
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 LIVE = os.environ.get("FNO_PI_LIVE") == "1"
 PI_ON_PATH = (
@@ -247,10 +247,9 @@ def _send_mail(text: str, session_id: str, monkeypatch, capsys) -> None:
 def _sessions_snapshot(cwd: Path) -> dict[str, list[str]]:
     """pi's own session store: the root listing plus the journey cwd's own
     listing, before and after the restart, compared byte for byte."""
-    from fno.agents.harnesses.pi import session_dir
-
-    root = pi_sessions_root()
-    directory = session_dir(cwd)
+    agent = os.environ.get("PI_CODING_AGENT_DIR") or str(Path.home() / ".pi" / "agent")
+    root = Path(agent) / "sessions"
+    directory = root / encode_cwd(cwd)
     return {
         "root": sorted(p.name for p in root.iterdir()) if root.is_dir() else [],
         "cwd": sorted(p.name for p in directory.iterdir()) if directory.is_dir() else [],
@@ -306,7 +305,7 @@ def test_AC1_HP_the_restart_journey_on_a_real_pi_thread(tmp_path, monkeypatch, c
     # the daemon's home (root/registry.json), the keeper socket
     # (home.parent()/mux/threads/), and the daemon-start keeper sweep that
     # reads the same directory.
-    short_state = Path(tempfile.mkdtemp(prefix="fno5c-"))
+    short_state = short_bind_root("fno5c-")
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",

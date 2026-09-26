@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fno.graph.store import read_graph_strict
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,7 @@ def _seed(g: Path, entry: dict) -> None:
 
 
 def _node(g: Path, node_id: str) -> dict:
-    return next(e for e in json.loads(g.read_text())["entries"] if e["id"] == node_id)
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id)
 
 
 def _stub_gh(monkeypatch, state: str | None, *, calls: list | None = None):
@@ -401,7 +402,16 @@ def _stub_no_git(monkeypatch):
         stderr = ""
         returncode = 1
 
-    monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
+    real_run = done_cli.subprocess.run
+
+    def fake_run(*a, **kw):
+        cmd = a[0] if a else kw.get("cmd")
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; reach the real binary.
+            return real_run(*a, **kw)
+        return _Res()
+
+    monkeypatch.setattr(done_cli.subprocess, "run", fake_run)
 
 
 def test_bare_done_gates_on_the_nodes_pr_when_autodetect_fails(done_graph, monkeypatch):
@@ -584,3 +594,45 @@ def test_orient_renders_merged_for_an_evidenced_close(monkeypatch):
     assert orient._node_line("ab-ev003", Path("/"), manifest_raw={}) == (
         "shipped (PR #42 merged)"
     )
+
+
+# ---------------------------------------------------------------------------
+# The store refuses a close that records nothing
+# ---------------------------------------------------------------------------
+
+
+def test_store_refuses_a_bare_evidence_less_close(done_graph, monkeypatch):
+    """A bare close of a node with no PR ref, note or link exits non-zero,
+    names the repair flags, and leaves completed_at null.
+    """
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-bare001", "title": "Bare node", "domain": "code"})
+
+    r = CliRunner().invoke(app, ["done", "ab-bare001"])
+
+    assert r.exit_code != 0
+    combined = r.output + str(r.exception)
+    assert "--note" in combined
+    entry = _node(done_graph, "ab-bare001")
+    assert entry.get("completed_at") is None
+    assert entry.get("status") != "done"
+
+
+def test_store_accepts_a_close_that_records_why(done_graph, monkeypatch):
+    """The same close with a note lands: completion_note carries the text."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(done_graph, {"id": "ab-noted001", "title": "Noted node", "domain": "code"})
+
+    r = CliRunner().invoke(
+        app, ["done", "ab-noted001", "--note", "shipped in a docs change"]
+    )
+
+    assert r.exit_code == 0, r.output
+    entry = _node(done_graph, "ab-noted001")
+    assert entry.get("status") == "done"
+    assert entry.get("completed_at") is not None
+    assert entry.get("completion_note") == "shipped in a docs change"

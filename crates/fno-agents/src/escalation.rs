@@ -24,6 +24,16 @@ const SECTION_OPTIONS: &str = "Options";
 const SECTION_RECOMMENDATION: &str = "Recommendation";
 const SECTION_ON_DEADLINE: &str = "If no answer by the deadline";
 const NEXT_SPLIT: &str = "What happens next:";
+// Question-file sections (the ask intake reads them; escalation notes leave
+// them empty). Names match docs/architecture/attention-items.md.
+const SECTION_BLOCKED_BECAUSE: &str = "Blocked because";
+const SECTION_WHY_THESE: &str = "Why these options";
+const SECTION_DOWNSIDE: &str = "Downside";
+const SECTION_UNKNOWNS: &str = "Not thought through";
+const SECTION_REVERSIBLE: &str = "Reversible";
+const SECTION_COST_IF_WRONG: &str = "Cost if wrong";
+const SECTION_MEANWHILE: &str = "Meanwhile";
+const SECTION_WHY_USER: &str = "Why user";
 
 #[derive(Default, Clone, PartialEq, Debug)]
 pub struct EscalationOption {
@@ -49,6 +59,18 @@ pub struct Escalation {
     pub options: Vec<EscalationOption>,
     pub recommendation: String,
     pub on_deadline: String,
+    // Question-file context fields; empty for an escalation note.
+    pub blocked_because: String,
+    pub options_rationale: String,
+    pub downside: String,
+    pub unknowns: String,
+    pub reversible: String,
+    pub cost_if_wrong: String,
+    pub meanwhile: String,
+    /// The user-only reason a reversible, recommended question still
+    /// reaches the user (irreversible, money or credential, outside the
+    /// machine, product or taste). Empty reads as absent.
+    pub why_user: String,
 }
 
 /// The project's escalations directory: `<vault>/internal/<project>/escalations`
@@ -57,10 +79,17 @@ pub struct Escalation {
 /// would be an unrequested extra.
 pub fn dir(cwd: &Path) -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    dir_with_home(cwd, home.as_deref())
+    vault_dir_with_home(cwd, home.as_deref(), "escalations")
 }
 
-pub(crate) fn dir_with_home(cwd: &Path, home: Option<&Path>) -> PathBuf {
+/// The project's question pages directory (attention arm), same contract as
+/// [`dir`]: `<vault>/internal/<project>/questions`, else `<space>/questions`.
+pub fn questions_dir(cwd: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    vault_dir_with_home(cwd, home.as_deref(), "questions")
+}
+
+pub(crate) fn vault_dir_with_home(cwd: &Path, home: Option<&Path>, leaf: &str) -> PathBuf {
     let settings = cwd.join(".fno/config.toml");
     let mut candidates: Vec<PathBuf> = vec![settings.clone()];
     if let Some(h) = home {
@@ -69,10 +98,17 @@ pub(crate) fn dir_with_home(cwd: &Path, home: Option<&Path>) -> PathBuf {
     if let Some(vault) = resolve_obsidian_vault(&candidates) {
         if let Some(vroot) = resolve_vault_root(&vault, home) {
             let project = resolve_project_name(None, home, cwd);
-            return vroot.join("internal").join(project).join("escalations");
+            // A temp-dir cwd whose project name is a basename fallback is a
+            // test or probe process (a leaked test daemon once wrote 203
+            // `internal/fnoe<pid>_<n>/questions` dirs into the real vault).
+            // Contain such writes in the space dir.
+            if crate::finalize::vault_write_is_temp_stray(home, cwd) {
+                return crate::paths::space_dir(cwd).join(leaf);
+            }
+            return vroot.join("internal").join(project).join(leaf);
         }
     }
-    crate::paths::space_dir(cwd).join("escalations")
+    crate::paths::space_dir(cwd).join(leaf)
 }
 
 /// Tolerant parse: anything missing is empty/None and [`problems`] names it.
@@ -98,6 +134,7 @@ pub fn parse(text: &str) -> Escalation {
                 "deadline" => esc.deadline = value.to_string(),
                 "recommend" => esc.recommend = value.parse::<usize>().ok(),
                 "on_silence" => esc.on_silence = value.to_string(),
+                "why_user" | "why-user" => esc.why_user = value.to_string(),
                 _ => {}
             }
         }
@@ -126,6 +163,14 @@ pub fn parse(text: &str) -> Escalation {
     esc.options = parse_options(&section(SECTION_OPTIONS));
     esc.recommendation = section(SECTION_RECOMMENDATION);
     esc.on_deadline = section(SECTION_ON_DEADLINE);
+    esc.blocked_because = section(SECTION_BLOCKED_BECAUSE);
+    esc.options_rationale = section(SECTION_WHY_THESE);
+    esc.downside = section(SECTION_DOWNSIDE);
+    esc.unknowns = section(SECTION_UNKNOWNS);
+    esc.reversible = section(SECTION_REVERSIBLE);
+    esc.cost_if_wrong = section(SECTION_COST_IF_WRONG);
+    esc.meanwhile = section(SECTION_MEANWHILE);
+    esc.why_user = section(SECTION_WHY_USER);
     esc
 }
 
@@ -450,11 +495,17 @@ The king waits. A force push cannot be undone.
         )
         .unwrap();
 
-        let with_vault = dir_with_home(&repo, Some(&base));
+        let with_vault = vault_dir_with_home(&repo, Some(&base), "escalations");
         assert_eq!(
             with_vault,
             base.join("c3po/internal/fno/escalations"),
             "AC2-EDGE vault branch"
+        );
+        let questions = vault_dir_with_home(&repo, Some(&base), "questions");
+        assert_eq!(
+            questions,
+            base.join("c3po/internal/fno/questions"),
+            "AC1-HP vault branch"
         );
 
         std::fs::write(
@@ -482,7 +533,65 @@ The king waits. A force push cannot be undone.
             "AC2-EDGE space fallback: {}",
             fallback.display()
         );
+        let q_home_backup = std::env::var_os("HOME");
+        let q_spaces_backup = std::env::var_os("FNO_SPACES_DIR");
+        std::env::set_var("HOME", &base);
+        std::env::set_var("FNO_SPACES_DIR", base.join("spaces"));
+        let questions_fallback = questions_dir(&repo);
+        // The expected side must resolve inside the same env window: after
+        // the restore it reads a parallel test's pins, not this test's (CI).
+        let expected = crate::paths::space_dir(&repo).join("questions");
+        match q_home_backup {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match q_spaces_backup {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        assert_eq!(
+            questions_fallback,
+            expected,
+            "AC1-HP space fallback: {}",
+            questions_fallback.display()
+        );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn vault_branch_refuses_temp_cwd_basename_fallback() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-escalation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // A vault only the HOME-side config knows: the throwaway cwd has none.
+        std::fs::create_dir_all(base.join(".fno")).unwrap();
+        std::fs::write(
+            base.join(".fno/config.toml"),
+            "[obsidian]\nenabled = true\nvault = \"c3po\"\n",
+        )
+        .unwrap();
+        // A throwaway cwd under a temp root, no project id, no git remote:
+        // without the refusal the vault branch names it by its basename into
+        // the REAL vault (the stray-dir leak this test pins).
+        let cwd = std::env::temp_dir().join(format!("fnoe{}_", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let refused = vault_dir_with_home(&cwd, Some(&base), "questions");
+        assert_eq!(
+            refused,
+            crate::paths::space_dir(&cwd).join("questions"),
+            "a temp cwd with a fallback name writes the space dir, never the vault"
+        );
+        // A declared project id still takes the vault branch, unchanged.
+        std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+        std::fs::write(cwd.join(".fno/config.toml"), "[project]\nid = \"fno\"\n").unwrap();
+        let with_id = vault_dir_with_home(&cwd, Some(&base), "questions");
+        assert_eq!(
+            with_id,
+            base.join("c3po/internal/fno/questions"),
+            "a declared project id keeps the vault branch"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

@@ -24,6 +24,10 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+fn event_text(path: &Path) -> String {
+    fno_agents::event_store::journal_text(path, &[])
+}
+
 // ── the king driver arm ───────────────────────────────────────────────────────
 //
 // A king has no PR, so none of the target conjuncts above apply. These drive
@@ -323,6 +327,21 @@ fn king_fire(
     king_spawn(state, cwd, events, home)
 }
 
+fn king_gate_status_mock(home: &Path, payload: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = home.join("escalate-mock");
+    let script = fs::read_to_string(&path).unwrap();
+    let body = script.strip_prefix("#!/bin/sh\n").unwrap_or(&script);
+    let gate_status = format!(
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"gate-status\" ]; then\nprintf '%s\\n' '{payload}'\nexit 0\nfi\n"
+    );
+    fs::write(&path, format!("#!/bin/sh\n{gate_status}{body}")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+}
+
 const BOARD_TWO_ACTIONABLE: &str = r#"{
   "actionable": 2, "unreadable": 0,
   "queues": [
@@ -428,6 +447,50 @@ fn king_arm_blocks_while_the_board_is_not_empty() {
 }
 
 #[test]
+fn a_fleet_stop_probe_allows_nowork_and_names_the_incident_owner() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-fleet-stop");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &fno);
+    king_gate_status_mock(
+        bin_dir.path(),
+        r#"{"verdict":"refused","reason":"fleet-stop","message":"fleet incident stop is active (generation 19, reason: repro)"}"#,
+    );
+
+    let (code, decision) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0, "the fire must return its decision: {decision}");
+    assert_eq!(decision["decision"], "allow");
+    assert_eq!(decision["termination_reason"], "NoWork");
+    assert!(
+        decision["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fno agents incident clear --reason"),
+        "the message must name the owner: {decision}"
+    );
+}
+
+#[test]
+fn a_gate_status_probe_without_json_keeps_the_king_blocking() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-broken-gate-probe");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, decision) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0, "the fire must return its decision: {decision}");
+    assert_eq!(decision["decision"], "block");
+    assert_ne!(decision["termination_reason"], "NoWork");
+}
+
+#[test]
 fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
@@ -442,7 +505,7 @@ fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
     assert_eq!(d["decision"], "allow");
     assert_eq!(d["termination_reason"], "NoWork");
 
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let row: serde_json::Value = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -535,7 +598,7 @@ fn an_unacked_stand_down_turn_reaches_noprogress_backstop() {
 }
 
 #[test]
-fn an_open_question_from_this_king_blocks_a_clean_board() {
+fn an_open_question_from_this_king_allows_a_clean_board_to_wait() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let state = king_manifest(cwd, "k-question");
@@ -553,11 +616,14 @@ fn an_open_question_from_this_king_blocks_a_clean_board() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
     assert_eq!(code, 0);
-    assert_eq!(d["decision"], "block", "decision: {d}");
-    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    assert_eq!(d["decision"], "allow", "decision: {d}");
+    assert_eq!(d["termination_reason"], "NoWork");
     assert!(
-        d["reason"].as_str().unwrap().contains("operator question"),
-        "the block must name the open question: {d}"
+        d["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("waiting on the user"),
+        "the stop must name the user wait: {d}"
     );
 }
 
@@ -676,7 +742,7 @@ fn a_crown_with_no_checkin_gets_one_hook_row_per_missed_beat() {
     assert_eq!(code2, 0, "fire 2: {d2}");
     assert_eq!(d1["decision"], "block", "fire 1: {d1}");
     assert_eq!(d2["decision"], "block", "fire 2: {d2}");
-    let rows = fs::read_to_string(&events).unwrap();
+    let rows = event_text(&events);
     let checkins: Vec<&str> = rows
         .lines()
         .filter(|l| l.contains("\"reign_checkin\""))
@@ -706,10 +772,7 @@ fn a_cancelled_crown_writes_no_hook_row() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
     assert_eq!(code, 0);
     assert_eq!(d["termination_reason"], "Interrupted");
-    let wrote_checkin = events.exists()
-        && fs::read_to_string(&events)
-            .map(|rows| rows.contains("\"reign_checkin\""))
-            .unwrap_or(false);
+    let wrote_checkin = event_text(&events).contains("\"reign_checkin\"");
     assert!(
         !wrote_checkin,
         "a cancelled crown writes no reign_checkin row"
@@ -910,7 +973,7 @@ fn a_fire_records_the_actionable_ids_the_next_fire_compares_against() {
 
     king_fire(&state, cwd, &events, &fno);
 
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let row: serde_json::Value = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1210,75 +1273,6 @@ fn every_king_noprogress_terminal_escalates() {
         "the blind terminal names the reading it measured (x-ff27), got: {}",
         blind_calls[0]
     );
-
-    // Terminal 3: a board the king READS fine, quiet, with a scope whose
-    // drain count still reads undelivered > 0. The old empty-set escalation
-    // rendered THIS board as "a board the king could not read" (q-f347e7bc):
-    // a healthy board must not assert the king went blind. The reading id
-    // carries the scope, so its commas ride as `+` (the escalate argv splits
-    // ids on `,`).
-    let quiet_tmp = TempDir::new().unwrap();
-    let quiet_cwd = quiet_tmp.path();
-    let quiet_log = quiet_cwd.join("escalations.log");
-    let quiet_state = quiet_cwd.join("king-state.md");
-    fs::write(
-        &quiet_state,
-        format!(
-            "---\nfno_id: k-quiet\ncreated_at: {}\nscope: x-1111,x-2222\n\
-             harness: claude\n---\n",
-            recent_created_at()
-        ),
-    )
-    .unwrap();
-    let quiet_events = quiet_cwd.join("events.jsonl");
-    let quiet_bin = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &quiet_log);
-    king_prepare_fixture(quiet_cwd, quiet_bin.parent().unwrap(), &quiet_bin);
-    // The crown's scope is the two epics x-1111 and x-2222; the fixture graph
-    // must carry them or the scope queue reads loud and the board never
-    // quiets. Their delivery state lives in the mocked drain verb, not here.
-    fs::write(
-        quiet_cwd.join("graph.json"),
-        serde_json::to_string(&serde_json::json!({"entries": [
-            {"id": "x-1111", "type": "epic", "status": "ready", "priority": "p1",
-             "plan_path": "/plans/p.md"},
-            {"id": "x-2222", "type": "epic", "status": "ready", "priority": "p1",
-             "plan_path": "/plans/p.md"},
-        ]}))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let mut quiet = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        quiet = king_spawn(
-            &quiet_state,
-            quiet_cwd,
-            &quiet_events,
-            quiet_bin.parent().unwrap(),
-        );
-    }
-    assert_eq!(
-        quiet.1["termination_reason"], "NoProgress",
-        "a quiet board with undelivered scope nodes must reach the NoProgress \
-         terminal: {:?}",
-        quiet.1
-    );
-    let quiet_logged = fs::read_to_string(&quiet_log).unwrap_or_default();
-    let quiet_calls: Vec<&str> = quiet_logged
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    assert_eq!(
-        quiet_calls.len(),
-        1,
-        "the quiet-board terminal escalates: {quiet_logged}"
-    );
-    assert!(
-        quiet_calls[0].contains("--stalled reading:undelivered:x-1111+x-2222"),
-        "the quiet terminal names its undelivered reading with the scope, \
-         got: {}",
-        quiet_calls[0]
-    );
 }
 
 /// The ceiling `--max-iterations` advertises must actually bind.
@@ -1442,10 +1436,9 @@ fn external_read_timeout_king_board_blocks_named() {
 // return above the manifest ceiling and the dry-fire backstop: blocking was
 // unbounded and the parked state was never recorded. These drive the bound.
 
-/// AC1: a constant undelivered count reaches the dry-fire backstop on the
-/// third fire, and the NoProgress terminal escalates.
+/// AC1: a quiet board with undelivered scope waits for CI or a worker.
 #[test]
-fn a_quiet_board_with_undelivered_scope_terminates_noprogress_at_the_dry_ceiling() {
+fn a_quiet_board_with_undelivered_scope_terminates_nowork_while_waiting() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let bin_dir = TempDir::new().unwrap();
@@ -1454,25 +1447,25 @@ fn a_quiet_board_with_undelivered_scope_terminates_noprogress_at_the_dry_ceiling
     let events = cwd.join("events.jsonl");
     let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &log);
 
-    let mut last = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        last = king_fire(&state, cwd, &events, &spec);
-    }
+    let last = king_fire(&state, cwd, &events, &spec);
 
     assert_eq!(last.0, 0, "{:?}", last.1);
     assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
-    assert_eq!(last.1["termination_reason"], "NoProgress");
+    assert_eq!(last.1["termination_reason"], "NoWork");
+    assert!(last.1["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on CI or a worker"));
     let logged = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        logged.contains("--reason NoProgress"),
-        "the NoProgress terminal must escalate: {logged}"
+        !logged.contains("--reason NoProgress"),
+        "a legal wait must not escalate: {logged}"
     );
 }
 
-/// AC2: the manifest ceiling terminates Budget on the fire it advertises,
-/// naming both the ceiling and what the reign was waiting on.
+/// AC2: the undelivered journal row is written before the legal wait terminal.
 #[test]
-fn a_quiet_board_reaches_the_manifest_ceiling_as_budget() {
+fn a_quiet_board_records_undelivered_before_nowork() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let bin_dir = TempDir::new().unwrap();
@@ -1481,43 +1474,18 @@ fn a_quiet_board_reaches_the_manifest_ceiling_as_budget() {
     let events = cwd.join("events.jsonl");
     let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &log);
 
-    let mut last = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        last = king_fire(&state, cwd, &events, &spec);
-    }
+    let last = king_fire(&state, cwd, &events, &spec);
 
     assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
-    assert_eq!(last.1["termination_reason"], "Budget");
-    let reason = last.1["reason"].as_str().unwrap();
+    assert_eq!(last.1["termination_reason"], "NoWork");
     assert!(
-        reason.contains("ceiling of 3") && reason.contains("3 scope nodes still undelivered"),
-        "{reason}"
+        event_text(&events).contains("\"undelivered\":3"),
+        "the wait must retain its undelivered journal row"
     );
 }
 
-/// AC3: a shrinking undelivered count is the quiet board's progress signal;
-/// each shrink resets the dry streak, so the reign keeps blocking.
-#[test]
-fn a_shrinking_undelivered_count_resets_the_dry_streak() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
-    let log = cwd.join("escalations.log");
-    let state = king_manifest(cwd, "k-shrinking");
-    let events = cwd.join("events.jsonl");
-    let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(5), Some(4), Some(3)], &log);
-
-    let mut last = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        last = king_fire(&state, cwd, &events, &spec);
-    }
-
-    assert_eq!(last.1["decision"], "block", "{:?}", last.1);
-    assert_eq!(last.1["termination_reason"], serde_json::Value::Null);
-}
-
-/// AC4: an unreadable drain is the i64::MAX sentinel and never a baseline, so
-/// a later real count cannot read as a shrink against it.
+/// AC4: an unreadable drain is the i64::MAX sentinel and never a baseline;
+/// a later real count is a legal wait, not progress against the sentinel.
 #[test]
 fn an_unreadable_drain_is_never_a_progress_baseline() {
     let tmp = TempDir::new().unwrap();
@@ -1534,12 +1502,16 @@ fn an_unreadable_drain_is_never_a_progress_baseline() {
 
     assert_eq!(fires[1].1["decision"], "block", "{:?}", fires[1].1);
     // Had the sentinel been recorded as a baseline, 5 < i64::MAX would read
-    // as progress and the third fire would block. It must terminate.
+    // as progress. The later successful read is a legal wait instead.
     assert_eq!(
-        fires[2].1["termination_reason"], "NoProgress",
+        fires[2].1["termination_reason"], "NoWork",
         "{:?}",
         fires[2].1
     );
+    assert!(fires[2].1["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on CI or a worker"));
 }
 
 /// AC5: the unreadable-questions block is bounded, and each blocking fire
@@ -1562,7 +1534,7 @@ fn an_unreadable_question_source_is_bounded_not_eternal() {
 
     assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
     assert_eq!(last.1["termination_reason"], "NoProgress");
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let rows = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1575,11 +1547,9 @@ fn an_unreadable_question_source_is_bounded_not_eternal() {
     );
 }
 
-/// AC6: an open operator question still blocks forever, by design - the
-/// parked state is the open question and only the operator's answer
-/// releases it.
+/// AC6: an open operator question is a legal wait and the terminal is durable.
 #[test]
-fn an_open_operator_question_never_terminates() {
+fn an_open_operator_question_records_one_nowork_terminal() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let state = king_manifest(cwd, "k-question");
@@ -1594,16 +1564,25 @@ fn an_open_operator_question_never_terminates() {
     )
     .unwrap();
 
-    for i in 0..5 {
-        let (code, d) = king_fire(&state, cwd, &events, &spec);
-        assert_eq!(code, 0);
-        assert_eq!(d["decision"], "block", "fire {}: {:?}", i + 1, d);
-        assert_eq!(
-            d["termination_reason"],
-            serde_json::Value::Null,
-            "fire {} must never terminate: {:?}",
-            i + 1,
-            d
-        );
-    }
+    let (code, d) = king_fire(&state, cwd, &events, &spec);
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "allow", "fire: {:?}", d);
+    assert_eq!(d["termination_reason"], "NoWork", "fire: {:?}", d);
+    assert!(d["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("waiting on the user"));
+
+    let (repeat_code, repeat) = king_fire(&state, cwd, &events, &spec);
+    assert_eq!(repeat_code, 0);
+    assert_eq!(repeat["decision"], "allow", "repeat: {:?}", repeat);
+    assert!(repeat["reason"]
+        .as_str()
+        .unwrap()
+        .contains("already terminal"));
+    let terminals = event_text(&events)
+        .lines()
+        .filter(|line| line.contains("\"type\":\"termination\""))
+        .count();
+    assert_eq!(terminals, 1, "a re-wake must not journal a second terminal");
 }

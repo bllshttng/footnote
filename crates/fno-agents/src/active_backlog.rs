@@ -262,7 +262,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    value_has_usable_pr_ref(&v)
+    crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
@@ -527,6 +527,27 @@ fn reconcile_pending(
     });
 }
 
+/// The close note the drain records when it closes a PR-less node: which
+/// terminal closed it and, when the event carries one, its first message
+/// line. Capped at 200 chars so a chatty message cannot bloat the graph
+/// row's completion_note.
+fn drain_close_note(reason: &TerminationReason, message: &str) -> String {
+    let mut note = format!("closed by the backlog drain on {reason:?}");
+    let first_line = message.lines().next().unwrap_or("").trim();
+    if !first_line.is_empty() {
+        note.push_str(": ");
+        note.push_str(first_line);
+    }
+    if note.len() > 200 {
+        let mut cut = 200;
+        while !note.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        note.truncate(cut);
+    }
+    note
+}
+
 /// Apply a polled termination event to the breaker via the shared `map_outcome`
 /// policy, mirroring the supervised path's `queue.close` side effects.
 fn resolve_dispatch(
@@ -547,16 +568,38 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if classify(ev.reason.clone()).projection().merge_armable
-        && !node_has_pr_ref(cfg, node_id)
-    {
+    let merge_armable = classify(ev.reason.clone()).projection().merge_armable;
+    // The park guard and the close note ask the same question, so the node
+    // is read once per event and the answer is shared. Non-close terminals
+    // (a crash, NoProgress) spawn no read at all.
+    let close_eligible = merge_armable || is_done_reason(&ev.reason);
+    let has_pr_ref = if close_eligible {
+        node_has_pr_ref(cfg, node_id)
+    } else {
+        false
+    };
+    let close = if merge_armable && !has_pr_ref {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
     } else if is_done_reason(&ev.reason) {
+        // The store refuses an evidence-less close, so a PR-less node
+        // (DoneAdvisory, DoneDelivery) closes with a note carrying the
+        // terminal and the event's first line. A node with a PR ref keeps
+        // the bare argv: the canonical close and its gates stay as they are.
+        let mut args = vec![
+            "backlog".to_string(),
+            "done".to_string(),
+            node_id.to_string(),
+        ];
+        if !has_pr_ref {
+            let note = drain_close_note(&ev.reason, &ev.message);
+            args.push("--note".to_string());
+            args.push(note);
+        }
         match retry_etxtbsy(|| {
             fno_cmd(&cfg.fno_bin)
-                .args(["backlog", "done", node_id])
+                .args(&args)
                 .current_dir(&cfg.cwd)
                 .output()
         }) {
@@ -620,25 +663,6 @@ fn resolve_crash(
     );
 }
 
-/// Does a parsed `fno backlog get` node carry a USABLE PR reference? `pr_number`
-/// an integer and `pr_url` a non-empty string, matching what the CLI's
-/// node_pr_refs can actually derive a ref from. An empty pr_url is not evidence
-/// of a ship.
-fn value_has_usable_pr_ref(v: &serde_json::Value) -> bool {
-    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
-        return true;
-    }
-    if v.get("pr_url")
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| !u.trim().is_empty())
-    {
-        return true;
-    }
-    v.get("additional_prs")
-        .and_then(|a| a.as_array())
-        .is_some_and(|a| !a.is_empty())
-}
-
 /// Did a SYNCHRONOUS (headless) child already reach a terminal state? The
 /// one-shot worker ran to completion before its dispatch returned, so graph
 /// state is the only evidence left. FAIL-OPEN: an unreadable or unparseable
@@ -666,7 +690,9 @@ fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
             .and_then(|t| t.as_str())
             .is_some_and(|t| !t.trim().is_empty())
     };
-    stamped("completed_at") || stamped("deferred_at") || value_has_usable_pr_ref(&v)
+    stamped("completed_at")
+        || stamped("deferred_at")
+        || crate::backlog::done_evidence::has_pr_ref(&v)
 }
 
 /// Resolve a synchronous (headless) child on the spot instead of holding it
@@ -906,8 +932,10 @@ fn dispatch_member(
     // mid-incident takes this branch on its first tick, proving the stop is
     // durable state rather than a missed announcement. Reconciliation and tick
     // reporting continue; only new dispatch is refused. An unreadable state
-    // fails closed with its own reason, never as clear.
-    let incident = crate::fleet_incident::verdict();
+    // fails closed with its own reason, never as clear. The gate asks the
+    // spawns question: dispatch is automatic spawning, so a stop that holds
+    // only tests or merges keeps dispatching.
+    let incident = crate::fleet_incident::verdict_for("spawns");
     if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
         let (token, generation, detail) = match &incident {
             crate::fleet_incident::Verdict::Stopped(r) => (
@@ -1136,175 +1164,6 @@ fn dispatch_mission(
         MissionDispatch::Continue
     };
     (outcome, merged)
-}
-
-/// The seed prompt for a machinery-spawned territory blueprinter: a
-/// worker holds no crown, dispatches nothing, and self-reports nothing - it
-/// designs the mailed idea nodes and waits for the next one.
-fn blueprinter_prompt(scope: &str) -> String {
-    format!(
-        "You are the territory blueprinter for scope {scope}. \
-When mail arrives carrying /fno:blueprint <node-id>, run the fno:blueprint \
-skill for that node. You hold no crown, dispatch nothing, and report \
-nothing: finish each blueprint and wait."
-    )
-}
-
-/// The `blueprint-feed --json` status receipt. `ideas` stays raw
-/// JSON: the tick only journals ids, it never interprets rungs.
-#[derive(Debug, Clone, Deserialize, Default)]
-struct BlueprinterStatus {
-    #[serde(default)]
-    worker: Option<BlueprinterWorker>,
-    #[serde(default)]
-    worker_name_next: String,
-    #[serde(default)]
-    ideas: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct BlueprinterWorker {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    live: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct BlueprinterDelivery {
-    #[serde(default)]
-    delivered: Vec<String>,
-    #[serde(default)]
-    failed: Vec<serde_json::Value>,
-}
-
-/// One `agents blueprint-feed` call: the binary's territory fact set owns the
-/// policy (membership, feed windows, the record store, mail transport); the
-/// supervisor only decides when to spawn and when to deliver.
-fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json::Value> {
-    let mut args = vec![
-        "agents".to_string(),
-        "blueprint-feed".to_string(),
-        "--scope".to_string(),
-        cfg.scope.clone(),
-        "--json".to_string(),
-    ];
-    args.extend(extra.iter().cloned());
-    let out = retry_etxtbsy(|| {
-        fno_cmd(&cfg.fno_bin)
-            .args(&args)
-            .current_dir(&cfg.cwd)
-            .output()
-    })
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    serde_json::from_slice(&out.stdout).ok()
-}
-
-/// One territory's blueprinter tick (AC5/AC6): with unfed triaged
-/// ideas and no live standing worker, spawn AT MOST ONE replacement through
-/// the standard `fno agents spawn` gates; then deliver. A refused spawn is
-/// recorded as a repair and the ideas stay preserved for the next tick.
-fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
-    if cfg.scope.is_empty() {
-        return; // legacy receipt: no territory, no blueprinter
-    }
-    let Some(raw) = run_blueprint_feed(cfg, &[]) else {
-        let _ = journal.append(
-            "blueprinter_status_skip",
-            json!({"scope": cfg.scope, "reason": "feed verb failed or unparseable"}),
-        );
-        return;
-    };
-    let status: BlueprinterStatus = serde_json::from_value(raw).unwrap_or_default();
-    if status.ideas.is_empty() {
-        return; // nothing to feed: never spawn a worker without work
-    }
-    let needs_worker = status.worker.as_ref().map(|w| !w.live).unwrap_or(true);
-    if needs_worker {
-        if status.worker_name_next.is_empty() {
-            let _ = journal.append(
-                "blueprinter_spawn_refused",
-                json!({"scope": cfg.scope, "reason": "receipt named no worker to spawn"}),
-            );
-            return;
-        }
-        let prompt = blueprinter_prompt(&cfg.scope);
-        let args = vec![
-            "agents".to_string(),
-            "spawn".to_string(),
-            "--substrate".to_string(),
-            "thread".to_string(),
-            "--name".to_string(),
-            status.worker_name_next.clone(),
-            "--agent".to_string(),
-            "fno:architect".to_string(),
-            prompt,
-        ];
-        let provenance = spawn_provenance_env(cfg, "blueprinter");
-        let spawn = retry_etxtbsy(|| {
-            fno_cmd(&cfg.fno_bin)
-                .args(&args)
-                .current_dir(&cfg.cwd)
-                .envs(provenance.clone())
-                .output()
-        });
-        match spawn {
-            Ok(o) if o.status.success() => {
-                let _ = journal.append(
-                    "blueprinter_spawned",
-                    json!({"scope": cfg.scope, "worker": status.worker_name_next}),
-                );
-            }
-            Ok(o) => {
-                let detail = String::from_utf8_lossy(&o.stderr);
-                let reason = format!("spawn refused: {}", detail.lines().next().unwrap_or(""));
-                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
-                let _ = journal.append(
-                    "blueprinter_spawn_refused",
-                    json!({"scope": cfg.scope, "reason": reason}),
-                );
-                return;
-            }
-            Err(e) => {
-                let reason = format!("spawn failed: {e}");
-                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
-                let _ = journal.append(
-                    "blueprinter_spawn_refused",
-                    json!({"scope": cfg.scope, "reason": reason}),
-                );
-                return;
-            }
-        }
-    }
-    let Some(raw) = run_blueprint_feed(cfg, &["--deliver".to_string()]) else {
-        let _ = journal.append(
-            "blueprinter_deliver_skip",
-            json!({"scope": cfg.scope, "reason": "deliver verb failed or unparseable"}),
-        );
-        return;
-    };
-    let delivery: BlueprinterDelivery = serde_json::from_value(raw).unwrap_or_default();
-    if delivery.delivered.is_empty() && delivery.failed.is_empty() {
-        return; // blocked receipt or nothing due: the verb recorded its own state
-    }
-    let worker_name = status
-        .worker
-        .as_ref()
-        .map(|w| w.name.clone())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| status.worker_name_next.clone());
-    let _ = journal.append(
-        "blueprinter_delivered",
-        json!({
-            "scope": cfg.scope,
-            "worker": worker_name,
-            "delivered": delivery.delivered,
-            "failed": delivery.failed.len(),
-        }),
-    );
 }
 
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
@@ -1560,8 +1419,18 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
     if !facts.any_enabled() {
         return Ok(Vec::new());
     }
+    let held = held_for(config_cwd, registry_path);
     let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
-    Ok(drain_targets_json(&facts, &territories).0)
+    Ok(drain_targets_json(&facts, &territories, &held).0)
+}
+
+/// The held map for one config cwd: one fold over the question journals,
+/// failing open to an empty map (a missing journal holds nothing).
+fn held_for(cwd: &Path, registry_path: &Path) -> std::collections::BTreeMap<String, String> {
+    match registry_path.parent().and_then(Path::parent) {
+        Some(fno_dir) => crate::needs::held_map(fno_dir, cwd),
+        None => Default::default(),
+    }
 }
 
 /// Target rows for one resolved territory set, plus the drop counts the
@@ -1571,13 +1440,15 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 fn drain_targets_json(
     facts: &territory::ActiveBacklogFacts,
     territories: &[territory::Territory],
-) -> (Vec<Value>, usize, usize) {
+    held: &std::collections::BTreeMap<String, String>,
+) -> (Vec<Value>, usize, usize, Vec<(String, String)>) {
     let Some(interval) = facts.interval_seconds else {
-        return (Vec::new(), 0, 0);
+        return (Vec::new(), 0, 0, Vec::new());
     };
     let mut targets = Vec::new();
     let mut disabled = 0;
     let mut missing_path = 0;
+    let mut held_drops: Vec<(String, String)> = Vec::new();
     for territory in territories {
         let root_project = territory.project.clone();
         if !facts.is_enabled_for(Some(&root_project)) {
@@ -1596,6 +1467,21 @@ fn drain_targets_json(
         } else {
             None
         };
+        // A held mission stops the whole territory: the drain must not spawn
+        // into an epic a question is blocking. Other held members
+        // drop from the member list; the receipt names the question.
+        if mission.as_deref().is_some_and(|m| held.contains_key(m)) {
+            if let Some(qid) = mission.as_deref().and_then(|m| held.get(m)) {
+                held_drops.push((territory.key.clone(), qid.clone()));
+            }
+            continue;
+        }
+        let members: Vec<String> = territory
+            .members
+            .iter()
+            .filter(|m| !held.contains_key(m.as_str()))
+            .cloned()
+            .collect();
         targets.push(json!({
             "project": territory.project,
             "cwd": territory.cwd,
@@ -1605,7 +1491,7 @@ fn drain_targets_json(
             "scope": territory.key,
             "rung": territory.rung,
             "kingless": territory.kingless,
-            "members": territory.members,
+            "members": members,
             "max_concurrent": facts.max_concurrent,
         }));
     }
@@ -1617,7 +1503,7 @@ fn drain_targets_json(
             .unwrap_or("")
             .cmp(b["scope"].as_str().unwrap_or(""))
     });
-    (targets, disabled, missing_path)
+    (targets, disabled, missing_path, held_drops)
 }
 
 /// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY
@@ -1629,6 +1515,7 @@ fn drain_targets_json(
 /// empty list read as "nothing enabled".
 pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainResolve {
     let facts = territory::active_backlog_facts(config_cwd);
+    let held = held_for(config_cwd, registry_path);
     let territories = territory::resolve_territories(config_cwd, registry_path);
     let missions = territories.as_ref().map_or(0, |t| t.len() as u64);
     let mut skip_reason: Option<String> = None;
@@ -1648,13 +1535,21 @@ pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainR
             if skip_reason.is_none() && territories.is_empty() {
                 skip_reason = Some("no_missions".to_string());
             }
-            let (rows, disabled, missing_path) = drain_targets_json(&facts, &territories);
+            let (rows, disabled, missing_path, held_drops) =
+                drain_targets_json(&facts, &territories, &held);
             match rows
                 .into_iter()
                 .map(|t| serde_json::from_value::<ResolvedTarget>(t))
                 .collect::<Result<Vec<_>, _>>()
             {
                 Ok(targets) => {
+                    if targets.is_empty() && skip_reason.is_none() {
+                        // Every live target held: name the question, not a
+                        // generic empty receipt.
+                        if let Some((_, qid)) = held_drops.first() {
+                            skip_reason = Some(format!("held:{qid}"));
+                        }
+                    }
                     if targets.is_empty() && skip_reason.is_none() {
                         skip_reason = Some(if disabled >= missing_path {
                             "project_disabled".to_string()
@@ -2217,13 +2112,10 @@ async fn mission_drain_loop(
 
         // The tick is synchronous; offload so the async runtime is never stalled.
         // Move the breaker AND pending set in and hand them back so the streak
-        // and in-flight tracking survive the tick. The blueprinter tick rides
-        // the same blocking task, BEFORE the drain: a plan designed this tick
-        // can dispatch on it the same tick.
+        // and in-flight tracking survive the tick.
         let taken_b = std::mem::take(&mut breaker);
         let taken_p = std::mem::take(&mut pending);
         let handle = tokio::task::spawn_blocking(move || {
-            blueprinter_tick(&cfg, &journal);
             let mut b = taken_b;
             let mut p = taken_p;
             let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
@@ -2267,6 +2159,71 @@ async fn mission_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::territory::Territory;
+
+    fn held_facts() -> territory::ActiveBacklogFacts {
+        territory::ActiveBacklogFacts {
+            enabled: Ok(true),
+            interval_seconds: Some(60),
+            failure_limit: 3,
+            max_concurrent: 2,
+        }
+    }
+
+    fn held_territory(members: Vec<String>) -> Territory {
+        Territory {
+            key: "x-e".to_string(),
+            rung: 2,
+            kingless: true,
+            members,
+            project: "alpha".to_string(),
+            cwd: "/tmp/alpha".to_string(),
+        }
+    }
+
+    #[test]
+    fn drain_drops_a_held_mission_and_names_the_question() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-e".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (rows, disabled, missing_path, held_drops) =
+            drain_targets_json(&facts, &territories, &held);
+        assert_eq!(disabled, 0);
+        assert_eq!(missing_path, 0);
+        assert!(
+            rows.is_empty(),
+            "held mission: territory absent from targets"
+        );
+        assert_eq!(held_drops, vec![("x-e".to_string(), "q-1".to_string())]);
+    }
+
+    #[test]
+    fn drain_drops_only_the_held_member_from_a_live_territory() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-e2".to_string(), "q-2".to_string())]
+                .into_iter()
+                .collect();
+        let (rows, _, _, held_drops) = drain_targets_json(&facts, &territories, &held);
+        assert_eq!(rows.len(), 1, "territory survives");
+        assert_eq!(rows[0]["members"], serde_json::json!(["x-e"]));
+        assert!(held_drops.is_empty());
+    }
+
+    #[test]
+    fn drain_keeps_everything_when_nothing_is_held() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> = Default::default();
+        let (rows, _, _, held_drops) = drain_targets_json(&facts, &territories, &held);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["members"], serde_json::json!(["x-e", "x-e2"]));
+        assert!(held_drops.is_empty());
+    }
 
     #[test]
     fn loose_member_argv_names_the_project_door() {
@@ -2425,8 +2382,6 @@ mod tests {
     // claims root, so it reads real state for a key that never exists (and never
     // writes there).
 
-    use std::os::unix::fs::PermissionsExt;
-
     /// Hold this for the whole body of any test that shells `fno_cmd`.
     ///
     /// `fno_cmd` resolves its binary from the process-global `$FNO_BIN` IN
@@ -2452,16 +2407,14 @@ mod tests {
     /// assert which `backlog done`/`defer` side effects the reconcile fired.
     fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\necho \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2470,19 +2423,17 @@ mod tests {
     /// is unreachable with it, and the whole thing passes green when reverted.
     fn stub_fno_defer_fails(dir: &std::path::Path, record: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [ \"$2\" = \"defer\" ]; then echo 'node not found' >&2; exit 1; fi\n\
                  exit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2491,19 +2442,17 @@ mod tests {
     /// records its argv and exits 0.
     fn stub_fno_get(dir: &std::path::Path, record: &std::path::Path, node_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [ \"$2\" = \"get\" ]; then printf '%s' '{}'; exit 0; fi\n\
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 node_json,
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -2532,8 +2481,7 @@ mod tests {
         let p = tmp.path().join("bin").join("fno");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         // exec: the kill hits the sleeper itself, not a shell wrapper.
-        std::fs::write(&p, "#!/bin/bash\nexec sleep 10\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = crate::write_exec_stub(p.parent().unwrap(), "fno", "#!/bin/bash\nexec sleep 10\n");
         let mut cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
         cfg.advance_timeout_s = 1;
         let (journal, project_journal) = test_journal(tmp.path());
@@ -2563,10 +2511,13 @@ mod tests {
     }
 
     fn journal_lines(p: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(p)
+        // Committed rows, not journal bytes: the store cutover stopped journal
+        // appends, so emitted events live only in the store beside the journal.
+        let _ = crate::event_store::import_all(p);
+        crate::event_store::query_events(p, &crate::event_store::EventQuery::default())
             .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
+            .iter()
+            .map(|r| r.line.clone())
             .collect()
     }
 
@@ -2762,6 +2713,50 @@ mod tests {
         assert_eq!(breaker.consecutive_failures("x-doc00001"), 0);
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(calls.contains("backlog done x-doc00001"), "calls: {calls}");
+        assert!(
+            calls.contains("--note"),
+            "a PR-less advisory close records why: {calls}"
+        );
+        assert!(
+            !calls.contains("--force"),
+            "the drain never force-closes: {calls}"
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_pr_green_close_carries_no_note() {
+        // AC4-ERR: a node with a PR ref keeps the bare argv, so the
+        // canonical close and its strand guard stay as they are.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"id":"x-prgr0001","status":"in_review","pr_number":424}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-prgr0001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "pr green".to_string(),
+            },
+        );
+
+        assert_eq!(breaker.consecutive_failures("x-prgr0001"), 0);
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog done x-prgr0001"), "calls: {calls}");
+        assert!(
+            !calls.contains("--note"),
+            "a PR-bearing close never carries a note: {calls}"
+        );
     }
 
     #[test]
@@ -2805,13 +2800,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'node has open blockers' >&2; exit 1; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, _pj) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2844,13 +2837,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then echo 'awaiting merge: PR OPEN' >&2; exit 5; fi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2888,13 +2879,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-aaaa could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
@@ -2931,13 +2920,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fno = bin.join("fno");
-        std::fs::write(
-            &fno,
+        let fno = crate::write_exec_stub(
+            &bin,
+            "fno",
             "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // failure_limit 1 so a single exit-6 trips and emits the parked event.
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 1);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -3231,16 +3218,14 @@ mod tests {
     /// stdout (exit 0). Any other subcommand is a no-op exit 0.
     fn stub_fno_advance(dir: &std::path::Path, receipt_json: &str) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{receipt_json}\nJSON\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3254,10 +3239,10 @@ mod tests {
         node_json: &str,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  cat <<'JSON'\n{advance_json}\nJSON\nexit 0; fi\n\
@@ -3265,9 +3250,7 @@ mod tests {
                  echo \"$@\" >> \"{}\"\nexit 0\n",
                 record.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3278,20 +3261,18 @@ mod tests {
         observer_marker: Option<&std::path::Path>,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
         let observer = observer_marker
             .map(|path| format!("printf 'called' > '{}'\n", path.display()))
             .unwrap_or_default();
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \\
                  cat <<'JSON'\n{advance_json}\nJSON\nelif [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \\
                  {observer}printf '%s' '{observer_json}'\nfi\nexit 0\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3381,10 +3362,10 @@ mod tests {
         cwd: &std::path::Path,
     ) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
                  if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
@@ -3396,9 +3377,7 @@ mod tests {
                 record.display(),
                 cwd.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
     }
 
@@ -3413,6 +3392,7 @@ mod tests {
                 changed_at: "2026-09-13T01:07:00Z".into(),
                 changed_by: "op".into(),
                 reason: "load 385".into(),
+                holds: Vec::new(),
                 source: Some("file".into()),
             })
             .unwrap(),
@@ -3575,6 +3555,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(
@@ -4230,46 +4211,6 @@ mod tests {
         assert!(!record.exists(), "no defer on a skipped child");
     }
 
-    /// A stub `fno` that records every argv, answers `agents blueprint-feed`
-    /// with `status_json`, and (optionally) fails `agents spawn` so the repair
-    /// path is reachable.
-    fn stub_fno_blueprint_feed(
-        dir: &std::path::Path,
-        record: &std::path::Path,
-        status_json: &str,
-        spawn_fails: bool,
-    ) -> String {
-        std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        let spawn_arm = if spawn_fails {
-            "if [ \"$2\" = \"spawn\" ]; then echo 'gate: refused' >&2; exit 1; fi\n"
-        } else {
-            ""
-        };
-        std::fs::write(
-            &p,
-            format!(
-                "#!/usr/bin/env bash\n\
-                 echo \"$@\" >> \"{}\"\n\
-                 if [ \"$2\" = \"blueprint-feed\" ]; then\n\
-                 case \"$*\" in\n\
-                 *--deliver*) printf '%s' '{{\"action\":\"deliver\",\"delivered\":[\"x-1\",\"x-2\"],\"failed\":[]}}';;\n\
-                 *) printf '%s' '{}';;\n\
-                 esac\n\
-                 exit 0\n\
-                 fi\n\
-                 {}\
-                 exit 0\n",
-                record.display(),
-                status_json,
-                spawn_arm
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        p.display().to_string()
-    }
-
     /// A stub `fno` for the converge-cap tests: every `backlog advance`
     /// (epic or loose) writes `S`, holds the slot for 300ms, writes `E`, then
     /// prints a benign receipt. The S/E log is the positive marker: overlap in
@@ -4277,10 +4218,10 @@ mod tests {
     /// The receipt itself is native now, so the fixture files carry it.
     fn stub_fno_converge(dir: &std::path::Path, log: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join("fno");
-        std::fs::write(
-            &p,
-            format!(
+        let p = crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!(
                 "#!/usr/bin/env bash\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
@@ -4288,148 +4229,8 @@ mod tests {
                  exit 0\n",
                 log = log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         p.display().to_string()
-    }
-
-    fn territory_cfg(tmp: &std::path::Path, fno_bin: String) -> DrainConfig {
-        let mut cfg = test_cfg(tmp, fno_bin, 3);
-        cfg.scope = "x-bbbb".to_string();
-        cfg
-    }
-
-    fn journal_rows(p: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
-        journal_lines(p)
-            .iter()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v["type"] == event)
-            .collect()
-    }
-
-    #[test]
-    fn blueprinter_tick_spawns_one_worker_then_delivers() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-bbbb","worker":null,
-            "worker_name_next":"blueprinter-x-bbbb-abc123",
-            "ideas":[{"id":"x-1","rung":"idea"},{"id":"x-2","rung":"design"}]}"#;
-        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-
-        blueprinter_tick(&cfg, &journal);
-
-        let argv = std::fs::read_to_string(&record).unwrap();
-        assert_eq!(argv.matches("agents spawn").count(), 1);
-        assert!(argv.contains("--substrate thread"));
-        assert!(argv.contains("--name blueprinter-x-bbbb-abc123"));
-        assert!(argv.contains("--agent fno:architect"));
-        assert!(argv.contains("territory blueprinter for scope x-bbbb"));
-        assert_eq!(argv.matches("--deliver").count(), 1);
-        eprintln!(
-            "JOURNAL RAW: {:?}",
-            std::fs::read_to_string(&project_journal).unwrap_or_default()
-        );
-        eprintln!(
-            "JOURNAL ROWS: {:?}",
-            journal_rows(&project_journal, "blueprinter_spawned")
-        );
-        eprintln!("JOURNAL LINES: {:?}", journal_lines(&project_journal));
-        assert_eq!(
-            journal_rows(&project_journal, "blueprinter_spawned").len(),
-            1
-        );
-        let delivered = journal_rows(&project_journal, "blueprinter_delivered");
-        assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0]["data"]["worker"], "blueprinter-x-bbbb-abc123");
-    }
-
-    #[test]
-    fn blueprinter_tick_reuses_a_live_worker() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-bbbb",
-            "worker":{"name":"blueprinter-x-bbbb-abc123","live":true},
-            "worker_name_next":"blueprinter-x-bbbb-abc123",
-            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
-        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-
-        blueprinter_tick(&cfg, &journal);
-
-        let argv = std::fs::read_to_string(&record).unwrap();
-        assert!(!argv.contains(" agents spawn "));
-        assert_eq!(argv.matches("--deliver").count(), 1);
-        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
-    }
-
-    #[test]
-    fn blueprinter_tick_records_repair_when_spawn_refused() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-bbbb","worker":null,
-            "worker_name_next":"blueprinter-x-bbbb-abc123",
-            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
-        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, true);
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-
-        blueprinter_tick(&cfg, &journal);
-
-        let argv = std::fs::read_to_string(&record).unwrap();
-        assert_eq!(argv.matches("agents spawn").count(), 1);
-        assert!(argv.contains("--repair"));
-        assert!(!argv.contains("--deliver"));
-        let repairs = journal_rows(&project_journal, "blueprinter_spawn_refused");
-        assert_eq!(repairs.len(), 1);
-        assert!(repairs[0]["data"]["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("spawn refused"));
-    }
-
-    #[test]
-    fn blueprinter_tick_idles_without_ideas_or_scope() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let fno = stub_fno_blueprint_feed(
-            &tmp.path().join("bin"),
-            &record,
-            r#"{"action":"status","ideas":[]}"#,
-            false,
-        );
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-        blueprinter_tick(&cfg, &journal);
-        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
-
-        // A legacy receipt (empty scope) never calls the feed verb at all.
-        let record2 = tmp.path().join("argv2.log");
-        let fno2 = stub_fno_blueprint_feed(
-            &tmp.path().join("bin2"),
-            &record2,
-            r#"{"action":"status","ideas":[{"id":"x-1"}]}"#,
-            false,
-        );
-        let mut legacy = test_cfg(tmp.path(), fno2, 3);
-        legacy.scope = String::new();
-        blueprinter_tick(&legacy, &journal);
-        assert!(journal_lines(&record2).is_empty());
-    }
-
-    #[test]
-    fn blueprinter_status_defaults_on_partial_json() {
-        let status: BlueprinterStatus = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(status.worker.is_none());
-        assert!(status.worker_name_next.is_empty());
-        assert!(status.ideas.is_empty());
     }
 
     /// The greatest number of converge runs that overlapped, replayed from the
@@ -4439,7 +4240,10 @@ mod tests {
         let mut running = 0usize;
         let mut peak = 0usize;
         let mut total = 0usize;
-        for line in journal_lines(log) {
+        // Raw marker log, not committed events: the stub's S/E lines are not
+        // envelopes and never enter the store.
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        for line in text.lines() {
             match line.trim() {
                 "S" => {
                     running += 1;

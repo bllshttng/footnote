@@ -21,7 +21,11 @@ def _finding(run_id, verdict="fail", dim="structural_validity", tool_fault=False
 
 def test_read_events_tolerant_skips_corrupt(tmp_path):  # AC3-ERR
     p = tmp_path / "events.jsonl"
-    p.write_text('{"type":"a"}\nNOT JSON\n\n{"type":"b"}\n')
+    p.write_text(
+        '{"ts":"2026-09-19T10:00:00Z","source":"test","type":"a","data":{}}\n'
+        "NOT JSON\n\n"
+        '{"ts":"2026-09-19T10:00:01Z","source":"test","type":"b","data":{}}\n'
+    )
     out = engine.read_events_tolerant(p)
     assert [e["type"] for e in out] == ["a", "b"]
 

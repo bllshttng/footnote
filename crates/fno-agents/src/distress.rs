@@ -15,14 +15,35 @@ use crate::loopcheck::{
     try_flag_value,
 };
 
-/// A `<help reason="..." evidence="...">` distress tag parsed from the
-/// stopping message. Deliberately NOT an `Intent` variant: a help tag never
-/// changes the stop decision; it fires a side channel that tells the parent
-/// spawn lineage the session is stuck without stopping it.
+/// Which distress vocabulary produced the row. `help` for the in-session
+/// `<help>` tag, `result_blocked` for a `RESULT: BLOCKED` return-contract
+/// line. Lands on the envelope as `data.kind`; the events `type` stays
+/// `blocked` for both (the v1 protocol enum is additive-only).
+#[derive(Debug, PartialEq)]
+pub(crate) enum DistressKind {
+    Help,
+    ResultBlocked,
+}
+
+impl DistressKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DistressKind::Help => "help",
+            DistressKind::ResultBlocked => "result_blocked",
+        }
+    }
+}
+
+/// A distress parsed from the stopping message: either a
+/// `<help reason="..." evidence="...">` tag or a `RESULT: BLOCKED` return.
+/// Deliberately NOT an `Intent` variant: a distress never changes the stop
+/// decision; it fires a side channel that tells the parent spawn lineage the
+/// session is stuck without stopping it.
 #[derive(Debug, PartialEq)]
 pub(crate) struct HelpDistress {
     reason: String,
     evidence: Option<String>,
+    kind: DistressKind,
 }
 
 /// First `<help ...>` opening tag whose name is exactly `help` (a raw
@@ -44,9 +65,88 @@ pub(crate) fn extract_help_distress(text: &str) -> Option<HelpDistress> {
             return Some(HelpDistress {
                 reason: parse_xml_attr(tag, "reason").unwrap_or_default(),
                 evidence: parse_xml_attr(tag, "evidence"),
+                kind: DistressKind::Help,
             });
         }
         from = start + "<help".len();
+    }
+    None
+}
+
+/// The other half of the same distress vocabulary: a
+/// `RESULT: BLOCKED` return, in either return-contract spelling - the plain
+/// line grammar (`RESULT: BLOCKED`, reason on a following `REASON:` line)
+/// and the preferred JSON object `{"result": "BLOCKED", ...}` in a fenced
+/// block or a `<result>` wrapper, reason from its `summary`. A reason-less
+/// return still parses; the distress itself is the signal.
+pub(crate) fn extract_result_blocked(text: &str) -> Option<HelpDistress> {
+    // The token must end the line or be followed by whitespace, so
+    // RESULT: BLOCKEDX is prose, not a return.
+    let is_blocked_line = |l: &str| -> bool {
+        match l.trim_start().strip_prefix("RESULT: BLOCKED") {
+            Some(rest) => rest.is_empty() || rest.starts_with(char::is_whitespace),
+            None => false,
+        }
+    };
+    for line in text.lines() {
+        if is_blocked_line(line) {
+            let reason = text
+                .lines()
+                .skip_while(|l| !is_blocked_line(l))
+                .skip(1)
+                .find_map(|l| {
+                    l.trim_start()
+                        .strip_prefix("REASON:")
+                        .map(|r| r.trim().to_string())
+                })
+                .unwrap_or_default();
+            return Some(HelpDistress {
+                reason,
+                evidence: None,
+                kind: DistressKind::ResultBlocked,
+            });
+        }
+    }
+    extract_result_blocked_json(text)
+}
+
+/// The JSON twin: scan fenced ```json blocks and `<result>` wrappers for a
+/// `{"result": "BLOCKED", ...}` object. Plain un-fenced `{...}` in prose is
+/// deliberately not scanned: it is not a return-contract shape.
+fn extract_result_blocked_json(text: &str) -> Option<HelpDistress> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        let closer = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed == "<result>" {
+            "</result>"
+        } else {
+            i += 1;
+            continue;
+        };
+        let mut body: Vec<&str> = Vec::new();
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].trim() != closer {
+            body.push(lines[j]);
+            j += 1;
+        }
+        let joined = body.join("\n");
+        if let Ok(v) = serde_json::from_str::<Value>(joined.trim()) {
+            if v.get("result").and_then(Value::as_str) == Some("BLOCKED") {
+                return Some(HelpDistress {
+                    reason: v
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    evidence: None,
+                    kind: DistressKind::ResultBlocked,
+                });
+            }
+        }
+        i = j + 1;
     }
     None
 }
@@ -98,24 +198,27 @@ pub(crate) fn newest_assistant_text_via_reader(
 /// this a session whose newest message still carries the same distress would
 /// re-mail the parent on each fire.
 fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    let Ok(file) = std::fs::File::open(project_events) else {
+    // Committed rows, not journal bytes: the store commit is the write
+    // boundary, so the dedup reads what a reader would see.
+    // Import first: pre-cutover bytes beside the journal are part of the
+    // history the dedup must see, and a read on an absent store is an
+    // honest no.
+    let _ = crate::event_store::import_all(project_events);
+    let Ok(rows) = crate::event_store::query_events(
+        project_events,
+        &crate::event_store::EventQuery {
+            types: vec!["blocked".to_string()],
+            ..Default::default()
+        },
+    ) else {
         return false;
     };
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("blocked")
-                && v.get("run").and_then(|r| r.as_str()) == Some(run)
-                && v.pointer("/data/reason").and_then(|r| r.as_str()) == Some(reason)
-            {
-                return true;
-            }
-        }
-        line.clear();
-    }
-    false
+    rows.iter().any(|r| {
+        serde_json::from_str::<Value>(&r.line).map_or(false, |v| {
+            v.get("run").and_then(|x| x.as_str()) == Some(run)
+                && v.pointer("/data/reason").and_then(|x| x.as_str()) == Some(reason)
+        })
+    })
 }
 
 /// Free-text cap shared with the emit CLI (`_PROTOCOL_DATA_STR_CAP`) and
@@ -146,7 +249,12 @@ pub(crate) fn scan_and_emit(
     let distress_text: Option<String> = last_assistant_message
         .map(str::to_string)
         .or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
-    let Some(distress) = distress_text.as_deref().and_then(extract_help_distress) else {
+    // A help tag wins when a message somehow carries both: it is the more
+    // specific signal and it already has a reason attribute.
+    let Some(distress) = distress_text
+        .as_deref()
+        .and_then(|t| extract_help_distress(t).or_else(|| extract_result_blocked(t)))
+    else {
         return false;
     };
     emit_help_distress_blocked(
@@ -207,7 +315,7 @@ fn append_blocked_event(
     if blocked_distress_already_emitted(project_events, run, &reason) {
         return false;
     }
-    let mut data = serde_json::json!({"reason": reason});
+    let mut data = serde_json::json!({"reason": reason, "kind": distress.kind.as_str()});
     if let Some(ev) = distress.evidence.as_deref() {
         data["evidence"] = serde_json::json!(cap(ev));
     }
@@ -287,7 +395,8 @@ const DISTRESS_SCAN_USAGE: &str = "\
 usage: fno-agents distress-scan --transcript <path> --run <id> [--node <id>]
        [--harness <name>] [--cwd <dir>] [--events <p>] [--global-events <p>]
 
-Reads a transcript for a <help> tag and, on a hit, appends a blocked row -
+Reads a transcript for a <help> tag or a RESULT: BLOCKED return and, on a
+hit, appends a blocked row -
 the pre-manifest counterpart of the read loop_check runs inline. Best-effort
 throughout: always exits 0. Prints 'distress: emitted <reason>' on a write,
 'distress: none' otherwise (no tag, no --run, or a transcript that does not
@@ -348,7 +457,10 @@ pub fn run_distress_scan(args: &[String]) -> i32 {
         return 0;
     }
     let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
-    let Some(distress) = text.as_deref().and_then(extract_help_distress) else {
+    let Some(distress) = text
+        .as_deref()
+        .and_then(|t| extract_help_distress(t).or_else(|| extract_result_blocked(t)))
+    else {
         println!("distress: none");
         return 0;
     };
@@ -389,18 +501,7 @@ pub(crate) fn fno_bin_env_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Mirrors the loopcheck test helper: a shell script on disk, executable.
-    fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        p
-    }
+    use crate::write_exec_stub as write_exec;
 
     #[test]
     fn extract_help_distress_attrs_and_shapes() {
@@ -430,13 +531,14 @@ mod tests {
         let path = tmp.path().join("events.jsonl");
         let mk = |run: &str, reason: &str| {
             serde_json::to_string(&serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z", "source": "test",
                 "type": "blocked", "run": run,
                 "data": {"reason": reason}
             }))
             .unwrap()
                 + "\n"
         };
-        std::fs::write(&path, mk("run-a", "missing dependency")).unwrap();
+        std::fs::write(&path, format!("{}\n", mk("run-a", "missing dependency"))).unwrap();
         // Same run + reason -> already emitted.
         assert!(blocked_distress_already_emitted(
             &path,
@@ -472,6 +574,7 @@ mod tests {
         let d = HelpDistress {
             reason: "missing dependency".to_string(),
             evidence: Some("plan 4.2".to_string()),
+            kind: DistressKind::Help,
         };
         append_blocked_event(
             &project,
@@ -481,8 +584,7 @@ mod tests {
             Some("codex"),
             &d,
         );
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -497,7 +599,7 @@ mod tests {
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(row["data"]["evidence"], "plan 4.2");
         assert_eq!(
-            std::fs::read_to_string(&global).unwrap().trim(),
+            crate::events::committed_journal_text(&global).trim(),
             serde_json::to_string(&row).unwrap(),
             "the global mirror carries the identical row"
         );
@@ -511,7 +613,9 @@ mod tests {
             &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1,
             "identical distress must not append a second row"
         );
@@ -520,12 +624,12 @@ mod tests {
         let d2 = HelpDistress {
             reason: "second wall".to_string(),
             evidence: None,
+            kind: DistressKind::Help,
         };
         assert!(append_blocked_event(
             &project, &global, "run-a", None, None, &d2
         ));
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -545,13 +649,13 @@ mod tests {
         let d = HelpDistress {
             reason: long.clone(),
             evidence: None,
+            kind: DistressKind::Help,
         };
         assert!(append_blocked_event(
             &project, &global, "run-a", None, None, &d
         ));
         let row: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&project)
-                .unwrap()
+            crate::events::committed_journal_text(&project)
                 .lines()
                 .next()
                 .unwrap(),
@@ -566,7 +670,9 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1
         );
     }
@@ -609,7 +715,7 @@ mod tests {
             &distress.unwrap()
         ));
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["type"], serde_json::json!("blocked"));
         assert_eq!(
             row["data"]["reason"],
@@ -688,7 +794,7 @@ mod tests {
 
         assert!(wrote);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["reason"], "worktree-init-blocked");
         assert_eq!(row["data"]["evidence"], "Operation not permitted");
         assert_eq!(row["node"], "x-bbbb");
@@ -788,8 +894,7 @@ print(rec["payload"]["content"][0]["text"], end="")
 
         assert_eq!(code, 0);
         assert_eq!(code2, 0);
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -807,5 +912,228 @@ print(rec["payload"]["content"][0]["text"], end="")
             "got: {:?}",
             rows[0]["data"]["evidence"]
         );
+    }
+
+    #[test]
+    fn extract_result_blocked_line_grammar_and_json_forms() {
+        // AC3-HP shape: the plain line grammar with a REASON: line.
+        let d = extract_result_blocked("RESULT: BLOCKED\nREASON: missing dependency")
+            .expect("line grammar parses");
+        assert_eq!(d.kind, DistressKind::ResultBlocked);
+        assert_eq!(d.reason, "missing dependency");
+        assert_eq!(d.evidence, None);
+        // A longer token sharing the prefix is prose, not a return.
+        assert_eq!(extract_result_blocked("RESULT: BLOCKEDX"), None);
+        // An indented REASON line still supplies the reason.
+        let di = extract_result_blocked("RESULT: BLOCKED\n  REASON: dep missing")
+            .expect("indented REASON parses");
+        assert_eq!(di.reason, "dep missing");
+        // The preferred JSON object, fenced. The fence opens its own line,
+        // the contract shape: prose glued to the opener is not a fence.
+        let fenced = concat!(
+            "work so far committed.\n",
+            "```json\n",
+            r#"{"result": "BLOCKED", "task": "2.1", "summary": "dep missing"}"#,
+            "\n```\n"
+        );
+        let dj = extract_result_blocked(fenced).expect("fenced JSON parses");
+        assert_eq!(dj.kind, DistressKind::ResultBlocked);
+        assert_eq!(dj.reason, "dep missing");
+        // ...and in a <result> wrapper.
+        let wrapped = concat!(
+            "<result>\n",
+            r#"{"result": "BLOCKED", "task": "2.1", "summary": "no claim held"}"#,
+            "\n</result>\n"
+        );
+        let dw = extract_result_blocked(wrapped).expect("wrapped JSON parses");
+        assert_eq!(dw.kind, DistressKind::ResultBlocked);
+        assert_eq!(dw.reason, "no claim held");
+        // A JSON object that is NOT a BLOCKED return is not a distress.
+        let success = concat!(
+            "```json\n",
+            r#"{"result": "SUCCESS", "task": "2.1", "summary": "fine"}"#,
+            "\n```\n"
+        );
+        assert_eq!(extract_result_blocked(success), None);
+        // Absence stays absence.
+        assert_eq!(
+            extract_result_blocked("all clear, nothing stuck here"),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_and_emit_covers_the_result_blocked_path() {
+        // AC3-HP: a stopping message carrying RESULT: BLOCKED with a REASON
+        // appends one blocked row with data.kind result_blocked.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let transcript = tmp.path().join("t.jsonl");
+        let wrote = scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "run-a",
+            None,
+            None,
+            &transcript,
+            Some("RESULT: BLOCKED\nREASON: probe reason"),
+        );
+        assert!(wrote);
+        let row: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
+        assert_eq!(row["type"], "blocked");
+        assert_eq!(row["data"]["kind"], "result_blocked");
+        assert_eq!(row["data"]["reason"], "probe reason");
+        // AC3-EDGE: the JSON return form appends the same row shape.
+        let tmp2 = tempfile::tempdir().unwrap();
+        let project2 = tmp2.path().join("events.jsonl");
+        let global2 = tmp2.path().join("global.jsonl");
+        let transcript2 = tmp2.path().join("t2.jsonl");
+        let json_msg = concat!(
+            "```json\n",
+            r#"{"result": "BLOCKED", "task": "2.1", "summary": "gate refused"}"#,
+            "\n```"
+        );
+        let wrote2 = scan_and_emit(
+            &project2,
+            &global2,
+            tmp2.path(),
+            "run-b",
+            None,
+            None,
+            &transcript2,
+            Some(json_msg),
+        );
+        assert!(wrote2);
+        let row2: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project2)).unwrap();
+        assert_eq!(row2["data"]["kind"], "result_blocked");
+        assert_eq!(row2["data"]["reason"], "gate refused");
+        // AC3-EDGE: a second stop on the same message appends nothing - the
+        // existing (run, capped reason) dedup covers the new path.
+        assert!(!scan_and_emit(
+            &project2,
+            &global2,
+            tmp2.path(),
+            "run-b",
+            None,
+            None,
+            &transcript2,
+            Some(json_msg)
+        ));
+        assert_eq!(
+            crate::events::committed_journal_text(&project2)
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scan_and_emit_help_tag_wins_over_result_blocked() {
+        // AC3-ERR: a message carrying BOTH appends exactly one row, kind help.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let transcript = tmp.path().join("t.jsonl");
+        let both = concat!(
+            r#"<help reason="missing dependency">plan 4.2</help>"#,
+            "\nRESULT: BLOCKED\nREASON: also blocked"
+        );
+        let wrote = scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "run-a",
+            None,
+            None,
+            &transcript,
+            Some(both),
+        );
+        assert!(wrote);
+        let row: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
+        assert_eq!(row["data"]["kind"], "help");
+        assert_eq!(row["data"]["reason"], "missing dependency");
+        assert_eq!(
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
+            1,
+            "exactly one row when both vocabularies appear"
+        );
+    }
+
+    #[test]
+    fn run_distress_scan_covers_the_result_blocked_path() {
+        // The CLI verb's own parse (the shape the pre-deploy done_probe
+        // exercises): the transcript reader supplies a RESULT: BLOCKED
+        // return and the scan emits one result_blocked row.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("rollout-result-blocked.jsonl");
+        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
+        let stub = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf 'RESULT: BLOCKED\\nREASON: probe reason'\n",
+        );
+        std::env::set_var(var, stub.to_str().unwrap());
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let args: Vec<String> = [
+            "distress-scan",
+            "--transcript",
+            transcript.to_str().unwrap(),
+            "--run",
+            "rb-run",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--events",
+            project.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = run_distress_scan(&args);
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        assert_eq!(code, 0);
+        let row: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
+        assert_eq!(row["type"], "blocked");
+        assert_eq!(row["data"]["kind"], "result_blocked");
+        assert_eq!(row["data"]["reason"], "probe reason");
+    }
+
+    #[test]
+    fn help_rows_also_carry_data_kind() {
+        // data.kind is additive on the EXISTING help path too: every blocked
+        // row names which vocabulary produced it.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let transcript = tmp.path().join("t.jsonl");
+        assert!(scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "run-a",
+            None,
+            None,
+            &transcript,
+            Some(r#"<help reason="stuck">ev</help>"#)
+        ));
+        let row: serde_json::Value =
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
+        assert_eq!(row["data"]["kind"], "help");
     }
 }

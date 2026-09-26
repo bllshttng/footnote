@@ -30,8 +30,13 @@
 //! - `pane` verbs (the list lives in [`PANE_VERBS`], named once): the
 //!   per-reply shapes in [`render_reply`].
 
+mod completion;
+mod harness_command;
+mod pane_submit;
 mod restore;
 
+pub use self::harness_command::command;
+use self::pane_submit::{pane_text, send_pane_bytes, submit_pane};
 use self::restore::workspace_restore;
 
 use std::ffi::OsString;
@@ -60,12 +65,17 @@ mod server_axis;
 
 pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
+mod block_args;
+pub mod kill_policy;
 mod pane_args;
+mod pane_keeper_list;
+use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
-    PANE_SEND_RAW_HELP, PANE_VERBS,
+    PANE_SEND_RAW_HELP,
 };
+pub(crate) use pane_keeper_list::pane_keeper_list;
 pub use server_axis::{
     env_server, note_server_flag, resolve_session, LEGACY_SERVER_ENV, SERVER_ENV,
 };
@@ -202,9 +212,9 @@ fi
 /// (Warp/iTerm) works with zero setup (AC4-EDGE) - the scanner does not care
 /// who emits. An unsupported / missing shell is a one-line error (AC4-ERR).
 pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
-    let snippet = match shell {
-        Some("zsh") => ZSH_SHELL_INIT,
-        Some("bash") => BASH_SHELL_INIT,
+    let (snippet, completion) = match shell {
+        Some("zsh") => (ZSH_SHELL_INIT, Some(self::completion::zsh_script())),
+        Some("bash") => (BASH_SHELL_INIT, Some(self::completion::bash_script())),
         Some(other) => {
             eprintln!("fno mux shell-init: unsupported shell {other:?}; supported: zsh, bash");
             return EXIT_USAGE;
@@ -214,15 +224,22 @@ pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
             return EXIT_USAGE;
         }
     };
-    // --json wraps the snippet in the stable envelope (a script reads `.snippet`);
-    // the default prints the raw snippet for `eval "$(fno mux shell-init zsh)"`.
+    let completion = completion.unwrap_or_default();
+    // --json keeps the envelope additive: the snippet is byte-identical, and
+    // the completion generated from the typed tree rides its own field. The
+    // default prints both for `eval "$(fno mux shell-init zsh)"`.
     if json {
         println!(
             "{}",
-            serde_json::json!({ "shell": shell.unwrap_or(""), "snippet": snippet })
+            serde_json::json!({
+                "shell": shell.unwrap_or(""),
+                "snippet": snippet,
+                "completion": completion,
+            })
         );
     } else {
         print!("{snippet}");
+        print!("{completion}");
     }
     EXIT_OK
 }
@@ -512,8 +529,7 @@ fn fold_pick_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
 /// (terminals emit an arrow as one write) and low-stakes pre-attach.
 fn pick_keys_from_read(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
     let mut keys = fold_pick_keys(esc, bytes);
-    if esc.as_slice() == [0x1b] {
-        esc.clear();
+    if crate::keys::take_lone_esc(esc) {
         keys.push(PickKey::Esc);
     }
     keys
@@ -785,56 +801,6 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(3);
 /// Unrecoverable. SIGKILL is immediate; this only bounds a slow reap.
 const SIGKILL_GRACE: Duration = Duration::from_secs(1);
 
-/// `fno mux kill-server [<name>]`: shut one session down. A live server Byes
-/// its clients, kills every pane child, and exits (its SocketGuard unlinks
-/// the socket); a stale socket is unlinked here with a message (exit 0); no
-/// socket at all is "no server" (exit 1). A wedged holder - one that never
-/// accepted, or accepted and never answered - is escalated through SIGTERM
-/// and SIGKILL to unlink: a recovery verb must not depend on the
-/// subsystem it recovers. Every run prints which rung ended it, and an
-/// unrecoverable state names the next action instead of leaving a dead `&&`
-/// chain with no hint.
-pub fn kill_server(session: &str, json: bool) -> i32 {
-    let sock = match proto::socket_path(session) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("fno: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    if !sock.exists() {
-        eprintln!("fno: no server for session {session:?}");
-        return EXIT_ERROR;
-    }
-    let outcome = kill_server_inner(session, &sock);
-    match outcome.path {
-        KillPath::Unrecoverable => eprintln!("{}", outcome.note),
-        _ => {
-            // On success `--json` prints `{session, killed, note, path}`;
-            // errors stay on stderr (mirrors the pane verbs' json/error split).
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "session": session,
-                        "killed": true,
-                        "note": outcome.note,
-                        "path": outcome.path.json_tag(),
-                    })
-                );
-            } else {
-                println!("{}", outcome.note);
-            }
-        }
-    }
-    outcome.exit_code()
-}
-
-/// The work of `kill-server`, returning the rung taken instead of printing.
-/// Both dead ends of the old verb - a connect that timed out, and a graceful
-/// request the connected server never answered - enter the same escalation
-/// ladder instead of refusing, because that is exactly the state the verb
-/// exists for.
 fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
     let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
@@ -1568,21 +1534,14 @@ pub fn stats(json: bool) -> i32 {
 /// remaining user-adjacent `squad` spellings, the key in the `--json`
 /// placement receipt and `~/.fno/squads.json`, ride the next change that
 /// bumps `PROTO_VERSION` or migrates the store for a real reason.
-pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
-    // main.rs routes here only with a token after the family verb, so a bare
-    // `mux workspace` is the global usage arm; one failure shape here, an
-    // unknown verb.
-    let sub = args
-        .first()
-        .map(|a| a.to_string_lossy())
-        .unwrap_or_default();
-    match sub.as_ref() {
-        "prune" => squad_prune(&args[1..]),
-        "restore" => workspace_restore(&args[1..], env_session),
-        _ => {
-            eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune|restore)");
-            EXIT_USAGE
-        }
+pub fn workspace(
+    op: crate::cli_args::WorkspaceOp,
+    args: &[OsString],
+    env_session: Option<&str>,
+) -> i32 {
+    match op {
+        crate::cli_args::WorkspaceOp::Prune(_) => squad_prune(args),
+        crate::cli_args::WorkspaceOp::Restore(_) => workspace_restore(args, env_session),
     }
 }
 
@@ -2311,6 +2270,10 @@ pub enum PaneCmd {
     },
     Kill {
         pane: u64,
+        /// `--hand-off-to <socket>`: release the pane to the thread lane
+        /// instead of killing it. The keeper socket is renamed there and
+        /// the child keeps running.
+        hand_off_to: Option<String>,
     },
     Claim {
         pane: u64,
@@ -2400,8 +2363,9 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// `fno mux pane <verb> ...`: parse, resolve the session, run the verb over a
 /// one-shot v4 control connection, print machine-readable output, return the
 /// exit code. `env_session` is `FNO_SESSION` (set in every pane).
-pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let parsed = match parse_pane_args(args) {
+pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
+    let args = op.tail();
+    let parsed = match parse_pane_args(&op, &args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fno mux pane: {e}");
@@ -2454,153 +2418,6 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
         format!("--stale-after needs a duration like 24h, 90m or 3600, got {value:?}")
     })?;
     Ok(std::time::Duration::from_secs(n.saturating_mul(unit)))
-}
-
-/// `fno mux pane keeper list`: one row per keeper socket under the panes
-/// dir, probed DIRECTLY (connect + Identify, short timeout). Answers "did
-/// the keeper survive" with the keeper's own word - its pid, its child's
-/// pid, its cwd and argv - never with a process count. A socket nobody
-/// lives behind is listed with the reason, because a silent zero is the
-/// receipt-can-lie shape. Read-only: this verb never unlinks anything (the
-/// server's readopt sweep owns that).
-pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Duration>) -> i32 {
-    let dir = crate::pty::keeper_dir();
-    let mut rows: Vec<serde_json::Value> = Vec::new();
-    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "sock").unwrap_or(false))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    for path in names {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let (session, pane_key) = match stem.rsplit_once('-') {
-            Some((s, key)) if key.chars().all(|c| c.is_ascii_digit()) => {
-                (s.to_string(), key.to_string())
-            }
-            _ => (stem.to_string(), String::new()),
-        };
-        let mut row = serde_json::json!({
-            "socket": path.display().to_string(),
-            "session": session,
-            "pane_key": pane_key,
-        });
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Short timeouts everywhere: a wedged keeper must not wedge the read.
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Err(e) => {
-                row["stale"] = serde_json::json!(format!("no listener: {e}"));
-            }
-            Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
-                let identified = (|| -> Option<serde_json::Value> {
-                    use crate::pty::{
-                        keeper_decode, keeper_frame_identify, KeeperRead, KEEPER_TAG_IDENTIFY_REPLY,
-                    };
-                    use std::io::{Read as _, Write as _};
-                    stream.write_all(&keeper_frame_identify()).ok()?;
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut read_buf = [0u8; 4096];
-                    loop {
-                        loop {
-                            match keeper_decode(&buf) {
-                                KeeperRead::NeedMore => break,
-                                KeeperRead::Frame(tag, payload, used) => {
-                                    buf.drain(..used);
-                                    if tag == KEEPER_TAG_IDENTIFY_REPLY {
-                                        return serde_json::from_slice(&payload).ok();
-                                    }
-                                }
-                            }
-                        }
-                        match stream.read(&mut read_buf) {
-                            Ok(0) | Err(_) => return None,
-                            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
-                        }
-                    }
-                })();
-                match identified {
-                    None => {
-                        row["stale"] = serde_json::json!("no identify answer inside the timeout");
-                    }
-                    Some(reply) => {
-                        for field in ["v", "keeper_pid", "child_pid", "cwd", "argv", "started_at"] {
-                            row[field] =
-                                reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
-                        }
-                        let child_pid = reply.get("child_pid").and_then(serde_json::Value::as_u64);
-                        if let Some(pid) = child_pid {
-                            // SAFETY: signal 0 is the existence probe.
-                            let hit = unsafe { libc::kill(pid as libc::pid_t, 0) };
-                            if hit != 0 {
-                                row["stale"] =
-                                    serde_json::json!(format!("child pid {pid} is gone"));
-                            }
-                        }
-                        let age = reply
-                            .get("started_at")
-                            .and_then(serde_json::Value::as_u64)
-                            .map(|t| now.saturating_sub(t));
-                        if let (Some(age), Some(cap)) = (age, stale_after) {
-                            if age > cap.as_secs() {
-                                row["stale"] = serde_json::json!(format!(
-                                    "aged {age}s (> {}s)",
-                                    cap.as_secs()
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        rows.push(row);
-    }
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-        );
-    } else if rows.is_empty() {
-        println!("no keeper panes");
-    } else {
-        for row in &rows {
-            let stale = row.get("stale").and_then(serde_json::Value::as_str);
-            let desc = match stale {
-                Some(reason) => format!(" (STALE: {reason})"),
-                None => String::new(),
-            };
-            println!(
-                "session {} pane {} keeper {} child {} cwd {}{}",
-                row.get("session")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                row.get("pane_key")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                row.get("keeper_pid")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                row.get("child_pid")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                row.get("cwd")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                desc,
-            );
-        }
-    }
-    EXIT_OK
 }
 
 /// Resolve `--session`/env, connect to the EXISTING server, run one control
@@ -2672,15 +2489,9 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
 }
 
 /// `fno mux tab ls|create|rename|join|close ...`.
-pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let verb = match args.first().and_then(|a| a.to_str()) {
-        Some(v) => v.to_string(),
-        None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|move|close");
-            return EXIT_USAGE;
-        }
-    };
-    // Flag pass over the tokens after the verb.
+pub fn tab(op: crate::cli_args::TabOp, args: &[OsString], env_session: Option<&str>) -> i32 {
+    // Flag pass over the tokens after the operation word (the typed tree
+    // guarantees one was present and names this op).
     let mut squad = None;
     let mut name = None;
     let mut tab_sel = None;
@@ -2700,7 +2511,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     let session = common.server.or(common.session);
     let json = common.json;
-    let mut i = 1;
+    let mut i = 0;
     while i < tab_args.len() {
         let tok = tab_args[i].as_str();
         let res = (|| -> Result<(), String> {
@@ -2772,15 +2583,15 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         i += 1;
     }
 
-    let verb = match verb.as_str() {
-        "ls" => ControlVerb::TabLs {
+    let verb = match op {
+        crate::cli_args::TabOp::Ls(_) => ControlVerb::TabLs {
             squad: squad_target(squad),
         },
-        "create" => ControlVerb::TabCreate {
+        crate::cli_args::TabOp::Create(_) => ControlVerb::TabCreate {
             squad: squad_target(squad),
             name: name.filter(|n| !n.trim().is_empty()),
         },
-        "rename" => {
+        crate::cli_args::TabOp::Rename(_) => {
             let (Some(tab), Some(name)) = (tab_sel, name) else {
                 eprintln!("fno mux tab rename: needs --tab <sel> and --name <s>");
                 return EXIT_USAGE;
@@ -2791,7 +2602,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 name,
             }
         }
-        "join" => {
+        crate::cli_args::TabOp::Join(_) => {
             let (Some(src_tab), Some(anchor_pane), Some(direction)) = (src, at, dir) else {
                 eprintln!("fno mux tab join: needs --src <sel> --at <pane> --dir <dir>");
                 return EXIT_USAGE;
@@ -2802,7 +2613,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 direction,
             }
         }
-        "close" => {
+        crate::cli_args::TabOp::Close(_) => {
             let Some(tab) = tab_sel else {
                 eprintln!("fno mux tab close: needs --tab <sel> (bulk close: {PRUNE_REMEDY})");
                 return EXIT_USAGE;
@@ -2816,7 +2627,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         // The direct-destination move: `--to` names the POSITION (the
         // same 1-based ordinal the tab bar shows), the server computes the
         // delta and runs the trunk the interactive reorder runs.
-        "move" => {
+        crate::cli_args::TabOp::Move(_) => {
             let (Some(tab), Some(to)) = (tab_sel, to) else {
                 eprintln!("fno mux tab move: needs --tab <sel> and --to <ordinal>");
                 return EXIT_USAGE;
@@ -2826,10 +2637,6 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 tab,
                 to,
             }
-        }
-        other => {
-            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|move|close)");
-            return EXIT_USAGE;
         }
     };
     run_on_existing_server(session.as_deref(), env_session, json, verb)
@@ -2884,8 +2691,8 @@ fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
     })
 }
 
-/// `fno mux layout get|apply ...` (get:; apply:).
-pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
+/// `fno mux layout get|apply ...`.
+pub fn layout(op: crate::cli_args::LayoutOp, args: &[OsString], env_session: Option<&str>) -> i32 {
     let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
@@ -2895,21 +2702,21 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     let session = common.server.or(common.session);
     let json = common.json;
-    if rest.first().map(String::as_str) == Some("apply") {
-        return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
-    }
-    if rest.first().map(String::as_str) == Some("graft") {
-        return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..]);
-    }
-    // Otherwise `get` (a bare `layout` also means get). The common flags
-    // already left in `take`, so the loop below sees only get's own flags.
-    let flags = match rest.first().map(String::as_str) {
-        Some("get") | None => rest,
-        Some(other) => {
-            eprintln!("fno mux layout: unknown verb {other} (get|apply|graft)");
-            return EXIT_USAGE;
+    // The operation word rides the tail (a common flag may sit before it);
+    // the typed tree already resolved it, so route on the op, not on
+    // rest.first().
+    match op {
+        crate::cli_args::LayoutOp::Apply(_) => {
+            return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
         }
-    };
+        crate::cli_args::LayoutOp::Graft(_) => {
+            return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..])
+        }
+        // The common flags already left in `take`, so the loop below sees
+        // only get's own flags.
+        crate::cli_args::LayoutOp::Get(_) => {}
+    }
+    let flags = rest;
     let mut squad = None;
     let mut tab_sel = None;
     let mut i = 0;
@@ -4294,7 +4101,9 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
             },
             Duration::from_millis(timeout_ms) + Duration::from_secs(2),
         ),
-        PaneCmd::Kill { pane } => (ControlVerb::PaneKill { pane }, CONTROL_TIMEOUT),
+        PaneCmd::Kill { pane, hand_off_to } => {
+            (ControlVerb::PaneKill { pane, hand_off_to }, CONTROL_TIMEOUT)
+        }
         PaneCmd::Claim { pane, pid } => (
             ControlVerb::PaneClaim {
                 pane,
@@ -5009,6 +4818,17 @@ fn render_reply(
             }
             EXIT_OK
         }
+        // A one-line receipt. `pane kill --hand-off-to` answers this way:
+        // the pane is released, the keeper is at its new socket, and the
+        // child is still running, which no structured reply describes.
+        ServerMsg::Notice { text } => {
+            if json {
+                println!("{}", serde_json::json!({"notice": text}));
+            } else {
+                println!("{text}");
+            }
+            EXIT_OK
+        }
         // The server only ever answers a control connection with the replies
         // above; anything else is a protocol violation.
         other => {
@@ -5021,51 +4841,6 @@ fn render_reply(
 // ---------------------------------------------------------------------------
 // `fno mux block pipe` - cross-pane block piping porcelain
 // ---------------------------------------------------------------------------
-
-/// A parsed `block pipe` invocation. Pure-parse struct, mirrors [`ParsedPane`].
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockPipe {
-    session: Option<String>,
-    json: bool,
-    from: u64,
-    to: u64,
-    block: BlockSel,
-    force: bool,
-}
-
-/// Parse the tokens after `mux block` into a [`ParsedBlockPipe`]. Pure, so the
-/// grammar is unit-testable without a socket. `pipe` is the only block verb.
-fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
-    let verb = args
-        .first()
-        .and_then(|a| a.to_str())
-        .ok_or_else(|| "block needs a verb: pipe | annotate".to_string())?;
-    if verb != "pipe" {
-        return Err(format!("unknown block verb: {verb} (pipe | annotate)"));
-    }
-    let a = BlockPipeArgs::try_parse_from(&args[1..])
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block pipe", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    Ok(ParsedBlockPipe {
-        session: a.server.or(a.session),
-        json: a.json,
-        from: parse_u64(
-            a.from.as_deref().ok_or("block pipe needs --from <pane>")?,
-            "--from",
-        )?,
-        to: parse_u64(
-            a.to.as_deref().ok_or("block pipe needs --to <pane>")?,
-            "--to",
-        )?,
-        block: match &a.block {
-            Some(b) => parse_block_sel(b)?,
-            None => BlockSel::Last,
-        },
-        force: a.force,
-    })
-}
 
 /// Data-integrity gate on the source block's metadata: an open (still
 /// running) or byte-cap-truncated block must never pipe - partial text is
@@ -5298,117 +5073,6 @@ fn wait_with_deadline(
     Ok((exit, rendered, diagnostics))
 }
 
-fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {
-    !after_cr.trim().is_empty() && after_cr != before_cr
-}
-
-fn pane_text(sock: &Path, session: &str, pane: u64) -> Result<String, ControlError> {
-    match control_roundtrip(
-        sock,
-        session,
-        ControlVerb::PaneRead {
-            pane,
-            lines: None,
-            block: None,
-        },
-    )? {
-        ServerMsg::PaneText { text, .. } => Ok(text),
-        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
-        other => Err(ControlError::Fatal(format!(
-            "unexpected pane read reply while confirming submit: {other:?}"
-        ))),
-    }
-}
-
-fn send_pane_bytes(
-    sock: &Path,
-    session: &str,
-    pane: u64,
-    bytes: Vec<u8>,
-    guarded: bool,
-    expected_identity: Option<&str>,
-) -> Result<(), ControlError> {
-    match control_roundtrip(
-        sock,
-        session,
-        ControlVerb::PaneSend {
-            pane,
-            bytes,
-            guarded,
-            expected_identity: expected_identity.map(str::to_string),
-        },
-    )? {
-        ServerMsg::Ok => Ok(()),
-        ServerMsg::Err { code, msg }
-            if code == err_code::TARGET_IDENTITY_MISMATCH || code == err_code::TARGET_DND =>
-        {
-            Err(ControlError::FatalCode { code, msg })
-        }
-        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
-        other => Err(ControlError::Fatal(format!(
-            "unexpected pane send reply while submitting: {other:?}"
-        ))),
-    }
-}
-
-fn submit_pane(
-    sock: &Path,
-    session: &str,
-    pane: u64,
-    bytes: Vec<u8>,
-    guarded: bool,
-    expected_identity: Option<&str>,
-    json: bool,
-) -> i32 {
-    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity) {
-        eprintln!("fno mux pane: {e}");
-        return match e {
-            ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
-            ControlError::Fatal(_) => EXIT_ERROR,
-            ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
-                EXIT_TARGET_IDENTITY_MISMATCH
-            }
-            ControlError::FatalCode { code, .. } if code == err_code::TARGET_DND => EXIT_TARGET_DND,
-            ControlError::FatalCode { .. } => EXIT_ERROR,
-        };
-    }
-    std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
-    let baseline = pane_text(sock, session, pane).ok();
-    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity) {
-        eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
-        if let ControlError::FatalCode { code, .. } = e {
-            if code == err_code::TARGET_IDENTITY_MISMATCH {
-                return EXIT_TARGET_IDENTITY_MISMATCH;
-            }
-            if code == err_code::TARGET_DND {
-                return EXIT_TARGET_DND;
-            }
-        }
-        return EXIT_SUBMIT_UNCONFIRMED;
-    }
-    for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
-        if let (Some(before), Ok(after)) = (baseline.as_deref(), pane_text(sock, session, pane)) {
-            if positive_post_submit_marker(before, &after) {
-                // Every failure arm prints, so silence was the ONLY quiet
-                // outcome: a reader with the "no --submit prints nothing"
-                // contract read a silent success as a non-submit and re-sent.
-                // One positive word on stdout, the channel WaitDone reports
-                // its outcome word on.
-                if !json {
-                    println!("submitted");
-                }
-                return render_reply(ServerMsg::Ok, json, false, None);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(SUBMIT_CONFIRM_INTERVAL_MS));
-        if (attempt + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity);
-        }
-    }
-    eprintln!("fno mux pane: text delivered, submission unconfirmed");
-    EXIT_SUBMIT_UNCONFIRMED
-}
-
 /// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
 /// [--force]`: read a COMPLETED block from the source pane and land its text
 /// in the target pane's input. Porcelain over `pane read --block` + `pane
@@ -5567,60 +5231,9 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
 /// cap only bounds how much of a large completed block rides into the event.
 const ANNOTATE_EXCERPT_CAP: usize = 2048;
 
-/// A parsed `block annotate` invocation. Pure-parse struct, mirrors
-/// [`ParsedBlockPipe`]. `node` carries the backlog node the finding is scoped
-/// to (the caller supplies the pane's server-tracked `FNO_NODE`, surfaced to
-/// the mux client as `Layout::focus_node`); the porcelain never guesses it.
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockAnnotate {
-    session: Option<String>,
-    from: u64,
-    block: BlockSel,
-    node: String,
-    message: String,
-}
-
-/// Parse the tokens after `mux block annotate` into a [`ParsedBlockAnnotate`].
-/// Pure, so the grammar is unit-testable without a socket. `--node` and `-m`
-/// are required; a missing `--node` is the "specify the node" refusal (a
-/// non-agent pane has no provenance to resolve, so the caller must name it).
-fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String> {
-    // args[0] is the "annotate" verb (block() already routed on it).
-    let a = BlockAnnotateArgs::try_parse_from(&args[1..])
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block annotate", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    let session = a.server.or(a.session);
-    let from = a
-        .from
-        .as_deref()
-        .map(|v| parse_u64(v, "--from"))
-        .transpose()?;
-    let block = match &a.block {
-        Some(b) => parse_block_sel(b)?,
-        None => BlockSel::Last,
-    };
-    let node = a.node;
-    let message = a.message.ok_or("block annotate needs -m <text>")?;
-    if message.trim().is_empty() {
-        return Err("block annotate: --message is empty".to_string());
-    }
-    Ok(ParsedBlockAnnotate {
-        session,
-        from: from.ok_or("block annotate needs --from <pane>")?,
-        block,
-        node: node.ok_or(
-            "block annotate needs --node <id> (a pane's node cannot be guessed; \
-             pass the node whose work this pane holds)",
-        )?,
-        message,
-    })
-}
-
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
-/// as an operator review finding against `--node` via `fno backlog annotate add`.
+/// as an operator review finding against `--node` via `fno backlog note <node> --blocking`.
 /// Unlike `block pipe` there is NO target-idle guard (nothing enters a
 /// recipient PTY - delivery is a mail inject the daemon queues); it reuses the
 /// same typed-block gate (an open/truncated/markerless block refuses) and caps
@@ -5692,38 +5305,27 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    review) and there is nothing to clean up.
     let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
 
-    // 2b. Resolve the --from pane's cwd so `fno backlog annotate add` records the finding
-    //     into THAT worktree's .fno/events.jsonl - the one loop-check reads for
-    //     the node - not the caller's cwd (codex P1: a mismatched cwd lands the
-    //     durable finding in the wrong project and never gates). Best-effort: on
-    //     a PaneLs miss inherit the caller cwd (the mail inject still lands).
-    let pane_cwd = pane_cwd_via_ls(&sock, &session, parsed.from);
-
-    // 3. Shell the Python core (`fno backlog annotate add`) via this binary's own `fno`
-    //    entrypoint, so the finding recording + claim-holder delivery ladder
-    //    lives in one place. The
-    //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
+    // 3. Shell the note verb (`fno backlog note <node> --blocking`) via this
+    //    binary's own `fno` entrypoint, so the finding recording + claim-holder
+    //    delivery ladder lives in one place. The excerpt rides stdin
+    //    (`--block-excerpt-file -`), never a temp file. The findings store is
+    //    not cwd-bound, so the caller's cwd is fine.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
     let mut cmd = crate::process_admission::std_command(&fno);
     cmd.args([
         OsString::from("backlog"),
-        OsString::from("annotate"),
-        OsString::from("add"),
-        OsString::from("--node"),
+        OsString::from("note"),
         OsString::from(&parsed.node),
-        OsString::from("--message"),
+        OsString::from("--blocking"),
         OsString::from(&parsed.message),
         OsString::from("--block-excerpt-file"),
         OsString::from("-"),
     ])
     .stdin(std::process::Stdio::piped());
-    if let Some(cwd) = pane_cwd {
-        cmd.current_dir(cwd);
-    }
     let mut child = match crate::process_admission::std_spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             return EXIT_ERROR;
         }
     };
@@ -5736,23 +5338,9 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     match child.wait() {
         Ok(s) => s.code().unwrap_or(EXIT_ERROR),
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog note --blocking`: {e}");
             EXIT_ERROR
         }
-    }
-}
-
-/// Resolve `pane`'s cwd via a `PaneLs` round-trip. Returns `None` on any miss
-/// (unreachable server, pane absent, empty cwd) so the caller degrades to the
-/// inherited cwd rather than failing the annotation outright.
-fn pane_cwd_via_ls(sock: &Path, session: &str, pane: u64) -> Option<String> {
-    match control_roundtrip(sock, session, ControlVerb::PaneLs) {
-        Ok(ServerMsg::PaneList { panes }) => panes
-            .into_iter()
-            .find(|p| p.pane_id == pane)
-            .map(|p| p.cwd)
-            .filter(|c| !c.is_empty()),
-        _ => None,
     }
 }
 
@@ -5773,25 +5361,19 @@ fn cap_excerpt(text: &str, cap: usize) -> String {
 /// `fno mux block <verb> ...`: route the block verb family. `pipe`
 /// pipes a completed block into another pane's input; `annotate`
 /// records it as an operator review finding.
-pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
-    match args.first().and_then(|a| a.to_str()) {
-        Some("pipe") => block_pipe(args, env_session),
-        Some("annotate") => block_annotate(args, env_session),
-        Some(v) => {
-            eprintln!("fno mux block: unknown block verb: {v} (pipe | annotate)");
-            EXIT_USAGE
-        }
-        None => {
-            eprintln!("fno mux block: block needs a verb: pipe | annotate");
-            EXIT_USAGE
-        }
+pub fn block(op: crate::cli_args::BlockOp, args: &[OsString], env_session: Option<&str>) -> i32 {
+    match op {
+        crate::cli_args::BlockOp::Pipe(_) => block_pipe(args, env_session),
+        crate::cli_args::BlockOp::Annotate(_) => block_annotate(args, env_session),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::pane_submit::positive_post_submit_marker;
     use super::*;
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
+    use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};
 
     // The paneless route-hint test lives in its own file; the parent is
     // shrink-only under the file-budget gate.
@@ -5834,8 +5416,28 @@ mod tests {
     mod server_axis_flag_tests;
 
     fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
-        let args: Vec<OsString> = tokens.iter().map(OsString::from).collect();
-        parse_pane_args(&args)
+        let op = op_of(tokens[0]);
+        let args: Vec<OsString> = tokens[1..].iter().map(OsString::from).collect();
+        parse_pane_args(&op, &args)
+    }
+
+    fn op_of(word: &str) -> crate::cli_args::PaneOp {
+        use crate::cli_args::{MuxTail, PaneOp};
+        let t = || MuxTail { tail: Vec::new() };
+        match word {
+            "ls" => PaneOp::Ls(t()),
+            "read" => PaneOp::Read(t()),
+            "run" => PaneOp::Run(t()),
+            "send" => PaneOp::Send(t()),
+            "wait" => PaneOp::Wait(t()),
+            "kill" => PaneOp::Kill(t()),
+            "claim" => PaneOp::Claim(t()),
+            "release" => PaneOp::Release(t()),
+            "split" => PaneOp::Split(t()),
+            "break" => PaneOp::Break(t()),
+            "focus" => PaneOp::Focus(t()),
+            _ => panic!("no test op mapping for {word}"),
+        }
     }
 
     #[test]
@@ -5844,21 +5446,39 @@ mod tests {
         // parser must accept its own instrument's remedy.
         let parsed = pane_args(&["kill", "main:76"]).expect("selector must parse");
         assert_eq!(parsed.session.as_deref(), Some("main"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_explicit_session_flag_beats_the_selector_session() {
         let parsed = pane_args(&["kill", "--session", "other", "main:76"]).expect("must parse");
         assert_eq!(parsed.session.as_deref(), Some("other"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_bare_id_still_parses_with_no_session() {
         let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
         assert_eq!(parsed.session, None);
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
@@ -5895,7 +5515,9 @@ mod tests {
 
     #[test]
     fn pane_help_names_the_two_pane_reference_forms() {
-        let help = pane_args(&["--help"]).unwrap_err();
+        // The verb-position help request renders the pane group's help now
+        // (clap); its after_help carries the pane reference line.
+        let help = crate::cli_args::pane_group_help();
         assert!(help.contains("<pane-id>"), "{help}");
         assert!(help.contains("<session>:<pane-id>"), "{help}");
         assert!(help.contains("--session overrides"), "{help}");
@@ -5904,10 +5526,11 @@ mod tests {
     #[test]
     fn pane_run_help_documents_the_worker_flag() {
         // the flag is the capture funnel's front door, so the run
-        // verb's own help names it and what it records. Both spellings of the
-        // help request reach the same text.
-        for help_args in [&["run", "--help"][..], &["--help"][..]] {
-            let help = pane_args(help_args).unwrap_err();
+        // verb's own help names it and what it records. The group help
+        // (after_help) and the -h inside the run tail reach the same text.
+        let group_help = crate::cli_args::pane_group_help();
+        let tail_help = parse_pane_args(&op_of("run"), &os(&["--help"])).unwrap_err();
+        for help in [group_help, tail_help] {
             assert!(help.contains("--worker"), "{help}");
             assert!(
                 help.contains("idle row"),
@@ -6099,20 +5722,22 @@ mod tests {
     fn pane_focus_target_parse_digits_vs_selector_vs_fzf() {
         // All digits: the legacy integer door, byte-identical behavior.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["31"])).unwrap().cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pane(31)
             }
         );
         // Anything else is a selector resolved against the registry.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "x919"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["x919"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Selector("x919".into())
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["focus", "t-x919-sentinel"]))
+            parse_pane_args(&op_of("focus"), &os(&["t-x919-sentinel"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Focus {
@@ -6121,16 +5746,18 @@ mod tests {
         );
         // --fzf with no positional opens the picker; with one it is usage.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "--fzf"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["--fzf"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pick
             }
         );
-        assert!(parse_pane_args(&os(&["focus", "--fzf", "31"])).is_err());
-        assert!(parse_pane_args(&os(&["focus", "--fzf", "x919"])).is_err());
-        assert!(parse_pane_args(&os(&["focus"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&["--fzf", "31"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&["--fzf", "x919"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&[])).is_err());
         // --fzf pairs with focus only.
-        assert!(parse_pane_args(&os(&["ls", "--fzf"])).is_err());
+        assert!(parse_pane_args(&op_of("ls"), &os(&["--fzf"])).is_err());
     }
 
     fn pane_row(name: &str, session: &str, pane: u64) -> PaneRow {
@@ -6414,14 +6041,18 @@ mod tests {
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
         // servers in 3.6.
-        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false);
+        let code = kill_server(
+            &format!("fno-test-absent-{}", std::process::id()),
+            false,
+            false,
+        );
         assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
     }
 
     #[test]
     fn mux_kill_server_invalid_name_is_usage_exit_2() {
         assert_eq!(
-            kill_server("../evil", false),
+            kill_server("../evil", false, false),
             EXIT_USAGE,
             "validation precedes any I/O"
         );
@@ -6571,7 +6202,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_ls_read_kill() {
         assert_eq!(
-            parse_pane_args(&os(&["ls"])).unwrap(),
+            parse_pane_args(&op_of("ls"), &os(&[])).unwrap(),
             ParsedPane {
                 session: None,
                 json: false,
@@ -6579,7 +6210,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--lines", "40", "--json"])).unwrap(),
+            parse_pane_args(&op_of("read"), &os(&["7", "--lines", "40", "--json"])).unwrap(),
             ParsedPane {
                 session: None,
                 json: true,
@@ -6592,7 +6223,7 @@ mod tests {
         );
         // --block last | <seq> selects a command block (lines ignored server-side).
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--block", "last"]))
+            parse_pane_args(&op_of("read"), &os(&["7", "--block", "last"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Read {
@@ -6602,7 +6233,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--block", "3"]))
+            parse_pane_args(&op_of("read"), &os(&["7", "--block", "3"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Read {
@@ -6611,13 +6242,16 @@ mod tests {
                 block: Some(BlockSel::Seq(3)),
             }
         );
-        assert!(parse_pane_args(&os(&["read", "7", "--block", "nope"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["7", "--block", "nope"])).is_err());
         assert_eq!(
-            parse_pane_args(&os(&["kill", "3", "--session", "work"])).unwrap(),
+            parse_pane_args(&op_of("kill"), &os(&["3", "--session", "work"])).unwrap(),
             ParsedPane {
                 session: Some("work".into()),
                 json: false,
-                cmd: PaneCmd::Kill { pane: 3 }
+                cmd: PaneCmd::Kill {
+                    pane: 3,
+                    hand_off_to: None
+                }
             }
         );
     }
@@ -6626,7 +6260,7 @@ mod tests {
     fn mux_pane_parse_split_break_and_ls_fno_id() {
         // split needs a direction; --focus opts into focus.
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "--direction", "right"]))
+            parse_pane_args(&op_of("split"), &os(&["5", "--direction", "right"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Split {
@@ -6636,7 +6270,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "-d", "up", "--focus"]))
+            parse_pane_args(&op_of("split"), &os(&["5", "-d", "up", "--focus"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Split {
@@ -6646,11 +6280,11 @@ mod tests {
             }
         );
         assert!(
-            parse_pane_args(&os(&["split", "5"])).is_err(),
+            parse_pane_args(&op_of("split"), &os(&["5"])).is_err(),
             "split without --direction is a usage error"
         );
         assert_eq!(
-            parse_pane_args(&os(&["break", "9", "--name", "solo"]))
+            parse_pane_args(&op_of("break"), &os(&["9", "--name", "solo"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Break {
@@ -6661,14 +6295,14 @@ mod tests {
         // `pane focus <pane>`: all digits is the legacy integer door.
         // The parse-level cases moved to pane_focus_target_parse.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["31"])).unwrap().cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pane(31)
             }
         );
-        assert!(parse_pane_args(&os(&["focus"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&[])).is_err());
         assert_eq!(
-            parse_pane_args(&os(&["ls", "--fno-id", "abc123"]))
+            parse_pane_args(&op_of("ls"), &os(&["--fno-id", "abc123"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Ls {
@@ -6680,9 +6314,12 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_tab_and_anchor() {
         // AC2-HP: `run --tab id:10 --at 2 --split down -- <argv>`.
-        let p = parse_pane_args(&os(&[
-            "run", "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = p.cmd else {
             panic!("expected Run");
@@ -6690,17 +6327,19 @@ mod tests {
         assert_eq!(placement.tab, Some(TabSel::Id(10)));
         assert_eq!(placement.at, Some(2));
         assert_eq!(placement.split, Some(Dir::Down));
-        let capped = parse_pane_args(&os(&[
-            "run",
-            "--at",
-            "2",
-            "--split",
-            "down",
-            "--max-panes",
-            "4",
-            "--",
-            "/bin/cat",
-        ]))
+        let capped = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--at",
+                "2",
+                "--split",
+                "down",
+                "--max-panes",
+                "4",
+                "--",
+                "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = capped.cmd else {
             panic!("expected Run");
@@ -6726,15 +6365,10 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_takes_argv_verbatim_after_flags() {
         // Leading flags are ours; the command argv (incl. ITS flags) is not.
-        let p = parse_pane_args(&os(&[
-            "run",
-            "--cwd",
-            "/code/foo",
-            "--",
-            "claude",
-            "--print",
-            "hi",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["--cwd", "/code/foo", "--", "claude", "--print", "hi"]),
+        )
         .unwrap();
         assert_eq!(
             p,
@@ -6751,19 +6385,20 @@ mod tests {
             }
         );
         // The `--` is optional: the first bare token begins the argv.
-        let p = parse_pane_args(&os(&["run", "echo", "marker"])).unwrap();
+        let p = parse_pane_args(&op_of("run"), &os(&["echo", "marker"])).unwrap();
         assert!(
             matches!(p.cmd, PaneCmd::Run { argv, .. } if argv == vec!["echo".to_string(), "marker".into()])
         );
         // An empty command is a usage error.
-        assert!(parse_pane_args(&os(&["run", "--cwd", "/x"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["--cwd", "/x"])).is_err());
     }
 
     #[test]
     fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
-        let p = parse_pane_args(&os(&[
-            "run", "squad", "review", "split", "left", "claude", "--print",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["squad", "review", "split", "left", "claude", "--print"]),
+        )
         .unwrap();
         assert!(matches!(
             p.cmd,
@@ -6779,8 +6414,11 @@ mod tests {
                 ..
             } if name == "review" && argv == &["claude", "--print"]
         ));
-        let aliases =
-            parse_pane_args(&os(&["run", "-s", "review", "-x", "right", "--", "echo"])).unwrap();
+        let aliases = parse_pane_args(
+            &op_of("run"),
+            &os(&["-s", "review", "-x", "right", "--", "echo"]),
+        )
+        .unwrap();
         assert!(matches!(
             aliases.cmd,
             PaneCmd::Run {
@@ -6794,9 +6432,10 @@ mod tests {
                 ..
             } if name == "review"
         ));
-        let long = parse_pane_args(&os(&[
-            "run", "--squad", "review", "--split", "up", "--", "echo",
-        ]))
+        let long = parse_pane_args(
+            &op_of("run"),
+            &os(&["--squad", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             long.cmd,
@@ -6812,15 +6451,10 @@ mod tests {
             } if name == "review"
         ));
         // --workspace is an alias for --squad (US2): same PaneTarget.
-        let ws = parse_pane_args(&os(&[
-            "run",
-            "--workspace",
-            "review",
-            "--split",
-            "up",
-            "--",
-            "echo",
-        ]))
+        let ws = parse_pane_args(
+            &op_of("run"),
+            &os(&["--workspace", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             ws.cmd,
@@ -6832,17 +6466,20 @@ mod tests {
                 ..
             } if name == "review"
         ));
-        assert!(parse_pane_args(&os(&["run", "squad", " ", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "--workspace", " ", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["squad", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["--workspace", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["split", "diagonal", "--", "echo"])).is_err());
+        assert!(
+            parse_pane_args(&op_of("run"), &os(&["--target", "review", "--", "echo"])).is_err()
+        );
         // Bare "at" (mux_spawn.py's placement_args contract) used to have no
         // alias, so the parser broke its loop on "at" and folded it plus
         // everything after into argv instead of recognizing it as placement
         // - here paired with bare "split", the combo that crashed.
-        let bare_at = parse_pane_args(&os(&[
-            "run", "split", "right", "at", "3", "--json", "--", "codex",
-        ]))
+        let bare_at = parse_pane_args(
+            &op_of("run"),
+            &os(&["split", "right", "at", "3", "--json", "--", "codex"]),
+        )
         .unwrap();
         assert!(bare_at.json);
         assert!(matches!(
@@ -6862,7 +6499,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_wait_defaults_and_units() {
         // --timeout is seconds -> ms; the default is bounded, never infinite.
-        let p = parse_pane_args(&os(&["wait", "5", "--quiet-ms", "200"])).unwrap();
+        let p = parse_pane_args(&op_of("wait"), &os(&["5", "--quiet-ms", "200"])).unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6873,8 +6510,11 @@ mod tests {
                 command_done: false,
             }
         );
-        let p =
-            parse_pane_args(&os(&["wait", "5", "--pattern", "done", "--timeout", "3"])).unwrap();
+        let p = parse_pane_args(
+            &op_of("wait"),
+            &os(&["5", "--pattern", "done", "--timeout", "3"]),
+        )
+        .unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6886,7 +6526,7 @@ mod tests {
             }
         );
         // --command-done is a bare flag.
-        let p = parse_pane_args(&os(&["wait", "5", "--command-done"])).unwrap();
+        let p = parse_pane_args(&op_of("wait"), &os(&["5", "--command-done"])).unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6902,7 +6542,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_send_source_is_text_xor_stdin() {
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "hi\r"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi\r"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6917,7 +6557,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--stdin"])).unwrap().cmd,
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Stdin,
@@ -6931,7 +6573,7 @@ mod tests {
         );
         // --guarded opts the send into the server-side turn-taken interlock.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--stdin", "--guarded"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin", "--guarded"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6946,7 +6588,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "hi", "--submit"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi", "--submit"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6964,9 +6606,12 @@ mod tests {
         // load-bearing half: an opt-in flag would leave every existing caller
         // unattributed and fix nothing.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "1", "--raw", "--submit"]))
-                .unwrap()
-                .cmd,
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "1", "--raw", "--submit"])
+            )
+            .unwrap()
+            .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Text("1".into()),
@@ -6979,9 +6624,10 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(
-                &["send", "2", "--text", "hi", "--fno-id", "addressed",]
-            ))
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--fno-id", "addressed"])
+            )
             .unwrap()
             .cmd,
             PaneCmd::Send {
@@ -6999,7 +6645,7 @@ mod tests {
         // `--raw --submit` with no payload parses as an EMPTY raw text, never
         // the arity error that used to make the refusal's advice false.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--raw", "--submit"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--raw", "--submit"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -7016,28 +6662,24 @@ mod tests {
         // Every other source-less form is still a usage error: `--raw` or
         // `--submit` alone names no operation, and a plain source-less send
         // never worked.
-        assert!(parse_pane_args(&os(&["send", "2", "--raw"])).is_err());
-        assert!(parse_pane_args(&os(&["send", "2", "--submit"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--raw"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--submit"])).is_err());
         // Neither / both are usage errors.
-        assert!(parse_pane_args(&os(&["send", "2"])).is_err());
-        assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "x", "--stdin"])).is_err());
         // --raw pairs only with send: on any other verb it is a usage error, not
         // a silently ignored flag that reads as "the envelope was skipped".
-        assert!(parse_pane_args(&os(&["read", "2", "--raw"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--raw"])).is_err());
     }
 
     #[test]
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
         assert_eq!(
-            parse_pane_args(&os(&[
-                "send",
-                "2",
-                "--text",
-                "hi",
-                "--style-exception",
-                "quoted"
-            ]))
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--style-exception", "quoted"])
+            )
             .unwrap()
             .cmd,
             PaneCmd::Send {
@@ -7053,8 +6695,8 @@ mod tests {
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
         // `--raw`: a silently ignored flag would read as "the exception held".
-        assert!(parse_pane_args(&os(&["send", "2", "--style-exception"])).is_err());
-        assert!(parse_pane_args(&os(&["read", "2", "--style-exception", "why"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--style-exception"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--style-exception", "why"])).is_err());
     }
 
     #[test]
@@ -7247,7 +6889,9 @@ mod tests {
         // The DEFAULT is the surprising half, so the help must state it. An
         // operator who only learns `--raw` exists still does not know what a
         // plain send now carries.
-        let err = parse_pane_args(&os(&["--help"])).unwrap_err();
+        // The pane group's help is clap's now; its after_help text carries
+        // the send contract.
+        let err = crate::cli_args::pane_group_help();
         assert!(err.contains("--raw"), "{err}");
         assert!(err.contains("<fno_mail>"), "{err}");
         assert!(err.contains("option prompt"), "{err}");
@@ -7304,12 +6948,10 @@ mod tests {
 
     #[test]
     fn mux_pane_parse_rejects_bad_verbs_flags_and_ids() {
-        assert!(parse_pane_args(&os(&["bogus"])).is_err());
-        assert!(parse_pane_args(&os(&[])).is_err());
-        assert!(parse_pane_args(&os(&["read", "notanumber"])).is_err());
-        assert!(parse_pane_args(&os(&["read", "7", "--nope"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["notanumber"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["7", "--nope"])).is_err());
         assert!(
-            parse_pane_args(&os(&["read"])).is_err(),
+            parse_pane_args(&op_of("read"), &os(&[])).is_err(),
             "read needs a pane id"
         );
     }
@@ -7531,7 +7173,7 @@ mod tests {
     #[test]
     fn block_pipe_parses_flags_and_defaults_to_last() {
         assert_eq!(
-            parse_block_args(&os(&["pipe", "--from", "4", "--to", "2"])),
+            parse_block_args(&os(&["--from", "4", "--to", "2"])),
             Ok(ParsedBlockPipe {
                 session: None,
                 json: false,
@@ -7543,7 +7185,6 @@ mod tests {
         );
         assert_eq!(
             parse_block_args(&os(&[
-                "pipe",
                 "--from",
                 "4",
                 "--to",
@@ -7571,15 +7212,7 @@ mod tests {
     #[test]
     fn block_annotate_parses_required_flags() {
         assert_eq!(
-            parse_block_annotate(&os(&[
-                "annotate",
-                "--from",
-                "3",
-                "--node",
-                "x-1",
-                "-m",
-                "off-by-one",
-            ])),
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "off-by-one",])),
             Ok(ParsedBlockAnnotate {
                 session: None,
                 from: 3,
@@ -7591,7 +7224,6 @@ mod tests {
         // --block seq + --session + long --message.
         assert_eq!(
             parse_block_annotate(&os(&[
-                "annotate",
                 "--from",
                 "3",
                 "--block",
@@ -7616,28 +7248,32 @@ mod tests {
     #[test]
     fn block_annotate_usage_errors() {
         // AC2-ERR: a missing --node is a refusal (no guessing the pane's node).
-        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "-m", "x"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "-m", "x"])).is_err());
         // Missing --from, missing -m, empty -m, unknown flag all refuse.
-        assert!(parse_block_annotate(&os(&["annotate", "--node", "x-1", "-m", "x"])).is_err());
-        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "--node", "x-1"])).is_err());
-        assert!(parse_block_annotate(&os(&[
-            "annotate", "--from", "3", "--node", "x-1", "-m", "  "
-        ]))
-        .is_err());
-        assert!(parse_block_annotate(&os(&[
-            "annotate", "--from", "3", "--node", "x-1", "-m", "x", "--oops",
-        ]))
-        .is_err());
+        assert!(parse_block_annotate(&os(&["--node", "x-1", "-m", "x"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "  "])).is_err());
+        assert!(
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "x", "--oops",]))
+                .is_err()
+        );
     }
 
     #[test]
-    fn block_verb_dispatch_rejects_unknown() {
-        // The verb enumeration now carries both verbs.
-        let e = parse_block_args(&os(&["rerun"])).unwrap_err();
-        assert!(
-            e.contains("annotate"),
-            "verb list must enumerate annotate: {e}"
-        );
+    fn block_ops_declared_in_the_tree() {
+        // The operation words are declared in the typed tree now; the
+        // classifier refuses anything else (AC1-ERR).
+        let block = crate::cli_args::front_command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "mux")
+            .expect("mux declared")
+            .get_subcommands()
+            .find(|c| c.get_name() == "block")
+            .expect("block declared")
+            .clone();
+        for op in ["pipe", "annotate"] {
+            assert!(block.find_subcommand(op).is_some(), "{op} declared");
+        }
     }
 
     #[test]
@@ -7658,10 +7294,10 @@ mod tests {
         // Missing --from / --to, an unknown flag, and an unknown verb are all
         // parse errors (exit 2 at the verb), never a partial pipe.
         assert!(parse_block_args(&os(&["pipe", "--to", "2"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "4"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "4", "--to", "2", "--oops"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "4"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "4", "--to", "2", "--oops"])).is_err());
         assert!(parse_block_args(&os(&["rerun"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "x", "--to", "2"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "x", "--to", "2"])).is_err());
     }
 
     #[test]
@@ -8007,3 +7643,5 @@ mod tests {
         assert_eq!(take_workspace_flag("v", vec!["6".into()]).unwrap().0, None);
     }
 }
+
+pub use kill_policy::{kill_selector, kill_server};

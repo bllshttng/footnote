@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.agents.registry import AgentEntry, load_registry, update_registry
-from fno.king.state import king_manifest_path, parse_manifest, write_manifest
+from fno.king.state import king_manifest_path, king_state_root, parse_manifest, write_manifest
 from fno.paths_testing import use_tmpdir
 
 CALLER_SESSION = "0c1f2f9a-1111-4000-8000-000000000001"
@@ -49,18 +50,26 @@ def court(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "busy"):
+def _seat(
+    name: str,
+    session: str,
+    *,
+    scope: str | None = SCOPE,
+    status: str = "busy",
+    level: int | None = None,
+    cwd: str = "/tmp",
+):
     update_registry(
         lambda rows: rows
         + [
             AgentEntry(
                 name=name,
-                cwd="/tmp",
+                cwd=cwd,
                 log_path="",
                 harness="claude",
                 harness_session_id=session,
                 status=status,
-                crown_level=2 if scope else None,
+                crown_level=level if level is not None else (2 if scope else None),
                 crown_scope=scope,
                 crown_grantor="human" if scope else None,
             )
@@ -69,7 +78,9 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
 
 
 def _manifest(court, scope: str = SCOPE, session: str = CALLER_SESSION):
-    path = king_manifest_path(scope)  # default root: the repo space the verb resolves
+    # The verb keys the manifest root on the caller row's cwd, so the fixture
+    # writes through the same call the resolver makes.
+    path = king_manifest_path(scope, state_root=king_state_root(Path(court)))
     write_manifest(path, scope=scope, harness_session_id=session)
     return path
 
@@ -85,24 +96,19 @@ def _done(*args: str):
 
 
 def _vacates() -> list:
-    """Every parsed line of the tmp journal. The real events.emit writes the
-    real file; a monkeypatched list would re-prove only the call."""
+    """Every committed row of the tmp journal. The real events.emit commits
+    through the store; a monkeypatched list would re-prove only the call."""
     from fno import paths
 
-    journal = paths.state_dir() / "events.jsonl"
-    if not journal.is_file():
-        return []
-    return [
-        json.loads(line)
-        for line in journal.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 def test_done_expires_the_manifest_and_arms_a_successor_without_force(court) -> None:
     """The abdication contract: both crown halves clear, and the next init
     over the same scope writes without --force."""
-    _seat("sitting-king", CALLER_SESSION)
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
     manifest = _manifest(court)
 
     result = _done()
@@ -131,7 +137,7 @@ def test_done_refuses_when_the_crown_moved_before_the_write(court, monkeypatch) 
     that already moved to an heir is refused rather than disarming the heir's
     manifest. Simulated by moving the crown between the CLI's identity read
     and its registry write."""
-    _seat("sitting-king", CALLER_SESSION)
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
     manifest = _manifest(court)
     from fno.agents import registry as registry_mod
 
@@ -182,7 +188,7 @@ def test_done_leaves_a_successor_manifest_crowned_in_the_vacate_window(
     manifest unlink must survive it: the unlink compares against the session
     id snapshotted before the vacate, so the file this expiry deletes can
     only ever be the one it decided to expire."""
-    _seat("sitting-king", CALLER_SESSION)
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
     manifest = _manifest(court)
     from fno.agents import registry as registry_mod
 
@@ -205,6 +211,31 @@ def test_done_leaves_a_successor_manifest_crowned_in_the_vacate_window(
     assert _row("sitting-king").crown_scope is None, "the row still vacated"
 
 
+def test_done_from_a_foreign_cwd_clears_the_row_cwd_manifest(
+    court, monkeypatch
+) -> None:
+    """The verb keys the manifest on the caller row's cwd: a king whose shell
+    sits outside the repo still clears ITS manifest. On the old code the file
+    survived while the receipt still said cleared (x-8387)."""
+    from fno.king.state import king_state_root as _ksr
+
+    kingrepo = court / "kingrepo"
+    kingrepo.mkdir()
+    _seat("sitting-king", CALLER_SESSION, cwd=str(kingrepo))
+    manifest = king_manifest_path(SCOPE, state_root=_ksr(kingrepo))
+    write_manifest(manifest, scope=SCOPE, harness_session_id=CALLER_SESSION)
+    elsewhere = court / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = _done()
+
+    assert result.exit_code == 0, result.output
+    assert "manifest: cleared" in result.output
+    assert not manifest.exists(), "the row-cwd manifest must be cleared"
+    assert _row("sitting-king").crown_scope is None
+
+
 def test_an_attended_human_expires_a_named_scope(court, monkeypatch) -> None:
     """No agent identity means a human at the keyboard: any scope may expire,
     but it must be named - a human holds no crown to default to."""
@@ -222,6 +253,48 @@ def test_an_attended_human_expires_a_named_scope(court, monkeypatch) -> None:
     assert not manifest.exists()
 
 
+def test_an_attended_expiry_of_one_set_member_refuses(court, monkeypatch) -> None:
+    """A member is not the crown: vacating nothing while printing an expiry
+    receipt is the false receipt this refusal closes."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("king-set", "set-session", scope="x-119e,x-4d9b")
+    manifest = _manifest(court, scope="x-119e,x-4d9b", session="set-session")
+
+    result = _done("--scope", "x-4d9b")
+
+    assert result.exit_code == 2
+    assert "x-119e,x-4d9b" in result.output and "king-set" in result.output
+    assert _row("king-set").crown_scope == "x-119e,x-4d9b"
+    assert manifest.exists()
+    assert not [e for e in _vacates() if e.get("kind") == "agent_crown_vacated"]
+
+
+def test_an_attended_expiry_names_a_damaged_registry(court, monkeypatch) -> None:
+    from fno.agents.registry import _registry_path
+
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    path = _registry_path(None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+    result = _done("--scope", "x-4d9b")
+
+    assert result.exit_code == 1
+    assert "crown expire failed" in result.output
+
+
+def test_an_attended_expiry_of_a_reordered_set_vacates_it(court, monkeypatch) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("king-set", "set-session", scope="x-119e,x-4d9b")
+    manifest = _manifest(court, scope="x-119e,x-4d9b", session="set-session")
+
+    result = _done("--scope", "x-4d9b,x-119e")
+
+    assert result.exit_code == 0, result.output
+    assert _row("king-set").crown_scope is None
+    assert not manifest.exists()
+
+
 def test_an_agent_with_no_crown_has_nothing_to_expire(court) -> None:
     _seat("plain-worker", CALLER_SESSION, scope=None)
 
@@ -234,7 +307,7 @@ def test_an_agent_with_no_crown_has_nothing_to_expire(court) -> None:
 def test_done_writes_one_vacate_event_naming_scope_and_holder(court) -> None:
     """The abdication lands in the journal, not just the registry: one event
     naming the scope, the holder and its session, from the record alone."""
-    _seat("sitting-king", CALLER_SESSION)
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
     _manifest(court)
 
     result = _done()
@@ -254,7 +327,7 @@ def test_a_refused_done_leaves_the_journal_silent(court, monkeypatch) -> None:
     """A successful abdication first proves the reader finds the event; the
     refused expiry that follows (the crown moved before the write) must gain
     no second one."""
-    _seat("sitting-king", CALLER_SESSION)
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
     _manifest(court)
     assert _done().exit_code == 0
     found = [e for e in _vacates() if e["kind"] == "agent_crown_vacated"]
@@ -313,3 +386,134 @@ def test_an_orphaned_scope_writes_the_manifest_clear_event(court, monkeypatch) -
     assert (event["cause"], event["scope"]) == ("orphan_manifest", "orphaned-scope")
     assert event["holder"] is None
     assert event["holder_session"] == "long-gone"
+
+
+# --- Presiding expiry: a king may expire a DEAD crown one rung below it ----
+
+
+def _stub_graph(monkeypatch, projects: dict[str, str]) -> None:
+    """Feed find_presiding_crown the epic -> project read the real graph
+    gives it; the tmp court has no tracker entries of its own."""
+    import fno.tracker.metadata as metadata
+
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda kind: [
+            {"id": epic, "type": "epic", "project": proj}
+            for epic, proj in projects.items()
+        ],
+    )
+
+
+def test_presiding_king_expires_a_dead_crown_in_its_territory(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1, cwd=str(court))
+    _seat("dead-l2", "dead-session", scope="epic-dead", status="exited")
+    manifest = _manifest(court, scope="epic-dead", session="dead-session")
+    _stub_graph(monkeypatch, {"epic-dead": "fno"})
+
+    result = _done("--scope", "epic-dead")
+
+    assert result.exit_code == 0, result.output
+    assert not manifest.exists(), "the dead crown's manifest must be cleared"
+    dead = _row("dead-l2")
+    assert (dead.crown_level, dead.crown_scope) == (2, "epic-dead")
+    assert "no live holder" in result.output
+    vacates = [e for e in _vacates() if e.get("kind") == "agent_crown_vacated"]
+    assert [(v["cause"], v["scope"]) for v in vacates] == [
+        ("orphan_manifest", "epic-dead")
+    ]
+
+
+def test_presiding_king_expires_a_manifest_only_crown(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1, cwd=str(court))
+    manifest = _manifest(court, scope="epic-orphan", session="gone-session")
+    _stub_graph(monkeypatch, {"epic-orphan": "fno"})
+
+    result = _done("--scope", "epic-orphan")
+
+    assert result.exit_code == 0, result.output
+    assert not manifest.exists()
+
+
+def test_presiding_refuses_a_live_crown_in_its_territory(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("live-l2", "live-session", scope="epic-live")
+    manifest = _manifest(court, scope="epic-live", session="live-session")
+    _stub_graph(monkeypatch, {"epic-live": "fno"})
+
+    result = _done("--scope", "epic-live")
+
+    assert result.exit_code == 2, result.output
+    assert manifest.exists(), "a live crown's manifest must survive"
+
+
+def test_a_foreign_dead_crown_still_refuses(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("dead-other", "dead-session", scope="epic-out", status="exited")
+    _stub_graph(monkeypatch, {"epic-out": "other-project"})
+
+    result = _done("--scope", "epic-out")
+
+    assert result.exit_code == 2, result.output
+    assert "only its own crown" in result.output
+
+
+def test_one_member_of_a_dead_set_crown_refuses(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("dead-set", "dead-session", scope="epic-a,epic-b", status="exited")
+    _stub_graph(monkeypatch, {"epic-a": "fno", "epic-b": "fno"})
+
+    result = _done("--scope", "epic-a")
+
+    assert result.exit_code == 2, result.output
+    assert _row("dead-set").crown_scope == "epic-a,epic-b"
+
+
+def test_a_caller_without_a_level_cannot_preside(court, monkeypatch):
+    _seat("half-crown", CALLER_SESSION, scope="fno", level=None)
+    _seat("dead-l2", "dead-session", scope="epic-dead", status="exited")
+    _stub_graph(monkeypatch, {"epic-dead": "fno"})
+
+    result = _done("--scope", "epic-dead")
+
+    assert result.exit_code == 2, result.output
+
+
+def test_presiding_refuses_a_successor_crowned_mid_call(court, monkeypatch):
+    """The pre-check ran outside the registry lock; the vacate closure must
+    stop a successor that crowned between the two instead of disarming it."""
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1, cwd=str(court))
+    manifest = _manifest(court, scope="epic-race", session="gone-session")
+    _stub_graph(monkeypatch, {"epic-race": "fno"})
+    from fno.agents import registry as registry_mod
+
+    real_update = registry_mod.update_registry
+
+    def _crown_successor_then_update(fn):
+        real_update(
+            lambda rows: rows
+            + [
+                AgentEntry(
+                    name="successor",
+                    cwd="/tmp",
+                    log_path="",
+                    harness="claude",
+                    harness_session_id="successor-session",
+                    status="busy",
+                    crown_level=2,
+                    crown_scope="epic-race",
+                    crown_grantor="human",
+                )
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _crown_successor_then_update)
+
+    result = _done("--scope", "epic-race")
+
+    assert result.exit_code == 1, result.output
+    assert "mid-expiry" in result.output
+    assert _row("successor").crown_scope == "epic-race"
+    assert manifest.exists()

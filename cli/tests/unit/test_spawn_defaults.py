@@ -135,6 +135,61 @@ def _two_harness_rows():
     ]
 
 
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import os
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
+
+
 def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
     """AC3-HP: the grid supplies harness/model below profiles and above defaults."""
     _declare_inventory(monkeypatch, _two_harness_rows())
@@ -142,10 +197,7 @@ def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "hi"],
         model="default-model",
@@ -163,10 +215,7 @@ def test_stage_profile_model_occupies_model_axis(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok", codex="ok")
     err = io.StringIO()
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
@@ -190,10 +239,7 @@ def test_profile_provider_pins_harness_grid_fills_model_and_effort(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok", codex="ok")
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
         profiles={"target": {"provider": "codex"}},
@@ -212,10 +258,7 @@ def test_pinned_substrate_filters_candidates_instead_of_cancelling(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok", codex="ok")
     # pane: universal -> grid fires exactly as without the flag
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "--substrate", "pane", "hi"],
@@ -250,10 +293,7 @@ def test_grid_effort_yields_to_explicit_effort_flag(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, codex="ok")
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "--effort", "low", "hi"],
     )
@@ -273,10 +313,7 @@ def test_grid_route_rides_beside_the_model_it_belongs_to(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
     result = _inject(["spawn", "--name", "w", "--node", "x-route1", "hi"])
     assert "--route" in result
     assert result[result.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
@@ -297,10 +334,7 @@ def test_grid_account_skips_on_a_non_claude_grid_harness(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, codex="ok")
     err = io.StringIO()
     result = _inject(["spawn", "--name", "w", "--node", "x-acct1", "hi"], err=err)
     assert "--account" not in result
@@ -318,10 +352,7 @@ def test_grid_account_wins_over_the_config_default(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-acct2", "hi"], account="ccm"
     )
@@ -339,10 +370,7 @@ def test_grid_routeless_row_injects_no_route(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok")
     result = _inject(["spawn", "--name", "w", "--node", "x-route2", "hi"])
     assert "--route" not in result
     assert "--model" in result and "claude-opus-5" in result
@@ -360,10 +388,7 @@ def test_inert_grid_says_why_in_the_receipt(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok", codex="ok")
     err = io.StringIO()
     _inject(["spawn", "--name", "w", "--node", "x-grid1", "hi"], err=err)
     assert "grid=no-inventory-declared" in err.getvalue()
@@ -379,7 +404,10 @@ def test_crown_profile_key_reaches_non_verb_seeds():
     assert _profile_key("") == "crown"
     assert _profile_key("/fno:target x") == "target"
     assert _profile_key("/absolute/path/to/thing") == "crown"
-    for verb in ("reign", "king-for-a-day", "fno-me"):
+    from fno.agents.spawn_defaults import _CROWN_VERBS
+
+    assert _CROWN_VERBS == frozenset({"reign", "fno-me"})
+    for verb in ("reign", "fno-me"):
         assert _profile_key(f"$fno:{verb} x-a792") == "crown"
         assert _profile_key(f"/fno:{verb} x-a792") == "crown"
 
@@ -549,10 +577,7 @@ def test_target_verb_ignores_plan_presence_blueprint_bills_planning(monkeypatch)
         {"name": "strong-x", "harness": "codex", "model": "gpt-strong", "band": "high"},
     ]
     _declare_inventory(monkeypatch, rows)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "ok", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="ok", codex="ok")
     node = {"difficulty": "low", "priority": "p2"}
     planned = {"difficulty": "low", "priority": "p2", "plan_path": "/tmp/plan.md"}
     monkeypatch.setattr(
@@ -892,7 +917,7 @@ def test_profile_lanes_walk_in_declared_order(monkeypatch):
     the live row count plays no part in where the walk starts."""
     import fno.agents.spawn_defaults as spawn_defaults
 
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     lanes = [
         _lane("codex", effort="high", substrate="pane", permission_mode="yolo"),
         _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
@@ -915,7 +940,7 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
     import fno.agents.spawn_gate as spawn_gate
 
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     monkeypatch.setattr(
         spawn_gate,
         "probe_capacity",
@@ -1928,7 +1953,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     monkeypatch.setattr(
         spawn_gate,
         "probe_capacity",
@@ -1983,7 +2008,7 @@ def _slot_settings(rows, profiles):
 def test_pin_model_resolves_row_harness_and_receipt(monkeypatch):
     """AC1-HP: --model gpt-6-astra with row codex-astra declared launches
     codex, names the row in the receipt, and prints no vendor warning."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "--model", "gpt-6-astra", "/fno:blueprint x-1"],
@@ -2003,7 +2028,7 @@ def test_pin_model_resolves_row_harness_and_receipt(monkeypatch):
 @requires_rust
 def test_pin_model_carries_row_route_and_account(monkeypatch):
     """AC2-HP: a routed row's pin carries harness, route and account."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "--model", "glm-5.3-flash[1m]", "/fno:target x-1"],
@@ -2026,7 +2051,7 @@ def test_pin_model_carries_row_route_and_account(monkeypatch):
 def test_pin_row_outranks_the_profile_provider(monkeypatch):
     """AC4-EDGE: the typed model's declared row beats the profile's config
     harness - gpt-5.6-luna rides codex even with target.provider = claude."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "--model", "gpt-5.6-luna", "/fno:target x-1"],
@@ -2069,7 +2094,7 @@ _SLOT_ROWS = [
 def test_string_lane_names_an_inventory_row(monkeypatch):
     """A lane may be the NAME of a [[routing.models]] row: the row's harness,
     model and access path ride as one coordinate."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2086,10 +2111,7 @@ def test_string_lane_names_an_inventory_row(monkeypatch):
 def test_lane_on_exhausted_account_is_skipped_for_the_next_lane(monkeypatch):
     """AC3-HP: the lane whose account is dead skips; the sibling lane on the
     healthy account answers."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "exhausted"}})
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2114,14 +2136,10 @@ def test_on_exhausted_queue_exits_78_with_typed_refusal(monkeypatch, capsys):
         dict(_SLOT_ROWS[0]),
         dict(_SLOT_ROWS[1], account="claude-main"),
     ]
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "exhausted",
-                "accounts": {"zai-main": "exhausted", "claude-main": "exhausted"},
-            }
-        },
+    _pin_capacity(
+        monkeypatch,
+        claude="exhausted",
+        extra={"claude": {"zai-main": "exhausted", "claude-main": "exhausted"}},
     )
     with pytest.raises(SystemExit) as exc:
         inject_spawn_defaults(
@@ -2145,10 +2163,7 @@ def test_on_exhausted_queue_exits_78_with_typed_refusal(monkeypatch, capsys):
 def test_on_exhausted_degrade_names_the_degrade_in_the_receipt(monkeypatch):
     """on_exhausted=degrade: the profile scalars answer as before, and the
     receipt says the slot terminal was the reason."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "exhausted"}})
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2173,7 +2188,7 @@ def test_on_exhausted_degrade_names_the_degrade_in_the_receipt(monkeypatch):
 def test_unknown_lane_name_refuses_by_name(monkeypatch):
     """AC3-ERR: a lane naming no declared row refuses with exit 2, naming the
     lane path, the missing row, and the declared row names."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         inject_spawn_defaults(
@@ -2199,7 +2214,7 @@ def test_inline_lane_still_selects(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = _inject(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2219,10 +2234,7 @@ def test_verb_with_no_lanes_falls_to_the_grid(monkeypatch):
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     err = io.StringIO()
     out = _inject(
         ["spawn", "--name", "w", "--node", "x-grid2", "hi"],
@@ -2239,7 +2251,7 @@ def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
     """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
     test builds objects, which take the getattr branch, so the Mapping-only
     unknown-field and non-string refusals were never executed."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
 
     def _raw_lane_settings(lanes):
         prof = type("P", (), {"lanes": lanes})()
@@ -2415,7 +2427,7 @@ _LOW_NODE = {"id": "x-1", "difficulty": "low", "priority": "p2"}
 def test_missing_difficulty_takes_the_high_overlay(monkeypatch):
     """AC6-DIFFICULTY: no node, no difficulty: the high overlay answers and
     the receipt says the difficulty rounded up."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2434,7 +2446,7 @@ def test_missing_difficulty_takes_the_high_overlay(monkeypatch):
 @requires_rust
 def test_low_difficulty_overlay_replaces_lanes(monkeypatch):
     """AC6-DIFFICULTY: a low node rides the low overlay's lanes."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
     )
@@ -2454,7 +2466,7 @@ def test_low_difficulty_overlay_replaces_lanes(monkeypatch):
 
 def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
     """AC6-DIFFICULTY: an out-of-vocabulary difficulty is missing, not low."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node",
         lambda toks, env=None: {"id": "x-1", "difficulty": "urgent"},
@@ -2478,10 +2490,7 @@ def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
 def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
     """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
     lanes; the policy is live on them."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "low"}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "low"}})
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
     )
@@ -2509,12 +2518,8 @@ _LOW_FLASH_HEALTHY_CODEX = [
 @requires_rust
 def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
     """AC6-LOW: the default policy demotes a low lane behind a healthy one."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
-            "codex": {"state": "ok"},
-        },
+    _pin_capacity(
+        monkeypatch, claude="low", extra={"claude": {"zai-main": "low"}}, codex="ok"
     )
     err = io.StringIO()
     out = inject_spawn_defaults(
@@ -2533,12 +2538,8 @@ def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
 @requires_rust
 def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
     """AC6-LOW: no healthy lane anywhere: the first low lane still serves."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
-            "codex": {"state": "low"},
-        },
+    _pin_capacity(
+        monkeypatch, claude="low", extra={"claude": {"zai-main": "low"}}, codex="low"
     )
     err = io.StringIO()
     out = inject_spawn_defaults(
@@ -2559,7 +2560,7 @@ def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
 def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
     """AC6-UNKNOWN: with skip, an unproven observation never serves."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         inject_spawn_defaults(
@@ -2579,7 +2580,7 @@ def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
 def test_overlay_with_explicit_empty_lanes_refuses_as_malformed(monkeypatch):
     """AC6-DIFFICULTY: an explicitly empty overlay lane list is malformed, not
     an invitation to open the global inventory."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         inject_spawn_defaults(
@@ -2599,7 +2600,7 @@ def test_overlay_with_explicit_empty_lanes_refuses_as_malformed(monkeypatch):
 def test_overlay_only_profile_still_resolves(monkeypatch):
     """AC6-DIFFICULTY: a profile with no base lanes but a by_difficulty map is
     a configured slot, not a grid fallthrough."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2623,15 +2624,10 @@ _IDENTITY_ROWS = [
 def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
     """AC6-PIN: the slot proves makers is active; a readyrule pin is a
     mismatch and never serves, whatever on_unknown allows."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "ok",
-                "accounts": {"makers": "ok", "readyrule": "ok"},
-                "evidence": {"makers": "proven", "readyrule": "mismatch"},
-            },
-        },
+    _pin_capacity(
+        monkeypatch,
+        extra={"claude": {"makers": "ok", "readyrule": "ok"}},
+        active={"claude": "makers"},
     )
     err = io.StringIO()
     out = inject_spawn_defaults(
@@ -2652,10 +2648,7 @@ def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
 def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
     """AC6-IDENTITY: an unproven slot claim is excluded under skip and named
     under the default allow."""
-    capacity = {
-        "claude": {"state": "unknown", "accounts": {"makers": "ok"},
-                   "evidence": {}},
-    }
+    _pin_capacity(monkeypatch, extra={"claude": {"makers": "ok"}})
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -2665,7 +2658,6 @@ def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
         stderr=err,
         env={},
     )
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: capacity)
     assert out[out.index("--harness") + 1] == "claude"
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
@@ -2688,16 +2680,7 @@ def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
 def test_vendor_route_lane_never_claims_the_slot(monkeypatch):
     """AC6-IDENTITY: an API lane with its own account and route skips the
     identity gate; the slot occupant is not its business."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "ok",
-                "accounts": {"zai-main": "ok"},
-                "evidence": {},
-            },
-        },
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
     rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
              "route": "zai/glm-5.3", "account": "zai-main"}]
     err = io.StringIO()
@@ -2711,42 +2694,11 @@ def test_vendor_route_lane_never_claims_the_slot(monkeypatch):
     assert "account_identity" not in err.getvalue()
 
 
-def test_proven_account_owns_the_harness_aggregate(monkeypatch):
-    """AC6-IDENTITY: an unpinned row reads the proven account's state, never
-    a MAX that a sibling record could fake."""
-    from fno.route_resolve import runtime_capacity as rc
-
-    monkeypatch.setattr(
-        "fno.route_resolve.harness_accounts", lambda harness, **kw: ["makers", "readyrule"]
-    )
-
-    class _V:
-        def __init__(self, state):
-            self.state = type("S", (), {"value": state})()
-            self.resets_at = None
-            self.source = "window"
-            self.observed_at = None
-
-    monkeypatch.setattr(
-        "fno.adapters.providers.runtime_state.headrooms",
-        lambda ids: {"makers": _V("exhausted"), "readyrule": _V("ok")},
-    )
-    monkeypatch.setattr(
-        "fno.route_resolve._identity_evidence",
-        lambda harness, accounts: {"makers": "proven", "readyrule": "mismatch"},
-    )
-    cap = rc(providers=("claude",))
-    assert cap["claude"]["state"] == "exhausted"
-    assert cap["claude"]["window"] == "identity:makers"
 @requires_rust
 def test_lane_coordinate_forwards_route_and_account(monkeypatch):
     """AC6-COORDINATE: a named row's vendor route and account constraint ride
     the launch argv; the coordinate is not discarded after the capacity check."""
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"},
-                                 "evidence": {}}},
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
     rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
              "route": "zai/glm-5.3", "account": "zai-main"}]
     err = io.StringIO()
@@ -2765,7 +2717,7 @@ def test_record_route_contradiction_refuses(monkeypatch):
     route that contradicts it would check one coordinate and bill another."""
     from types import SimpleNamespace
 
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
              "route": "zai/glm-5.3", "account": "zai-main"}]
     s = _slot_settings(rows, {"target": {"lanes": ["flash-zai"]}})
@@ -2786,7 +2738,7 @@ def test_record_route_contradiction_refuses(monkeypatch):
 def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
     """AC6-COORDINATE: a typed --model outranks the slot, receipt names the
     override, and no lane harness is borrowed for the foreign model."""
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     err = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "-H", "claude", "--model", "gpt-5.6-luna", "/fno:target x-1"],

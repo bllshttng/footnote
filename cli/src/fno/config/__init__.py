@@ -41,7 +41,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, cast
 
-import tomli_w
 import yaml
 from pydantic import (
     BaseModel,
@@ -65,12 +64,10 @@ from fno.config._dispatch_verbs import DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPAT
 from fno.config._dispatch_verbs import DispatchVerbDescriptor as DispatchVerbDescriptor
 from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
 from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
-from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
-from fno.config._graph import GraphBlock
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
@@ -249,6 +246,8 @@ class BlueprintBlock(BaseModel):
 
     max_prs_per_epic: int = 4
 
+    python_repair_added_lines: int = Field(default=30, ge=0)
+
     @field_validator("max_prs_per_epic")
     @classmethod
     def max_prs_per_epic_positive(cls, v: int) -> int:
@@ -416,6 +415,7 @@ class BacklogBlock(BaseModel):
     # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
+    epic_max_open_children: Optional[int] = Field(default=None, ge=1)
     render_targets: list[RenderTargetConfig] = Field(default_factory=list)
     # Seconds an open local board or reign.html tab waits, visible and
     # untouched, before it reloads itself (0 is off).
@@ -2029,6 +2029,20 @@ class SidelineBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     colors: SidelineColorsBlock = Field(default_factory=SidelineColorsBlock)
+    # The row-shape switch the Rust sideline reads. Mirrors the Rust reader's
+    # tolerance: the card is the default, and an unknown value reads as the
+    # card default (crates/fno sideline_color).
+    layout: Literal["card", "list"] = "card"
+
+    @field_validator("layout", mode="before")
+    @classmethod
+    def _coerce_layout(cls, v: object) -> object:
+        """Unknown or wrong-shaped values degrade to the card default, never error."""
+        if v is None:
+            return "card"
+        if isinstance(v, str) and v.strip().lower() == "list":
+            return "list"
+        return "card"
 
 
 class DispatchBlock(BaseModel):
@@ -2074,6 +2088,14 @@ class DispatchBlock(BaseModel):
     # Proactive LOW cutover, opt-in, default 0 = off. Deliberately inverted from
     # defer_horizon_minutes: a distant reset means leave now, not wait.
     cutover_low_after_minutes: int = 0
+    # The blueprint floor for a plan-less node (lean dispatch): "high" (the
+    # default) routes a plan-less node to /blueprint only when its difficulty
+    # is high, its size is L, or an open premise question blocks it (the
+    # `premise-question` tag). Every other plan-less node goes straight to
+    # /target, which states its own scope. "medium" restores the pre-lean
+    # table (blueprint for medium and up). Read by the lifecycle verb table
+    # (fno-agents effective_verb) through the dispatch doors.
+    blueprint_floor: str = "high"
 
     @field_validator("auto_merge", mode="before")
     @classmethod
@@ -2100,6 +2122,14 @@ class DispatchBlock(BaseModel):
         a string, or a negative degrades to 0 (off). Same stance as the two
         above: a config typo can never arm automatic rerouting."""
         return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+    @field_validator("blueprint_floor", mode="before")
+    @classmethod
+    def _coerce_blueprint_floor(cls, v: object) -> object:
+        """Only the two literals are honored; anything else degrades to "high",
+        the lean default. Same stance as the validators above: a typo can never
+        widen blueprint ceremony past the lean-dispatch ruling."""
+        return v if v in ("high", "medium") else "high"
 
 
 def _positive_int(v: object) -> bool:
@@ -2252,8 +2282,7 @@ class AgentsBlock(SweepKeys):
     # Spawn-gate scalars degrade to safe defaults: max_live caps the roster
     # union as the BACKSTOP behind the RAM floor (min_free_gb) and the CPU
     # axis (LD1); provider_limits caps lanes and fan-out; admission
-    # decides on max_fleet_cpu_share every spawn; hard_max_load_per_cpu is the
-    # absolute backstop on 15-minute load (max_load_per_cpu: deprecated LD2).
+    # decides on max_fleet_cpu_share every spawn (max_load_per_cpu: deprecated LD2).
     max_live: int = 3
     max_live_per_territory: int = 4  # team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
@@ -2269,7 +2298,6 @@ class AgentsBlock(SweepKeys):
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
     max_fleet_cpu_share: float = 0.5
-    hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
     # Unset derives the sustained-CPU threshold from measured capacity.
     footprint_sustained_cpu_cores: Optional[float] = None
@@ -2458,17 +2486,9 @@ class AgentsBlock(SweepKeys):
 
         Same contract as :meth:`_coerce_max_load_per_cpu`. <= 0 is VALID and
         means the gate refuses on any fleet attribution at all, which is
-        the strictest setting rather than a disabled one; the backstop
-        (``hard_max_load_per_cpu``) is the knob that turns the load check off.
+        the strictest setting rather than a disabled one.
         """
         return _finite_or(v, 0.5)
-
-    @field_validator("hard_max_load_per_cpu", mode="before")
-    @classmethod
-    def _coerce_hard_max_load_per_cpu(cls, v: object) -> object:
-        """Coerce an unparseable backstop to the default (40.0); never raise.
-        <= 0 disables the backstop and leaves the governor alone in charge."""
-        return _finite_or(v, 40.0)
 
     @field_validator("worker_qos", mode="before")
     @classmethod
@@ -3873,7 +3893,6 @@ class ConfigBlock(BaseModel):
     plans_filename: str = "%Y%m%d-{slug}-{node}.md"
     branch: BranchBlock = Field(default_factory=BranchBlock)
     paths: PathsBlock = Field(default_factory=PathsBlock)
-    graph: GraphBlock = Field(default_factory=GraphBlock)
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     inbox: InboxBlock = Field(default_factory=InboxBlock)
@@ -3929,7 +3948,7 @@ class ConfigBlock(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _lift_legacy_retire_grace(cls, data: object) -> object:
+    def _lift_legacy_keys(cls, data: object) -> object:
         return _watchdog.lift_retire_grace(data)
 
     @field_validator("status_sinks", mode="before")
@@ -4365,6 +4384,11 @@ def _atomic_write_toml(target: Path, data: dict[str, object]) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             clean = cast("dict[str, Any]", _strip_none(data))
+            # Lazy: only config WRITERS pay this dependency. A module-level
+            # import made a bare `import fno.events` (receipt emission from a
+            # bare python3) fail on machines without tomli_w installed.
+            import tomli_w
+
             f.write(tomli_w.dumps(clean).encode("utf-8"))
         os.replace(str(tmp), str(target))
     except BaseException:

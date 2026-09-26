@@ -19,7 +19,7 @@ The legacy `progress_notes` feed is retired by an explicit, operator-run migrati
 
 1. Inventory: `fno-agents backlog-notes inventory --json`. Read-only. It names the backend, per-node note counts, character totals, and each node's `notes_hash`.
 2. Digest preparation: for each OPEN node, an agent prepares a manifest entry `{node_id, source_hash, state, details?, author?}` from the node's full original history. Keep obligations, corrections, unresolved uncertainty, and source paths. The combined prose must fit the budget. Notes on OPEN nodes without a manifest entry refuse.
-3. Preview: `fno-agents backlog-notes migrate --manifest <file> --graph <graph.json>`. Validates every entry against the live rows. A stale hash, a malformed entry, or an over-budget digest names the row `unresolved` and exits nonzero without touching data.
+3. Preview: `fno-agents backlog-notes migrate --manifest <file> --graph <graph.db>`. Validates every entry against the live rows. A stale hash, a malformed entry, or an over-budget digest names the row `unresolved` and exits nonzero without touching data.
 4. Apply: same command plus `--apply`. Re-reads each row under the publication lock. Journals every original note, keyed by node and source position. Replaces the hot row and marks it migrated. A nonzero result names every row it left intact.
 5. Readback: `fno backlog notes history <id> --limit 100` (the same reader the migration runs). Explicit and paged. History is never silently loaded into a dispatch prompt.
 6. Recovery: restore a selected historical body through the normal revision-checked writer. Never replace the whole graph with an old snapshot over later writes.
@@ -28,4 +28,4 @@ Re-running the same manifest is idempotent. Already-migrated rows count as `unch
 
 ## Compatibility
 
-The canonical command vocabulary (11 groups plus the `annotate` exception) is defined once in `crates/fno-agents/src/backlog/commands.rs` and mirrored in `scripts/ci/verb-collapse-map.tsv`. Legacy spellings keep working during the compatibility window. The final 11-group-only catalog lands after the note storage merge and compatibility removal.
+The canonical command vocabulary (11 groups) is defined once in `crates/fno-agents/src/backlog/commands.rs` and mirrored in `scripts/ci/verb-collapse-map.tsv`. Legacy spellings keep working during the compatibility window. The `annotate` spellings refuse and name `note --blocking`. The final 11-group-only catalog lands after the note storage merge and compatibility removal.

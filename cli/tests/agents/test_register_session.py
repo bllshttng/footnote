@@ -21,10 +21,9 @@ from fno.paths_testing import use_tmpdir
 
 
 def _events(tmp_path: Path) -> list[dict]:
-    path = tmp_path / ".fno" / "events.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(tmp_path / ".fno" / "events.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +42,10 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     )
 
     assert entry.harness == "claude"
-    assert entry.short_id == "ef9982cc-2543-4cea-9a20-081cca7119f6"
+    # The transport short id is claude's own 8-hex attach/job key (the uuid's
+    # leading segment), NOT the full uuid: `claude attach <short_id>` refuses a
+    # full uuid, so a row carrying one was unattachable from the mux tap.
+    assert entry.short_id == "ef9982cc"
     # Registered NON-live: a hand-started session has no live transport, so it
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
@@ -139,8 +141,10 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
     assert a.name != b.name
     rows = load_registry()
     assert len(rows) == 2
+    # The transport short id is the derived 8-hex job key, not the full
+    # session id: claude attach refuses a full uuid.
     ids = {r.short_id for r in rows}
-    assert ids == {"11111111-aaaa", "22222222-bbbb"}
+    assert ids == {"11111111", "22222222"}
 
 
 def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypatch) -> None:
@@ -1391,3 +1395,135 @@ def test_register_verb_allows_fno_agent_self_without_a_row(tmp_path: Path, monke
     # (canonical bare short-id handle) still runs - the guard keys on an
     # existing row, not on the marker's presence.
     assert load_registry()[0].name == "dead2222"
+
+
+# ---------------------------------------------------------------------------
+# The deferred open: a spawn whose harness session id does not exist yet
+# parks the owed sessions row on the worker's registry row; SessionStart's
+# first id observation opens it. Covers both SessionStart writers.
+# ---------------------------------------------------------------------------
+
+DEFER_NODE = "x-defer1"
+
+
+def _seed_deferred_node() -> None:
+    """One node in the tmp graph the parked row opens at SessionStart."""
+    import json
+
+    from fno import paths
+
+    g = paths.graph_json()
+    g.parent.mkdir(parents=True, exist_ok=True)
+    g.write_text(
+        json.dumps({"entries": [{
+            "id": DEFER_NODE, "title": "deferred provenance target",
+            "type": "feature", "project": "fno", "status": "ready",
+        }]}),
+        encoding="utf-8",
+    )
+
+
+def _deferred_sessions() -> list[dict]:
+    from fno import paths
+    from fno.graph.store import read_graph
+
+    return next(
+        e for e in read_graph(paths.graph_json()) if e["id"] == DEFER_NODE
+    ).get("sessions", [])
+
+
+def _parked_row(name: str = "target-x-def1"):
+    """A spawned claude row with NO session id yet, carrying the park."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name=name,
+            harness="claude",
+            harness_session_id="",
+            pid=4_194_301,
+            pid_start_time=1_000,
+            node=DEFER_NODE,
+            effort="xhigh",
+            pending_session_row={"phase": "do", "merge_grant": None},
+            cwd="/proj",
+            log_path="",
+            status="spawning",
+        )
+    ])
+
+
+def test_session_start_first_fill_opens_the_parked_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The claude SessionStart arm: the empty primary accepts its first id and
+    the parked payload opens the node's sessions row, then is cleared."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, record_session_observation
+
+    _seed_deferred_node()
+    _parked_row()
+    entry, outcome = record_session_observation(
+        name="target-x-def1", harness="claude", session_id=REMINT
+    )
+
+    assert outcome == "primary"
+    assert entry is not None
+    rows = _deferred_sessions()
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == REMINT
+    assert rows[0]["phase"] == "do"
+    assert rows[0]["effort"] == "xhigh"
+    row = load_registry()[0]
+    assert row.pending_session_row is None
+    assert row.harness_session_id == REMINT
+
+
+def test_restamp_first_fill_opens_the_parked_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The codex/opencode SessionStart arm restamps the same empty primary;
+    the same helper opens the same row. One helper, both writers."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _seed_deferred_node()
+    _parked_row()
+    entry = restamp_harness_session_id(
+        name="target-x-def1", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = _deferred_sessions()
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == REMINT
+    assert rows[0]["phase"] == "do"
+    row = load_registry()[0]
+    assert row.pending_session_row is None
+
+
+def test_deferred_open_is_a_noop_after_the_claim_path_won(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """append_session_record is idempotent on (session_id, phase): a claim-path
+    open that already wrote the do row makes the deferred open a no-op."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno import paths
+    from fno.agents.registry import load_registry, record_session_observation
+    from fno.graph.store import append_session_record
+
+    _seed_deferred_node()
+    _parked_row()
+    append_session_record(
+        paths.graph_json(), DEFER_NODE, phase="do", harness="claude",
+        session_id=REMINT, started_at="2026-09-22T00:00:00Z",
+    )
+    entry, outcome = record_session_observation(
+        name="target-x-def1", harness="claude", session_id=REMINT
+    )
+
+    assert outcome == "primary"
+    rows = _deferred_sessions()
+    assert len(rows) == 1
+    assert rows[0]["started_at"] == "2026-09-22T00:00:00Z"
+    assert load_registry()[0].pending_session_row is None

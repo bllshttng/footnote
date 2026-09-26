@@ -55,6 +55,49 @@ def test_every_member_of_an_epic_set_must_be_an_epic():
         compile_scope_ids("x-a,x-n", entries, resolve=lambda _: (2, "x-a,x-n"))
 
 
+# --- the compile resolves against the rows it holds (x-5f26) -----------------
+
+
+@pytest.fixture
+def _no_projects(tmp_path, monkeypatch):
+    import fno.projects.resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[work.workspaces.ws1]\nprojects = []\n", encoding="utf-8")
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+
+def test_an_epic_set_compiles_without_a_second_graph_read(_no_projects, monkeypatch):
+    # AC3-HP: the compile holds the entries; resolve_crown must not pay a
+    # whole-graph parse to relearn what by_id already knows.
+    from fno.agents import crown as crown_mod
+
+    entries = [
+        {"id": "x-a", "type": "epic", "project": "fno"},
+        {"id": "x-a1", "parent": "x-a", "project": "fno"},
+        {"id": "x-b", "type": "epic", "project": "fno"},
+        {"id": "x-b1", "parent": "x-b", "project": "fno"},
+    ]
+
+    def _refuse():
+        raise AssertionError("a held-row compile must not re-read the graph")
+
+    monkeypatch.setattr(crown_mod, "_graph_index", _refuse)
+    ids = compile_scope_ids("x-a,x-b", entries)
+    assert ids == {"x-a", "x-a1", "x-b", "x-b1"}
+
+
+def test_a_non_epic_member_still_refuses_through_the_held_rows(_no_projects):
+    # AC3-ERR: the held-row resolver enforces the same epic-only rule.
+    entries = [
+        {"id": "x-a", "type": "epic", "project": "fno"},
+        {"id": "x-n", "type": "feature", "project": "fno"},
+    ]
+    with pytest.raises(ValueError, match="not an epic"):
+        compile_scope_ids("x-a,x-n", entries)
+
+
 def test_a_non_epic_root_is_refused():
     entries = [{"id": "x-root", "type": "feature"}]
     with pytest.raises(ValueError):
@@ -80,6 +123,30 @@ def test_scope_undelivered_counts_only_nodes_not_done_or_superseded():
         {"id": "x-outside", "status": "in_progress"},
     ]
     assert scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 4
+
+
+def test_scope_undelivered_closes_wont_do_but_not_unclassified_deferrals():
+    entries = [
+        {
+            "id": "x-root",
+            "type": "epic",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+        },
+        {
+            "id": "x-wont-do",
+            "parent": "x-root",
+            "status": "deferred",
+            "deferred_kind": "wont_do",
+        },
+        {
+            "id": "x-unclassified",
+            "parent": "x-root",
+            "status": "deferred",
+            "deferred_kind": None,
+        },
+    ]
+    assert scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 1
 
 
 def test_a_fully_driven_scope_still_counts_as_undelivered():

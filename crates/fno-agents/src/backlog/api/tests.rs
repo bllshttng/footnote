@@ -26,8 +26,6 @@ fn session_row(session_id: &str) -> SessionRecord {
         ended_at: None,
         ended_by: None,
         effort: None,
-        at: None,
-        claimed_at: None,
         observed_model: None,
         merge_grant: None,
         extras: Map::new(),
@@ -567,6 +565,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "operator",
             Some("do"),
             Some("claude"),
+            None,
         )
         .unwrap();
         assert!(payload.success);
@@ -585,6 +584,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "operator",
             Some("do"),
             Some("claude"),
+            None,
         )
         .unwrap();
         assert!(!again.success, "ending twice refuses");
@@ -601,6 +601,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "operator",
             Some("do"),
             Some("claude"),
+            None,
         );
         assert!(matches!(payload, Ok(p) if !p.success));
         let one = node(store, "ab-one").unwrap().unwrap();
@@ -711,6 +712,48 @@ fn api_transcript_helper_agrees_before_mutations() {
     let (_d1, _d2, json_store, sqlite_store) = both_stores();
     let (a, b) = (transcript(&json_store), transcript(&sqlite_store));
     assert_eq!(a, b);
+}
+
+/// The keeper feeds the pure read halves from the cache; the store-reading
+/// functions delegate to the same halves. This pins the seam: on both
+/// backends the pure halves over the store's rows answer byte-equal to the
+/// store reads (the AC8 pre-change-equality contract).
+#[test]
+fn api_pure_read_halves_equal_the_store_reads_on_both_backends() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        let store_rows = read_rows(store).unwrap();
+        // rows: the round-tripped list.
+        assert_eq!(rows_in(&store_rows), rows(store).unwrap());
+        // node: one present id, one absent.
+        assert_eq!(
+            node_in(&store_rows, "ab-two").map(|n| n.to_json()),
+            node(store, "ab-two").unwrap().map(|n| n.to_json())
+        );
+        assert_eq!(node_in(&store_rows, "ab-nope").map(|n| n.to_json()), None);
+        // nodes: the default page and an id_in filter, compared as the wire
+        // projection (page info plus node rows).
+        let as_rows = |c: &Connection<Node>| {
+            (
+                serde_json::to_value(&c.page_info).unwrap(),
+                c.nodes.iter().map(|n| n.to_json()).collect::<Vec<_>>(),
+            )
+        };
+        let filter = NodeFilter::default();
+        let page = Page::default();
+        assert_eq!(
+            as_rows(&nodes(store, &filter, &page).unwrap()),
+            as_rows(&nodes_in(&store_rows, &filter, &page))
+        );
+        let id_filter = NodeFilter {
+            id_in: Some(vec!["ab-one".into(), "ab-three".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            as_rows(&nodes(store, &id_filter, &page).unwrap()),
+            as_rows(&nodes_in(&store_rows, &id_filter, &page))
+        );
+    }
 }
 
 #[test]
@@ -836,5 +879,242 @@ fn readers_follow_store_rows_reflect_mutations() {
         let after = rows(store).unwrap();
         assert_eq!(after[1]["id"], "ab-two");
         assert_eq!(after[1]["title"], "Two renamed");
+    }
+}
+
+#[test]
+fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
+    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
+    let store = &json_store;
+    session_append(store, "ab-one", session_row("s-explicit")).unwrap();
+    let payload = session_end(
+        store,
+        "ab-one",
+        "s-explicit",
+        "reap-sweep",
+        Some("do"),
+        Some("claude"),
+        Some("2026-08-02T07:00:00Z"),
+    )
+    .unwrap();
+    assert!(payload.success);
+    let one = node(store, "ab-one").unwrap().unwrap();
+    let typed = one
+        .sessions
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "s-explicit")
+        .unwrap();
+    assert_eq!(typed.ended_at.as_deref(), Some("2026-08-02T07:00:00Z"));
+
+    // Raw branch: a row the typed model cannot represent still owes its
+    // close, and reads the same explicit instant through the raw fill.
+    mutate(store, "seed-raw", |entries| {
+        entries.push(json!({
+            "id": "ab-raw1", "slug": "ab-raw1", "title": "Raw", "type": "feature",
+            "status": "in_progress", "priority": "p2",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "sessions": [
+                {"session_id": "s-raw", "phase": "do", "harness": "claude",
+                 "started_at": 123}
+            ]
+        }));
+        Ok(true)
+    })
+    .unwrap();
+    let payload = session_end(
+        store,
+        "ab-raw1",
+        "s-raw",
+        "reap-sweep",
+        Some("do"),
+        Some("claude"),
+        Some("2026-08-02T08:30:00Z"),
+    )
+    .unwrap();
+    assert!(payload.success);
+    let entries = rows(store).unwrap();
+    let raw = entries
+        .iter()
+        .find(|e| crate::graph_store::entry_id(e) == Some("ab-raw1"))
+        .unwrap();
+    assert_eq!(raw["sessions"][0]["ended_at"], "2026-08-02T08:30:00Z");
+    assert_eq!(raw["sessions"][0]["ended_by"], "reap-sweep");
+}
+
+#[test]
+fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 1522,
+                url: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 1523,
+                url: Some("https://github.com/o/r/pull/1523".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+
+        // Stamps 1523 only; 1522 stays unstamped.
+        let payload = pull_request_stamp(
+            store,
+            "ab-one",
+            1523,
+            Some("https://github.com/o/r/pull/1523"),
+            "merged",
+        )
+        .unwrap();
+        assert!(payload.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        // 1522 landed as the primary (primary_pr was empty); 1523 is the
+        // one additional_prs entry, and only it carries the stamp.
+        assert_eq!(one.primary_pr.unwrap().merge_status, None);
+        let extras = one.additional_prs.unwrap();
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].merge_status.as_deref(), Some("merged"));
+
+        // A second call is refused: the entry already reads merged.
+        let again = pull_request_stamp(
+            store,
+            "ab-one",
+            1523,
+            Some("https://github.com/o/r/pull/1523"),
+            "closed",
+        )
+        .unwrap();
+        assert!(!again.success);
+
+        // An absent number is refused and writes nothing.
+        let absent = pull_request_stamp(store, "ab-one", 999, None, "merged").unwrap();
+        assert!(!absent.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(one.additional_prs.unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn primary_pr_stamp_stamps_an_unrecorded_primary() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2180,
+                url: Some("https://github.com/o/r/pull/2180".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+        let payload = primary_pr_stamp(
+            store,
+            "ab-one",
+            2180,
+            Some("https://github.com/o/r/pull/2180"),
+            "merged",
+        )
+        .unwrap();
+        assert!(payload.success);
+        let stamped = payload.node.as_ref().unwrap();
+        let primary = stamped.primary_pr.as_ref().unwrap();
+        assert_eq!(primary.merge_status.as_deref(), Some("merged"));
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(
+            one.primary_pr.unwrap().merge_status.as_deref(),
+            Some("merged")
+        );
+    }
+}
+
+#[test]
+fn primary_pr_stamp_refuses_a_number_or_url_mismatch() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2180,
+                url: Some("https://github.com/o/r/pull/2180".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+        let wrong_number = primary_pr_stamp(
+            store,
+            "ab-one",
+            2181,
+            Some("https://github.com/o/r/pull/2180"),
+            "merged",
+        )
+        .unwrap();
+        assert!(!wrong_number.success);
+        let wrong_url = primary_pr_stamp(
+            store,
+            "ab-one",
+            2180,
+            Some("https://github.com/o/r/pull/9999"),
+            "merged",
+        )
+        .unwrap();
+        assert!(!wrong_url.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(one.primary_pr.unwrap().merge_status, None);
+    }
+}
+
+#[test]
+fn primary_pr_stamp_never_overwrites_a_recorded_value() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        mutate(store, "seed-failed-primary", |entries| {
+            entries.push(json!({
+                "id": "ab-failed", "slug": "ab-failed", "title": "Failed",
+                "type": "feature", "status": "done", "priority": "p2",
+                "created_at": "2026-09-11T00:00:00+00:00",
+                "pr_number": 2180, "merge_status": "failed"
+            }));
+            Ok(true)
+        })
+        .unwrap();
+        let refused = primary_pr_stamp(store, "ab-failed", 2180, None, "merged").unwrap();
+        assert!(!refused.success);
+        let seeded = node(store, "ab-failed").unwrap().unwrap();
+        assert_eq!(
+            seeded.primary_pr.unwrap().merge_status.as_deref(),
+            Some("failed")
+        );
+
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 2199,
+                url: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        let stamped = primary_pr_stamp(store, "ab-one", 2199, None, "merged").unwrap();
+        assert!(stamped.success);
+        let again = primary_pr_stamp(store, "ab-one", 2199, None, "closed").unwrap();
+        assert!(!again.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(
+            one.primary_pr.unwrap().merge_status.as_deref(),
+            Some("merged")
+        );
     }
 }

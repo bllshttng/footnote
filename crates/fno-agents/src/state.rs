@@ -838,6 +838,23 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// v36: why a mint could not bind the node the spawn NAMED -
+    /// the seed's verb argument read as a node id but the seam resolved no
+    /// readable row for it. Set only in that one case; absent when the node
+    /// resolved and absent when the spawn genuinely named none, so the three
+    /// states stay distinguishable. Mirrors Python's `AgentEntry.node_reason`;
+    /// same X3 passthrough duty as `node` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_reason: Option<String>,
+    /// The sessions row a spawn owed but could not open because no harness
+    /// session id existed yet (`{phase, merge_grant?}`): parked by Python's
+    /// spawn stamp, consumed and cleared by SessionStart's first id
+    /// observation. Mirrors Python's `AgentEntry.pending_session_row`; Rust
+    /// only carries the payload, so it stays a raw Value (X3 passthrough duty
+    /// as `node` and `substrate` before it - without this mirror a daemon
+    /// write drops the parked row silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_session_row: Option<serde_json::Value>,
     /// v23: the spawn REQUEST, verbatim as the flags spelled it (any
     /// `[1m]` suffix included), stamped once at birth beside the observed
     /// axes. `model`/`model_basis` flip to a verified observation; these never
@@ -1133,6 +1150,24 @@ pub struct RegistryEntry {
     /// `workspaceWrite` alone are different workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_writable_roots: Vec<String>,
+    /// The permission_mode string the operator's spawn REQUESTED, verbatim
+    /// (schema v35): `read-only:on-request`, `yolo`, `full-auto`. `None` when
+    /// the spawn named no mode (the bare yolo bool or the bounded default).
+    /// Distinct from `sandbox_posture`, which records the resolved NAME of the
+    /// sandbox half only: the requested string is what a resume replays, and a
+    /// row without it cannot tell `read-only:on-request` from
+    /// `read-only:never`. Same X3 passthrough duty as the other posture
+    /// columns, and the same additive-optional writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
+    /// Where the current turn's sandboxPolicy came from (schema v35):
+    /// `resolved` when it echoes the server-reported posture, `requested`
+    /// when the server named no sandbox and the row's recorded request was
+    /// replayed instead. Stamped at spawn, refreshed by the resume
+    /// write-back. `None` on rows that predate the column; readers show
+    /// `unknown`, never a posture name and never a permission claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_policy_source: Option<String>,
     /// v9 backfill-only: the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -2229,6 +2264,39 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     })
 }
 
+/// One migration pass over claude rows whose `short_id` is a byte-copy of
+/// the session uuid (the register path once wrote it that way): the
+/// transport key is the uuid's own leading 8-hex segment, and a full uuid
+/// refuses `claude attach`. Rewrites ONLY `short_id` - name, aliases and
+/// crown fields are untouched - under the registry lock, skips the write
+/// entirely when nothing matches, and never touches a short id that is an
+/// independent transport key (not a copy of the row's own session id).
+pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
+    let mut healed = 0usize;
+    update_registry(path, |registry| {
+        for entry in registry.entries.iter_mut() {
+            if entry.harness.as_deref() != Some("claude")
+                || entry.mux.is_some()
+                || entry.short_id.len() <= 8
+            {
+                continue;
+            }
+            let Some(session) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            if entry.short_id != session {
+                continue;
+            }
+            let lead = session.split('-').next().unwrap_or(session);
+            if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+                entry.short_id = lead.to_ascii_lowercase();
+                healed += 1;
+            }
+        }
+    })?;
+    Ok(healed)
+}
+
 /// Read-modify-write the registry under an exclusive lock, publishing the
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never
@@ -2271,6 +2339,26 @@ where
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
+    // Every transition into Exited carries its date, whichever closure wrote
+    // it. A row already Exited with no stamp stays unstamped: a stamp written
+    // now would date an old exit to an unrelated write. Any drive-eligible row
+    // drops an old stamp, even when another terminal status sat between the
+    // exit and revival, or the ladder can read the old exit as current again.
+    let was_exited: std::collections::HashSet<&str> = before_entries
+        .iter()
+        .filter(|b| b.status == AgentStatus::Exited)
+        .map(|b| b.name.as_str())
+        .collect();
+    let mut stamp = None;
+    for entry in &mut registry.entries {
+        let before_exited = was_exited.contains(entry.name.as_str());
+        if entry.status == AgentStatus::Exited && entry.exited_at.is_none() && !before_exited {
+            let now = stamp.get_or_insert_with(crate::daemon::now_rfc3339_like);
+            entry.exited_at = Some(now.clone());
+        } else if entry.status.is_drive_eligible() && entry.exited_at.is_some() {
+            entry.exited_at = None;
+        }
+    }
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde
@@ -2326,11 +2414,21 @@ where
 /// (`find_name_or_full_session_id`: label, full session id + canonical handle,
 /// related/predecessor ids) plus the transport short id and a prior label held
 /// as an alias.
-pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String, String), String> {
+pub fn rename_agent(
+    path: &Path,
+    token: &str,
+    new_name: &str,
+    node: Option<&str>,
+) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
             "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
         );
+    }
+    if let Some(node) = node {
+        if node.trim().is_empty() {
+            return Err("registry node must be non-empty when provided".to_string());
+        }
     }
     // Resolve BEFORE the lock. The resolution reads the same file the
     // transaction re-reads under the lock, and the identity re-check inside the
@@ -2419,6 +2517,9 @@ pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String,
             target.aliases.push(resolved_name.clone());
         }
         target.name = new_name.to_string();
+        if let Some(node) = node {
+            target.node = Some(node.trim().to_string());
+        }
         Ok(())
     }) {
         Ok(inner) => inner?,
@@ -2474,7 +2575,7 @@ pub(crate) fn rename_response(
             "registry name must be 1-64 letters, numbers, underscores, or hyphens",
         );
     }
-    match rename_agent(registry_path, token, new_name) {
+    match rename_agent(registry_path, token, new_name, None) {
         Ok((old, new)) => Response::ok(
             req.id,
             serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
@@ -2574,7 +2675,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
 /// to five following arguments, 200 chars. The binary name alone cannot tell
 /// `agents reap --apply` from `board --json`, and which door dropped rows is
 /// exactly the question the grouped loss event exists to answer.
-fn invocation_verb() -> String {
+pub(crate) fn invocation_verb() -> String {
     let mut parts: Vec<String> = std::env::args_os()
         .take(6)
         .map(|a| a.to_string_lossy().into_owned())
@@ -2760,7 +2861,7 @@ where
     Ok(result)
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
@@ -2769,7 +2870,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
 /// lock, blocking until acquired. The returned `File` holds the lock until it
 /// is unlocked or dropped.
-fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
+pub(crate) fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -2823,7 +2924,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateEr
     Ok(serde_json::from_str(&buf)?)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(

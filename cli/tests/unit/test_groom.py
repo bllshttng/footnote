@@ -202,6 +202,30 @@ def test_spawn_is_headless_sonnet(monkeypatch, claims_root):
     assert G._SPAWN_TIMEOUT_S > G._WORKER_TIMEOUT_S, "inner bound must fire first"
 
 
+def test_spawn_failure_reports_the_verdict_not_a_head_window(monkeypatch):
+    """AC2-HP (x-d769): gate notes run long, so the 200-char head window cut
+    the verdict line off the report. The reader keys on the last spawn-gate:
+    line instead."""
+    verdict = "spawn-gate: refused on ram_floor (ram_floor, exit 77): available_gb=1.2"
+
+    class _Proc:
+        returncode = 77
+        stdout = ""
+        stderr = f"spawn-gate note: {'n' * 300}\n{verdict}"
+
+    def _fake_run(cmd, **kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
+        # real binary; the fake stands in for the spawn only.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    with pytest.raises(RuntimeError) as ei:
+        G._spawn_groom_worker("brief", "/repo", G.GROOM_MODEL_DEFAULT, DAY.isoformat())
+    assert verdict in str(ei.value)
+
+
 # ── the skill brief contract ────────────────────────────────────────────────
 
 
@@ -282,7 +306,7 @@ def test_skill_routes_questions_to_the_deferred_pile_not_idea():
 
 def test_skill_forbids_direct_state_edits():
     text = SKILL.read_text()
-    assert "graph.json" in text and "Never" in text
+    assert "graph.db" in text and "Never" in text
     for forbidden in ("jq -i", "sed -i"):
         assert forbidden in text, "the brief must name the direct-edit paths it forbids"
 
@@ -730,6 +754,64 @@ def test_refresh_survives_a_corrupt_plist(tmp_path, monkeypatch):
     r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
     assert r["status"] == "installed"
     assert r["hour"] == G.GROOM_HOUR_DEFAULT
+
+
+# ── unchanged refresh must not re-register ─────────────────────────────────
+# macOS posts a background-activity notice on every launchd re-registration,
+# so a refresh whose rendered bytes match the installed plist must skip the
+# bootstrap entirely.
+
+
+def test_refresh_with_unchanged_bytes_skips_rebootstrapping(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/fno")
+    bounces: list = []
+    monkeypatch.setattr(
+        "fno.pr_watch._install.bounce", lambda **kw: bounces.append(kw) or ("ok", 0)
+    )
+
+    first = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno")
+    second = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+
+    assert first["status"] == "installed"
+    assert second["status"] == "unchanged"
+    assert len(bounces) == 1, "the refresh must not re-register an unchanged agent"
+
+
+def test_refresh_still_reregisters_when_the_binary_changes(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/old/fno")
+    monkeypatch.setattr("shutil.which", lambda _: "/new/fno")
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+
+    assert r["status"] == "installed"
+    assert "/new/fno" in (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+
+def test_default_groom_path_is_caller_independent(tmp_path, monkeypatch):
+    """No install_path -> fixed default, never the caller's environment."""
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/fno")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    monkeypatch.setenv(
+        "PATH", "/var/run/com.apple.security.cryptexd/codex.system/usr/bin"
+    )
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno")
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert "cryptexd" not in xml
 
 
 # ── freshness predicate (x-1c7b) ────────────────────────────────────────────

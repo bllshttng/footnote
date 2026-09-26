@@ -9,24 +9,30 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 pub mod agents_view;
+pub mod backlog_model;
 pub mod backlog_view;
+pub mod backlog_write;
 pub mod board_reader;
 pub mod bootstrap;
+pub mod build_drift;
 pub mod chrome;
 pub mod cli_args;
 pub mod client;
 pub mod clipboard;
 pub mod connections_view;
 pub mod court_overlay;
+pub mod crown_names;
 pub mod digest_overlay;
 pub mod dispatch_launch;
+pub mod event_cli;
+pub mod event_store;
 pub mod feed_overlay;
 #[cfg(test)]
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
 pub mod link;
-pub mod mission_squad;
+pub mod live_store_fence;
 pub mod mouse;
 pub mod mux_cli;
 pub mod mux_rows;
@@ -38,8 +44,10 @@ pub mod popup;
 pub mod process_admission;
 pub mod product_boundary;
 pub mod proto;
+pub mod proto_pane;
 pub mod proto_slot;
 pub mod pty;
+pub mod ratatui_blit;
 pub mod registry_label;
 pub mod restore_gate;
 pub mod restore_liveness;
@@ -55,6 +63,8 @@ pub mod squad_cascade;
 pub mod squad_store;
 pub mod store_client;
 pub mod templates;
+#[cfg(test)]
+mod test_keeper_cleanup;
 #[cfg(test)]
 pub(crate) mod test_owner;
 pub mod theme;

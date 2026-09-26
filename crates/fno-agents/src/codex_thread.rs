@@ -29,6 +29,7 @@ use crate::codex_inject::{
     AppServerStream, ReviewDelivery, ReviewTarget,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -47,6 +48,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// burst of notification frames with quiet gaps while the model thinks, so
 /// this deadline is the ONLY bound on the wait for `turn/completed`.
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+/// Manual compaction runs a provider turn. Share that whole-turn bound and
+/// require the same-thread completion receipt before reporting success.
+const COMPACTION_TIMEOUT: Duration = TURN_TIMEOUT;
 /// How long the daemon's `ask` waits on a submitter's reply before answering
 /// `in_flight`. Comfortably under the client's 120s `RESPONSE_DEADLINE`
 /// (crates/fno-agents/src/bin/client.rs) so a bounded receipt, not a silent
@@ -154,6 +158,51 @@ pub struct TurnResult {
     pub raw: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    #[serde(rename = "complete")]
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGoal {
+    pub thread_id: String,
+    pub objective: String,
+    pub status: GoalStatus,
+    pub usage: GoalUsage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalUsage {
+    pub token_budget: Option<i64>,
+    pub tokens_used: i64,
+    pub time_used_seconds: i64,
+}
+
+impl GoalUsage {
+    pub fn preserves(&self, previous: &Self) -> bool {
+        self.token_budget == previous.token_budget
+            && self.tokens_used >= previous.tokens_used
+            && self.time_used_seconds >= previous.time_used_seconds
+    }
+
+    pub fn receipt_value(&self) -> Value {
+        json!({
+            "token_budget": self.token_budget,
+            "tokens_used": self.tokens_used,
+            "time_used_seconds": self.time_used_seconds,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewResult {
     pub turn_id: String,
@@ -216,6 +265,260 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
     .to_string()
 }
 
+/// Resume one exact thread for provider control without changing its model,
+/// sandbox, approval policy, or thread config.
+pub(crate) fn thread_resume_control_request_json(id: u64, thread_id: &str, cwd: &Path) -> String {
+    json!({
+        "id": id,
+        "method": "thread/resume",
+        "params": {
+            "threadId": thread_id,
+            "cwd": cwd,
+        }
+    })
+    .to_string()
+}
+
+/// Build the typed native compaction action. The caller must prove completion
+/// from the same thread's `contextCompaction` lifecycle item; this frame is
+/// only the submit half of that transaction.
+pub fn thread_compact_start_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/compact/start",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+enum CompactionLifecycle {
+    Started(String, String),
+    Completed(String, String, Value),
+    ContextCompacted(Value),
+}
+
+fn parse_compaction_lifecycle(value: &Value, thread_id: &str) -> Option<CompactionLifecycle> {
+    let method = value.get("method").and_then(Value::as_str)?;
+    if method == "thread/compacted" {
+        let params = value.get("params")?;
+        if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+            return None;
+        }
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())?;
+        return Some(CompactionLifecycle::ContextCompacted(json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "type": "contextCompaction",
+            "status": "completed",
+        })));
+    }
+    if !matches!(method, "item/started" | "item/completed") {
+        return None;
+    }
+    let params = value.get("params").unwrap_or(value);
+    if params
+        .get("threadId")
+        .or_else(|| value.get("threadId"))
+        .and_then(Value::as_str)
+        != Some(thread_id)
+    {
+        return None;
+    }
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| value.get("turnId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
+    let item = params.get("item").or_else(|| value.get("item"))?;
+    if item.get("type").and_then(Value::as_str) != Some("contextCompaction") {
+        return None;
+    }
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())?
+        .to_string();
+    let completed_at_ms = if method == "item/completed" {
+        Some(params.get("completedAtMs").and_then(Value::as_u64)?)
+    } else {
+        None
+    };
+    match method {
+        "item/started" => Some(CompactionLifecycle::Started(turn_id, item_id)),
+        "item/completed" => Some(CompactionLifecycle::Completed(
+            turn_id,
+            item_id.clone(),
+            json!({
+                "threadId": thread_id,
+                "turnId": params.get("turnId").or_else(|| value.get("turnId")),
+                "itemId": item_id,
+                "type": "contextCompaction",
+                "status": "completed",
+                "completedAtMs": completed_at_ms,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// Read the native goal for one exact full thread id.
+pub fn thread_goal_get_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/get",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+/// Set or pause a native goal without exposing a clear operation. The
+/// controller preserves the objective and usage across a pause.
+pub fn thread_goal_set_request_json(
+    id: u64,
+    thread_id: &str,
+    objective: &str,
+    status: &str,
+) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/set",
+        "params": {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": status,
+        },
+    })
+    .to_string()
+}
+
+pub fn reign_objective(scope: &str) -> String {
+    format!("$fno:reign {}", scope.trim())
+}
+
+pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|_| ThreadDriverError::Protocol("invalid thread/goal response".into()))?;
+    parse_goal_value(&value)
+}
+
+pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    let goal = value.pointer("/result/goal").or_else(|| value.get("goal"));
+    let Some(goal) = goal else {
+        return Ok(None);
+    };
+    if goal.is_null() {
+        return Ok(None);
+    }
+    let object = goal.as_object().ok_or_else(|| {
+        ThreadDriverError::Protocol("thread/goal response carried a non-object goal".into())
+    })?;
+    let thread_id = object
+        .get("threadId")
+        .or_else(|| object.get("thread_id"))
+        .and_then(Value::as_str)
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no thread id".into()))?
+        .to_string();
+    let objective = object
+        .get("objective")
+        .or_else(|| object.get("goal"))
+        .and_then(Value::as_str)
+        .filter(|objective| !objective.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no objective".into()))?
+        .to_string();
+    let status = match object
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no status".into()))?
+    {
+        "active" => GoalStatus::Active,
+        "paused" => GoalStatus::Paused,
+        "blocked" => GoalStatus::Blocked,
+        "usageLimited" | "usage_limited" => GoalStatus::UsageLimited,
+        "budgetLimited" | "budget_limited" => GoalStatus::BudgetLimited,
+        "complete" | "completed" | "done" => GoalStatus::Completed,
+        other => {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/goal response has unknown status {other:?}"
+            )))
+        }
+    };
+    let token_budget_value = object
+        .get("tokenBudget")
+        .or_else(|| object.get("token_budget"))
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no token budget".into())
+        })?;
+    let token_budget = if token_budget_value.is_null() {
+        None
+    } else {
+        Some(
+            token_budget_value
+                .as_i64()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    ThreadDriverError::Protocol("thread/goal token budget is invalid".into())
+                })?,
+        )
+    };
+    let tokens_used = object
+        .get("tokensUsed")
+        .or_else(|| object.get("tokens_used"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid tokens used".into())
+        })?;
+    let time_used_seconds = object
+        .get("timeUsedSeconds")
+        .or_else(|| object.get("time_used_seconds"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid time used".into())
+        })?;
+    Ok(Some(NativeGoal {
+        thread_id,
+        objective,
+        status,
+        usage: GoalUsage {
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+        },
+    }))
+}
+
+pub fn ensure_reign_goal(
+    current: Option<&NativeGoal>,
+    scope: &str,
+    continuation_owner: &str,
+) -> Result<GoalStatus, ThreadDriverError> {
+    let expected = reign_objective(scope);
+    if let Some(goal) = current {
+        if goal.objective != expected {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing native goal {:?}; expected {:?}; continuation owner {}",
+                goal.objective, expected, continuation_owner
+            )));
+        }
+        if !matches!(goal.status, GoalStatus::Active | GoalStatus::Paused) {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
+            )));
+        }
+    }
+    Ok(GoalStatus::Active)
+}
+
 /// Build a `turn/start` request for the held driver.
 pub fn turn_start_request_json_with_id(id: u64, thread_id: &str, text: &str) -> String {
     turn_start_request_json_with_effort(id, thread_id, text, None)
@@ -227,7 +530,16 @@ pub fn turn_start_request_json_with_effort(
     text: &str,
     effort: Option<&str>,
 ) -> String {
-    turn_start_request_json_full(id, thread_id, text, effort, &[], None)
+    // No resolved posture and the bounded default request: the minimal frame.
+    turn_start_request_json_full(
+        id,
+        thread_id,
+        text,
+        effort,
+        &[],
+        None,
+        &CodexPosture::bounded(),
+    )
 }
 
 /// `turn/start` with the optional state-root grant.
@@ -255,16 +567,29 @@ pub fn turn_start_request_json_with_effort(
 /// `writableRoots: []` and can still write its own cwd - so naming the state
 /// root does not take the worktree away.
 ///
-/// The thread's resolved posture with `state_dirs` added to its writable roots.
-///
-/// Additive and order-stable: the posture's own roots come first and a root it
-/// already names is not repeated, so the turn widens the policy and narrows
-/// nothing.
-pub(crate) fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) -> Value {
-    let mut policy = resolved.cloned().unwrap_or_else(
-        || json!({"type": "workspaceWrite", "writableRoots": Vec::<String>::new()}),
-    );
-    let mut roots: Vec<String> = policy
+/// Widen a RESOLVED workspaceWrite posture with `state_dirs` and network
+/// access. Additive and order-stable: the posture's own roots come first and
+/// a root it already names is not repeated, so the turn widens the policy and
+/// narrows nothing. Every other resolved posture is echoed unchanged by
+/// [`turn_policy`]; this builder only ever sees the workspaceWrite echo,
+/// because roots mean nothing under a wider posture and naming them on a
+/// narrower one would be a widening of its own.
+pub(crate) fn sandbox_policy_with_roots(resolved: &Value, state_dirs: &[String]) -> Value {
+    let mut policy = resolved.clone();
+    let mut roots: Vec<String> = posture_roots(&policy);
+    for dir in state_dirs {
+        if !roots.iter().any(|root| root == dir) {
+            roots.push(dir.clone());
+        }
+    }
+    policy["writableRoots"] = json!(roots);
+    policy["networkAccess"] = json!(true);
+    policy
+}
+
+/// The `writableRoots` a policy object already carries, as owned strings.
+fn posture_roots(policy: &Value) -> Vec<String> {
+    policy
         .get("writableRoots")
         .and_then(Value::as_array)
         .map(|existing| {
@@ -274,15 +599,54 @@ pub(crate) fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
-    for dir in state_dirs {
-        if !roots.iter().any(|root| root == dir) {
-            roots.push(dir.clone());
-        }
+        .unwrap_or_default()
+}
+
+/// The `turn/start` sandboxPolicy: the thread's RESOLVED posture echoed with
+/// its roots widened, or - when the server named no sandbox at all - the
+/// recorded REQUEST built into a policy, marked `requested` so no reader can
+/// mistake a replayed request for a server answer. The return pairs the
+/// policy with its source (`resolved` / `requested`); `None` sends no policy
+/// key at all, which keeps a bounded request with no roots on today's exact
+/// frame.
+///
+/// This is where the old frame narrowed a full-access thread: the resolved
+/// posture was filtered to `workspaceWrite` and a missing one was fabricated
+/// as `workspaceWrite` from nothing whenever any root existed, so a
+/// `dangerFullAccess` thread received a `workspaceWrite` policy on every
+/// single turn. The echo is now unfiltered, and the from-request build never
+/// invents a posture name - it builds the posture the request named.
+pub(crate) fn turn_policy(
+    resolved: Option<&Value>,
+    requested: &CodexPosture,
+    state_dirs: &[String],
+) -> Option<(Value, &'static str)> {
+    if let Some(resolved) = resolved {
+        return Some(match resolved.get("type").and_then(Value::as_str) {
+            Some("workspaceWrite") => (sandbox_policy_with_roots(resolved, state_dirs), "resolved"),
+            // Full access and read-only echo unchanged: roots mean nothing
+            // under full access, and adding roots (or network) to read-only
+            // would be a widening of its own.
+            _ => (resolved.clone(), "resolved"),
+            // The server's own value, whatever it names: never a hand-built
+            // substitute for an unknown posture.
+        });
     }
-    policy["writableRoots"] = json!(roots);
-    policy["networkAccess"] = json!(true);
-    policy
+    if requested.is_full_access() {
+        return Some((
+            json!({"type": requested.sandbox.as_policy_type()}),
+            "requested",
+        ));
+    }
+    if state_dirs.is_empty() {
+        return None;
+    }
+    let policy = json!({
+        "type": requested.sandbox.as_policy_type(),
+        "writableRoots": state_dirs,
+        "networkAccess": true,
+    });
+    Some((policy, "requested"))
 }
 
 /// The roots the thread lane carries onto every `turn/start`: the caller's
@@ -306,17 +670,11 @@ fn granted_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
 
 /// `turn/start` takes a whole `sandboxPolicy` object, never a `writableRoots`
 /// delta, so the policy is built FROM the thread's own resolved posture
-/// (`resolved`) with the roots widened and network forced on. Hand-building
-/// the object instead replaces every sibling field - the tmp exclusions, roots
-/// the posture already carried - with the server's defaults.
-///
-/// With no resolved posture to echo, it falls back to the minimal object.
-/// A known bounded posture then carries the policy even with no root granted
-/// (a non-repo cwd with no published state dirs), because network is part of
-/// what a bounded worker needs; a `dangerFullAccess` thread resolves `None`
-/// and keeps today's frame.
-///
-/// No resolved posture and no state dirs builds today's frame byte-for-byte.
+/// (`resolved`), or from the recorded REQUEST when the server named no
+/// sandbox ([`turn_policy`]). The source is carried BESIDE the policy on the
+/// row (`turn_policy_source`), not inside the frame: the app-server owns the
+/// params' shape, and a non-protocol key would be a second vocabulary for one
+/// fact.
 pub fn turn_start_request_json_full(
     id: u64,
     thread_id: &str,
@@ -324,6 +682,7 @@ pub fn turn_start_request_json_full(
     effort: Option<&str>,
     state_dirs: &[String],
     resolved: Option<&Value>,
+    requested: &CodexPosture,
 ) -> String {
     let mut params = json!({
         "threadId": thread_id,
@@ -332,8 +691,8 @@ pub fn turn_start_request_json_full(
     if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
         params["effort"] = json!(effort);
     }
-    if !state_dirs.is_empty() || resolved.is_some() {
-        params["sandboxPolicy"] = sandbox_policy_with_roots(resolved, state_dirs);
+    if let Some((policy, _source)) = turn_policy(resolved, requested, state_dirs) {
+        params["sandboxPolicy"] = policy;
     }
     json!({
         "id": id,
@@ -386,68 +745,10 @@ pub fn parse_resolved_sandbox(raw: &str) -> Option<Value> {
     serde_json::from_str::<Value>(raw)
         .ok()?
         .pointer("/result/sandbox")
-        .filter(|sandbox| sandbox.get("type").and_then(Value::as_str) == Some("workspaceWrite"))
         .cloned()
 }
 
-/// Resolve the thread lane's launch posture from BOTH spellings a spawn can
-/// use, or refuse.
-///
-/// `spawn_codex_thread_lane` read the `yolo` bool alone and dropped
-/// `permission_mode` on the floor. Dropping an axis is not neutral here: the
-/// lane then starts bounded, which is a SILENT downgrade of the exact posture
-/// the caller was trying to name. Both CLI front doors happen to refuse
-/// `--permission-mode` for codex today, so nothing reaches this with the key
-/// set - but the daemon RPC is the trust boundary, and a boundary that ignores
-/// a permission axis it does not understand is one caller away from the defect.
-///
-/// The vocabulary is codex's own, and it is the one `permission_pane_tokens`
-/// maps for the pane lane (`fno.agents.mux_spawn`): the `full-auto` and `yolo`
-/// shortcuts, or the explicit `<sandbox>:<approval>` pair. Keep the two in
-/// step; a third spelling invented here would be a second vocabulary for one
-/// axis.
-///
-/// Fail closed on anything else, and on both keys at once - "one knob at a
-/// time" is the rule the CLIs already enforce, and guessing which of two
-/// disagreeing postures a caller meant is how a bypass gets granted by
-/// accident.
-pub fn resolve_thread_posture(
-    yolo: Option<bool>,
-    permission_mode: Option<&str>,
-) -> Result<bool, String> {
-    let mode = permission_mode.map(str::trim).filter(|m| !m.is_empty());
-    let Some(mode) = mode else {
-        return Ok(yolo.unwrap_or(false));
-    };
-    if yolo == Some(true) {
-        return Err(format!(
-            "spawn carries both yolo=true and permission_mode {mode:?}; pass one \
-             (they are mutually exclusive, as on `fno agents spawn`)"
-        ));
-    }
-    match mode {
-        "yolo" => Ok(true),
-        "full-auto" => Ok(false),
-        _ => match mode.split_once(':') {
-            Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
-                match sandbox {
-                    "danger-full-access" => Ok(true),
-                    "workspace-write" | "read-only" => Ok(false),
-                    _ => Err(format!(
-                        "codex permission_mode {mode:?} names sandbox {sandbox:?}, which the \
-                         thread lane cannot resolve; use read-only, workspace-write, or \
-                         danger-full-access"
-                    )),
-                }
-            }
-            _ => Err(format!(
-                "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
-                 (full-auto, yolo) or the <sandbox>:<approval> form \
-                 (e.g. workspace-write:on-request)"
-            )),
-        },
-    }
-}
+pub use crate::codex_posture::{resolve_thread_posture, CodexPosture};
 
 /// The posture name the server reported, read WITHOUT the workspaceWrite
 /// filter [`parse_resolved_sandbox`] applies.
@@ -603,6 +904,10 @@ pub struct CodexThread {
     /// every per-turn override so the grant widens the roots and changes
     /// nothing else. `None` when the thread is not `workspaceWrite`.
     resolved_sandbox: Option<Value>,
+    /// The posture the spawn (or resume) REQUESTED, spelled onto the per-turn
+    /// policy when the server resolved nothing. Per THREAD, set once at
+    /// `thread/start` or `thread/resume`.
+    requested: CodexPosture,
     /// The posture name the server reported, unfiltered, for the registry row.
     /// `None` only until `thread/start` answers; recorded as
     /// [`SANDBOX_POSTURE_UNKNOWN`] when the response named no sandbox.
@@ -630,10 +935,10 @@ impl CodexThread {
     pub async fn start(
         cwd: impl Into<PathBuf>,
         model: Option<&str>,
-        yolo: bool,
+        posture: &CodexPosture,
         effort: Option<&str>,
     ) -> Result<Self, ThreadDriverError> {
-        Self::start_with_state_dirs(cwd, model, yolo, effort, &[], None).await
+        Self::start_with_state_dirs(cwd, model, posture, effort, &[], None).await
     }
 
     /// [`CodexThread::start`] plus the roots this thread carries on every turn
@@ -642,7 +947,7 @@ impl CodexThread {
     pub async fn start_with_state_dirs(
         cwd: impl Into<PathBuf>,
         model: Option<&str>,
-        yolo: bool,
+        posture: &CodexPosture,
         effort: Option<&str>,
         state_dirs: &[String],
         config: Option<&serde_json::Map<String, Value>>,
@@ -660,8 +965,7 @@ impl CodexThread {
             1,
             &cwd,
             model,
-            yolo,
-            "never",
+            posture,
             project_id.as_deref(),
             config,
         );
@@ -674,6 +978,7 @@ impl CodexThread {
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
         driver.state_dirs = granted_roots(&cwd, state_dirs);
+        driver.requested = posture.clone();
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
         driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
@@ -709,11 +1014,40 @@ impl CodexThread {
         cwd: impl Into<PathBuf>,
         thread_id: &str,
         model: Option<&str>,
-        yolo: bool,
+        posture: &CodexPosture,
         effort: Option<&str>,
         config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<Self, ThreadDriverError> {
-        Self::resume_with_state_dirs(cwd, thread_id, model, yolo, effort, &[], config).await
+        Self::resume_with_state_dirs(cwd, thread_id, model, posture, effort, &[], config).await
+    }
+
+    /// Resume one exact thread for provider actions without overriding its
+    /// existing permission or model settings.
+    pub(crate) async fn resume_for_control(
+        cwd: impl Into<PathBuf>,
+        thread_id: &str,
+    ) -> Result<Self, ThreadDriverError> {
+        if thread_id.trim().is_empty() {
+            return Err(ThreadDriverError::Protocol(
+                "harness_session_id is required for codex resume".into(),
+            ));
+        }
+        let cwd = cwd.into();
+        let mut driver = Self::launch(cwd.clone()).await?;
+        let request = thread_resume_control_request_json(1, thread_id, &cwd);
+        let response = driver.request(1, request).await?;
+        let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
+            .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
+        if confirmed_id != thread_id {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/resume returned {confirmed_id}, expected {thread_id}"
+            )));
+        }
+        driver.thread_id = confirmed_id;
+        driver.rollout_path = PathBuf::from(rollout_path);
+        driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
+        Ok(driver)
     }
 
     /// [`CodexThread::resume`] plus the state-root grant. A resumed thread
@@ -723,7 +1057,7 @@ impl CodexThread {
         cwd: impl Into<PathBuf>,
         thread_id: &str,
         model: Option<&str>,
-        yolo: bool,
+        posture: &CodexPosture,
         effort: Option<&str>,
         state_dirs: &[String],
         config: Option<&serde_json::Map<String, Value>>,
@@ -738,7 +1072,7 @@ impl CodexThread {
         // so the driver is protocol-ready the moment it exists.
         let mut driver = Self::launch(cwd.clone()).await?;
         let request =
-            thread_resume_request_with_options(1, thread_id, &cwd, model, yolo, "never", config);
+            thread_resume_request_with_options(1, thread_id, &cwd, model, posture, config);
         let response = driver.request(1, request).await?;
         let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
@@ -753,6 +1087,7 @@ impl CodexThread {
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
         driver.state_dirs = granted_roots(&cwd, state_dirs);
+        driver.requested = posture.clone();
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
         driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
@@ -800,6 +1135,7 @@ impl CodexThread {
             cwd,
             effort: None,
             state_dirs: Vec::new(),
+            requested: CodexPosture::bounded(),
             resolved_sandbox: None,
             resolved_sandbox_type: None,
             current_turn_id: None,
@@ -914,6 +1250,7 @@ impl CodexThread {
             self.effort.as_deref(),
             &self.state_dirs,
             self.resolved_sandbox.as_ref(),
+            &self.requested,
         );
         let response = self.request(request_id, request).await?;
         let turn_id = parse_turn_start_response(&response)?;
@@ -943,6 +1280,7 @@ impl CodexThread {
             self.effort.as_deref(),
             &self.state_dirs,
             self.resolved_sandbox.as_ref(),
+            &self.requested,
         );
         self.write_frame(&request).await?;
         Ok(request_id)
@@ -1036,6 +1374,260 @@ impl CodexThread {
         Ok(())
     }
 
+    pub async fn compact(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let id_value = Value::from(id);
+        self.write_frame(&thread_compact_start_request_json(id, &self.thread_id))
+            .await?;
+        let deadline = Instant::now() + COMPACTION_TIMEOUT;
+        let mut acknowledged = false;
+        let mut started_items = Vec::new();
+        let mut completed_items = HashMap::new();
+        loop {
+            if acknowledged {
+                if let Some(receipt) = started_items
+                    .iter()
+                    .find_map(|item_id| completed_items.remove(item_id))
+                {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let value = self.read_value(remaining).await?;
+            if value.get("id") == Some(&id_value) {
+                provider_response(value)?;
+                acknowledged = true;
+                continue;
+            }
+            match parse_compaction_lifecycle(&value, &self.thread_id) {
+                Some(CompactionLifecycle::Started(turn_id, item_id)) => {
+                    started_items.push((turn_id, item_id));
+                }
+                Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) => {
+                    completed_items.insert((turn_id, item_id), receipt);
+                }
+                Some(CompactionLifecycle::ContextCompacted(receipt)) => {
+                    return crate::context_window::verify_compaction_receipt(
+                        &receipt,
+                        &self.thread_id,
+                    )
+                    .map_err(|error| {
+                        ThreadDriverError::Protocol(format!(
+                            "unverified compaction receipt: {error:?}"
+                        ))
+                    });
+                }
+                None => park_frame(&mut self.pending, &mut self.completed_turns, value),
+            }
+        }
+    }
+
+    pub async fn goal_get(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(id, thread_goal_get_request_json(id, &self.thread_id))
+            .await
+            .and_then(provider_response)
+    }
+
+    pub async fn goal_set(
+        &mut self,
+        objective: &str,
+        status: &str,
+    ) -> Result<Value, ThreadDriverError> {
+        if objective.trim().is_empty() || !matches!(status, "active" | "paused") {
+            return Err(ThreadDriverError::Protocol(
+                "goal set needs a non-empty objective and active|paused status".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(
+            id,
+            thread_goal_set_request_json(id, &self.thread_id, objective, status),
+        )
+        .await
+        .and_then(provider_response)
+    }
+
+    pub async fn goal_get_typed(&mut self) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        let value = self.goal_get().await?;
+        let goal = parse_goal_value(&value)?;
+        if goal
+            .as_ref()
+            .is_some_and(|goal| goal.thread_id != self.thread_id)
+        {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/get returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
+    }
+
+    /// Read one live provider goal without resuming or changing the thread.
+    /// Stop hooks use this short direct query to distinguish an active native
+    /// continuation from a missing or unreadable goal.
+    pub(crate) async fn read_goal_for_stop(
+        thread_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        if thread_id.trim().is_empty() || timeout.is_zero() {
+            return Err(ThreadDriverError::Protocol(
+                "Stop goal read needs an exact thread id and positive timeout".into(),
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        let socket = crate::codex_inject::codex_app_server_socket_path();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (mut sink, mut stream) =
+            tokio::time::timeout(remaining, crate::codex_inject::connect_app_server(&socket))
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?
+                .map_err(|error| {
+                    ThreadDriverError::Protocol(format!(
+                        "Codex goal connection unavailable: {error}"
+                    ))
+                })?;
+        let id = Value::from(1);
+        let request = thread_goal_get_request_json(1, thread_id);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::timeout(remaining, sink.send(Message::Text(request.into())))
+            .await
+            .map_err(|_| ThreadDriverError::Timeout)?
+            .map_err(|error| {
+                ThreadDriverError::Protocol(format!("Codex goal request write failed: {error}"))
+            })?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let frame = tokio::time::timeout(remaining, stream.next())
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?;
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    let value: Value = serde_json::from_str(text.trim()).map_err(|_| {
+                        ThreadDriverError::Protocol("Codex goal response is not JSON".into())
+                    })?;
+                    if value.get("id") != Some(&id) {
+                        continue;
+                    }
+                    let value = provider_response(value)?;
+                    if let Some(goal) = value
+                        .pointer("/result/goal")
+                        .or_else(|| value.get("goal"))
+                        .filter(|goal| !goal.is_null())
+                    {
+                        let returned_thread = goal
+                            .get("threadId")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                ThreadDriverError::Protocol(
+                                    "Codex goal response has no thread id".into(),
+                                )
+                            })?;
+                        if returned_thread != thread_id {
+                            return Err(ThreadDriverError::Protocol(format!(
+                                "Codex goal response returned {returned_thread}, expected {thread_id}"
+                            )));
+                        }
+                    }
+                    return parse_goal_value(&value);
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => {
+                    return Err(ThreadDriverError::Protocol(format!(
+                        "Codex goal response read failed: {error}"
+                    )))
+                }
+                None => {
+                    return Err(ThreadDriverError::Protocol(
+                        "Codex app-server closed before the goal response".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    pub async fn goal_set_typed(
+        &mut self,
+        objective: &str,
+        status: GoalStatus,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let status_wire = match status {
+            GoalStatus::Active => "active",
+            GoalStatus::Paused => "paused",
+            GoalStatus::Blocked => "blocked",
+            GoalStatus::UsageLimited => "usageLimited",
+            GoalStatus::BudgetLimited => "budgetLimited",
+            GoalStatus::Completed => "complete",
+        };
+        if objective.trim().is_empty() || !matches!(status, GoalStatus::Active | GoalStatus::Paused)
+        {
+            return Err(ThreadDriverError::Protocol(
+                "typed goal set needs a non-empty active or paused objective".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let value = self
+            .request_value(
+                id,
+                thread_goal_set_request_json(id, &self.thread_id, objective, status_wire),
+            )
+            .await
+            .and_then(provider_response)?;
+        let goal = parse_goal_value(&value)?.ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal/set returned no typed goal".into())
+        })?;
+        if goal.thread_id != self.thread_id {
+            return Err(ThreadDriverError::Protocol(
+                "thread/goal/set returned a different thread id".into(),
+            ));
+        }
+        Ok(goal)
+    }
+
+    pub async fn ensure_reign_goal_typed(
+        &mut self,
+        scope: &str,
+        continuation_owner: &str,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let current = self.goal_get_typed().await?;
+        ensure_reign_goal(current.as_ref(), scope, continuation_owner)?;
+        let objective = reign_objective(scope);
+        match current {
+            Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
+            Some(goal) if goal.status == GoalStatus::Paused => {
+                let resumed = self.goal_set_typed(&objective, GoalStatus::Active).await?;
+                if !resumed.usage.preserves(&goal.usage) {
+                    return Err(ThreadDriverError::Protocol(
+                        "thread/goal/set did not preserve goal usage".into(),
+                    ));
+                }
+                Ok(resumed)
+            }
+            Some(goal) => Err(ThreadDriverError::Protocol(format!(
+                "refusing to reactivate native goal with status {:?}",
+                goal.status
+            ))),
+            None => self.goal_set_typed(&objective, GoalStatus::Active).await,
+        }
+    }
+
     /// Unarchive this thread id so `thread/resume` finds it in the same
     /// live store it left. History-preserving in both directions.
     pub async fn unarchive(&mut self, thread_id: &str) -> Result<(), ThreadDriverError> {
@@ -1126,6 +1718,26 @@ impl CodexThread {
     /// The writable roots this thread carries onto every `turn/start`.
     pub fn granted_writable_roots(&self) -> &[String] {
         &self.state_dirs
+    }
+
+    /// The posture this thread's start or resume REQUESTED. One source for the
+    /// registry row and the per-turn policy replay: the entry builder reads it
+    /// instead of taking a parallel copy of the same answer.
+    pub fn requested_posture(&self) -> &CodexPosture {
+        &self.requested
+    }
+
+    /// Where the CURRENT turn's sandboxPolicy comes from: `resolved` when the
+    /// server reported a posture the turn echoes, `requested` when the server
+    /// named no sandbox and the row's own request is replayed instead. Two
+    /// different worlds behind one policy object, named so a record can tell
+    /// them apart.
+    pub fn turn_policy_source(&self) -> &'static str {
+        if self.resolved_sandbox.is_some() {
+            "resolved"
+        } else {
+            "requested"
+        }
     }
 
     /// The pid of the app-server SERVING this thread, which is the shared
@@ -1366,6 +1978,21 @@ impl CodexThreadActor {
             .await
             .map_err(|_| "codex thread actor is gone".to_string())
     }
+
+    /// A handle whose actor task is already dead: the shape a daemon
+    /// restart leaves behind in `ctx.codex_threads`. Test-only.
+    #[cfg(test)]
+    pub(crate) fn with_dead_actor() -> Self {
+        let (tx, rx) = mpsc::channel(THREAD_CHANNEL_CAP);
+        drop(rx);
+        Self {
+            tx,
+            pid: None,
+            shared: Arc::new(ActorShared {
+                turn_id: std::sync::Mutex::new(None),
+            }),
+        }
+    }
 }
 
 /// Sequential frame pump from the daemon connection's read half into the
@@ -1544,7 +2171,14 @@ impl ActorCtx {
         if let Some(driving) = self.driving.take() {
             self.shared.set_turn_id(None);
             for waiter in driving.waiters {
-                let _ = waiter.send(Err(message.to_string()));
+                // The error names the turn and reads as a RESTART of the
+                // daemon-owned thread, never as a failed turn: the thread
+                // and its transcript survive, and a sender that believed
+                // the turn itself failed would report a lie upstream.
+                let _ = waiter.send(Err(format!(
+                    "{message} (turn {turn}; the daemon-owned thread and its transcript survive)",
+                    turn = driving.turn_id,
+                )));
             }
         }
     }
@@ -1909,15 +2543,14 @@ fn thread_start_request_with_options(
     id: u64,
     cwd: &Path,
     model: Option<&str>,
-    yolo: bool,
-    approval_policy: &str,
+    posture: &CodexPosture,
     project_id: Option<&str>,
     config: Option<&serde_json::Map<String, Value>>,
 ) -> String {
     let mut params = json!({
         "cwd": cwd,
-        "sandbox": if yolo { "danger-full-access" } else { "workspace-write" },
-        "approvalPolicy": approval_policy,
+        "sandbox": posture.sandbox.as_scalar(),
+        "approvalPolicy": posture.approval.as_str(),
     });
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         params["model"] = json!(model);
@@ -1937,15 +2570,14 @@ fn thread_resume_request_with_options(
     thread_id: &str,
     cwd: &Path,
     model: Option<&str>,
-    yolo: bool,
-    approval_policy: &str,
+    posture: &CodexPosture,
     config: Option<&serde_json::Map<String, Value>>,
 ) -> String {
     let mut params = json!({
         "threadId": thread_id,
         "cwd": cwd,
-        "sandbox": if yolo { "danger-full-access" } else { "workspace-write" },
-        "approvalPolicy": approval_policy,
+        "sandbox": posture.sandbox.as_scalar(),
+        "approvalPolicy": posture.approval.as_str(),
     });
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         params["model"] = json!(model);
@@ -1954,6 +2586,13 @@ fn thread_resume_request_with_options(
         params["config"] = Value::Object(config.clone());
     }
     json!({"id": id, "method": "thread/resume", "params": params}).to_string()
+}
+
+fn provider_response(value: Value) -> Result<Value, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    Ok(value)
 }
 
 fn server_error(error: &Value) -> String {
@@ -1983,6 +2622,195 @@ mod tests {
     }
 
     #[test]
+    fn compaction_lifecycle_parser_reads_thread_and_item_identity() {
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "item": { "id": "compact-1", "type": "contextCompaction" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&started, "thread-a"),
+            Some(CompactionLifecycle::Started(turn_id, item_id))
+                if turn_id == "turn-a" && item_id == "compact-1"
+        ));
+        let completed = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
+                "item": { "id": "compact-1", "type": "contextCompaction" }
+            }
+        });
+        let Some(CompactionLifecycle::Completed(turn_id, item_id, receipt)) =
+            parse_compaction_lifecycle(&completed, "thread-a")
+        else {
+            panic!("item/completed proves lifecycle completion without item.status");
+        };
+        assert_eq!(
+            (turn_id.as_str(), item_id.as_str()),
+            ("turn-a", "compact-1")
+        );
+        assert_eq!(receipt["threadId"], "thread-a");
+        assert_eq!(receipt["turnId"], "turn-a");
+        assert_eq!(receipt["itemId"], "compact-1");
+        assert_eq!(receipt["status"], "completed");
+        assert_eq!(receipt["completedAtMs"], 1_790_000_000_000_u64);
+        crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap();
+        assert!(parse_compaction_lifecycle(&completed, "thread-b").is_none());
+        let completed_without_start = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "completedAtMs": 1_790_000_000_000_i64,
+                "item": { "id": "compact-2", "type": "contextCompaction" }
+            }
+        });
+        assert!(matches!(
+            parse_compaction_lifecycle(&completed_without_start, "thread-a"),
+            Some(CompactionLifecycle::Completed(turn_id, item_id, _))
+                if turn_id == "turn-a" && item_id == "compact-2"
+        ));
+    }
+
+    #[test]
+    fn compacted_notification_is_a_same_thread_completion_receipt() {
+        let event = serde_json::json!({
+            "method": "thread/compacted",
+            "params": {"threadId": "thread-a", "turnId": "turn-1"}
+        });
+        let Some(CompactionLifecycle::ContextCompacted(receipt)) =
+            parse_compaction_lifecycle(&event, "thread-a")
+        else {
+            panic!("Codex compaction notification should prove completion");
+        };
+
+        assert_eq!(
+            crate::context_window::verify_compaction_receipt(&receipt, "thread-a").unwrap()
+                ["turnId"],
+            "turn-1"
+        );
+        assert!(parse_compaction_lifecycle(&event, "thread-b").is_none());
+    }
+
+    #[test]
+    fn control_resume_does_not_override_existing_thread_policy() {
+        let value: Value = serde_json::from_str(&thread_resume_control_request_json(
+            7,
+            "thread-full-id",
+            Path::new("/worktrees/feature"),
+        ))
+        .unwrap();
+        assert_eq!(value["method"], "thread/resume");
+        assert_eq!(value["params"]["threadId"], "thread-full-id");
+        assert_eq!(value["params"]["cwd"], "/worktrees/feature");
+        assert!(value["params"].get("sandbox").is_none());
+        assert!(value["params"].get("approvalPolicy").is_none());
+        assert!(value["params"].get("model").is_none());
+        assert!(value["params"].get("config").is_none());
+    }
+
+    #[test]
+    fn native_provider_actions_pin_the_full_thread_id() {
+        let compact: Value = serde_json::from_str(&thread_compact_start_request_json(
+            7,
+            "00000000-0000-4000-8000-000000000001",
+        ))
+        .unwrap();
+        assert_eq!(compact["method"], "thread/compact/start");
+        assert_eq!(
+            compact["params"]["threadId"],
+            "00000000-0000-4000-8000-000000000001"
+        );
+
+        let goal: Value = serde_json::from_str(&thread_goal_set_request_json(
+            8,
+            "thread-full",
+            "$fno:reign x-0000",
+            "active",
+        ))
+        .unwrap();
+        assert_eq!(goal["method"], "thread/goal/set");
+        assert_eq!(goal["params"]["status"], "active");
+        assert_eq!(goal["params"]["objective"], "$fno:reign x-0000");
+        assert!(goal["params"].get("continuationOwner").is_none());
+    }
+
+    #[test]
+    fn native_goal_parser_requires_positive_status_and_keeps_provider_limits() {
+        let goal = parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000",
+                "status": "budgetLimited",
+                "tokenBudget": 50_000,
+                "tokensUsed": 12_345,
+                "timeUsedSeconds": 67
+            }}
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(goal.thread_id, "thread-full");
+        assert_eq!(goal.status, GoalStatus::BudgetLimited);
+        assert_eq!(goal.usage.token_budget, Some(50_000));
+        assert_eq!(goal.usage.tokens_used, 12_345);
+        assert_eq!(goal.usage.time_used_seconds, 67);
+
+        assert!(parse_goal_value(&json!({
+            "result": { "goal": {
+                "threadId": "thread-full",
+                "objective": "$fno:reign x-0000"
+            }}
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn goal_usage_readback_rejects_a_reset_and_allows_monotone_time() {
+        let before = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 67,
+        };
+        let after = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 68,
+        };
+        assert!(after.preserves(&before));
+        assert!(!GoalUsage::default().preserves(&before));
+        assert!(!GoalUsage {
+            token_budget: Some(40_000),
+            ..after
+        }
+        .preserves(&before));
+    }
+
+    #[test]
+    fn ensure_goal_never_reopens_a_provider_limited_or_completed_goal() {
+        let limited = NativeGoal {
+            thread_id: "thread-full".into(),
+            objective: "$fno:reign x-0000".into(),
+            status: GoalStatus::BudgetLimited,
+            usage: GoalUsage {
+                token_budget: Some(50_000),
+                tokens_used: 12_345,
+                time_used_seconds: 67,
+            },
+        };
+        assert!(ensure_reign_goal(Some(&limited), "x-0000", "king:x-0000").is_err());
+        let completed = NativeGoal {
+            status: GoalStatus::Completed,
+            ..limited
+        };
+        assert!(ensure_reign_goal(Some(&completed), "x-0000", "king:x-0000").is_err());
+    }
+
+    #[test]
     fn steer_requires_expected_turn_id() {
         let value: Value = serde_json::from_str(&turn_steer_request_json(
             7, "thread-1", "turn-1", "continue",
@@ -1993,8 +2821,8 @@ mod tests {
 
     /// A spawn that spells its posture as `permission_mode` reaches the same
     /// frame a `yolo` bool reaches. Asserted THROUGH the frame rather than on
-    /// the resolver's bool alone: the bool is an implementation detail and the
-    /// wire field is what the app-server reads.
+    /// the resolver's answer alone: the typed posture is an implementation
+    /// detail and the wire field is what the app-server reads.
     #[test]
     fn permission_mode_yolo_reaches_a_full_access_frame() {
         let yolo = resolve_thread_posture(None, Some("yolo")).expect("yolo maps");
@@ -2002,107 +2830,59 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            yolo,
-            "never",
+            &yolo,
             None,
             None,
         ))
         .unwrap();
         assert_eq!(frame["params"]["sandbox"], "danger-full-access");
+        assert_eq!(frame["params"]["approvalPolicy"], "never");
 
-        // The explicit pair form resolves off its sandbox half, not its name.
+        // The explicit pair form resolves off its halves, not its name.
         let paired =
             resolve_thread_posture(None, Some("danger-full-access:never")).expect("pair maps");
         let frame: Value = serde_json::from_str(&thread_start_request_with_options(
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            paired,
-            "never",
+            &paired,
             None,
             None,
         ))
         .unwrap();
         assert_eq!(frame["params"]["sandbox"], "danger-full-access");
-    }
-
-    /// The bounded spellings stay bounded, and an absent axis is byte-identical
-    /// to reading the bare bool - the shape every spawn takes today.
-    #[test]
-    fn resolve_thread_posture_keeps_the_bounded_spellings_bounded() {
-        assert_eq!(resolve_thread_posture(None, None), Ok(false));
-        assert_eq!(resolve_thread_posture(Some(true), None), Ok(true));
-        assert_eq!(resolve_thread_posture(Some(false), None), Ok(false));
-        // An empty value is UNSET, not a mode: the bool still decides.
-        assert_eq!(resolve_thread_posture(Some(true), Some("")), Ok(true));
-        assert_eq!(resolve_thread_posture(None, Some("full-auto")), Ok(false));
-        assert_eq!(
-            resolve_thread_posture(None, Some("workspace-write:on-request")),
-            Ok(false)
-        );
-        assert_eq!(
-            resolve_thread_posture(None, Some("read-only:untrusted")),
-            Ok(false)
-        );
-    }
-
-    /// Fail closed, and say which value: a permission axis the lane cannot
-    /// resolve must never fall through to bounded. Bounded is a plausible
-    /// answer, which is what makes the silent version of this so hard to see.
-    #[test]
-    fn resolve_thread_posture_refuses_rather_than_degrading() {
-        for mode in [
-            "accept-edits",
-            "bypassPermissions",
-            "danger-full-access",
-            ":never",
-        ] {
-            let err = resolve_thread_posture(None, Some(mode))
-                .expect_err("an unmappable mode must refuse");
-            assert!(
-                err.contains(mode),
-                "refusal must name the value it could not map; got: {err}"
-            );
-        }
-        // An unknown sandbox half is refused even though the pair form parses.
-        let err = resolve_thread_posture(None, Some("full-access:never"))
-            .expect_err("an unknown sandbox must refuse");
-        assert!(err.contains("full-access"), "got: {err}");
-        // One knob at a time, the rule the CLIs already enforce.
-        let err = resolve_thread_posture(Some(true), Some("full-auto"))
-            .expect_err("two postures at once must refuse");
-        assert!(
-            err.contains("mutually exclusive"),
-            "refusal must name the conflict; got: {err}"
-        );
+        assert_eq!(frame["params"]["approvalPolicy"], "never");
     }
 
     /// AC11: the resume request carries the recorded posture, so a daemon
-    /// restart cannot silently demote a yolo worker to workspace-write.
+    /// restart cannot silently demote a yolo worker to workspace-write. The
+    /// read-only spelling proves the halves are typed, not a bool.
     #[test]
     fn thread_resume_carries_the_recorded_sandbox_posture() {
+        let full = CodexPosture::full_access();
         let full: Value = serde_json::from_str(&thread_resume_request_with_options(
             1,
             "thread-p",
             std::path::Path::new("/tmp/w"),
             None,
-            true,
-            "never",
+            &full,
             None,
         ))
         .unwrap();
         assert_eq!(full["params"]["sandbox"], "danger-full-access");
-        let bounded: Value = serde_json::from_str(&thread_resume_request_with_options(
+        assert_eq!(full["params"]["approvalPolicy"], "never");
+        let read_only = CodexPosture::from_record(Some("read-only:on-request"), None);
+        let read_only: Value = serde_json::from_str(&thread_resume_request_with_options(
             1,
             "thread-p",
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &read_only,
             None,
         ))
         .unwrap();
-        assert_eq!(bounded["params"]["sandbox"], "workspace-write");
+        assert_eq!(read_only["params"]["sandbox"], "read-only");
+        assert_eq!(read_only["params"]["approvalPolicy"], "on-request");
     }
 
     /// An empty config map is the absent form: the key is omitted so the
@@ -2114,8 +2894,7 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             None,
             Some(&empty),
         ))
@@ -2125,8 +2904,7 @@ mod tests {
             "thread-p",
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             Some(&empty),
         ))
         .unwrap();
@@ -2142,8 +2920,7 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             None,
             Some(&config),
         ))
@@ -2219,7 +2996,13 @@ mod tests {
     fn turn_start_carries_the_state_root_grant() {
         let roots = vec!["/Users/x/.fno".to_string()];
         let value: Value = serde_json::from_str(&turn_start_request_json_full(
-            7, "thread-1", "go", None, &roots, None,
+            7,
+            "thread-1",
+            "go",
+            None,
+            &roots,
+            None,
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         assert_eq!(value["params"]["sandboxPolicy"]["type"], "workspaceWrite");
@@ -2253,6 +3036,7 @@ mod tests {
             None,
             &roots,
             Some(&resolved),
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         let policy = &value["params"]["sandboxPolicy"];
@@ -2282,6 +3066,7 @@ mod tests {
             None,
             &[],
             Some(&resolved),
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         let policy = &value["params"]["sandboxPolicy"];
@@ -2329,6 +3114,7 @@ mod tests {
             None,
             &roots,
             None,
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         let wired = value["params"]["sandboxPolicy"]["writableRoots"]
@@ -2347,7 +3133,15 @@ mod tests {
     #[test]
     fn turn_start_without_roots_is_byte_identical_to_today() {
         let with_helper = turn_start_request_json_with_effort(7, "thread-1", "go", Some("high"));
-        let with_empty = turn_start_request_json_full(7, "thread-1", "go", Some("high"), &[], None);
+        let with_empty = turn_start_request_json_full(
+            7,
+            "thread-1",
+            "go",
+            Some("high"),
+            &[],
+            None,
+            &CodexPosture::bounded(),
+        );
         assert_eq!(with_helper, with_empty);
         let value: Value = serde_json::from_str(&with_empty).unwrap();
         assert!(value["params"].get("sandboxPolicy").is_none());
@@ -2375,6 +3169,7 @@ mod tests {
             None,
             &roots,
             Some(&resolved),
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         let policy = &value["params"]["sandboxPolicy"];
@@ -2403,6 +3198,7 @@ mod tests {
             None,
             &roots,
             Some(&resolved),
+            &CodexPosture::bounded(),
         ))
         .unwrap();
         assert_eq!(
@@ -2411,11 +3207,12 @@ mod tests {
         );
     }
 
-    /// The resolved posture is read from the thread/start response, and only
-    /// for a workspaceWrite thread: a full-access thread must not be handed a
-    /// workspaceWrite object to echo.
+    /// The resolved posture is read UNFILTERED from the thread/start
+    /// response (AC2-HP): a full-access thread is echoed what the server
+    /// resolved, never handed a fabricated workspaceWrite object; read-only
+    /// reads as itself (AC2-EDGE). Only a response with NO sandbox is None.
     #[test]
-    fn resolved_sandbox_is_read_only_for_a_bounded_thread() {
+    fn resolved_sandbox_is_read_unfiltered() {
         let bounded =
             r#"{"id":1,"result":{"sandbox":{"type":"workspaceWrite","writableRoots":[]}}}"#;
         assert_eq!(
@@ -2423,7 +3220,15 @@ mod tests {
             "workspaceWrite"
         );
         let full = r#"{"id":1,"result":{"sandbox":{"type":"dangerFullAccess"}}}"#;
-        assert!(parse_resolved_sandbox(full).is_none());
+        assert_eq!(
+            parse_resolved_sandbox(full).unwrap()["type"],
+            "dangerFullAccess"
+        );
+        assert_eq!(
+            parse_resolved_sandbox(r#"{"id":1,"result":{"sandbox":{"type":"readOnly"}}}"#).unwrap()
+                ["type"],
+            "readOnly"
+        );
         assert!(parse_resolved_sandbox(r#"{"id":1,"result":{}}"#).is_none());
     }
 
@@ -2447,8 +3252,6 @@ mod tests {
             parse_resolved_sandbox_type(full).as_deref(),
             Some("dangerFullAccess")
         );
-        // The filtered reader collapses this arm; the record's must not.
-        assert!(parse_resolved_sandbox(full).is_none());
         // Only a response that named NO sandbox is genuinely unknown.
         assert_eq!(parse_resolved_sandbox_type(r#"{"id":1,"result":{}}"#), None);
         assert_eq!(
@@ -2467,8 +3270,7 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             None,
             None,
         ))
@@ -2486,8 +3288,7 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             Some("proj-1"),
             None,
         ))
@@ -2504,8 +3305,7 @@ mod tests {
             1,
             std::path::Path::new("/tmp/w"),
             None,
-            false,
-            "never",
+            &CodexPosture::bounded(),
             None,
             None,
         ))

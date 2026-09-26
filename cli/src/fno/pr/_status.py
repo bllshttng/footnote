@@ -375,6 +375,8 @@ def verdict_line(payload: dict) -> str:
         clause = f"{len(blockers)} blockers: {', '.join(blockers)}"
     else:
         clause = "no blockers"
+    missing = (payload.get("github_merge_state") or {}).get("missing_required_checks")
+    clause += f" (missing: {', '.join(missing)})" if missing else ""
     # A red line names its first failing check and step, so the one-line read
     # already separates a pytest red from a lint red (the d-bdb035b6 incident:
     # two `smoke` reds fifteen minutes apart, unrelated remedies). The full
@@ -387,6 +389,8 @@ def verdict_line(payload: dict) -> str:
         if first.get("step"):
             label += f"[{first['step']}]"
         fail_slot = f" failing: {label}"
+    history = payload.get("branch_history") or {}
+    history_slot = f" history: {history['line']}" if history.get("line") else ""
     return (
         f"{payload.get('pr')} "
         f"{str(payload.get('pr_state') or 'UNKNOWN').upper()} "
@@ -394,7 +398,7 @@ def verdict_line(payload: dict) -> str:
         f"{settled_slot} "
         f"{mergeable_slot} "
         f"{'ready' if payload.get('ready') else 'NOT-ready'} "
-        f"@ {head[:12] or 'unknown'}{coverage_at} - {clause}{fail_slot}"
+        f"@ {head[:12] or 'unknown'}{coverage_at}{history_slot} - {clause}{fail_slot}"
     )
 
 
@@ -468,111 +472,45 @@ def _review_activity(branch: str, head: str, cwd: Optional[str]):
         )
 
 
-def _ready_blockers(
-    green: bool,
-    verdict: str,
-    unresolved: object,
-    coverage: dict,
-    review_lane: bool = True,
-    *,
-    head: str = "",
-    head_branch: str = "",
-    code_review_required: bool = False,
-    mergeable: Optional[str] = None,
-    counts: Optional[dict] = None,
-    repo: str = "",
-) -> list[str]:
-    """Which conjuncts of ``ready`` fail, in a stable order.
+def _merge_decision(pr: str, repo: str, facts: dict) -> dict:
+    """The one merge decision, as an authorized-merge preview."""
+    from fno.rust_binary import verb_call
 
-    The conjunct vocabulary, the red-kind split, the fail-closed arms, and
-    the terminal-PR exemption are narrated in
-    docs/architecture/pr-status-verdict.md (`_ready_blockers`).
-    """
-    blockers: list[str] = []
-    # `mergeable` is None only when the caller never asked (old test
-    # stubs, a degraded fetch that omitted the field) - never block on that,
-    # only on a GitHub-supplied answer that isn't the positive "MERGEABLE".
-    # `_map_mergeable` already turns a null (still computing) into the string
-    # "UNKNOWN", so this also fails closed on "still computing", not open.
-    if mergeable not in (None, "MERGEABLE"):
-        blockers.append(f"not_mergeable_{str(mergeable).lower()}")
-    if not green:
-        # A red is named for the KIND of row that failed, never generically.
-        # `ci_red` on a head whose every job passed is a lie a reader acts on:
-        # it woke a session with "CI red, fno/review-coverage failed", which
-        # is two incompatible claims in one line. The counts already know
-        # which kind failed, so the name reads them.
-        #
-        # Rename, never remove. `stacked-base-guard` is also a StatusContext,
-        # so on some PRs a status-only red is the ONLY red there is - dropping
-        # the blocker would silence a real gate to de-duplicate a different
-        # one. Both still block, and the verdict stays red either way.
-        #
-        # The predicate is POSITIVE (a status provably failed), never the
-        # absence of a failing job. A rollup row carrying neither `name` nor
-        # `context` still classifies as a fail and lands in NEITHER sub-count,
-        # so "no job failed" alone would name a commit status that does not
-        # exist. An unattributable red keeps the generic name - and so does a
-        # MIXED red, where a status failed beside an unkeyed row: `not
-        # fail_check_runs` reads true there too, and the honest test is that
-        # EVERY failing row is a status, not merely that no job was among them.
-        if (
-            verdict == "red"
-            and counts
-            and counts.get("unsettled_fail")
-            and counts.get("unsettled_fail") == counts.get("fail")
-        ):
-            blockers.append("ci_cancelled_retrigger")
-        elif (
-            verdict == "red"
-            and counts
-            and counts.get("fail_statuses")
-            and counts.get("fail_statuses") == counts.get("fail")
-        ):
-            blockers.append("commit_status_red")
-        else:
-            blockers.append(f"ci_{verdict}")
-    if unresolved is None or not isinstance(unresolved, int):
-        # None is the read's own "unknown"; a non-int is a contract violation.
-        # Both fail closed as unknown rather than TypeError or a silent pass.
-        blockers.append("optional_reviews_unknown")
-    elif unresolved > 0:
-        blockers.append("optional_reviews_unresolved")
-    if review_lane:
-        cov_word = coverage.get("coverage")
-        if cov_word == "unknown":
-            blockers.append("review_coverage_unknown")
-        else:
-            from fno.pr._coverage_gate import covered_conjuncts
+    try:
+        receipt = verb_call(
+            "authorized-merge", {"cwd": repo, "pr": int(pr), "effect": "preview", **facts},
+            timeout=180,
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken transport is not a verdict
+        receipt = {"outcome": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(receipt.get("blockers"), list):
+        receipt["blockers"] = [{
+            "code": "merge_decision_unknown", "class": "unknown",
+            "detail": str(receipt.get("detail") or "authorized-merge receipt unreadable"),
+        }]
+    return receipt
 
-            ok, failed = covered_conjuncts(coverage, head, code_review_required)
-            # At the cap (the row's own rounds_exhausted bit, d-0fa92eb9) the
-            # review obligation is discharged and the PR merges on green CI,
-            # so neither the conjuncts below nor the posture read may hold
-            # it: a blocker here would name as stuck exactly the PR the law
-            # says is reviewed. Under the cap the row conjuncts are the
-            # whole coverage hold.
-            at_cap = coverage.get("rounds_exhausted") is True
-            if not ok and not at_cap:
-                blockers.append(f"review_coverage_{failed}")
-            # The Rust posture verdict, read the same way the merge gate reads
-            # it (one producer, never a reclassification): a satisfied-conjunct
-            # row whose rung is explicitly unsatisfied is its own blocker,
-            # because `ready` must not promise a merge the verb refuses. A row
-            # naming NO posture stays a receipt fact (`review_posture: null`)
-            # rather than a blocker here: this surface never recomputes, so a
-            # pre-posture row would read as blocked on a machine the merge
-            # gate would send to upgrade first - the verb, not the read,
-            # owns that refusal. At the cap the posture is never read.
-            posture = coverage.get("review_posture") if ok and not at_cap else None
-            if (
-                ok
-                and not at_cap
-                and isinstance(posture, dict)
-                and posture.get("posture_satisfied") is not True
-            ):
-                blockers.append("review_posture_unsatisfied")
-    return blockers
+
+def _github_merge_blockers(pr_json, rollup, cwd):
+    """GitHub's mergeStateStatus as named ready blockers; None when unasked."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+    if pr_json.get("mergeStateStatus") is None:
+        return None
+    try:
+        op = {k: pr_json.get(k) for k in ("mergeStateStatus", "baseRefName", "pr", "mergeable")}
+        op.update(op="status-merge-blocker", rollup=rollup, cwd=cwd)
+        return verb_call("authorized-merge", op, timeout=120)
+    except VerbUnavailable as exc:
+        return {"blockers": ["github_merge_state_unknown"], "source": str(exc)}
+
+
+def _branch_history(pr_json, rollup, cwd, prior):
+    from fno.rust_binary import verb_call
+    try:
+        result = verb_call("authorized-merge", {"op": "status-branch-history", "cwd": cwd, "branch": pr_json.get("headRefName"), "rollup": rollup, "workflow_runs": pr_json.get("workflowRuns") or [], "prior": (prior or {}).get("branch_history")}, timeout=60)
+        return result if result.get("line") else None
+    except Exception:
+        return None
 
 
 def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
@@ -627,12 +565,10 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
 def _merge_authority(repo: str) -> dict:
     """The resolved merge-authority axes for this repo.
 
-    Three keys, all fail-open to None on an unreadable settings load: a
+    Two keys, both fail-open to None on an unreadable settings load: a
     status receipt that cannot read config says so rather than asserting
     "disabled" - a guessed NO here is the direction a wedged fleet reads as
-    a disarm, and a guessed YES is the dangerous one. The autonomous shape
-    is `enabled AND grant=dispatch`; every other enabled grant routes the
-    actual merge through a human or the operator.
+    a disarm, and a guessed YES is the dangerous one.
     """
     try:
         from fno.config import load_settings_for_repo
@@ -641,15 +577,13 @@ def _merge_authority(repo: str) -> dict:
         enabled = bool(am.enabled)
         grant = str(am.grant or "none")
         return {
-            "auto_merge_enabled": enabled,
+            "config_auto_merge_enabled": enabled,
             "grant": grant,
-            "mergeable_autonomously": enabled and grant == "dispatch",
         }
     except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
         return {
-            "auto_merge_enabled": None,
+            "config_auto_merge_enabled": None,
             "grant": None,
-            "mergeable_autonomously": None,
         }
 
 
@@ -718,8 +652,9 @@ def run_status(
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
     The exit code is always the CI verdict's code; review fields are additive
-    and advisory, and `ready` conjoins them with `ready_blockers` naming the
-    failed conjuncts (docs/architecture/pr-status-verdict.md, `run_status`).
+    and advisory; `ready` is the authorized-merge preview verdict with
+    `ready_blockers` naming the gate codes that hold
+    (docs/architecture/pr-status-verdict.md, `run_status`).
     `prior` is the same head's previous payload; detail and rerun facts are
     reused within one head only (docs, `Reuse across reads of one head`).
     """
@@ -886,68 +821,56 @@ def run_status(
             pr_json.get("headRefName") or "", pr_json.get("headRefOid") or "", cwd
         )
 
-    blockers = _ready_blockers(
-        green,
-        verdict,
-        unresolved,
-        coverage,
-        review_lane,
-        head=pr_json.get("headRefOid") or "",
-        head_branch=str(pr_json.get("headRefName") or ""),
-        code_review_required=code_review_required,
-        # A terminal PR has no would-merge left, like the coverage conjunct
-        # above - a merged/closed PR's mergeable field is stale and must not
-        # hold a report that changes nothing.
-        mergeable=None if is_terminal else pr_json.get("mergeable"),
-        repo=cwd or os.getcwd(),
-        counts=counts,
+    github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
+    history_needed = verdict == "red" and not is_terminal and any(
+        str(_alt(check.get("conclusion"), check.get("state"), "")).upper()
+        in {"CANCELLED", "TIMED_OUT"}
+        for check in _latest_per_name(generic_rollup)
     )
-    if hold_reason:
-        blockers.append("dispatch_hold")
-    if activity.blocked:
-        # Config-independent on purpose. Every other review conjunct here is
-        # gated on `review_lane`, so a repo with no lane configured reports
-        # ready:true while a review of that head is mid-flight - which is
-        # technically correct against the configured policy and operationally
-        # wrong. A review that is RUNNING blocks whether or not one was ever
-        # required.
-        blockers.append(activity.blocker)
-    # The operator-law overlay, through the SAME resolver the merge gate
-    # applies at its own coverage verdict: a waiver clears exactly the
-    # coverage conjuncts (never CI, never an optional finding), and the
-    # payload names it so a waived ready never reads as a reviewed one. An
-    # unknown decision probe is its own blocker - fail closed on a store that
-    # could not answer, never "no waiver".
-    coverage_waiver = None
-    if review_lane and str(coverage.get("coverage") or "") != "unknown":
-        from fno.pr import _coverage_gate
-
-        failing = [
-            b
-            for b in blockers
-            if b.startswith("review_coverage_") and b != "review_coverage_unknown"
-        ]
-        if failing:
-            overlay_head = str(pr_json.get("headRefOid") or "")
-            hard = _coverage_gate.unresolved_hard_findings(
-                cwd or os.getcwd(),
-                overlay_head,
-                str(pr_json.get("headRefName") or ""),
-                coverage,
+    branch_history = _branch_history(pr_json, generic_rollup, cwd, prior_payload) if history_needed else None
+    # Rerun recovery, probed on every green read of a live PR (fail-open).
+    rerun: Optional[dict] = None
+    if verdict == "green" and not is_terminal:
+        head_sha = pr_json.get("headRefOid")
+        prior_green = (
+            prior_payload.get("verdict") == "green"
+            and prior_payload.get("head") == head_sha
+            and "rerun_recovered" in prior_payload
+            and isinstance(prior_payload.get("checks"), dict)
+            and prior_payload["checks"].get("total") == counts["total"]
+        )
+        if prior_green:
+            rerun = {
+                "recovered": bool(prior_payload.get("rerun_recovered")),
+                "failed": list(prior_payload.get("recovered_failures") or []),
+            }
+        else:
+            rerun = rerun_recovery(
+                pr, cwd, sha=head_sha, runs=pr_json.get("workflowRuns")
             )
-            waived, waiver_note, probe_note = _coverage_gate.operator_waiver_verdict(
-                _coverage_gate._repo_slug(cwd or os.getcwd()),
-                int(pr),
-                overlay_head,
-                hard,
-            )
-            if waived:
-                blockers = [b for b in blockers if b not in failing]
-                coverage_waiver = waiver_note[
-                    len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :
-                ]
-            elif probe_note:
-                blockers.append("review_coverage_waiver_unknown")
+    rerun_fields = (
+        {
+            "rerun_recovered": bool(rerun.get("recovered")),
+            "recovered_failures": list(rerun.get("failed") or []),
+        }
+        if rerun is not None
+        else {}
+    )
+    # ONE merge decision: the probes this read already paid for
+    # ride the ask, so the owner never spawns a second status read.
+    receipt = _merge_decision(
+        pr,
+        cwd or os.getcwd(),
+        {
+            "verdict": verdict,
+            "counts": counts,
+            "rerun_recovered": bool(rerun.get("recovered")) if rerun is not None else None,
+            "optional_reviews_unresolved": unresolved,
+            "github_blockers": (github_merge or {}).get("blockers") or [],
+            "covered_head": pr_json.get("headRefOid"),
+        },
+    )
+    blocker_words = [str(b.get("code")) for b in receipt.get("blockers") or []]
     coverage_status_repost = None
     if not is_terminal and review_lane:
         from fno.pr import _reviews
@@ -961,7 +884,7 @@ def run_status(
         # known_word guard on the trigger keeps that honest.
         required_state = (
             "FAILURE"
-            if any(blocker.startswith("review_coverage_") for blocker in blockers)
+            if any(word.startswith("review_coverage_") for word in blocker_words)
             else "SUCCESS"
         )
         unavailable_state = "SUCCESS"
@@ -1001,42 +924,6 @@ def run_status(
             )
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
-    # Rerun recovery, probed on every green read of a live PR (fail-open).
-    # A recovery is history of one head (docs, `Reuse across reads of one
-    # head`); `runs` is the listing fetch_pr_rest already read.
-    rerun: Optional[dict] = None
-    if verdict == "green" and not is_terminal:
-        head_sha = pr_json.get("headRefOid")
-        prior_green = (
-            prior_payload.get("verdict") == "green"
-            and prior_payload.get("head") == head_sha
-            and "rerun_recovered" in prior_payload
-            and isinstance(prior_payload.get("checks"), dict)
-            and prior_payload["checks"].get("total") == counts["total"]
-        )
-        if prior_green:
-            rerun = {
-                "recovered": bool(prior_payload.get("rerun_recovered")),
-                "failed": list(prior_payload.get("recovered_failures") or []),
-            }
-        else:
-            rerun = rerun_recovery(
-                pr, cwd, sha=head_sha, runs=pr_json.get("workflowRuns")
-            )
-    rerun_fields = (
-        {
-            "rerun_recovered": bool(rerun.get("recovered")),
-            "recovered_failures": list(rerun.get("failed") or []),
-        }
-        if rerun is not None
-        else {}
-    )
-    # The ready conjunct answers "may this merge", so it must agree with the
-    # merge gate: a rerun-recovered green is held there, and a status that
-    # says ready: true beside a held merge is the disagreement that cost a
-    # session its merge once already.
-    if rerun is not None and rerun.get("recovered"):
-        blockers.append("rerun_recovered_green")
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -1053,7 +940,9 @@ def run_status(
         "green": green,
         "pr_state": pr_json.get("state"),
         "mergeable": pr_json.get("mergeable"),
+        "github_merge_state": github_merge,
         "checks": counts,
+        **({"branch_history": branch_history} if branch_history else {}),
         # Red reads only: name the failing checks and, where the job log
         # reads, the failing step, its first error line, and the steps
         # fail-fast never reached (an unreached step is not a pass).
@@ -1120,24 +1009,15 @@ def run_status(
             "worktree": activity.worktree,
         },
         "dispatch_hold": hold_reason,
-        # The obvious "read this, not green": ready iff CI is green AND
-        # no optional finding is unresolved AND review coverage is a
-        # counted pass. Coverage joined the conjunction because `fno
-        # pr merge` already read it: with it absent here, the
-        # two verbs answered opposite ways from one payload and every
-        # ready: true PR refused at the merge gate. The blockers list
-        # names WHICH conjunct failed - a bare false has one
-        # explanation per conjunct and a reader would have to guess.
-        # The coverage conjunct keys on the WORD: a budget spent on
-        # fail rounds reads covered, and the count beside it is a fact
-        # (N reviewed, M passed), never a second gate.
-        "ready": not blockers,
-        "ready_blockers": blockers,
+        # The preview verdict.
+        "merge_decision": receipt,
+        "ready": not blocker_words,
+        "ready_blockers": blocker_words,
     }
-    if coverage_waiver is not None:
+    if receipt.get("coverage_waiver") is not None:
         # The positive marker beside a waived ready: without it, a PR the
         # operator waived and a PR a reviewer covered render identically.
-        payload["coverage_waiver"] = coverage_waiver
+        payload["coverage_waiver"] = receipt["coverage_waiver"]
     if owner_guidance is not None:
         payload["review_owner_guidance"] = owner_guidance
     if coverage_status_repost is not None:
@@ -1286,10 +1166,10 @@ def run_status(
                 sys.stderr.write(
                     f"note: reviewer_refused: {', '.join(empty)} ran and refused "
                     "to attest (an empty diff at the reviewer's checkout: it "
-                    "sat on the base branch, so the review read nothing). Fire "
-                    "from the PR worktree session (`fno do target "
-                    "request-self-review --pr <n>`) or spawn the reviewer with "
-                    "--cwd <worktree>.\n"
+                    "sat on the base branch, so the review read nothing). Run "
+                    "the review inline in the PR worktree session: `fno do "
+                    "target request-self-review --pr <n>`, or `/fno:review "
+                    "<level> <n>` (`$fno:review` on codex).\n"
                 )
             if unresolvable:
                 sys.stderr.write(

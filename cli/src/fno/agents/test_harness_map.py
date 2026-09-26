@@ -78,7 +78,15 @@ def test_packaged_contract_is_complete_for_every_known_harness():
                 "c-1",
             ],
         ),
-        ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
+        # The resume row carries the same shared-daemon ownership assertion
+        # as attach: `--remote unix://` makes a daemon-down resume a named
+        # failure instead of a silently private in-process owner.
+        (
+            "codex",
+            "interactive_resume",
+            "cx-1",
+            ["codex", "resume", "cx-1", "--remote", "unix://"],
+        ),
         ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
         # agy's resume primitive, measured 2026-08-26 on 1.1.19 and 1.1.21:
         # a fresh process quotes a token planted in an earlier turn
@@ -612,6 +620,17 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
     assert normalize_command("$fno:target x-81ad", "codex") == "$fno:target x-81ad"
 
 
+def test_pi_namespaced_seed_renders_the_skill_command_form():
+    """The canonical seed reaches pi as its own skill command, never the
+    literal `/fno:target` (no such pi command) and never `/skill:fno:target`."""
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/fno:target resume", "pi") == "/skill:target resume"
+    assert normalize_command("/target resume", "pi") == "/skill:target resume"
+    assert normalize_command("/skill:target resume", "pi") == "/skill:target resume"
+    assert normalize_command("/fno:target resume", "claude") == "/fno:target resume"
+
+
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
     invocation `/fno:target ...` - no prose brief. The spawn claim reads
@@ -780,6 +799,7 @@ def test_native_verbs_roster_is_filled_from_measured_sources():
         "/model",
         "/status",
         "/compact",
+        "/goal",
     ]
     assert capabilities("pi")["native_verbs"] == ["/name"]
     assert capabilities("gemini").get("native_verbs") is None
@@ -1199,7 +1219,7 @@ def test_native_and_review_verbs_come_from_the_capability_table():
 
     caps = capabilities("codex")
     assert set(caps["native_verbs"]) == {
-        "/review", "/code-review", "/model", "/status", "/compact",
+        "/review", "/code-review", "/model", "/status", "/compact", "/goal",
     }
     assert _CODEX_REVIEW_VERBS == {"/review", "/code-review"}
     assert _CODEX_REVIEW_VERBS <= set(caps["native_verbs"])

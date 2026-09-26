@@ -137,22 +137,37 @@ pub fn external_backend_selected() -> bool {
 /// clock instead - a backend outage must not become a hot exec loop).
 pub const SNAPSHOT_REFRESH_SECS: u64 = 10;
 
-/// Execute the backend-neutral snapshot verb (`fno backlog status --snapshot`)
-/// and return its stdout. `None` on any failure - missing binary, non-zero
-/// exit, unparseable stdout - so the caller's last-good/stale machinery treats
-/// a failed snapshot exactly like a failed file read.
+/// Execute the tracker snapshot door (`fno-agents graph-get`'s stdin form,
+/// `{"tracker":"snapshot","stale_ok":true}`) and return its stdout. `None` on
+/// any failure - missing binary, non-zero exit, unparseable stdout - so the
+/// caller's last-good/stale machinery treats a failed snapshot exactly like a
+/// failed file read.
 ///
 /// The snapshot document is the SAME shape `derive_queue` consumes
 /// (`{"backend": ..., "entries": [...]}` with graph-compatible entry fields),
 /// so both reader modes feed the same pure derivation functions; the mux
 /// classification, lanes, and read-time dependency readiness are unchanged.
 pub fn read_snapshot() -> Option<String> {
-    // fno_bin (FNO_BIN override, else the running binary) - the same resolver
-    // every other fno-subprocess site in the crate uses, so the snapshot is
-    // read from the binary version that owns this document's schema.
-    let mut command = crate::process_admission::std_command(crate::server::fno_bin());
-    command.args(["backlog", "status", "--snapshot"]);
-    let out = crate::process_admission::std_output(&mut command).ok()?;
+    use std::io::Write;
+    // fno_agents_bin (FNO_AGENTS_BIN override, else the paired dev binary) -
+    // the snapshot now lives in the fno-agents binary, so the paired-binary
+    // resolver that every other fno-agents subprocess site uses is the one
+    // that owns this document's schema.
+    let mut command =
+        crate::process_admission::std_command(crate::digest_overlay::fno_agents_bin());
+    command.arg("graph-get");
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut command).ok()?;
+    child
+        .stdin
+        .as_mut()?
+        .write_all(br#"{"tracker":"snapshot","stale_ok":true}"#)
+        .ok()?;
+    drop(child.stdin.take());
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -165,7 +180,7 @@ pub fn read_snapshot() -> Option<String> {
 
 /// Read a node's derived status, tolerating the pre-rename `_status` key so a
 /// graph.json not yet re-written by the Python side still classifies.
-fn node_status(e: &serde_json::Value) -> Option<&str> {
+pub(crate) fn node_status(e: &serde_json::Value) -> Option<&str> {
     e.get("status")
         .or_else(|| e.get("_status"))
         .and_then(|v| v.as_str())
@@ -245,7 +260,7 @@ pub enum BoardScope {
 impl BoardScope {
     /// Whether a card carrying `project` (already trimmed; `None` = unscoped)
     /// belongs on this board.
-    fn keeps(&self, project: Option<&str>) -> bool {
+    pub(crate) fn keeps(&self, project: Option<&str>) -> bool {
         match (self, project) {
             (BoardScope::All, _) => true,
             (_, None) => true,
@@ -351,6 +366,26 @@ pub fn board_scope_from_spawn_env() -> (BoardScope, String) {
             BoardScope::All,
             "not latched by a client spawn (FNO_BOARD_SCOPE unset): all projects".into(),
         ),
+    }
+}
+
+/// The scope reason alone, for paint. The client's spawn latch IS the resolved
+/// `resolve_board_scope` answer (the spawner resolved config and latched the
+/// env), so this is the reason to show on the backlog header. Read per call:
+/// the read is an env lookup, and a cache would freeze a test's env change.
+pub fn board_scope_reason() -> String {
+    board_scope_from_spawn_env().1
+}
+
+/// The one card label: `<id> <slug>`, id FIRST - the id is the handle every
+/// verb takes, so it leads and the slug reads after it. An empty slug renders
+/// the id alone. Every client paint site folds through this so the rows
+/// cannot drift apart.
+pub fn card_label(c: &crate::proto::BacklogCard) -> String {
+    if c.slug.is_empty() {
+        c.id.clone()
+    } else {
+        format!("{} {}", c.id, c.slug)
     }
 }
 
@@ -461,7 +496,8 @@ pub const UNLANED: &str = "unlaned";
 /// Canonical board column order, mirroring `KANBAN_COLUMNS` in
 /// `graph/render.py`: Now leads (genuine today-work), Triage holds the
 /// awaiting-ack queue, Done is terminal.
-const KANBAN_COLUMNS: [&str; 5] = ["Now", "Next", "Later", "Triage", "Done"];
+pub(crate) const KANBAN_COLUMNS: [&str; 6] =
+    ["In Progress", "Now", "Next", "Later", "Triage", "Done"];
 
 /// A lane's position in [`KANBAN_COLUMNS`]; anything unrecognized sorts last.
 fn lane_rank(lane: &str) -> usize {
@@ -481,13 +517,20 @@ fn lane_rank(lane: &str) -> usize {
 /// sits. Kept deliberately close to the Python, ordering included, so a change
 /// there is easy to mirror here.
 ///
+/// One named difference: a live claim puts the card in In Progress here,
+/// while `_kanban_column` accepts `live_claimed` and never reads it.
+///
 /// `claimed` folds the graph `status` and the live-lockfile claim together (a
 /// node another session drives may never write a graph status -);
-/// `underway` is [`in_progress_epics`] membership.
+/// `underway` is [`in_progress_epics`] membership; `effective_priority` is
+/// the epic-promoted priority the backlog read model feeds from the keeper
+/// (`None` keeps the node's own priority, what `derive_queue` and the mux
+/// `--top` door still do).
 pub(crate) fn kanban_column(
     e: &serde_json::Value,
     claimed: bool,
     underway: bool,
+    effective_priority: Option<&str>,
 ) -> Option<&'static str> {
     if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
         return None;
@@ -496,18 +539,24 @@ pub(crate) fn kanban_column(
         return Some("Done");
     }
     let status = node_status(e).unwrap_or("ready");
+    if status == "done" {
+        return Some("Done");
+    }
     if matches!(status, "deferred" | "superseded") {
         return None; // off-board until reactivated
     }
-    if claimed || underway {
-        return Some("Now");
+    if status == "in_progress" || claimed || underway {
+        return Some("In Progress");
     }
     // Queued is orthogonal to `status`: a node awaiting human ack is not active
-    // work, so it must not inflate Now - but a claimed node stays in Now.
+    // work, so it must not inflate the active lanes.
     if has_stamp(e, "queued_at") {
         return Some("Triage");
     }
-    match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
+    match effective_priority
+        .or_else(|| e.get("priority").and_then(|v| v.as_str()))
+        .unwrap_or("p2")
+    {
         "p0" | "p1" => Some("Now"),
         "p3" => Some("Later"),
         _ => Some("Next"),
@@ -531,7 +580,7 @@ fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
 /// write time, so this reader must derive it itself rather than trust the
 /// raw `status` field. Fails closed like the Python: a `blocked_by` id absent
 /// from `id_to_entry` counts as blocked, never as satisfied.
-fn has_open_dependency(
+pub(crate) fn has_open_dependency(
     e: &serde_json::Value,
     id_to_entry: &HashMap<&str, &serde_json::Value>,
 ) -> bool {
@@ -654,7 +703,7 @@ pub fn derive_queue(
         // unlaned keeps the two boards agreeing on what is even on the board -
         // an excluded node rendered as an actionable card would be a row the
         // canonical board says does not exist.
-        let Some(lane) = kanban_column(e, claimed, underway.contains(id)) else {
+        let Some(lane) = kanban_column(e, claimed, underway.contains(id), None) else {
             continue;
         };
         rows.push((
@@ -748,6 +797,57 @@ fn mark_head(cards: &mut [BacklogCard]) {
 /// `AgentRow.pr: Option<u64>`). Pure; a malformed doc yields an empty map (the
 /// label simply never appears). `pr_number` is NOT unique across entries, but the
 /// map is keyed by node id, so that is irrelevant.
+/// node id -> the driving session's SHORT id (first 8 chars), from the same
+/// graph read `derive_pr_map` consumes: the live claim holder's session when
+/// one holds, else the node's last do/ship session. The operator's PR-row
+/// ask: a row whose driving session has ended names the sessions list, and
+/// an empty list maps to nothing (the row then says "no session"). Pure; a
+/// malformed doc yields an empty map.
+pub fn derive_session_map(raw: &str) -> HashMap<String, String> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return HashMap::new();
+    };
+    let Some(entries) = doc
+        .get("entries")
+        .or_else(|| doc.get("nodes"))
+        .and_then(|v| v.as_array())
+    else {
+        return HashMap::new();
+    };
+    let short = |s: &str| s.chars().take(8).collect::<String>();
+    let mut out = HashMap::new();
+    for e in entries {
+        let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let driving = e
+            .get("locked_by_harness_session")
+            .and_then(|v| v.as_str())
+            .map(short)
+            .or_else(|| {
+                e.get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|rows| {
+                        rows.iter()
+                            .rev()
+                            .find(|s| {
+                                matches!(
+                                    s.get("phase").and_then(|p| p.as_str()),
+                                    Some("do") | Some("ship")
+                                )
+                            })
+                            .and_then(|s| s.get("session_id"))
+                            .and_then(|v| v.as_str())
+                            .map(short)
+                    })
+            });
+        if let Some(d) = driving {
+            out.insert(id.to_string(), d);
+        }
+    }
+    out
+}
+
 pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
         return HashMap::new();
@@ -772,155 +872,10 @@ pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
     out
 }
 
-/// One active mission (an epic with `mission_active: true`): its slug names the
-/// squad, `done`/`total` count its leaf descendants. Counts are recomputed here,
-/// not read - the graph node never carries them (they land on the plan doc).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mission {
-    pub epic_id: String,
-    pub slug: String,
-    pub done: u32,
-    pub total: u32,
-}
-
-/// Active missions from one graph read: the headers to render, plus a
-/// `node id -> epic id` index that groups a worker row into its mission by
-/// ancestor (an epic is never its own member). `None` on a malformed document,
-/// so the caller renders workers ungrouped rather than hiding them; an empty map
-/// is the valid "nothing active" state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissionMap {
-    pub missions: Vec<Mission>,
-    pub node_to_epic: HashMap<String, String>,
-}
-
-/// Depth cap for the rollup recursion (the ancestor walk relies on its `seen`
-/// guard alone). The mission tree is only mission -> epic -> leaf; the slack
-/// plus the `seen` set terminates a malformed epic-parent cycle.
-const MISSION_DEPTH_CAP: usize = 8;
-
 /// Consecutive failed reads before the section is marked stale. The reader ticks
 /// about once a second, so this is a few seconds of a genuinely unreadable graph -
 /// past any single write race, well short of the operator acting on old work.
 const STALE_AFTER_FAILED_READS: u32 = 3;
-
-struct MissionNode<'a> {
-    parent: Option<&'a str>,
-    slug: &'a str,
-    is_epic: bool,
-    mission_active: bool,
-    done: bool,
-}
-
-/// Derive the active missions from raw graph JSON. Pure; see [`MissionMap`].
-pub fn derive_missions(raw: &str) -> Option<MissionMap> {
-    let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let entries = doc
-        .get("entries")
-        .or_else(|| doc.get("nodes"))?
-        .as_array()?;
-
-    let mut nodes: HashMap<&str, MissionNode> = HashMap::with_capacity(entries.len());
-    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
-    for e in entries {
-        let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let parent = e.get("parent").and_then(|v| v.as_str());
-        if let Some(p) = parent {
-            children.entry(p).or_default().push(id);
-        }
-        nodes.insert(
-            id,
-            MissionNode {
-                parent,
-                slug: e.get("slug").and_then(|v| v.as_str()).unwrap_or(""),
-                is_epic: e.get("type").and_then(|v| v.as_str()) == Some("epic"),
-                mission_active: e.get("mission_active").and_then(|v| v.as_bool()) == Some(true),
-                done: node_status(e) == Some("done"),
-            },
-        );
-    }
-
-    let active: HashSet<&str> = nodes
-        .iter()
-        .filter(|(_, n)| n.mission_active)
-        .map(|(id, _)| *id)
-        .collect();
-    if active.is_empty() {
-        return Some(MissionMap::default());
-    }
-
-    // Nearest active-mission ancestor; start at the parent so the epic is never
-    // its own member. The full parent chain is walked - mission scope is all
-    // transitive descendants - and the `seen` set is the only bound (it makes
-    // even a malformed parent cycle terminate); a fixed depth cap would drop a
-    // deeply-nested but valid worker.
-    let mut node_to_epic = HashMap::new();
-    for (&id, node) in &nodes {
-        let mut cur = node.parent;
-        let mut seen: HashSet<&str> = HashSet::new();
-        while let Some(a) = cur {
-            if !seen.insert(a) {
-                break; // cycle
-            }
-            if active.contains(a) {
-                node_to_epic.insert(id.to_string(), a.to_string());
-                break;
-            }
-            cur = nodes.get(a).and_then(|n| n.parent);
-        }
-    }
-
-    let mut missions: Vec<Mission> = active
-        .iter()
-        .map(|&epic| {
-            let (done, total) = rollup(epic, &nodes, &children, &mut HashSet::new(), 0);
-            Mission {
-                epic_id: epic.to_string(),
-                slug: nodes.get(epic).map(|n| n.slug).unwrap_or("").to_string(),
-                done,
-                total,
-            }
-        })
-        .collect();
-    // Deterministic sideline order (the active set iterates arbitrarily).
-    missions.sort_by(|a, b| a.epic_id.cmp(&b.epic_id));
-    Some(MissionMap {
-        missions,
-        node_to_epic,
-    })
-}
-
-/// Leaf done/total under `epic`: a leaf child counts once (done iff `status ==
-/// "done"`); an epic child recurses and folds its leaves in, never counting an
-/// epic as a unit. `seen`/`depth` bound a malformed parent cycle.
-fn rollup<'a>(
-    epic: &'a str,
-    nodes: &HashMap<&'a str, MissionNode<'a>>,
-    children: &HashMap<&'a str, Vec<&'a str>>,
-    seen: &mut HashSet<&'a str>,
-    depth: usize,
-) -> (u32, u32) {
-    if depth >= MISSION_DEPTH_CAP || !seen.insert(epic) {
-        return (0, 0);
-    }
-    let (mut done, mut total) = (0u32, 0u32);
-    for &child in children.get(epic).map(Vec::as_slice).unwrap_or(&[]) {
-        let Some(cn) = nodes.get(child) else { continue };
-        if cn.is_epic {
-            let (d, t) = rollup(child, nodes, children, seen, depth + 1);
-            done += d;
-            total += t;
-        } else {
-            total += 1;
-            if cn.done {
-                done += 1;
-            }
-        }
-    }
-    (done, total)
-}
 
 /// Ranked nodes (band 0) sort ahead of unranked ones (band 1).
 fn rank_band(rank: Option<f64>) -> u8 {
@@ -1052,11 +1007,11 @@ pub struct ReaderState {
     pr: HashMap<String, u64>,
     /// The pr map as of the last publish, so a pr-only change is detected.
     last_pr: Option<HashMap<String, u64>>,
-    /// Active missions, recomputed only on a fresh read (mirrors `pr`).
-    missions: MissionMap,
-    /// The mission map as of the last publish, so a mission-only change is
-    /// detected (a mission activating/completing with the same cards/prs).
-    last_missions: Option<MissionMap>,
+    /// node id -> driving session short id (the PR-row attach handle),
+    /// recomputed with `pr` on the same fresh read.
+    driver: HashMap<String, String>,
+    /// The driver map as of the last publish (the pr gate's mirror).
+    last_driver: Option<HashMap<String, String>>,
     /// Consecutive ticks whose read failed while the file was still there. Feeds
     /// [`Queue::stale`]; reset by any read that lands.
     read_failures: u32,
@@ -1105,7 +1060,7 @@ impl ReaderState {
         stamp: Option<(i64, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
+    ) -> Option<(Queue, HashMap<String, u64>, HashMap<String, String>)> {
         // Whether THIS tick pulled fresh bytes off disk. Only a fresh read that
         // also parses clears the failure counter: re-deriving the cached document
         // succeeds every tick by definition, so treating that as success would
@@ -1125,13 +1080,13 @@ impl ReaderState {
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
                     self.pr = derive_pr_map(&raw);
-                    self.missions = derive_missions(&raw).unwrap_or_default();
+                    self.driver = derive_session_map(&raw);
                     self.cached_raw = Some(raw);
                 }
                 (None, None) => {
                     self.cached_stamp = stamp;
                     self.pr = HashMap::new();
-                    self.missions = MissionMap::default();
+                    self.driver = HashMap::new();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
                 // Torn read: keep last-good AND retry next tick. A single one is
@@ -1210,13 +1165,12 @@ impl ReaderState {
         // put) must republish too, else the `PR #N` label would lag until an
         // unrelated card/claim flip.
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
-        let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
-        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&queue)
-        {
+        let driver_changed = self.last_driver.as_ref() != Some(&self.driver);
+        if live_changed || pr_changed || driver_changed || self.last_sent.as_ref() != Some(&queue) {
             self.last_sent = Some(queue.clone());
             self.last_pr = Some(self.pr.clone());
-            self.last_missions = Some(self.missions.clone());
-            Some((queue, self.pr.clone(), self.missions.clone()))
+            self.last_driver = Some(self.driver.clone());
+            Some((queue, self.pr.clone(), self.driver.clone()))
         } else {
             None
         }
@@ -1512,6 +1466,28 @@ mod tests {
     }
 
     #[test]
+    fn the_driver_map_prefers_the_claim_then_the_last_do_or_ship_session() {
+        let raw = r#"{"entries":[
+            {"id":"n1","locked_by_harness_session":"aaaaaaaa-1111",
+             "sessions":[{"phase":"do","session_id":"bbbbbbbb-2222"}]},
+            {"id":"n2","sessions":[
+              {"phase":"do","session_id":"cccccccc-3333"},
+              {"phase":"blueprint","session_id":"dddddddd-4444"},
+              {"phase":"ship","session_id":"eeeeeeee-5555"}]},
+            {"id":"n3","sessions":[{"phase":"blueprint","session_id":"ffffffff-6666"}]},
+            {"id":"n4"}
+        ]}"#;
+        let m = derive_session_map(raw);
+        // A live claim holder wins.
+        assert_eq!(m.get("n1").map(String::as_str), Some("aaaaaaaa"));
+        // No claim: the LAST do/ship session wins (the blueprint row loses).
+        assert_eq!(m.get("n2").map(String::as_str), Some("eeeeeeee"));
+        // Sessions exist but none is do/ship: nothing maps (the row says so).
+        assert!(!m.contains_key("n3"));
+        assert!(!m.contains_key("n4"));
+    }
+
+    #[test]
     fn resolve_board_scope_defaults_to_the_repo_project() {
         let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
@@ -1648,7 +1624,7 @@ mod tests {
 
     #[test]
     fn snapshot_document_feeds_the_same_derivation() {
-        // The backend-neutral snapshot (`fno backlog status --snapshot`) is the
+        // The backend-neutral snapshot (the graph-get stdin door) is the
         // same document shape the graph file is: entries[] with graph-compatible
         // fields plus an extra `backend` key the reader must tolerate. Readiness
         // stays derived: a closed blocker arrives as a tombstone row, and an
@@ -1913,7 +1889,7 @@ mod tests {
             "Triage",
             "queued awaits ack, never inflates Now"
         );
-        assert_eq!(lane("x-held"), "Now", "a claimed node is underway");
+        assert_eq!(lane("x-held"), "In Progress", "a claimed node is underway");
         // The project half is the node's own, absent when unscoped.
         let project = |id: &str| cards.iter().find(|c| c.id == id).unwrap().project.clone();
         assert_eq!(project("x-now").as_deref(), Some("fno"));
@@ -1940,7 +1916,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hot.lanes,
-            vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
+            vec![("In Progress".to_string(), 1), ("Later".to_string(), 1)],
             "the claimed node moves lanes, count and all"
         );
         assert_eq!(hot.cards[0].state, CardState::InFlight);
@@ -1990,7 +1966,7 @@ mod tests {
         let epic = cards.iter().find(|c| c.id == "x-epic").unwrap();
         assert_eq!(
             epic.lane.as_deref(),
-            Some("Now"),
+            Some("In Progress"),
             "a p3 epic with a claimed child is underway, not long-tail"
         );
     }
@@ -2363,127 +2339,5 @@ mod tests {
         // Unparseable output is None (keep last-good), not an empty map.
         assert!(live_claims_from_sweep("not json").is_none());
         assert!(live_claims_from_sweep(r#"{"no_claims":1}"#).is_none());
-    }
-
-    // ---- mission derivation ----------------------------------------------
-
-    #[test]
-    fn active_mission_membership_and_counts() {
-        // An active-mission epic's leaf children map to it and its done/total
-        // count them; the epic is not its own member; a node under an inactive
-        // epic is unmapped.
-        let raw = graph(
-            r#"{"id":"x-e","slug":"mission-e","type":"epic","mission_active":true},
-               {"id":"x-c1","slug":"c1","status":"done","parent":"x-e"},
-               {"id":"x-c2","slug":"c2","status":"claimed","parent":"x-e"},
-               {"id":"x-off","slug":"off","type":"epic","parent":null},
-               {"id":"x-c3","slug":"c3","status":"ready","parent":"x-off"}"#,
-        );
-        let m = derive_missions(&raw).unwrap();
-        assert_eq!(m.node_to_epic.get("x-c1"), Some(&"x-e".to_string()));
-        assert_eq!(m.node_to_epic.get("x-c2"), Some(&"x-e".to_string()));
-        assert_eq!(
-            m.node_to_epic.get("x-e"),
-            None,
-            "epic is not its own member"
-        );
-        assert_eq!(
-            m.node_to_epic.get("x-c3"),
-            None,
-            "inactive-epic child unmapped"
-        );
-        assert_eq!(m.missions.len(), 1);
-        let mission = &m.missions[0];
-        assert_eq!(mission.epic_id, "x-e");
-        assert_eq!(mission.slug, "mission-e");
-        assert_eq!((mission.done, mission.total), (1, 2));
-    }
-
-    #[test]
-    fn empty_active_mission_counts_survivors() {
-        // A mission whose only child is done still renders 1/1 - it exists even
-        // with no in-flight work.
-        let raw = graph(
-            r#"{"id":"x-e","slug":"m","type":"epic","mission_active":true},
-               {"id":"x-c1","status":"done","parent":"x-e"}"#,
-        );
-        let m = derive_missions(&raw).unwrap();
-        assert_eq!(m.missions.len(), 1);
-        assert_eq!((m.missions[0].done, m.missions[0].total), (1, 1));
-    }
-
-    #[test]
-    fn no_active_mission_is_empty_not_none() {
-        // A valid graph with nothing active is an empty map, not None (None is
-        // reserved for a malformed doc).
-        let raw = graph(r#"{"id":"x-e","slug":"m","type":"epic"}"#);
-        let m = derive_missions(&raw).unwrap();
-        assert!(m.missions.is_empty() && m.node_to_epic.is_empty());
-    }
-
-    #[test]
-    fn malformed_document_is_none() {
-        // A torn/malformed graph yields None so the caller renders workers
-        // ungrouped rather than hiding them.
-        assert!(derive_missions("not json").is_none());
-    }
-
-    #[test]
-    fn epic_child_folds_leaves_one_level() {
-        // A mission epic over a sub-epic folds the sub-epic's leaves in
-        // (mission -> epic -> leaf), never counting the sub-epic as a unit.
-        let raw = graph(
-            r#"{"id":"x-m","slug":"mission","type":"epic","mission_active":true},
-               {"id":"x-sub","slug":"sub","type":"epic","parent":"x-m"},
-               {"id":"x-l1","status":"done","parent":"x-sub"},
-               {"id":"x-l2","status":"ready","parent":"x-sub"},
-               {"id":"x-direct","status":"done","parent":"x-m"}"#,
-        );
-        let m = derive_missions(&raw).unwrap();
-        assert_eq!(m.missions.len(), 1);
-        // 2 done (x-l1, x-direct) of 3 leaves (x-l1, x-l2, x-direct); the
-        // sub-epic itself is not a unit.
-        assert_eq!((m.missions[0].done, m.missions[0].total), (2, 3));
-        // A leaf under the sub-epic walks UP past it to the active mission.
-        assert_eq!(m.node_to_epic.get("x-l1"), Some(&"x-m".to_string()));
-    }
-
-    #[test]
-    fn parent_cycle_terminates() {
-        // A malformed parent cycle must not loop the ancestor walk or the
-        // rollup recursion.
-        let raw = graph(
-            r#"{"id":"x-a","type":"epic","mission_active":true,"parent":"x-b"},
-               {"id":"x-b","type":"epic","parent":"x-a"}"#,
-        );
-        // Terminates (does not hang) and produces a well-formed map.
-        let m = derive_missions(&raw).unwrap();
-        assert_eq!(m.missions.len(), 1, "x-a is the active mission");
-    }
-
-    #[test]
-    fn deep_worker_maps_past_the_old_depth_cap() {
-        // A worker more than the old fixed cap (8) parent-hops below the active
-        // epic must still map to it - mission scope is all transitive
-        // descendants, bounded only by the cycle guard (codex P2).
-        let mut parts =
-            vec![r#"{"id":"x-m","slug":"m","type":"epic","mission_active":true}"#.to_string()];
-        for i in 0..12 {
-            let parent = if i == 0 {
-                "x-m".to_string()
-            } else {
-                format!("n{}", i - 1)
-            };
-            parts.push(format!(
-                r#"{{"id":"n{i}","status":"ready","parent":"{parent}"}}"#
-            ));
-        }
-        let raw = graph(&parts.join(","));
-        let m = derive_missions(&raw).unwrap();
-        assert_eq!(
-            m.node_to_epic.get("n11"),
-            Some(&"x-m".to_string()),
-            "a 12-deep worker still maps to its mission"
-        );
     }
 }

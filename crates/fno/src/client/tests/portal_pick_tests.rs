@@ -32,6 +32,8 @@ async fn selector_shift_p_opens_the_portal_picker_without_sending() {
 /// squad 1's unnamed tabs 0/1, lagos on squad 2's tab 0.
 fn portal_pick_view() -> View {
     let agent = |squad: Option<u64>, name: &str, pane_id, tab, portal: Option<u8>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal,
         harness: None,
         model: None,
@@ -61,9 +63,11 @@ fn portal_pick_view() -> View {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -145,12 +149,17 @@ async fn portal_pick_lists_open_portals_and_preselects_new() {
         "tab 1",
         "tab 2",      //
         "new portal", //
-        "hjkl/arrows move",
+        "arrows/hjkl move",
         "1-9 jump",
         "enter place",
         "esc/q cancel",
+        "shift+arrows/HJKL split",
+        "t new tab",
     ] {
         assert!(overlay.contains(label), "missing {label}: {overlay}");
+    }
+    for line in v.portal_pick_lines(&v.portal_pick.as_ref().unwrap()) {
+        assert!(!line.contains('…'), "an ellipsis: {line}");
     }
 }
 
@@ -258,7 +267,7 @@ async fn portal_pick_with_no_open_portals_still_offers_new() {
 
 #[tokio::test]
 async fn portal_pick_hjkl_move_and_q_esc_cancel() {
-    // The vocabulary is the attach picker's: hjkl/arrows move, esc/q cancel.
+    // The vocabulary is the attach picker's: arrows/hjkl move, esc/q cancel.
     let mut v = portal_pick_view();
     open_portal_pick_by_key(&mut v).await; // cursor 3
     let mut buf = Vec::new();
@@ -271,6 +280,69 @@ async fn portal_pick_hjkl_move_and_q_esc_cancel() {
     portal_pick_keys(&mut v, b"q", &mut buf).await.unwrap();
     assert!(v.portal_pick.is_none(), "q cancels");
     assert!(buf.is_empty(), "motion and cancel never send");
+}
+
+#[tokio::test]
+async fn portal_pick_shift_l_on_new_row_sends_a_right_split() {
+    // AC1-HP: on the + row, shift+L asks for the new portal as a RIGHT
+    // split of the pane the operator is looking at, and the picker closes.
+    let mut v = portal_pick_view();
+    open_portal_pick_by_key(&mut v).await;
+    let mut buf = Vec::new();
+    portal_pick_keys(&mut v, b"L", &mut buf).await.unwrap();
+    assert!(v.portal_pick.is_none(), "the commit closes the picker");
+    let mut cur = std::io::Cursor::new(&buf);
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+        ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+            assert_eq!(id, "c19cd2c3");
+            assert!(placement.portal_new, "asks the server to allocate");
+            assert_eq!(placement.portal, None, "no index is named");
+            assert_eq!(placement.split, Some(Dir::Right));
+            assert_eq!(
+                placement.target,
+                PaneTarget::SquadId(v.layout.active_squad),
+                "the split lands in the workspace the operator views"
+            );
+            assert!(!placement.here);
+        }
+        other => panic!("expected AttachAgent, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn portal_pick_split_on_an_open_portal_row_sends_nothing() {
+    // AC1-ERR: shift+HJKL on an OPEN-portal row cannot commit (a repoint
+    // keeps its geometry by design), so nothing is sent, the cursor never
+    // moves, the rest of the read is dropped, and the notice names the + row.
+    let mut v = portal_pick_view();
+    open_portal_pick_by_key(&mut v).await;
+    portal_pick_keys(&mut v, b"2", &mut Vec::new())
+        .await
+        .unwrap(); // cursor to list row 1
+    let mut buf = Vec::new();
+    portal_pick_keys(&mut v, b"Lj", &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "nothing commits");
+    let pick = v.portal_pick.as_ref().expect("the picker stays open");
+    assert_eq!(pick.cursor, 1, "the trailing j never moves the cursor");
+    let (notice, _) = v.notice.expect("the miss is named on screen");
+    assert!(
+        notice.contains("move to the + row"),
+        "the + row is named: {notice}"
+    );
+}
+
+#[tokio::test]
+async fn portal_pick_t_on_new_row_equals_enter() {
+    // AC1-EDGE: `t` is Enter's keyboard-only alias, byte for byte.
+    let mut v1 = portal_pick_view();
+    open_portal_pick_by_key(&mut v1).await;
+    let mut b1 = Vec::new();
+    portal_pick_keys(&mut v1, b"\r", &mut b1).await.unwrap();
+    let mut v2 = portal_pick_view();
+    open_portal_pick_by_key(&mut v2).await;
+    let mut b2 = Vec::new();
+    portal_pick_keys(&mut v2, b"t", &mut b2).await.unwrap();
+    assert_eq!(b1, b2, "t sends exactly what Enter sends");
 }
 
 // ---- task 1.2: `l`/Right on an agent row reaches portal 0 ----------------
@@ -328,4 +400,91 @@ async fn selector_h_on_agent_row_stays_inert() {
     selector_keys(&mut v, b"h", &mut buf).await.unwrap();
     assert!(buf.is_empty(), "h sends nothing");
     assert_eq!(v.selector, Some(8), "h neither reaches nor closes");
+}
+
+// ---- task 1.1: the `P` refusal names the row's state -----------------------
+
+/// The display position of the named agent row.
+fn cursor_on(v: &View, name: &str) -> usize {
+    v.display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+        .unwrap_or_else(|| panic!("row {name} is on screen"))
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_names_the_portal_state_and_reseat() {
+    // AC1-HP: `P` on a row already shown through a portal names the row,
+    // its portal and tab, and the verb that moves it - not the old
+    // state-free rule sentence that contradicted the picker listing.
+    let mut v = portal_pick_view();
+    let cur = cursor_on(&v, "nairobi");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "a refusal sends nothing");
+    assert!(v.portal_pick.is_none(), "the picker never opens");
+    let (notice, _) = v.notice.expect("the state is named on screen");
+    assert!(notice.contains("nairobi"), "{notice}");
+    assert!(notice.contains("portal 0"), "{notice}");
+    assert!(notice.contains("tab 1"), "{notice}");
+    assert!(notice.contains("reseat"), "{notice}");
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_names_the_pane_state_and_reseat() {
+    // A pane-hosted row that is no portal seat still refuses - the gate
+    // does not move - but the refusal names the pane state it observes.
+    let mut v = portal_pick_view();
+    v.layout.agents[0].portal = None; // nairobi keeps pane 10, loses portal 0
+    let cur = cursor_on(&v, "nairobi");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    assert!(
+        v.portal_pick.is_none(),
+        "the gate holds: the picker stays shut"
+    );
+    let (notice, _) = v.notice.expect("the state is named on screen");
+    assert!(notice.contains("nairobi"), "{notice}");
+    assert!(notice.contains("already has a pane"), "{notice}");
+    assert!(notice.contains("reseat"), "{notice}");
+    assert!(notice.contains("tab 1"), "{notice}");
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_on_an_exited_row_names_the_exit_not_reseat() {
+    // AC1-ERR: an exited row gets its name and its exit. `reseat` moves a
+    // LIVE worker, so the exited arm must not offer it.
+    let mut v = portal_pick_view();
+    v.layout.agents[3].attach_id = None;
+    v.layout.agents[3].exited = true; // bg-claude exits
+    let cur = cursor_on(&v, "bg-claude");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    let (notice, _) = v.notice.expect("the exit is named on screen");
+    assert!(notice.contains("bg-claude"), "{notice}");
+    assert!(notice.contains("exited"), "{notice}");
+    assert!(
+        !notice.contains("reseat"),
+        "no reseat for the dead: {notice}"
+    );
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_on_a_non_agent_row_states_the_rule() {
+    // AC1-EDGE (half 1): no row in hand means no state to name, so this is
+    // the one arm allowed to state the rule.
+    let mut v = portal_pick_view();
+    let cur = v
+        .display_rows()
+        .iter()
+        .position(|r| !matches!(r, DisplayRow::Agent(_)))
+        .expect("a non-agent row");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    let (notice, _) = v.notice.expect("the rule is named on screen");
+    assert_eq!(notice, "a portal shows an agent row");
 }

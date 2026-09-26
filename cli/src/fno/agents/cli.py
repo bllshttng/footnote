@@ -758,8 +758,8 @@ def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
     """Worker launch dir honoring --cwd > --here (caller) > default canonical.
 
-    Mirrors the Rust client's ``effective_worker_cwd`` precedence. x-aaaa
-    inverted the default (was caller-cwd): a spawn with NO explicit
+    Mirrors the Rust client's ``effective_worker_cwd`` precedence.
+    inverted the default (was 's caller-cwd): a spawn with NO explicit
     cwd source now resolves to the canonical (main) checkout, so the identical
     command behaves the same regardless of where the launcher happens to stand.
     ``--here``/``--in-place`` is the explicit opt-in to keep the caller's cwd.
@@ -785,7 +785,7 @@ def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
         return caller
     if canonical != caller:
         # Never silent: the redirect note fires on every actual move, default
-        # path included (x-aaaa Locked Decision 5).
+        # path included.
         print(
             f"fno agents: dispatching from canonical main (default) ({canonical}); "
             "pass --here to stay in this worktree",
@@ -955,8 +955,9 @@ def cmd_crown(
         ),
     ),
 ) -> None:
-    """Crown an existing session from an attended shell, or from an agent whose
-    own crown strictly contains the requested scope.
+    """Crown an existing session from an attended shell, from an agent whose
+    own crown strictly contains the requested scope, or add to your own
+    epic-set crown an epic your session created.
 
     Run `fno agents register` inside the target session, then run this command
     with its printed handle. Same-scope succession stays on the spawn-time
@@ -1017,7 +1018,7 @@ from fno.agents.court import register_court_command  # noqa: E402
 register_court_command(agents_app)
 
 
-# Moved to fno.agents.spawn_lineage (file budget); re-exported here.
+# Moved to fno.agents.spawn_lineage; re-exported here.
 from fno.agents.spawn_lineage import (  # noqa: E402
     _stamp_launch_edge,
     _stamp_spawned_session_row,
@@ -1258,7 +1259,7 @@ def cmd_spawn(
         "--workspace",
         "-s",
         help=(
-            "Pane placement : send the new pane to a workspace by its visible "
+            "Pane placement: send the new pane to a workspace by its visible "
             "name instead of the cwd-derived default. --substrate pane only."
         ),
     ),
@@ -1273,7 +1274,7 @@ def cmd_spawn(
         "--split",
         "-x",
         help=(
-            "Pane placement : tile the new pane left|right|up|down of the "
+            "Pane placement: tile the new pane left|right|up|down of the "
             "squad's focused pane instead of a new tab. --substrate pane only."
         ),
     ),
@@ -1413,7 +1414,7 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
-    # x-aaaa: the effective launch dir surfaces in the receipt on the DEFAULT
+    #: the effective launch dir surfaces in the receipt on the DEFAULT
     # move (a node-less spawn now lands on canonical), coupled with the stderr
     # redirect note. An explicit --cwd (incl. -P/node-resolved) is the caller's
     # own choice and never surfaces -- gate on `not cwd` so the receipt stays
@@ -1572,7 +1573,7 @@ def cmd_spawn(
         node_seed_env = seed.env
         node_seed_receipt = seed.receipt
         if cwd is None and not here:
-            ensured = seed.ensure_launch_workdir(name, harness)
+            ensured = seed.ensure_launch_workdir(harness)
             if ensured is None:
                 raise typer.Exit(code=2)
             workdir = ensured.resolve()
@@ -1639,7 +1640,14 @@ def cmd_spawn(
     # substrate maps every provider, so it's exempt here. The codex
     # thread lane is exempt too: the shared app-server resolves the posture
     # (resolve_thread_posture), so a mapped mode rides it natively.
-    codex_thread_lane = harness == "codex" and substrate in ("thread", "bg") and not once
+    # The capability table decides, through the one Rust vocabulary (see
+    # codex_posture.rs): a codex thread lane carries a mapped mode when the
+    # table declares the lane AND the mode resolves in codex's own words. An
+    # unavailable owner reads false, which degrades to the refusal below -
+    # never a guessed yes.
+    from fno.agents.permission_axis import codex_thread_lane_carries
+
+    codex_thread_lane = codex_thread_lane_carries(harness, substrate, once, permission_mode)
     if (
         permission_mode is not None
         and harness != "claude"
@@ -1659,7 +1667,7 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
-    # Tier-3 fail-closed for the bg/headless lanes (the pane substrate
+    #: Tier-3 fail-closed for the bg/headless lanes (the pane substrate
     # maps every provider via build_pane_argv, so it's exempt and validated
     # there). Mirrors the --permission-mode guard above; the same per-cell matrix
     # as the Rust client. Validate BEFORE any spawn.
@@ -1709,7 +1717,7 @@ def cmd_spawn(
         print(refusal, file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # --crown/-k <scope>...: the operator names the TERRITORY and the ladder
+    # --crown/-k <scope>... : the operator names the TERRITORY and the ladder
     # altitude is derived from it (crown.derive_crown_level). The grantor is
     # stamped ambiently at spawn from this session, so the child's row records who
     # actually bestowed the crown, never a value it could forge.
@@ -1781,7 +1789,7 @@ def cmd_spawn(
         if substrate == "pane":
             from fno.agents.harness_map import capabilities_or_undeclared
 
-            # the posture answers route_on_pane=False for an
+            #: the posture answers route_on_pane=False for an
             # undeclared harness, so the refusal stays clean. `capabilities()`
             # would raise an uncaught DispatchResolveError here (exit 1
             # traceback) on a lane this change made reachable.
@@ -1977,7 +1985,7 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2) from exc
 
-    # the receipt's credential facts, read off the composed overlays
+    #: the receipt's credential facts, read off the composed overlays
     # (never off the flags - a caller who typed `--account makers -P zai` reads
     # auth/bills and learns immediately that makers contributed a profile and
     # nothing else). Gated on the resolved overlays, not the flag spellings, so
@@ -2064,7 +2072,7 @@ def cmd_spawn(
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # the sessions row a node-bearing spawn opens. Explicit
+    #: the sessions row a node-bearing spawn opens. Explicit
     # --session-phase wins; empty infers from the verb table
     # (spawn_phase.toml). A --node spawn the table cannot label is refused
     # fail-closed, like the guards above, before anything spawns: silently
@@ -2139,6 +2147,35 @@ def cmd_spawn(
                 raise typer.Exit(code=2)
             route_provider = recorded_provider
 
+    # The write policy resolves BEFORE the substrate branch so a pane spawn
+    # refuses instead of silently dropping the enforcement it was handed.
+    # Claude-only for the same reason: the sandbox block composes into the
+    # claude --settings payload, so another harness would take the flag and
+    # enforce nothing - the exact partial-jail this option exists to prevent.
+    # It also sits above the node guard and the gate: an exit here holds no
+    # claim, so it cannot strand one.
+    sandbox_settings: dict[str, object] | None = None
+    if sandbox_write_policy:
+        if substrate == "pane" and not once:
+            print(
+                "--sandbox-write-policy needs the thread substrate: a pane "
+                "spawn's --settings slot is reserved by the mux hook server, "
+                "so a pane cannot carry the OS write allowlist.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if harness != "claude":
+            print(
+                f"--sandbox-write-policy composes into the claude --settings "
+                f"payload; harness {harness!r} would carry the flag and "
+                f"enforce nothing. Drop the flag or spawn claude.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from fno.agents.model_routing import load_sandbox_write_policy
+
+        sandbox_settings = load_sandbox_write_policy(sandbox_write_policy)
+
     # The node guard sits BELOW the resume-provider resolution on purpose:
     # it acquires `dispatch:<id>` (and the handover `node:<id>`), and every
     # exit above it strands those keys for their whole TTL with nothing
@@ -2178,7 +2215,7 @@ def cmd_spawn(
         )
         if guard.get("verdict") != "dispatchable":
             # `reason` FIRST, and detail as its own field. Both shell consumers
-            # read this line with `sed -n 's/.* reason=\([^;]*\).*/\1/p;q'`,
+            # read this line with `sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q'`,
             # so whatever lands in `reason=` is the machine token they switch
             # on. `detail` is a prose sentence, and the acquire-race return sets
             # BOTH - so leading with detail put `node:<id>` in the slot, matched
@@ -2274,6 +2311,9 @@ def cmd_spawn(
                 no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
                 account=account or dispatch_account,
+                seed=message,
+                session_phase=session_phase,
+                succession_scope=crown_scope if succeed else None,
             )
             break
         except GateRefused as exc:
@@ -2290,7 +2330,7 @@ def cmd_spawn(
                 raise
             if last_wait_note == 0.0 or now - last_wait_note >= 60.0:
                 sys.stderr.write(
-                    f"spawn-gate: {reason}; --wait retries for "
+                    f"spawn-gate note: {reason}; --wait retries for "
                     f"{int(wait_deadline - now)}s more\n"
                 )
                 last_wait_note = now
@@ -2319,33 +2359,6 @@ def cmd_spawn(
     # the same scoping contract FNO_NODE is pinned to.
     prov_prev["FNO_WORKER_NAME"] = os.environ.get("FNO_WORKER_NAME")
     os.environ["FNO_WORKER_NAME"] = name
-
-    # The write policy resolves BEFORE the substrate branch so a pane spawn
-    # refuses instead of silently dropping the enforcement it was handed.
-    # Claude-only for the same reason: the sandbox block composes into the
-    # claude --settings payload, so another harness would take the flag and
-    # enforce nothing - the exact partial-jail this option exists to prevent.
-    sandbox_settings: dict[str, object] | None = None
-    if sandbox_write_policy:
-        if substrate == "pane" and not once:
-            print(
-                "--sandbox-write-policy needs the thread substrate: a pane "
-                "spawn's --settings slot is reserved by the mux hook server, "
-                "so a pane cannot carry the OS write allowlist.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if harness != "claude":
-            print(
-                f"--sandbox-write-policy composes into the claude --settings "
-                f"payload; harness {harness!r} would carry the flag and "
-                f"enforce nothing. Drop the flag or spawn claude.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        from fno.agents.model_routing import load_sandbox_write_policy
-
-        sandbox_settings = load_sandbox_write_policy(sandbox_write_policy)
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
@@ -2455,7 +2468,7 @@ def cmd_spawn(
                 receipt_obj["pane_alive"] = pane_result.pane_alive
                 receipt_obj["unbound_reason"] = pane_result.unbound_reason
             if getattr(pane_result, "stamp_failure", None) is not None:
-                # (AC4-ERR) The stamp step reported its own failure: the
+                # The stamp step reported its own failure: the
                 # row is id-less and no retry is coming, so the receipt says so
                 # instead of returning zero with a silent None.
                 receipt_obj["stamp_failure"] = pane_result.stamp_failure
@@ -2499,7 +2512,7 @@ def cmd_spawn(
                 receipt_obj["readiness"] = pane_result.readiness
             if pane_result.readiness_rule is not None:
                 receipt_obj["readiness_rule"] = pane_result.readiness_rule
-            # Locked Decision 5, renamed by / name the REQUESTED
+            # Locked Decision 5, renamed by /: name the REQUESTED
             # mode so an audit of "why did this worker have edit rights" has a
             # durable answer - and only as a request, because fno cannot back
             # the outcome (a forced-default environment ignores the flag while
@@ -2507,9 +2520,9 @@ def cmd_spawn(
             # unset receipt is unchanged.
             if permission_mode is not None:
                 receipt_obj["permission_mode_requested"] = permission_mode
-            # name the pinned account so a mis-pin is visible at spawn
+            #: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
-            # the account fact carries WHO chose it.
+            #: the account fact carries WHO chose it.
             _account, _source = launch_provenance.receipt_account_fields(
                 pane_result.launch_account, pane_result.launch_account_source, account
             )
@@ -2526,7 +2539,7 @@ def cmd_spawn(
                 if account_env is not None:
                     receipt_obj["credential_source"] = credential_source
                     receipt_obj["credential_env_keys"] = credential_env_keys
-            # for the composed spawn, which credential fno made live and
+            #: for the composed spawn, which credential fno made live and
             # who is billed - derived from the composed env, never the flags.
             if credential is not None:
                 receipt_obj["auth"] = credential.auth
@@ -2536,7 +2549,7 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
-            # the node this pane works gets its sessions row now, while
+            #: the node this pane works gets its sessions row now, while
             # the receipt holds the worker identity. Runs before the exit-22
             # check on purpose: an unverified seed still left a live pane, and
             # that pane's provenance is real whether its payload landed or not.
@@ -2648,7 +2661,7 @@ def cmd_spawn(
                 route_provider=route_provider,
                 provider_gate=gate,
                 sandbox_settings=sandbox_settings,
-                # the ALREADY-resolved FNO_NODE from the provenance
+                #: the ALREADY-resolved FNO_NODE from the provenance
                 # pass - the node this spawn is FOR, not the ambient value.
                 node=(prov_env or {}).get("FNO_NODE"),
                 # The route's model token, recorded on the row (the receipt
@@ -2683,7 +2696,7 @@ def cmd_spawn(
             else:
                 os.environ[_k] = _v
 
-    # bg/headless lane - reached only on a successful dispatch (every
+    #: bg/headless lane - reached only on a successful dispatch (every
     # failure above exits). The registry row the dispatch minted carries the
     # worker's full harness session id; a one-shot whose row was torn down or
     # whose uuid never resolved skips with a named line, not a bad row.
@@ -2705,7 +2718,7 @@ def cmd_spawn(
         # consumers (name validation blocks backslash already, so this is the
         # only escapable character; sigma-review hardening finding).
         safe_name = result.name.replace('"', '\\"')
-        # Locked Decision 5 / Rust parity, renamed by / name the
+        # Locked Decision 5 / Rust parity, renamed by /: name the
         # REQUESTED mode (flag or the yolo-derived bypassPermissions) so an
         # audit can tell elevated permissions were REQUESTED on this fallback
         # path - fno can back the request, never the applied outcome. Only
@@ -2714,23 +2727,23 @@ def cmd_spawn(
         # closed set before it lands here, so a config-sourced mode carrying a
         # backslash or control char would otherwise emit invalid JSON. Matches
         # Rust's json_string_ascii byte-for-byte for every ordinary mode.
-        eff_mode = permission_mode or ("bypassPermissions" if yolo else None)
+        eff_mode = permission_mode or (("yolo" if "codex" in (harness, getattr(result, "provider", "")) else "bypassPermissions") if yolo else None)
         perm_field = (
             f', "permission_mode_requested": {json.dumps(eff_mode)}'
             if eff_mode
             else ""
         )
-        # x-aaaa: append the effective cwd only on the default move. json.dumps
+        #: append the effective cwd only on the default move. json.dumps
         # (not a bare `"`-escape) so a path with a backslash or control char stays
         # valid JSON for receipt consumers (review); it matches Rust's
         # json_string_ascii byte-for-byte. LAST field so an unmoved receipt is
         # byte-identical.
         cwd_field = f', "cwd": {json.dumps(_moved_cwd)}' if _moved_cwd is not None else ""
-        # name the pinned account. Only when set, so a non-account bg
+        #: name the pinned account. Only when set, so a non-account bg
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
         account_field = launch_provenance.bg_account_field(result, account)
-        # the composed spawn's live credential and payer, from the
+        #: the composed spawn's live credential and payer, from the
         # composed env (see the pane branch); composed-only so an account-only
         # bg receipt stays byte-identical (AC3).
         cred_field = (
@@ -2822,7 +2835,7 @@ def cmd_name(
     refuses the fleet on a stale install.
 
     The model rides $FNO_AGENTS_NAME_MODEL, not a flag: the flag-registry gate
- refuses Python typer-flag growth, and a shell dispatcher carries an
+     refuses Python typer-flag growth, and a shell dispatcher carries an
     env var as cheaply as a flag.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
@@ -2852,7 +2865,8 @@ def cmd_name(
 
 
 # `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
-# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
+# entry resolves it). The retask transaction is native too: the empty-argv rename payload door
+# in fno-agents runs it, and run_retask is the thin front that builds the payload.
 
 
 @agents_app.command("retask", hidden=True)
@@ -2946,7 +2960,7 @@ def cmd_spawn_guard(
                       a worker is unproven),
                       a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
                       a respawned worker - the caller maps this to skipped-contested,
-), a worker ROW on the node while the claim itself does
+                      ), a worker ROW on the node while the claim itself does
                       not hold it (reason=worker-row, worker=<names>: the receipt
                       names the row and no claim holder, because peeking and
                       stopping that worker is what frees the node - a release
@@ -3177,7 +3191,7 @@ def cmd_discovered_json(
         try:
             entries = load_registry()
             exclude = {e.short_id for e in entries if e.short_id}
-            # Projects-store rows key on full session_id (: no double-list).
+            # Projects-store rows key on full session_id.
             exclude_sids = {e.cc_session_id for e in entries if e.cc_session_id}
         except Exception:  # noqa: BLE001 — discovery never depends on a clean registry
             exclude = set()
@@ -3281,7 +3295,7 @@ def cmd_registry_repair(
 #: `heal-token` exit codes. 13 mirrors the lifecycle verbs' not-found code; the
 #: ambiguity code is distinct from BOTH that and typer's internal-error 1 so the
 #: Rust caller can tell "refuse loudly with these candidates" from "degrade to
-#: the original not-found error" (AC4 vs AC5).
+#: the original not-found error".
 HEAL_TOKEN_MISS_EXIT = 13
 HEAL_TOKEN_AMBIGUOUS_EXIT = 3
 HEAL_TOKEN_UNAVAILABLE_EXIT = 12
@@ -3394,24 +3408,6 @@ def cmd_codex_session_for_pid(pid: int = typer.Argument(..., help="Pane pid to p
     sys.stdout.flush()
 
 
-@agents_app.command("nudge-peek", hidden=True)
-def cmd_nudge_peek(
-    session: str = typer.Option(..., "--session-id", help="Loop session id."),
-    cwd: str = typer.Option(..., "--cwd", help="Session working directory."),
-) -> None:
-    """Internal: emit a one-line nudge for the oldest unread inbox message
-    addressed to this session's project, advancing a per-session cursor so it
-    surfaces once (P2). The loop-check verb shells out to this on
-    a `block` decision. Prints nothing when there is no fresh unread; fail-open
-    on any error so the loop is never broken.
-    """
-    from fno.agents.nudge import peek_nudge
-
-    line = peek_nudge(session, cwd)
-    if line:
-        sys.stdout.write(line)
-
-
 @agents_app.command("logs")
 def cmd_logs(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
@@ -3499,7 +3495,7 @@ def cmd_whoami(
     # failed shellout would yield live_status: null with no WARN (the design
     # requires both).
     # Resolve THIS process's session id from whichever harness marker is set
-    # a codex/gemini worker resolves its own row via harness_session_id,
+    #: a codex/gemini worker resolves its own row via harness_session_id,
     # not just CLAUDE_CODE_SESSION_ID.
     from fno.agents.self_stamp import identity_ambiguity_message, resolve_self_identity
 
@@ -3626,7 +3622,7 @@ def cmd_register(
             f"session is still treated as {entry.origin!r}.\n"
         )
 
-    # record a clock saying "no expiry" beside a hand-stamped policy.
+    #: record a clock saying "no expiry" beside a hand-stamped policy.
     # Not for enforcement - an absent clock already never lapses. This is what
     # lets the DND column on `fno agents list` say "held" for this row instead
     # of leaving the operator to guess from a blank cell.
@@ -3688,7 +3684,7 @@ def cmd_top(
     ),
 ) -> None:
     """Show every live worker process - fno-spawned and foreign claude bg
-    alike - with pid, RSS (MB), and status (US4).
+    alike - with pid, RSS (MB), and status.
 
     The same union the spawn gate counts, so this is the audit surface every
     gate message points at. Python-only (RSS via psutil; not routed to the
@@ -3880,11 +3876,15 @@ def _batch_resolver():
     return resolve
 
 
-def _registry_falsifier(handle: str) -> str | None:
-    """The falsifier for one ``handle``. A wrapper over
-    [`_registry_falsifiers`] so the three-key match has ONE implementation and
-    the single-handle path cannot drift from the batch one."""
-    return _registry_falsifiers([handle])[handle]
+def _truth_line(result: dict, falsifier: str | None) -> str:
+    """The human truth line: dead, or exited (resumable) when a resume could relaunch it."""
+    from fno.agents.session_truth import RESUMABLE_BASES, render_truth
+
+    payload = _truth_payload(result, falsifier=falsifier)
+    if payload["reachability"] == "unreachable":
+        result = {**result, "state": (
+            "exited" if payload["basis"] in RESUMABLE_BASES and result.get("session_id") else "dead")}
+    return f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]"
 
 
 def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
@@ -3973,7 +3973,7 @@ def cmd_truth(
     """
     import json as _json
 
-    from fno.agents.session_truth import render_truth, resolve_session_truth
+    from fno.agents.session_truth import resolve_session_truth
 
     # Split rather than one combined test, so the positional narrows to `str`
     # for the single-handle path below without an assert standing in for the
@@ -4017,11 +4017,7 @@ def cmd_truth(
             )
         else:
             for name, result, falsifier in answers:
-                payload = _truth_payload(result, falsifier=falsifier)
-                sys.stdout.write(
-                    f"{name}: {render_truth(result)} "
-                    f"[{payload['reachability']}: {payload['basis']}]\n"
-                )
+                sys.stdout.write(f"{name}: {_truth_line(result, falsifier)}\n")
         sys.stdout.flush()
         # Always 0: an unresolvable handle is reported in its own entry, never
         # in an exit code the whole batch would have to share.
@@ -4032,12 +4028,11 @@ def cmd_truth(
         raise typer.Exit(code=2)
 
     result = resolve_session_truth(handle)
-    falsifier = _registry_falsifier(handle)
+    falsifier = _registry_falsifiers([handle])[handle]
     if json_out:
         sys.stdout.write(_json.dumps(_truth_payload(result, falsifier=falsifier)) + "\n")
     else:
-        payload = _truth_payload(result, falsifier=falsifier)
-        sys.stdout.write(f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]\n")
+        sys.stdout.write(_truth_line(result, falsifier) + "\n")
     sys.stdout.flush()
     # Both are unresolvable-handle exits (13, the lifecycle not-found code); the
     # reason distinguishes the routine miss from a crashing resolver, which
@@ -4376,7 +4371,7 @@ def cmd_watchdog(
 
     payload, rows = wd.run_sweep(now_s=now)
     if payload.get("refused"):
-        # a zero-row roster is an unreadable instrument, not an empty
+        #: a zero-row roster is an unreadable instrument, not an empty
         # fleet. Write no sweep file and advance no gate, so staleness reads
         # loud instead of certifying a healthy quiet fleet that was never read.
         print(f"fno agents watchdog: {payload['refused']}", file=sys.stderr)
@@ -4891,7 +4886,7 @@ def yard(
     typer.echo(f"{len(citizens)} citizens, {n_new} first sighting(s); tiers: {'/'.join(RARITY_TIERS)}")
 
 
-# instruments over the capability table. `probe` measures the live
+#: instruments over the capability table. `probe` measures the live
 # harness against the (config-merged) row. Four verdicts and UNKNOWN never
 # acts: a missing binary or a timeout is UNKNOWN with its reason, never a
 # disagreement, because an absent instrument is not a measurement.
@@ -4955,7 +4950,8 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] | clear --reason T [--by X] | status [--json].
+    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
+    No --hold holds all three scopes; status prints each scope as holds or admits.
     """
     import subprocess
 

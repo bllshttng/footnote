@@ -52,7 +52,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -62,6 +61,7 @@ from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses.pi import lookup_sessions
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 LIVE = os.environ.get("FNO_PI_LIVE") == "1"
 PI_ON_PATH = (
@@ -282,7 +282,7 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_pi_thread(
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not: same short-state move as the restart journey.
-    short_state = Path(tempfile.mkdtemp(prefix="fno5d-"))
+    short_state = short_bind_root("fno5d-")
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",

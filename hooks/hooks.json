@@ -25,6 +25,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/generated-write-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/join-partition-write-guard.sh"
           }
         ]
@@ -60,11 +69,15 @@
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/truncation-guard.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pipe-guard.sh"
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/recursive-grep-guard.py"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/test-run-guard.sh"
           }
         ]
       },
@@ -122,6 +135,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
+            "timeout": 2
           }
         ]
       }

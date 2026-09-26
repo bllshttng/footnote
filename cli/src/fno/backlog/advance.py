@@ -255,14 +255,18 @@ class SpawnQueueRefused(SpawnError):
 
 
 #: spawn exit -> machine verdict. 75-80 are capacity conditions true for every caller equally;
-#: 81 and 86 are registries/gates no spawn on this machine can pass; 82 and 83 are the fleet
-#: incident pair; 84 is the state-root refusal: permanent, a human grants, never capacity;
-#: 85 is the sandbox probe. Constants are read off the module so a rename breaks loudly.
+#: 81 is a registry no spawn on this machine can pass; 82 and 83 are the fleet incident pair:
+#: no spawn passes while the stop stands, so they read gate-unavailable; 84 is the state-root
+#: refusal: permanent, a human grants, never capacity; 85 is the sandbox probe; 86 and 88 are
+#: the territory and blueprint caps, which free up when a slot frees; 87 is an unanswered gate.
+#: Constants are read off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
     _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
+    _spawn_gate.EXIT_TERRITORY_CAP: "capacity-refused", _spawn_gate.EXIT_BLUEPRINT_CAP: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+    _spawn_gate.EXIT_FLEET_STOP: "gate-unavailable", _spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE: "gate-unavailable",
     _spawn_gate.EXIT_STATE_ROOT_UNGRANTED: "state-root-ungranted",
     _spawn_gate.EXIT_GATE_UNAVAILABLE: "gate-unavailable",
     EXIT_SANDBOX_UNREACHABLE: "sandbox-unreachable",
@@ -385,6 +389,9 @@ def selection_guards(
         return hold.guard_reason
 
     try:
+        if qid := _held_questions().get(entry.get("id")):
+            return f"held:{qid}"
+
         owner = entry.get("contained_in")
         if isinstance(owner, str) and owner:
             return f"contained:{owner}"
@@ -457,44 +464,43 @@ def _guard_staleness_days() -> int:
         return 21
 
 
+class SelectUnmeasured(RuntimeError):
+    """The native select-read verb hit its bound; arm_watch retries it."""
+
+
+def _select_read(kind: str, args: list[str]) -> Any:
+    from fno.rust_binary import call_binary_json
+    error, receipt = call_binary_json("select-read", [kind, *args], timeout=None)
+    if error is not None or not isinstance(receipt, dict):
+        raise RuntimeError(f"select-read {kind}: {error or 'unreadable receipt'}")
+    if receipt.get("status") == "unmeasured":
+        raise SelectUnmeasured(str(receipt.get("detail")))
+    if receipt.get("status") != "ok":
+        raise RuntimeError(str(receipt.get("detail")))
+    return receipt.get("answer")
+
+_held_cache: tuple[float, dict] = (0.0, {})
+
+
+def _held_questions() -> dict:
+    """node -> open question id via select-read held; fail-open, 30s cache."""
+    global _held_cache
+    try:
+        if time.monotonic() - _held_cache[0] < 30:
+            return _held_cache[1]
+        _held_cache = (time.monotonic(), _select_read("held", []) or {})
+    except Exception:  # noqa: BLE001 - a held read never starves selection
+        _held_cache = (time.monotonic(), {})
+    return _held_cache[1]
+    return _held_cache[1]
+
+
 def _next_node(project: Optional[str]) -> Optional[dict]:
     """Return the next ready node summary (or None), via ``fno backlog next``.
 
-    Project-scoped (Open Question 2 RESOLVED: the same selection bare megawalk
-    uses). Raises on a non-zero/garbled response so advance skips rather than
-    guessing a node (Failure Modes: Errors).
+    Project-scoped. Raises on a non-zero/garbled response so advance skips rather than guessing a node (Failure Modes: Errors).
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "next"]
-    if project:
-        cmd += ["--project", project]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog next exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        return None
-    node = json.loads(out)
-    if not isinstance(node, dict) or not node.get("id"):
-        raise RuntimeError(f"fno backlog next returned an unexpected shape: {out[:200]}")
-    # `fno backlog next` omits `_resolved_cwd` (the work-map-resolved project
-    # root); only `fno backlog get` derives it. Enrich best-effort so the worker
-    # launches from the mapped root rather than a raw/misscoped recorded cwd
-    # (codex P2). A get failure is non-fatal - _spawn_worker falls back to .cwd.
-    if not node.get("_resolved_cwd"):
-        try:
-            gp = subprocess.run(
-                [*_subprocess_util.fno_py_cmd(), "backlog", "get", node["id"]],
-                capture_output=True, text=True, timeout=30,
-            )
-            if gp.returncode == 0 and (gp.stdout or "").strip():
-                full = json.loads(gp.stdout)
-                if isinstance(full, dict) and full.get("_resolved_cwd"):
-                    node["_resolved_cwd"] = full["_resolved_cwd"]
-        except Exception:  # noqa: BLE001 - best-effort enrichment
-            pass
-    return node
+    return _select_read("next", ["--project", project] if project else [])
 
 
 # A node with no `domain` set collapses into ONE bucket in `_live_lane_domains`
@@ -605,26 +611,10 @@ def _undispatched_nodes(
     project: Optional[str], mission: Optional[str] = None
 ) -> dict:
     """Read the independent planned-unclaimed observer receipt."""
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "undispatched", "--json"]
-    if project:
-        cmd += ["--project", project]
+    args = ["--project", project] if project else []
     if mission:
-        cmd += ["--mission", mission]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"fno backlog undispatched did not answer inside its 60s budget: {' '.join(cmd)}"
-        ) from exc
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    try:
-        receipt = json.loads(out)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"fno backlog undispatched returned invalid JSON: {out[:200]}") from exc
+        args += ["--mission", mission]
+    receipt = _select_read("undispatched", args)
     if (
         not isinstance(receipt, dict)
         or receipt.get("status") != "ok"
@@ -1293,6 +1283,25 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
     return rec if rec and harness_map.is_declared(rec) else None
 
 
+def _territory_stamp(node_id: str) -> dict:
+    """The territory stamp: three values, never two. ``kingless`` is False on
+    a crowned territory, True on a kingless one, None when nothing could read
+    the attribution. Reads the territory-verdict door; its unknown receipt
+    omits both fields, so ``.get`` is the whole fold and an absence stamps
+    null. Any read failure degrades to nulls with one warning.
+    """
+    try:
+        from fno.rust_binary import call_binary_json
+
+        error, verdict = call_binary_json("territory-verdict", ["--node", node_id])
+        if error is not None:
+            raise RuntimeError(error)
+        return {"territory": verdict.get("territory"), "kingless": verdict.get("kingless")}
+    except Exception as exc:  # noqa: BLE001
+        print(f"advance: WARNING: territory verdict unreadable for {node_id}: {exc}", file=sys.stderr)
+        return {"territory": None, "kingless": None}
+
+
 def _spawn_worker(
     node_id: str,
     node_cwd: Optional[str],
@@ -1365,6 +1374,9 @@ def _spawn_worker(
         )
         if reused:
             return reused
+    # The stamp lands on the cold-spawn path only: a reuse dispatch runs no
+    # subprocess at all. The record, not the veto: a kingless territory drains.
+    row.update(_territory_stamp(node_id))
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,
         is_unsafe_short_address,
@@ -1482,7 +1494,8 @@ def _finish_spawn(
     if receipt is not None:
         receipt.update({
             key: row[key] for key in
-            ("short_id", "substrate", "harness", "verb", "verb_source", "agent_name")
+            ("short_id", "substrate", "harness", "verb", "verb_source", "agent_name",
+             "territory", "kingless")
         } | {"notes": notes})
     return row["short_id"]
 
@@ -1686,18 +1699,18 @@ def _grid_lane_for(
         from fno import route_resolve
 
         inventory = route_resolve.resolve_inventory()
-        capacity: dict[str, object] = dict(
-            route_resolve.runtime_capacity(inventory=inventory)
-        )
         profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
         candidate, chain, _verdict = route_resolve.resolve_slot(
             profile_verb,
             node,
-            capacity,
+            None,
             inventory=inventory,
             explicit_model_value=model,
+            # The dispatch seam refreshes: a stale or never-probed lane
+            # reading is probed once before the walk skips the lane.
+            capacity_refresh=True,
         )
-    except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
+    except Exception as exc:  # noqa: BLE001 - the decline text feeds the spawn seam's refusal
         return None, None, None, None, f"grid=unreadable ({str(exc)[:80]})"
     # The chain's last element is the terminal reason on every path, so it is
     # surfaced verbatim rather than reformatted - the strings are the existing
@@ -3337,6 +3350,8 @@ def advance(
     # 3. Next ready node (project-scoped). Never guess on error.
     try:
         node = _next_node(project)
+    except SelectUnmeasured as exc:
+        return skip("select-unmeasured", detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         return skip("next-error", detail=str(exc))
     if node is None:
@@ -3534,7 +3549,12 @@ def advance(
             f"brief={_brief_tag})",
             file=sys.stderr,
         )
-    _tick(1, None, f"node={node_id} worker={short_id}")
+    # The same word the drain readout renders (active_backlog.rs): a dispatch
+    # into a kingless territory names it on the arm line an operator reads.
+    tick_detail = f"node={node_id} worker={short_id}"
+    if next_receipt.get("kingless") is True:
+        tick_detail += " kingless"
+    _tick(1, None, tick_detail)
     # Wake the active-backlog drain daemon (node): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:

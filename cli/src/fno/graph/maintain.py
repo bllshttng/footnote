@@ -826,7 +826,7 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
 
     An encounter inside the window is somebody saying this node cost them time
     recently. Unwindowed it would be a permanent exemption any agent could
-    switch on with no undo, so the drain reads the vote's own ``ts``.
+    switch on with no undo, so the drain reads the vote's own ``created_at``.
 
     The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
     "no freshness signal from the plan" (not movement), never an error.
@@ -2090,7 +2090,7 @@ def run_validity_sweep(
     )
 
 
-AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason")
+AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason ended_epoch")
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
@@ -2100,19 +2100,19 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
         from fno.agents.watchdog import finished_with_the_tree, tail_facts
 
         if harness not in FILE_BACKED_HARNESSES:
-            return False, "harness not file-backed"
+            return False, "harness not file-backed", None
 
         facts = tail_facts(session_id, cwd, agent=harness)
         if facts is None:
             if resolve_transcript_path(harness, session_id, cwd) is None:
-                return False, "transcript unresolved"
-            return False, "transcript unreadable"
+                return False, "transcript unresolved", None
+            return False, "transcript unreadable", None
         if not finished_with_the_tree(facts, now_s, quiet_after_s):
-            return False, "transcript active"
+            return False, "transcript active", None
         quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
-        return True, f"transcript quiet {quiet_m}m, tail not engaged"
+        return True, f"transcript quiet {quiet_m}m, tail not engaged", facts.last_event_epoch
     except Exception:  # noqa: BLE001 - a proof must never break the sweep
-        return False, "transcript unreadable"
+        return False, "transcript unreadable", None
 
 
 def detect_abandoned_do_rows(
@@ -2133,32 +2133,34 @@ def detect_abandoned_do_rows(
             harness, sid = row.get("harness"), row.get("session_id")
             if nid in live_claimed or live_worked.get(nid):
                 why = ("live claim" if nid in live_claimed
-                       else f"live roster worker {', '.join(live_worked[nid])}")
-                out.append(AbandonedDoRow(nid, harness, sid, "held", why))
+                       else f"reachable worker on node {', '.join(live_worked[nid])}")
+                out.append(AbandonedDoRow(nid, harness, sid, "held", why, None))
             else:
-                gone, reason = prover(harness, sid, e.get("cwd"),
-                                      quiet_after_s=quiet_after_s, now_s=now_s)
-                out.append(AbandonedDoRow(nid, harness, sid,
-                                          "gone" if gone else "held", reason))
+                idle = do_row_idle_s(e, row, now_s)
+                gone = idle is not None and idle > quiet_after_s
+                reason, epoch = (f"row idle {idle // 3600}h, no reachable worker on the node", None) if gone else (f"row idle {'?' if idle is None else idle // 3600}h, inside the {int(quiet_after_s // 3600)}h bound", None)
+                out.append(AbandonedDoRow(nid, harness, sid, "gone" if gone else "held", reason, epoch))
     return out
 
 
+def do_row_idle_s(entry, row, now_s) -> Optional[int]:
+    return int(now_s - max(stamps)) if (stamps := [s.timestamp() for s in map(_parse_ts, [row.get("started_at")] + [n.get("ts") for n in entry.get("progress_notes") or [] if isinstance(n, dict) and n.get("source_session_id") == row.get("session_id")]) if s]) else None
+
+def abandoned_do_rows(entries, claimed, *, strict=True):
+    from fno.config import load_settings
+    from fno.claims.roster import classify_workers, read_roster
+    from fno.graph.statuses import is_open_do_row
+    now_s, bound = datetime.now(timezone.utc).timestamp(), load_settings().backlog.maintain.abandoned_do_row_hours * 3600
+    reading = read_roster(require_live_probe=False) if any((do_row_idle_s(e, r, now_s) or 0) > bound for e in entries for r in e.get("sessions") or [] if is_open_do_row(r)) else None
+    if reading is not None and not reading.consulted:
+        if not strict:
+            return [AbandonedDoRow(e.get("id"), r.get("harness"), r.get("session_id"), "held", f"roster unread ({reading.reason})", None) for e in entries for r in e.get("sessions") or [] if is_open_do_row(r)]
+        raise RuntimeError(f"roster unread ({reading.reason})")
+    return detect_abandoned_do_rows(entries, live_claimed=claimed, live_worked={n: [str(w.get("name")) for w in classify_workers(ws)[0]] for n, ws in (reading.workers_by_node if reading else {}).items()}, prover=do_row_session_gone, now_s=now_s, quiet_after_s=bound)
 def abandoned_leg(entries, claimed, graph_path, apply):
     """Detect + reap + render for cmd_maintain; returns ``(lines, warning)``."""
     try:
-        from fno.config import load_settings
-        hours = load_settings().backlog.maintain.abandoned_do_row_hours
-    except Exception:
-        hours = 24
-    try:
-        from fno.graph.statuses import live_worked_node_ids
-        rows = detect_abandoned_do_rows(
-            entries, live_claimed=claimed,
-            live_worked=live_worked_node_ids(strict=True, entries=entries),
-            prover=do_row_session_gone,
-            now_s=datetime.now(timezone.utc).timestamp(),
-            quiet_after_s=hours * 3600,
-        )
+        rows = abandoned_do_rows(entries, claimed)
     except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
         return [], f"abandoned-do-row leg skipped: {exc}"
 
@@ -2170,11 +2172,18 @@ def abandoned_leg(entries, claimed, graph_path, apply):
 
         for cand in gone[:AUTO_DEFER_BLAST_CAP]:
             try:
+                ended_at = None
+                if cand.ended_epoch is not None:
+                    ended_at = datetime.fromtimestamp(
+                        cand.ended_epoch, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 rep = reap_open_session_record(
                     graph_path, cand.node, phase="do",
                     harness=cand.harness, session_id=cand.session_id,
+                    ended_at=ended_at,
                 )
                 reaped[cand.node] = {"row_removed": bool(rep.get("row_removed")),
+                                     "row_closed": bool(rep.get("row_closed")),
                                      "status_after": rep.get("status_after")}
                 reaped_rows += 1
             except Exception as exc:  # noqa: BLE001 - one bad row must not abort
@@ -2188,8 +2197,8 @@ def abandoned_leg(entries, claimed, graph_path, apply):
         if rep and "error" in rep:
             lines.append(f"  warning: do-row reap of {r.node} failed: {rep['error']}")
         elif rep:
-            lines.append(f"  reaped do row {r.node} ({tag}): row_removed "
-                         f"{str(rep['row_removed']).lower()}, status_after "
+            lines.append(f"  settled do row {r.node} ({tag}): row_closed "
+                         f"{str(rep.get('row_closed', False)).lower()}, status_after "
                          f"{rep['status_after']} ({r.reason})")
         else:
             verb = "would reap" if r.verdict == "gone" else "held"
@@ -2388,14 +2397,14 @@ def run_pass(
     """
     import typer
 
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import read_graph_strict, commit_rows_via_store
     from fno.graph.statuses import recompute_statuses
     from fno.graph._intake import _find_node
     from fno.graph.render import make_kanban_column
     from fno.graph.render_html import _load_wip_caps
 
     # Read once; derive status so the judgment legs see accurate states.
-    entries = recompute_statuses(read_graph(graph_path()))
+    entries = recompute_statuses(read_graph_strict(graph_path()))
 
     if suspect_reverts:
         # Short-circuit: a read-only retro sweep, not another leg.
@@ -2690,7 +2699,7 @@ def run_pass(
                     typer.echo(f"warning: stale-ready defer of {cand.node_id} failed: {exc}", err=True)
             return ents
 
-        locked_mutate_graph(graph_path(), mutator)
+        commit_rows_via_store(graph_path(), mutator)
 
     # --- leg 8: validity sweep (proposal-only, never mutates) - reviews the
     # oldest stale ideas into an immutable deck; watermarked ideas never
@@ -2728,7 +2737,7 @@ def run_pass(
             # node that raced to claimed/done/deferred DURING analysis voids its
             # recommendation (AC4-EDGE).
             def _reread():
-                return recompute_statuses(read_graph(graph_path()))
+                return recompute_statuses(read_graph_strict(graph_path()))
 
             validity_result = run_validity_sweep(
                 entries,

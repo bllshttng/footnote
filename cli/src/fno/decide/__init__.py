@@ -118,6 +118,7 @@ PROJECTION_FIELDS = (
     "rationale",
     "supersedes",
     "reads",
+    "scope",
     "question_id",
 )
 
@@ -473,6 +474,14 @@ def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
     )
 
 
+
+def _decisions_index_path() -> Path:
+    """The compatibility decision index beside the ledger; never rotates."""
+    from fno import paths
+
+    return Path(paths.ledger_json()).parent / "decisions.jsonl"
+
+
 def record_decision(
     *,
     decision: str,
@@ -490,15 +499,17 @@ def record_decision(
     asked_at: str | None = None,
     expiry_ref: dict[str, Any] | None = None,
     reads: "list[str] | None" = None,
+    scope: str | None = None,
     events_root: Any = None,
     source: str = "target",
 ) -> dict[str, Any]:
     """Append the event, then project it onto the subject node.
 
-    Returns ``{"decision_id", "event", "node_id"}`` where ``node_id`` is None
-    when the subject names no graph node (a file or an area): the durable event
-    still lands, because a record that only exists when the subject resolves is
-    a record the operator cannot rely on.
+    Returns ``{"decision_id", "event", "node_id", "projection"}``. ``node_id``
+    is None when no node took the ruling and ``projection`` says why (an
+    unresolvable subject, an external tracker, an unreadable store, a refused
+    write): the durable event still lands, because a record that only exists
+    when the subject resolves is a record the operator cannot rely on.
 
     An index write that fails is not a success, so it raises
     :class:`IndexWriteError`. That error carries the decision_id, because by
@@ -616,26 +627,28 @@ def record_decision(
         rationale=rationale,
         supersedes=supersedes,
         reads=read_rows,
+        scope=scope,
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
     try:
-        append_event(event, events_path=paths.decisions_jsonl())
+        append_event(event, events_path=_decisions_index_path())
     except Exception as exc:  # noqa: BLE001 - the event id names recovery
         raise IndexWriteError(decision_id, exc) from exc
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
         graph_api.decision_record(event, path=paths.graph_json())
-    except (Exception, SystemExit):  # noqa: BLE001 - graph is a projection
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - graph is a projection
         # The project journal and compatibility index already hold the ruling.
         # A corrupt or unavailable graph must degrade to that durable capture,
         # matching the old JSONL-to-node projection path below.
         _graph_entries()
-        node_id = None
+        node_id, why = None, f"the graph store refused the ruling ({exc!r})"
+        print(f"decide: recorded {decision_id}, but {why}.", file=sys.stderr)
     else:
         try:
-            node_id = _project(event)
+            node_id, why = _project(event)
         except (Exception, SystemExit) as exc:  # noqa: BLE001
             # The projection is the node VIEW, the third of three writes. Both
             # durable stores already hold the decision, so failing the command here
@@ -648,8 +661,8 @@ def record_decision(
                 f"`fno backlog decisions`; the subject node just does not show it.",
                 file=sys.stderr,
             )
-            node_id = None
-    return {"decision_id": decision_id, "event": event, "node_id": node_id}
+            node_id, why = None, f"the graph projection failed ({exc!r})"
+    return {"decision_id": decision_id, "event": event, "node_id": node_id, "projection": why}
 
 
 def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
@@ -709,7 +722,7 @@ def retract_decision(
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
     try:
-        append_event(event, events_path=paths.decisions_jsonl())
+        append_event(event, events_path=_decisions_index_path())
     except Exception as exc:  # noqa: BLE001 - the event id names recovery
         raise IndexWriteError(str(target["decision_id"]), exc) from exc
     try:
@@ -719,8 +732,10 @@ def retract_decision(
     return {"decision_id": str(target["decision_id"]), "event": event}
 
 
-def _project(event: dict[str, Any]) -> str | None:
+def _project(event: dict[str, Any]) -> tuple[str | None, str]:
     """Write the decision onto the subject node's ``decisions`` list.
+
+    Returns the node id and ``""``, or None and the reason no node took it.
 
     Runs inside the locked mutate cycle, with the subject resolved under the
     lock, so two concurrent decides on one node serialize. Supersession marks
@@ -733,7 +748,7 @@ def _project(event: dict[str, Any]) -> str | None:
     data = event["data"]
     subject = data.get("subject")
     if not subject:
-        return None
+        return None, "the ruling names no subject"
 
     # Pre-check on the unlocked read so an unresolvable subject (a file, an
     # area) does not pay for a full graph rewrite that changes nothing. The
@@ -746,9 +761,9 @@ def _project(event: dict[str, Any]) -> str | None:
     try:
         precheck_entries = read_entries("decide")
     except ExternalMetadataUnavailable:
-        return None
-    except Exception:  # noqa: BLE001 - the store refusing to serve IS unreadable
-        precheck_entries = []
+        return None, "the active tracker is external, so no graph node holds rulings"
+    except Exception as exc:  # noqa: BLE001 - the store refusing to serve IS unreadable
+        return None, f"the graph could not be read ({exc!r})"
     if resolve_node(subject, precheck_entries).kind != "exact":
         # read_entries swallows a corrupt default graph to [], which resolves
         # the same as a genuinely unmatched subject. On the default backend,
@@ -760,7 +775,8 @@ def _project(event: dict[str, Any]) -> str | None:
 
             if active_backend_name() == "graph":
                 _graph_entries()
-        return None
+            return None, "the graph read back no nodes"
+        return None, f"subject {subject!r} names no graph node"
 
     matched: list[str] = []
 
@@ -788,8 +804,10 @@ def _project(event: dict[str, Any]) -> str | None:
             break
         return entries
 
-    graph_store.locked_mutate_graph(graph_store.GRAPH_JSON, mutator)
-    return matched[0] if matched else None
+    graph_store.commit_rows_via_store(graph_store.GRAPH_JSON, mutator)
+    if matched:
+        return matched[0], "projected onto the subject node"
+    return None, "no exact node matched the subject"
 
 
 def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list[dict], int]":
@@ -803,7 +821,7 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
         db_rows = graph_api.decisions(path=paths.graph_json())
     except Exception:
         db_rows = []
-    legacy_rows, damaged = _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+    legacy_rows, damaged = _read_legacy_index(_decisions_index_path(), warn=warn)
     if not db_rows:
         return legacy_rows, damaged
     def row_key(row: dict) -> tuple[str, str]:
@@ -818,27 +836,72 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
 
 
 def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
-    """Read the pre-wave-12 JSONL index for compatibility and migration."""
+    """Read the decision index: committed store rows first, legacy JSONL for
+    the rest.
+
+    The store commit is the write boundary, so a store beside the index holds
+    every recorded row; the raw scan then only contributes legacy-only rows
+    plus the DAMAGED count - a torn append must still cost its warning, and
+    the recovery verb that warning names is what recompacts the file.
+    """
+    from fno.events.store_client import native_rows
+
+    def _row(event_line: str) -> dict:
+        event = json.loads(event_line)
+        data = event["data"]
+        row = dict(data)
+        row["ts"] = event.get("ts")
+        row["_event_type"] = event.get("type")
+        return row
+
+    def _key(row: dict) -> "tuple[str, str]":
+        return (
+            str(row.get("_event_type") or DECISION_EVENT),
+            str(
+                row.get("decision_id")
+                or row.get("retraction_id")
+                or row.get("target_decision_id")
+                or ""
+            ),
+        )
+
+    seen: "set[tuple[str, str]]" = set()
+    rows: list[dict] = []
+    # The store read lands BEFORE the raw-existence dance: a store without a
+    # raw index is the normal post-cutover shape, not an empty one.
+    committed = native_rows(path, types=sorted(DECISION_EVENT_TYPES))
+    if committed is not None:
+        for line in committed:
+            try:
+                row = _row(line)
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                continue
+            rows.append(row)
+            seen.add(_key(row))
+    damaged = 0
     try:
         path.stat()
     except FileNotFoundError:
         try:
             path.lstat()
         except OSError:
-            return [], 0
-        raise
-    rows: list[dict] = []
-    damaged = 0
+            # A dangling path with no store rows reads as empty; the raise
+            # below keeps an unreachable store from reading as "no records".
+            if not rows:
+                return [], 0
+        else:
+            raise
     for line in _read_lines(path):
         if not _is_index_line(line):
             damaged += 1
             continue
-        event = json.loads(line)
-        data = event["data"]
-        row = dict(data)
-        row["ts"] = event.get("ts")
-        row["_event_type"] = event.get("type")
+        row = _row(line)
+        key = _key(row)
+        if key[1] and key in seen:
+            continue
         rows.append(row)
+        if key[1]:
+            seen.add(key)
     if damaged and warn:
         print(
             f"decide: {damaged} damaged row(s) in {path} were skipped. "
@@ -870,23 +933,15 @@ def _graph_entries(*, required: bool = False) -> "list[dict]":
         entries = graph_store.read_graph_strict(graph_store.GRAPH_JSON)
         if not required:
             return graph_store.entries_with_archive(entries)
-        # entries_with_archive reads the ARCHIVE softly and degrades on any
-        # failure, so a torn graph-archive.json would drop every archived
-        # node's decisions from a backfill that still printed "+0" and exited
-        # 0. Both graph files, or neither: a guard on one is decorative.
-        from fno.paths import graph_archive_json
+        # The archive read is strict too: both halves of the store, or
+        # neither, or a torn store silently drops archived decisions.
+        from fno.paths import graph_json
 
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
+        archived = graph_store.read_archive_entries(path=graph_json())
         live = {e.get("id") for e in entries if isinstance(e, dict)}
         return [
             *entries,
-            *(
-                a
-                for a in graph_store.read_graph_strict(archive_path)
-                if isinstance(a, dict) and a.get("id") not in live
-            ),
+            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
         ]
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
         if required:
@@ -1160,6 +1215,7 @@ def list_decisions(
     lane: str | None = None,
     state: str | None = None,
     entries: "list[dict] | None" = None,
+    scope: str = "current",
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -1232,6 +1288,12 @@ def list_decisions(
         if subject and looks_like_decision_id(subject)
         else ""
     )
+    graph_unread = None
+    if any(_decision_lane(row) == "coord" for row in decisions) and entries is None:
+        try:
+            entries = _graph_entries(required=True)
+        except Exception as exc:  # noqa: BLE001 - unread is not unscoped
+            graph_unread, entries = f"the graph could not be read ({exc})", []
     by_subject = _subject_matcher(subject, entries=entries) if subject else None
 
     def keep(row: dict) -> bool:
@@ -1248,12 +1310,6 @@ def list_decisions(
         return by_subject is not None and by_subject(str(row.get("subject") or ""))
     out: "list[dict]" = []
     emitted: "set[str]" = set()
-    graph_entries: list[dict] = []
-    if any(_decision_lane(row) == "coord" for row in decisions):
-        try:
-            graph_entries = _graph_entries(required=True)
-        except Exception:
-            graph_entries = []
 
     for row in decisions:
         if not keep(row):
@@ -1281,9 +1337,11 @@ def list_decisions(
             row["lifecycle_reason"] = "graduated to enforced artifact"
             row["lifecycle_evidence"] = retirement
         elif row["lane"] == "coord":
-            lifecycle, evidence = _coord_lifecycle(row, graph_entries)
+            lifecycle, evidence = _coord_lifecycle(row, entries or [])
             if evidence:
                 row["lifecycle_evidence"] = evidence
+            if graph_unread and (row.get("expiry_ref") or row.get("subject")):
+                lifecycle, row["lifecycle_reason"] = "unknown", graph_unread
         elif row["lane"] == "unattributed":
             lifecycle = "unscoped"
         else:
@@ -1291,7 +1349,7 @@ def list_decisions(
         row["lifecycle"] = lifecycle
         if lane is not None and row["lane"] != lane:
             continue
-        if state not in {None, "all"} and lifecycle != state:
+        if state not in {None, "all"} and lifecycle not in {state, "unknown"}:
             continue
         row.pop("_event_type", None)
         out.append(row)
@@ -1305,7 +1363,16 @@ def list_decisions(
     )
     if limit and limit > 0:
         out = out[:limit]
-    return subject or "(all)", out, damaged
+    label = subject or "(all)"
+    if scope.casefold() != "all":
+        try:
+            from fno.rust_binary import verb_call
+            answer = verb_call("law-match", {"mode": "scope-split", "rows": out})
+            out = answer["kept"]
+            label += str(answer.get("note") or "")
+        except Exception:
+            label += " (scope filter unavailable; nothing hidden)"
+    return label, out, damaged
 
 
 def current_law(subject: str) -> dict[str, Any]:
@@ -1343,13 +1410,10 @@ def current_law(subject: str) -> dict[str, Any]:
 
 def review_list() -> dict[str, Any]:
     """Report unresolved multi-ruling subjects without mutating the index."""
-    _, rows, damaged = list_decisions(limit=None, state="all")
+    _, rows, damaged = list_decisions(limit=None, state="all", scope="all")
     grouped: dict[str, list[dict[str, Any]]] = {}
     display_subjects: dict[str, str] = {}
-    try:
-        graph_entries = _graph_entries(required=True)
-    except Exception:
-        graph_entries = []
+    graph_entries = _graph_entries()
     subjectless = 0
     subjectless_rows: list[dict[str, Any]] = []
     invalid_authority = 0
@@ -1503,7 +1567,14 @@ def _default_journals() -> "list[Path]":
         try:
             stat = path.stat()
         except OSError:
-            continue
+            # The store commit is the write boundary: a journal whose only
+            # trace is its store is still a journal the fold must read.
+            from fno.events.store_client import store_db_path
+
+            try:
+                stat = store_db_path(path).stat()
+            except OSError:
+                continue
         key = (stat.st_dev, stat.st_ino)
         if key in seen:
             continue
@@ -1514,45 +1585,58 @@ def _default_journals() -> "list[Path]":
 
 def _journal_events(paths: "list[Path]") -> "list[dict]":
     events: "list[dict]" = []
+    from fno.events.store_client import native_rows
+
+    def _fold(lines) -> "list[dict]":
+        events: "list[dict]" = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and (
+                data.get("decision_id")
+                or data.get("retraction_id")
+                or data.get("target_decision_id")
+            ):
+                events.append(rec)
+        return events
+
     for path in paths:
+        # The store commit is the write boundary: committed rows are the
+        # whole history; raw bytes are only the pre-store legacy fallback
+        # (errors="replace" there, so one torn append cannot block reindex -
+        # the very recovery the damaged-row warning sends the operator to).
+        committed = native_rows(path, types=sorted(DECISION_EVENT_TYPES))
+        if committed is not None:
+            events.extend(_fold(committed))
+            continue
         try:
-            # errors="replace" for the same reason the index reader uses it,
-            # and it matters MORE here: this folds every journal the graph
-            # names, so one torn multi-byte append in any of them would make
-            # reindex impossible - the very recovery the damaged-row warning
-            # sends the operator to.
             fh = path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
         with fh:
-            for line in fh:
-                if not any(event_type in line for event_type in DECISION_EVENT_TYPES):
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
-                    continue
-                data = rec.get("data")
-                if isinstance(data, dict) and (
-                    data.get("decision_id")
-                    or data.get("retraction_id")
-                    or data.get("target_decision_id")
-                ):
-                    events.append(rec)
+            events.extend(
+                _fold(
+                    line
+                    for line in fh
+                    if any(event_type in line for event_type in DECISION_EVENT_TYPES)
+                )
+            )
     return events
 
 
 def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
     """Backfill the compatibility JSONL index without minting new ids."""
-    from fno import paths
     from fno.events import append_event, validate
 
     if sources is None:
         _graph_entries(required=True)
 
-    index = Path(paths.decisions_jsonl())
+    index = _decisions_index_path()
     repaired = _compact_index(index)
     existing, _ = _read_legacy_index(index, warn=False)
     prior_keys = {

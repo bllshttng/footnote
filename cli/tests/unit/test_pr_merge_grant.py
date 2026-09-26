@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fno.config import AutoMergeBlock
 from fno.pr import _merge
 from fno.pr._merge_grant import (
@@ -24,6 +26,13 @@ from fno.pr._proc import Result
 
 NODE = "ab-grantunit1"
 PR = 42
+
+
+@pytest.fixture(autouse=True)
+def _stub_pr_worktree_resolution(monkeypatch):
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
+    )
 
 
 def _verdict(monkeypatch, state, reason="r", claim_state="stale"):
@@ -262,8 +271,6 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
         "coverage_verdict",
         lambda pr, repo, recompute=False: (_coverage_gate.COVERED, "", "abc123", ""),
     )
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, repo=None: None)
-    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 0)
     monkeypatch.setattr(_base_lineage, "lineage_verdict", lambda pr, cwd: ("ok", ""))
 
     seen: dict = {}

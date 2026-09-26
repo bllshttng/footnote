@@ -8,45 +8,86 @@
 // in-session stop hook (keep the agent working until the world agrees it's
 // done) using OpenCode's plugin surface.
 //
-// OpenCode has no exit-veto hook, but footnote's stop hook is really
-// "observe-when-the-agent-stops, then continue until done". OpenCode's
-// `session.idle` event (published by the server at every turn end, incl.
-// re-driven turns - see packages/opencode/src/session/status.ts) is that
-// observation point. On idle we:
+// One gate body, two contracts. OpenCode 1.x loads plugins that export a
+// function returning a hook object; 2.x loads a plain `{ id, setup }` object
+// and drives it through a context with hook seams. Both arms adapt their
+// version's I/O into one `io` seam - `readAssistantTexts`, `sendPrompt`,
+// `sendSynthetic`, `run` - and hand it to the SAME handler, so the scheduler,
+// the transcript synthesis, the gate call and the decision branch exist
+// exactly once.
 //
-//   1. read the turn's assistant text via client.session.messages,
-//   2. synthesize a minimal claude-shaped transcript jsonl,
-//   3. shell `fno-agents loop-check` (the SAME completion gate claude uses:
-//      promise scan + PR-for-HEAD + CI green + bots reviewed + no blocking
-//      finding; it emits the `termination` event itself on a terminal allow),
-//   4. on a non-terminal (block/continue) decision, re-drive the SAME session
-//      in-context via client.session.prompt (preserves history; beats the
-//      loop-wrapper's fresh-process relaunch).
+// On idle (1.x `session.idle`; 2.x `session.status` with `status.type ===
+// "idle"` - the 2.x form is the only one listened to, so one idle can never
+// run the gate twice) the handler:
 //
-// This SUPERSEDES /#47's `message.part.updated` promise-text handler,
-// which emitted an UNGATED DonePRGreen termination on the promise text alone.
+//   1. resolves the session's target manifest via `fno-agents state path
+//      target-state` (the space-resolved manifest; the legacy in-repo
+//      .fno/target-state.md is the fallback when the verb prints nothing),
+//   2. reads the turn's assistant text,
+//   3. synthesizes a minimal claude-shaped transcript jsonl,
+//   4. shells `fno-agents loop-check` (the SAME completion gate claude uses)
+//      with the idle event's own session id (`--harness opencode
+//      --harness-session <sid>`), so the gate binds the session through the
+//      registry before any continuation,
+//   5. on a refuse decision the asking session is not the target's bound
+//   session: send nothing, emit nothing, run the pre-manifest distress scan
+//   and stop. On a non-terminal (block) decision, re-drive the SAME session
+//   in-context with the continuation the gate named.
+//
 // loop-check is the SOLE completion authority (shared with claude, no drift):
 // the plugin never decides "done" itself, and never fabricates a termination
 // when the gate is unavailable.
 //
-// If there is no footnote session (no .fno/target-state.md in the project),
-// the plugin no-ops, so a plain native OpenCode session is unaffected.
+// If the gate refuses, a plain native OpenCode session is unaffected.
 
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
+import { execFile } from "node:child_process"
 
-function fnoSessionId(dir) {
+// The manifest resolver. `state path target-state` is the space-resolved
+// truth (manifests live at ~/.fno/spaces/<space>/worktrees/<name>/); the
+// legacy in-repo path is the fallback when the verb prints nothing or the
+// printed file does not exist. 5s bound: a wedged verb must never hold an
+// idle event.
+const MANIFEST_VERB_TIMEOUT_MS = 5000
+
+// The 2.x subprocess bound. The gate verbs are reads, but a wedged read must
+// never hold the 2.x event subscription forever.
+const SUBPROC_TIMEOUT_MS = 120_000
+
+async function resolveManifest(dir, io) {
+  let timer
   try {
-    const txt = readFileSync(join(dir, ".fno", "target-state.md"), "utf8")
-    const m = txt.match(/^session_id:\s*"?([^"\s]+)"?/m)
-    return m ? m[1] : null
-  } catch (e) {
-    // A missing manifest is the dominant case (plain native opencode session) -
-    // stay silent. Any OTHER read error (a present-but-unreadable manifest) is a
-    // real footnote session going dark, so surface it once instead of vanishing.
-    if (e?.code !== "ENOENT") {
-      console.error(`[footnote] cannot read target-state.md: ${e}`)
+    const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+    const run = io
+      .run([bin, "state", "path", "target-state"], dir)
+      .then((out) => String(out || ""))
+      .catch(() => "")
+    const out = (await Promise.race([
+      run,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(""), MANIFEST_VERB_TIMEOUT_MS)
+      }),
+    ])) || ""
+    clearTimeout(timer)
+    const printed = out.trim()
+    if (printed) {
+      try {
+        readFileSync(printed)
+        return printed
+      } catch {
+        // printed a path that does not exist; fall through to legacy
+      }
     }
+  } catch {
+    // verb unavailable (old fno-agents, no PATH): legacy fallback below
+  }
+  clearTimeout(timer)
+  const legacy = join(dir, ".fno", "target-state.md")
+  try {
+    readFileSync(legacy)
+    return legacy
+  } catch {
     return null
   }
 }
@@ -69,45 +110,43 @@ function synthesizeTranscript(items) {
   return lines.length ? lines.join("\n") + "\n" : ""
 }
 
-export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
-  const dir = directory || worktree || process.cwd()
-  // In-flight guard: never run two loop-checks (or overlap a re-drive) at once.
-  // ponytail: single boolean - the turn lifecycle + loop-check's NoProgress
-  // backstop already bound a stuck session; this just prevents concurrent fires.
-  let busy = false
+// 2.x message rows are `{ type, content: [{ type, text }] }`; the synthesizer
+// reads `{ info: { role }, parts }`. Assistant-only, like the 1.x reader.
+function normalizeV2Rows(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  return list
+    .filter((r) => r && r.type === "assistant")
+    .map((r) => ({
+      info: { role: "assistant" },
+      parts: Array.isArray(r.content) ? r.content : [],
+    }))
+}
 
-  return {
-    event: async ({ event }) => {
-      // Crown-awareness injection on session creation. OpenCode has no footnote
-      // slash surface, so a dispatched king cannot load
-      // skills/king-for-a-day/SKILL.md by invocation; the injected line NAMES
-      // the reference file to Read instead - the same teaching a claude king
-      // reaches by loading the skill. noReply is the SDK's context-only
-      // primitive: context lands without triggering an AI turn. An uncrowned
-      // session injects nothing and makes no prompt call; any failure degrades
-      // to silence and never blocks the session.
-      if (event?.type === "session.created") {
-        const sid = event.properties?.sessionID
-        // Presence guard first (same cheap read as the idle handler): a plain
-        // native session pays nothing, and `fno whoami` would exit 3 on it and
-        // log a spurious error on every session creation.
-        if (sid && fnoSessionId(dir)) {
+// The one gate body. Both arms adapt their version's I/O into `io` and hand
+// it here; neither holds a second copy of anything below (AC2-SHARED).
+function makeHandler(io, dir) {
+  // Per-session gate scheduler (Change 2): one entry per session id. An idle
+  // for an idle session runs; an idle for a RUNNING session marks `rerun` and
+  // returns; when a gate finishes and its entry reads `rerun`, it runs once
+  // more. Different sessions never block each other, and no idle is dropped.
+  // Deliberately NOT authority: the gate's binding refusal (Change 1) is what
+  // keeps ownership correct across a plugin reload, so a reload costs a
+  // redundant gate run and never a wrong continuation.
+  const gates = new Map()
+
+  return async function handle(kind, sid) {
+    try {
+      if (kind === "created") {
+        // Presence via the resolver: a plain native session pays nothing.
+        if (sid && (await resolveManifest(dir, io))) {
           try {
-            const out = await $`cd ${dir} && fno whoami 2>/dev/null`.quiet().text()
-            const crown = (out.match(/^crown:.*$/m) || [])[0]
+            const out = await io.run([process.env.FNO_AGENTS_BIN || "fno-agents", "whoami"], dir)
+            const crown = (String(out).match(/^crown:.*$/m) || [])[0]
             if (crown) {
-              await client.session.prompt({
-                path: { id: sid },
-                body: {
-                  noReply: true,
-                  parts: [
-                    {
-                      type: "text",
-                      text: `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/king-for-a-day/references/cli-commands.md.`,
-                    },
-                  ],
-                },
-              })
+              await io.sendSynthetic(
+                sid,
+                `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/reign/references/cli-commands.md.`,
+              )
             }
           } catch (e) {
             console.error(`[footnote] crown inject failed: ${e}`)
@@ -115,58 +154,52 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
         }
         return
       }
-      if (event?.type !== "session.idle") return
-      const sid = event.properties?.sessionID
-      if (!sid) return
-      // Presence guard only: target-state.md's session_id is footnote's OWN
-      // generated loop key (timestamp-PID-random), a different namespace from
-      // OpenCode's event sessionID - they never match, so this is "is footnote
-      // running here?", not an equality check. A plain native session (no
-      // manifest) no-ops; the event's sessionID (sid) drives the SDK calls.
-      // ponytail: if OpenCode ever runs parallel sub-sessions under one footnote
-      // run, bind the first idle's sid in a sidecar and match against it; for the
-      // Sequential opencode harness one active session makes presence sufficient.
-      if (!fnoSessionId(dir)) {
-        // A worker that dies before `target init` writes a manifest still
-        // carries a <help> tag nobody would otherwise read (loop-check below
-        // never runs on this path). Side effect only, best-effort, never
-        // throws: this is the shell stop hooks' pre-manifest distress-scan,
-        // ported to OpenCode's idle event.
-        const preSynth = join(dir, ".fno", `.opencode-premanifest-${sid}.jsonl`)
-        try {
-          const res = await client.session.messages({ path: { id: sid } })
-          const items = Array.isArray(res?.data) ? res.data : []
-          writeFileSync(preSynth, synthesizeTranscript(items))
-          const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-          await $`cd ${dir} && ${bin} distress-scan --transcript ${preSynth} --run ${sid} --harness opencode --cwd ${dir}`
-            .quiet()
-            .text()
-        } catch (e) {
-          console.error(`[footnote] pre-manifest distress-scan skipped (non-fatal): ${e}`)
-        } finally {
-          try {
-            unlinkSync(preSynth)
-          } catch {
-            // nothing to clean up / already gone
-          }
-        }
+      if (kind !== "idle" || !sid) return
+
+      // Per-session serialize: never run two gates for one session, never
+      // drop an idle. (AC3-HP: different sessions run concurrently; AC3-ERR:
+      // a concurrent idle for a running session is a pending recheck, taken
+      // once after the running gate finishes.)
+      if (gates.get(sid) === "running") {
+        gates.set(sid, "rerun")
         return
       }
-      if (busy) return
-      busy = true
+      gates.set(sid, "running")
+      try {
+        await runGate(sid)
+      } finally {
+        if (gates.get(sid) === "rerun") {
+          gates.set(sid, "running")
+          runGate(sid)
+            .catch(() => {})
+            .finally(() => gates.delete(sid))
+        } else {
+          gates.delete(sid)
+        }
+      }
+    } catch (e) {
+      // Any adapter failure names itself once and leaves the session idle;
+      // the hook never throws out (AC2-FAILOPEN).
+      console.error(`[footnote] bridge handler failed: ${e}`)
+    }
 
+    async function runGate(sid) {
       let decision = null
-      // Declared before the try so the finally can clean it up on every path.
+      let items = []
+      // Resolved per fire: manifests appear and disappear as targets start
+      // and finish. When nothing resolves, the gate still runs against the
+      // legacy candidate path so a crowned session reaches its own evidence
+      // path and an unbound session gets its refusal (AC2-*).
+      const manifestPath = await resolveManifest(dir, io)
+      const stateArg = manifestPath || join(dir, ".fno", "target-state.md")
       const synth = join(dir, ".fno", `.opencode-loopcheck-${sid}.jsonl`)
       try {
         // 1. Read this session's assistant messages.
-        let items = []
         try {
-          const res = await client.session.messages({ path: { id: sid } })
-          // Guard: a non-array data would make synthesizeTranscript's for...of throw.
-          items = Array.isArray(res?.data) ? res.data : []
+          items = await io.readAssistantTexts(sid)
+          items = Array.isArray(items) ? items : []
         } catch (e) {
-          console.error(`[footnote] session.messages(${sid}) failed: ${e}; leaving session idle`)
+          console.error(`[footnote] readAssistantTexts(${sid}) failed: ${e}; leaving session idle`)
           return
         }
 
@@ -178,53 +211,165 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
           return
         }
 
-        // 3. Run the full claude completion gate. loop-check exits 0 for both
-        //    allow and block; only CLI misuse / a missing binary throws. On any
-        //    failure we NEVER re-drive and NEVER fabricate a termination.
+        // 3. Run the full claude completion gate, bound to THIS session.
+        //    The gate refuses a session the registry does not bind to this
+        //    target (exit 0, decision "refuse"); the bridge then runs the
+        //    pre-manifest distress scan and sends nothing (AC1-ERR, AC2-ERR).
         const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
         try {
-          const out = await $`cd ${dir} && ${bin} loop-check --state .fno/target-state.md --transcript ${synth} --cwd ${dir}`
-            .quiet()
-            .text()
+          const out = await io.run(
+            [
+              bin,
+              "loop-check",
+              "--state",
+              stateArg,
+              "--transcript",
+              synth,
+              "--cwd",
+              dir,
+              "--harness",
+              "opencode",
+              "--harness-session",
+              sid,
+            ],
+            dir,
+          )
           decision = JSON.parse(out)
         } catch (e) {
           console.error(`[footnote] loop-check unavailable/failed: ${e}; not re-driving`)
           return
         }
       } finally {
-        // Clean up the synth transcript (loop-check has already read it by now);
-        // ignore failures incl. ENOENT when an early return skipped the write.
         try {
           unlinkSync(synth)
         } catch {
           // nothing to clean up / already gone
         }
-        // Release before any re-drive so the re-driven turn's session.idle is
-        // not dropped by this guard.
-        busy = false
       }
 
       if (!decision) return
-      // Terminal: loop-check already emitted `termination` - let the session end
-      // and emit nothing extra (no duplicate termination event).
+      // Not this session's target (or an unbound session): distress scan
+      // only, no prompt, no termination (AC1-ERR, AC2-ERR).
+      if (decision.decision === "refuse") {
+        await distressScan(sid, synth, items)
+        return
+      }
+      // Terminal: loop-check already emitted `termination`.
       if (decision.termination_reason) return
-      // Non-terminal (the world has not caught up, or no promise yet): re-drive
-      // the same session in-context. Fire-and-forget; the next turn's idle runs
-      // the gate again. loop-check's NoProgress backstop bounds a stuck loop.
+      // Non-terminal: re-drive the same session in-context with the
+      // continuation the gate named. Fire-and-forget; the next turn's idle
+      // runs the gate again.
       if (decision.decision === "block") {
-        // try/catch covers a synchronous throw from prompt(); .catch() covers
-        // the async rejection. Either way a plugin hook must never throw.
+        const continuation =
+          typeof decision.continuation === "string" && decision.continuation
+            ? decision.continuation
+            : "/target --resume"
         try {
-          client.session
-            .prompt({
-              path: { id: sid },
-              body: { parts: [{ type: "text", text: "/target --resume" }] },
-            })
-            .catch((e) => console.error(`[footnote] re-drive prompt(${sid}) failed: ${e}`))
+          io.sendPrompt(sid, continuation).catch((e) =>
+            console.error(`[footnote] re-drive prompt(${sid}) failed: ${e}`),
+          )
         } catch (e) {
           console.error(`[footnote] re-drive prompt(${sid}) threw: ${e}`)
         }
       }
+    }
+
+    // The distress scan for an unbound session, on the SAME payload shape
+    // the shell stop hooks use. Side effect only, best-effort, never throws.
+    async function distressScan(sid, synth, items) {
+      try {
+        if (!items) return
+        writeFileSync(synth, synthesizeTranscript(items))
+        const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+        await io.run(
+          [bin, "distress-scan", "--transcript", synth, "--run", sid, "--harness", "opencode", "--cwd", dir],
+          dir,
+        )
+      } catch (e) {
+        console.error(`[footnote] distress-scan skipped (non-fatal): ${e}`)
+      } finally {
+        try {
+          unlinkSync(synth)
+        } catch {
+          // nothing to clean up / already gone
+        }
+      }
+    }
+  }
+}
+
+// The 1.x arm: a function returning the event hook object, driven by the
+// OpenCode 1.x plugin loader.
+async function server({ directory, worktree, client, $ }) {
+  const dir = directory || worktree || process.cwd()
+  const io = {
+    readAssistantTexts: async (sid) => {
+      const res = await client.session.messages({ path: { id: sid } })
+      return Array.isArray(res?.data) ? res.data : []
+    },
+    sendPrompt: (sid, text) =>
+      client.session.prompt({
+        path: { id: sid },
+        body: { parts: [{ type: "text", text }] },
+      }),
+    sendSynthetic: (sid, text) =>
+      client.session.prompt({
+        path: { id: sid },
+        body: { noReply: true, parts: [{ type: "text", text }] },
+      }),
+    run: async (argv, cwd) => (await $`cd ${cwd} && ${argv}`.quiet().text()) ?? "",
+  }
+  const handle = makeHandler(io, dir)
+  return {
+    event: async ({ event }) => {
+      if (event?.type === "session.created") return handle("created", event.properties?.sessionID)
+      if (event?.type !== "session.idle") return
+      return handle("idle", event.properties?.sessionID)
     },
   }
 }
+
+// The 2.x arm: one event subscription whose idle form is `session.status`
+// with `status.type === "idle"`. The deprecated `session.idle` event is
+// deliberately NOT listened to, so one idle can never run the gate twice
+// (AC2-EDGE).
+function makeV2Io(ctx) {
+  return {
+    readAssistantTexts: async (sid) => {
+      const res = await ctx.session.context({ sessionID: sid })
+      const rows = Array.isArray(res) ? res : Array.isArray(res?.data) ? res.data : []
+      return normalizeV2Rows(rows)
+    },
+    sendPrompt: (sid, text) => ctx.session.prompt({ sessionID: sid, text }),
+    sendSynthetic: (sid, text) => ctx.session.synthetic({ sessionID: sid, text }),
+    run: (argv, cwd) =>
+      new Promise((resolve, reject) => {
+        execFile(argv[0], argv.slice(1), { cwd, timeout: SUBPROC_TIMEOUT_MS }, (err, stdout) => {
+          if (err) reject(err)
+          else resolve(String(stdout ?? ""))
+        })
+      }),
+  }
+}
+
+async function setup(ctx) {
+  const dir = ctx.directory || process.cwd()
+  const handle = makeHandler(makeV2Io(ctx), dir)
+  const controller = new AbortController()
+  ;(async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        if (event?.type === "session.created") {
+          handle("created", event.data?.sessionID)
+        } else if (event?.type === "session.status" && event.data?.status?.type === "idle") {
+          handle("idle", event.data?.sessionID)
+        }
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) console.error(`[footnote] 2.x event loop failed: ${e}`)
+    }
+  })()
+  return () => controller.abort()
+}
+
+export default { id: "footnote", server, setup }

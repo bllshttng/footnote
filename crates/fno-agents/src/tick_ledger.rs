@@ -5,7 +5,10 @@
 //! one `control_plane_tick` row to the journal it already uses, saying what it
 //! did or why it did nothing. The reader folds every journal into one row per
 //! arm: last tick, last action, last skip reason, and a stale verdict when the
-//! last tick is older than twice the arm's interval. An arm whose journals
+//! last tick is older than twice the arm's interval. The fold reads each
+//! journal's committed store rows plus its live bytes
+//! (`event_store::journal_text`): writers commit to the store only, so a fold
+//! over the raw file stops at the store cutover. An arm whose journals
 //! hold no tick row at all reads UNOBSERVED, never STALE: the absence of a
 //! producer receipt cannot say whether a producer exists, and only an
 //! observed receipt is a measurement.
@@ -18,7 +21,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::loop_runtime::Journal;
@@ -45,6 +47,40 @@ pub struct ArmSpec {
     /// Who schedules this arm, so a never-ticked row names its scheduler and
     /// `explain` can blame the tier that owns the silence.
     pub scheduler: &'static str,
+    /// The arm whose work this arm consumes. When the upstream arm is red,
+    /// this arm's silence is the upstream's fault, and the row names it.
+    pub upstream: Option<&'static str>,
+    /// The config key that arms this loop. `None` means always armed.
+    pub arm_key: Option<&'static str>,
+    /// The verb that reads this loop's own detail, printed beside the row.
+    pub reader: Option<&'static str>,
+}
+
+/// The resolved value of one arm key, as the row prints it. An unknown key
+/// answers `unreadable`, never a silent blank - the same rule
+/// `cause: Some("unexplained")` follows.
+fn arm_key_value(cwd: &Path, key: &str) -> String {
+    let answered = match key {
+        "auto_heal.enabled" => crate::agents_config::auto_heal_enabled(cwd),
+        "active_backlog.enabled" => crate::agents_config::active_backlog_enabled(cwd),
+        "slot_cutover.enabled" => crate::agents_config::slot_cutover_enabled(cwd),
+        _ => return "unreadable".to_string(),
+    };
+    if answered { "true" } else { "false" }.to_string()
+}
+
+/// Whether a row's arm key resolves false: the loop is off by config, its
+/// silence is expected, and it never reads as attention-worthy.
+pub fn row_is_unarmed(row: &ArmStatus) -> bool {
+    row.arm_key.is_some() && row.arm_value.as_deref() == Some("false")
+}
+
+/// The upstream arm named in [`KNOWN_ARMS`], if any.
+pub fn upstream_of(arm: &str) -> Option<&'static str> {
+    KNOWN_ARMS
+        .iter()
+        .find(|s| s.arm == arm)
+        .and_then(|s| s.upstream)
 }
 
 /// Every arm the readout shows, whether or not it has ever ticked.
@@ -53,71 +89,161 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         arm: "king_wake",
         default_interval_s: 900,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "watchdog",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "pr_watch_merge",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno do pr watch status"),
+    },
+    ArmSpec {
+        arm: "pr_watch_sweep",
+        default_interval_s: 600,
+        scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno do pr watch status"),
     },
     ArmSpec {
         arm: "active_backlog",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: Some("active_backlog.enabled"),
+        reader: Some("fno config active-backlog"),
     },
     ArmSpec {
         arm: "auto_continue",
         default_interval_s: 1800,
         scheduler: "session",
+        upstream: Some("pr_watch_merge"),
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "notify_watch",
         default_interval_s: 300,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "stop_hook",
         default_interval_s: 0,
         scheduler: "hook:target-stop-hook",
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "reap",
         default_interval_s: 60,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "machine_watch",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "arm_watch",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno agents loops table"),
+    },
+    ArmSpec {
+        arm: "king_settle",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: Some("fno agents court --nodes"),
     },
     ArmSpec {
         arm: "provider_cap",
         default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "slot_cutover",
+        default_interval_s: crate::slot_cutover::SLOT_CUTOVER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: Some("slot_cutover.enabled"),
+        reader: None,
     },
     ArmSpec {
         arm: "merge_close",
         default_interval_s: crate::merge_close::MERGE_CLOSE_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
     },
     ArmSpec {
         arm: "crown_ledger",
         default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "fleet_page",
+        default_interval_s: crate::fleet_page::FLEET_PAGE_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "attention",
+        default_interval_s: crate::attention_arm::ATTENTION_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+        arm_key: None,
+        reader: None,
+    },
+    ArmSpec {
+        arm: "heal",
+        default_interval_s: 600,
+        scheduler: SCHED_LAUNCHD,
+        upstream: None,
+        arm_key: Some("auto_heal.enabled"),
+        reader: Some("fno do pr watch status"),
     },
 ];
 
@@ -179,6 +305,14 @@ pub enum ProducerEvidence {
     Observed,
 }
 
+/// One timed-out select read the heal lane may still retry: the project the
+/// row's detail named (`-` when none) and the attempt's ts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnmeasuredRetry {
+    pub project: String,
+    pub ts: String,
+}
+
 /// One rendered arm row for the readout.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArmStatus {
@@ -216,6 +350,29 @@ pub struct ArmStatus {
     /// The rendered readout line, filled by [`explain`] for every row, red or
     /// not, so no consumer re-formats it.
     pub line: String,
+    /// The one verb that repairs a red row, set by `arm_repair::annotate`.
+    pub repair: Option<String>,
+    /// Who runs the repair: `auto` (the arm_watch heal lane) or `operator`.
+    pub heal: Option<String>,
+    /// The red arm this row waits on, when its cause is `upstream_down`.
+    pub upstream: Option<String>,
+    /// The config key that arms this loop, from the spec. `None` for unknown
+    /// arms and always-armed ones.
+    pub arm_key: Option<String>,
+    /// The key's resolved value (`true`/`false`/`unreadable`), read at fold
+    /// time. `None` when the arm carries no key.
+    pub arm_value: Option<String>,
+    /// The verb that reads this loop's own detail, from the spec.
+    pub reader: Option<String>,
+    /// Every observed tick inside `notify.arm_starved_after_s` carried
+    /// `acted=0` while the newest stayed fresh: the arm ran and produced
+    /// nothing. Set by [`mark_starved`].
+    pub starved: bool,
+    /// Per-project select-unmeasured attempts still inside twice their
+    /// interval, folded from the journal. Only the `auto_continue` row
+    /// carries them: the heal lane retries each once, keyed per project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retries: Vec<UnmeasuredRetry>,
 }
 
 /// The journal list every arms read folds: the agents home journal plus the
@@ -231,32 +388,55 @@ pub fn journals(home: &AgentsHome) -> Vec<PathBuf> {
     vec![home.events_jsonl(), global]
 }
 
-/// Fold every journal (plus `.1` rotations) into one row per known arm.
-/// Unknown arms seen in the journals are appended after the known ones, so a
-/// new emitter deploys before its reader does.
+/// The row types the arms folds read: arm ticks and the healer's receipts.
+const ARM_ROW_TYPES: &[&str] = &[EVENT_TYPE, "pr_heal_tick"];
+/// The row types the pr-watch tick trace reads.
+const TICK_TRACE_TYPES: &[&str] = &["pr_watch_tick_attempt", "pr_watch_tick_end"];
+
+/// Every parsed row of `types` the journals hold: the store's committed rows,
+/// then the live file's bytes. Writers commit to the store only, so a fold
+/// over the raw file alone stops at the store cutover.
+fn journal_rows(journals: &[PathBuf], types: &[&str]) -> Vec<Value> {
+    journals
+        .iter()
+        .flat_map(|j| {
+            crate::event_store::journal_text(j, types)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Fold every journal into one row per known arm, reading each journal's
+/// committed store rows plus its live bytes. Unknown arms seen in the
+/// journals are appended after the known ones, so a new emitter deploys
+/// before its reader does.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut newest: HashMap<String, NewestTick> = HashMap::new();
     let mut newest_ok: HashMap<String, NewestTick> = HashMap::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        paths.push(rotation_path(journal));
-    }
-    for path in &paths {
-        scan_journal(path, &mut newest, &mut newest_ok);
+    let mut retries: HashMap<String, NewestTick> = HashMap::new();
+    for value in journal_rows(journals, ARM_ROW_TYPES) {
+        fold_arm_row(value, &mut newest, &mut newest_ok, &mut retries);
     }
 
+    // The static spec facts ride the fold; the runtime arm value is filled
+    // by [`fill_arm_values`] at the readout layer, so this fold stays
+    // machine-independent (and unit-testable without a config).
     let mut rows: Vec<ArmStatus> = KNOWN_ARMS
         .iter()
         .map(|spec| {
-            arm_status(
+            let mut row = arm_status(
                 spec.arm,
                 Some(spec.scheduler),
                 spec.default_interval_s,
                 newest.get(spec.arm),
                 newest_ok.get(spec.arm),
                 now_unix,
-            )
+            );
+            row.arm_key = spec.arm_key.map(str::to_string);
+            row.reader = spec.reader.map(str::to_string);
+            row
         })
         .collect();
     let mut extra: Vec<ArmStatus> = newest
@@ -266,6 +446,30 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
         .collect();
     extra.sort_by(|a, b| a.arm.cmp(&b.arm));
     rows.extend(extra);
+
+    // Only the auto_continue row carries the retry candidates. Each attempt
+    // stays retryable for twice its interval, then ages out: a cleared
+    // signal store must not re-fire every old journal row.
+    if let Some(ac) = rows.iter_mut().find(|r| r.arm == "auto_continue") {
+        let interval = if ac.interval_s > 0 {
+            ac.interval_s
+        } else {
+            1800
+        };
+        let mut in_window: Vec<(u64, &String, &NewestTick)> = retries
+            .iter()
+            .filter(|(_, e)| e.ts_unix + 2 * interval >= now_unix)
+            .map(|(project, e)| (e.ts_unix, project, e))
+            .collect();
+        in_window.sort_by_key(|(ts, project, _)| (*ts, project.as_str()));
+        ac.retries = in_window
+            .into_iter()
+            .map(|(_, project, e)| UnmeasuredRetry {
+                project: project.clone(),
+                ts: e.ts.clone(),
+            })
+            .collect();
+    }
     rows
 }
 
@@ -278,30 +482,182 @@ struct NewestTick {
     data: Value,
 }
 
-fn rotation_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".1");
-    PathBuf::from(s)
-}
-
-fn scan_journal(
-    path: &Path,
+fn fold_arm_row(
+    value: Value,
     newest: &mut HashMap<String, NewestTick>,
     newest_ok: &mut HashMap<String, NewestTick>,
+    retries: &mut HashMap<String, NewestTick>,
 ) {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
+    // The healer's receipt type folds into the `heal` arm here too, so
+    // both journal folds agree on what a heal receipt looks like.
+    let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
+        heal_tick_as_arm_row(value)
+    } else {
+        value
     };
-    for line in std::io::BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+    if value.get("type").and_then(Value::as_str) != Some(EVENT_TYPE) {
+        return;
+    }
+    let Some(data) = value.get("data").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(arm) = data.get("arm").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(ts_unix) = value
+        .get("ts")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_unix)
+    else {
+        return;
+    };
+    let row = NewestTick {
+        ts_unix,
+        ts: value
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        data: Value::Object(data.clone()),
+    };
+    if fresher_than(newest, arm, ts_unix) {
+        newest.insert(arm.to_string(), row.clone());
+    }
+    // A timed-out select read is a per-project retry candidate: keep the
+    // newest attempt per project, so a later project's healthy tick never
+    // masks an earlier project's timeout (read_arms windows the survivors).
+    let skip_reason = data.get("skip_reason").and_then(Value::as_str);
+    if arm == "auto_continue" && skip_reason == Some("select-unmeasured") {
+        let project = data
+            .get("detail")
+            .and_then(Value::as_str)
+            .and_then(crate::select_read::project_from_detail)
+            .unwrap_or("-");
+        if fresher_than(retries, project, ts_unix) {
+            retries.insert(project.to_string(), row.clone());
+        }
+    }
+    // The newest run that did NOT fail anchors `failing_for_s`: how long
+    // the arm has been failing, not merely how long since it last spoke.
+    let ok = !skip_reason.is_some_and(|r| FAILURE_SKIPS.contains(&r));
+    if ok && fresher_than(newest_ok, arm, ts_unix) {
+        newest_ok.insert(arm.to_string(), row);
+    }
+}
+
+fn fresher_than(map: &HashMap<String, NewestTick>, arm: &str, ts_unix: u64) -> bool {
+    match map.get(arm) {
+        Some(seen) => ts_unix >= seen.ts_unix,
+        None => true,
+    }
+}
+
+/// One `pr_heal_tick` row folded into `control_plane_tick` shape for the
+/// `heal` arm, so the readout sees a loop the arm rows alone never named:
+/// the drive loop journals to the project it healed, while the arms fold
+/// reads the agents home. acted=1 when the tick changed anything (rebased,
+/// reran, escalated), 0 when it only looked; the counts ride `detail`.
+fn heal_tick_as_arm_row(value: Value) -> Value {
+    let mut data = value.get("data").cloned().unwrap_or(Value::Null);
+    if let Some(obj) = data.as_object_mut() {
+        let count = |obj: &serde_json::Map<String, Value>, k: &str| {
+            obj.get(k).and_then(Value::as_u64).unwrap_or(0)
+        };
+        let acted =
+            (count(obj, "rebased") + count(obj, "reran") + count(obj, "escalated") > 0) as u64;
+        let detail = format!(
+            "seen={} rebased={} reran={} escalated={} still_red={}",
+            count(obj, "seen"),
+            count(obj, "rebased"),
+            count(obj, "reran"),
+            count(obj, "escalated"),
+            count(obj, "still_red")
+        );
+        obj.insert("arm".into(), json!("heal"));
+        obj.insert("acted".into(), json!(acted));
+        obj.insert("scheduler".into(), json!(SCHED_LAUNCHD));
+        obj.insert("detail".into(), json!(detail));
+    }
+    json!({
+        "type": EVENT_TYPE,
+        "ts": value.get("ts").cloned().unwrap_or(Value::Null),
+        "data": data,
+    })
+}
+
+/// Mark rows whose arm is armed, ticking, and producing nothing: every
+/// observed tick inside `threshold_s` carried `acted=0` with no skip reason
+/// while the newest stayed fresh. A skip token that explains the idleness
+/// (`calm`, `off_cadence`, a configured-off switch) is the arm stating its
+/// own state, not starvation; and a stale or failing row keeps its louder
+/// verdict. A heuristic with a ceiling - it reads a run of silent zeroes
+/// over time, not the arm's input, so it tunes via the threshold knob,
+/// never via an input probe.
+pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
+    let mut history: HashMap<String, Vec<(u64, u64, bool)>> = HashMap::new();
+    collect_tick_history(journal_rows(journals, ARM_ROW_TYPES), &mut history);
+    for row in rows.iter_mut() {
+        if row_is_unarmed(row)
+            || row.producer_evidence == ProducerEvidence::Unobserved
+            || row.stale
+            || row.failing
+        {
             continue;
+        }
+        let Some(ticks) = history.get(&row.arm) else {
+            continue;
+        };
+        let window: Vec<&(u64, u64, bool)> = ticks
+            .iter()
+            .filter(|(ts, _, _)| *ts > now_unix.saturating_sub(threshold_s))
+            .collect();
+        if !window.is_empty()
+            && window
+                .iter()
+                .all(|(_, acted, explained)| *acted == 0 && !explained)
+        {
+            row.starved = true;
+        }
+    }
+}
+
+/// Resolve every keyed row's `arm_value` against this machine's config. The
+/// pure fold stays free of config reads; the readout layer owns them, so a
+/// row's unarmed verdict reflects the config the reader actually runs.
+pub fn fill_arm_values(rows: &mut [ArmStatus], cwd: &Path) {
+    for row in rows.iter_mut() {
+        if let Some(key) = row.arm_key.as_deref() {
+            row.arm_value = Some(arm_key_value(cwd, key));
+        }
+    }
+}
+
+/// [`read_arms`] plus the arm values and the starved mark: the one read
+/// every arms readout makes, so the table and the status arms never
+/// disagree about the vocabulary. The threshold comes from
+/// `notify.arm_starved_after_s`.
+pub fn read_arms_starved(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
+    let mut rows = read_arms(journals, now_unix);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    fill_arm_values(&mut rows, &cwd);
+    let threshold = crate::agents_config::notify_arm_starved_after_s(&cwd);
+    mark_starved(journals, &mut rows, now_unix, threshold);
+    rows
+}
+
+/// One fold collecting every `(ts, acted, skip_explains)` triple an arm's
+/// rows hold.
+fn collect_tick_history(rows: Vec<Value>, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
+    for value in rows {
+        let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
+            heal_tick_as_arm_row(value)
+        } else {
+            value
         };
         if value.get("type").and_then(Value::as_str) != Some(EVENT_TYPE) {
             continue;
         }
-        let Some(data) = value.get("data").and_then(Value::as_object) else {
+        let Some(data) = value.get("data") else {
             continue;
         };
         let Some(arm) = data.get("arm").and_then(Value::as_str) else {
@@ -314,34 +670,15 @@ fn scan_journal(
         else {
             continue;
         };
-        let row = NewestTick {
-            ts_unix,
-            ts: value
-                .get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            data: Value::Object(data.clone()),
-        };
-        if fresher_than(newest, arm, ts_unix) {
-            newest.insert(arm.to_string(), row.clone());
-        }
-        // The newest run that did NOT fail anchors `failing_for_s`: how long
-        // the arm has been failing, not merely how long since it last spoke.
-        let ok = !data
+        let skip_explains = data
             .get("skip_reason")
-            .and_then(Value::as_str)
-            .is_some_and(|r| FAILURE_SKIPS.contains(&r));
-        if ok && fresher_than(newest_ok, arm, ts_unix) {
-            newest_ok.insert(arm.to_string(), row);
-        }
-    }
-}
-
-fn fresher_than(map: &HashMap<String, NewestTick>, arm: &str, ts_unix: u64) -> bool {
-    match map.get(arm) {
-        Some(seen) => ts_unix >= seen.ts_unix,
-        None => true,
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        history.entry(arm.to_string()).or_default().push((
+            ts_unix,
+            data.get("acted").and_then(Value::as_u64).unwrap_or(0),
+            skip_explains,
+        ));
     }
 }
 
@@ -369,6 +706,14 @@ fn arm_status(
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
+            retries: Vec::new(),
         };
     };
     let interval_s = tick
@@ -402,6 +747,14 @@ fn arm_status(
         failing_for_s,
         cause: None,
         line: String::new(),
+        repair: None,
+        heal: None,
+        upstream: None,
+        arm_key: None,
+        arm_value: None,
+        reader: None,
+        starved: false,
+        retries: Vec::new(),
     }
 }
 
@@ -417,27 +770,42 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
 /// `arms_attention`; consumers print the rows and never re-derive the
 /// verdict from the legacy booleans.
 pub fn needs_attention(row: &ArmStatus) -> bool {
+    if row_is_unarmed(row) {
+        // An off loop is a configuration, not a fault: paging on it every
+        // tick is the noise this table exists to remove.
+        return false;
+    }
     row.producer_evidence == ProducerEvidence::Unobserved || row.stale || row.failing
 }
 
 /// Skip reasons that mean the arm ran and its run failed - not that it chose
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
 /// quota_skip pass through; timeout/error fail), the king-wake and notify
-/// emitters' failure tokens, and auto_continue's `next-error` (a non-zero,
-/// malformed or timed-out `backlog next`), `spawn-failed` (the dispatch it
+/// emitters' failure tokens, merge_close's `failures` (a partial reconcile
+/// that left nodes unresolved), and auto_continue's `next-error` (a non-zero
+/// or malformed `backlog next`) and `select-unmeasured` (a bounded read that
+/// did not answer or a transient store refusal), `spawn-failed` (the dispatch it
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
-/// action failed, has not skipped - it has failed. `degraded` is
+/// action failed, has not skipped - it has failed. `budget_spent` fails
+/// because the arm stopped before it covered every unit it enumerated (the
+/// king wake's `budget spent after k of N crowns`, the watchdog's skipped
+/// leg, a merge queue whose grant budget spent with nothing merged); its
+/// detail carries the count. `select-unmeasured` is a
+/// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
 /// fresh row red.
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
     "error",
+    "failures",
     "next-error",
+    "select-unmeasured",
     "spawn-failed",
     "env_broken",
+    "budget_spent",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -452,6 +820,7 @@ const CONFIGURED_OFF_SKIPS: &[&str] = &[
     "disabled",
     "gate:disabled",
     "drain_disabled",
+    "unarmed",
     "watchdog_off",
     "wake_disabled",
 ];
@@ -485,56 +854,47 @@ pub struct TickTrace {
     /// installer's LaunchAgents path - the 2026-09-08 shape where a pytest
     /// tempdir registration displaced the real pr-watcher.
     pub foreign_plist: Option<String>,
+    /// The dispatch pause in force when the trace was read, `None` when
+    /// clear. Set by the live read only: a folded journal trace cannot
+    /// know whether a breaker is armed now. `DispatchPause` does not
+    /// serialize, and the trace never needs to.
+    #[serde(skip)]
+    pub pause: Option<crate::loops_pause::DispatchPause>,
 }
 
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
-/// of the journals (plus `.1` rotations). Absent records leave defaults: the
-/// trace never invents a tick.
+/// of each journal's committed store rows plus its live bytes. Absent
+/// records leave defaults: the trace never invents a tick.
 pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        paths.push(rotation_path(journal));
-    }
     let mut trace = TickTrace::default();
-    for path in &paths {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+    for value in journal_rows(journals, TICK_TRACE_TYPES) {
+        let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
+            continue;
+        }
+        let Some(ts_unix) = value
+            .get("ts")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_unix)
+        else {
+            continue;
         };
-        for line in std::io::BufReader::new(file).lines() {
-            let Ok(line) = line else { continue };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
-            if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
-                continue;
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        if typ == "pr_watch_tick_attempt" {
+            if trace.attempt_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+                trace.attempt_ts_unix = Some(ts_unix);
+                trace.attempt_age_s = Some(now_unix.saturating_sub(ts_unix));
             }
-            let Some(ts_unix) = value
-                .get("ts")
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_unix)
-            else {
-                continue;
-            };
-            let data = value.get("data").cloned().unwrap_or(Value::Null);
-            if typ == "pr_watch_tick_attempt" {
-                if trace.attempt_ts_unix.is_none_or(|prev| ts_unix >= prev) {
-                    trace.attempt_ts_unix = Some(ts_unix);
-                    trace.attempt_age_s = Some(now_unix.saturating_sub(ts_unix));
-                }
-            } else if trace.end_ts_unix.is_none_or(|prev| ts_unix >= prev) {
-                trace.end_ts_unix = Some(ts_unix);
-                trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
-                trace.end_phase = str_field(&data, "phase");
-                trace.end_outcome = str_field(&data, "outcome");
-                trace.end_cut = data.get("cut").and_then(Value::as_array).map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
-            }
+        } else if trace.end_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+            trace.end_ts_unix = Some(ts_unix);
+            trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
+            trace.end_phase = str_field(&data, "phase");
+            trace.end_outcome = str_field(&data, "outcome");
+            trace.end_cut = data.get("cut").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
         }
     }
     trace
@@ -580,6 +940,107 @@ pub fn foreign_plist_path(print_stdout: &str, home: &Path) -> Option<String> {
     })
 }
 
+/// The launchd labels the loops table lists, one row each with loaded yes/no
+/// and the last exit `launchctl list` reports.
+pub const LAUNCHD_LABELS: &[&str] = &[
+    "sh.fno.pr-watcher",
+    "sh.fno.groom",
+    "sh.fno.autocontinue",
+    "sh.fno.sync-backlog",
+    "sh.fno.board-server",
+    "com.user.autocorrect",
+    "com.user.autocorrect-watcher",
+];
+
+/// One label's facts from the fold.
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchdLabelFacts {
+    pub label: String,
+    pub loaded: bool,
+    pub last_exit: Option<i64>,
+}
+
+/// The launchd fold: every label the table lists with its loaded/last-exit
+/// facts, plus the dead list any ``sh.fno.*`` or autocorrect label with a
+/// nonzero last exit - the same shape doctor's deleted Python reader built,
+/// widened to the labels its `sh.fno.` prefix filter missed. Not-applicable
+/// off macOS or when launchctl cannot run: it fabricates no alarm.
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchdFold {
+    pub applicable: bool,
+    pub labels: Vec<LaunchdLabelFacts>,
+    pub dead: Vec<LaunchdLabelFacts>,
+}
+
+/// Run the fold live. `None` off macOS or when `launchctl list` fails or
+/// outlives its 5s bound - a wedged launchctl must not wedge the readout.
+pub fn launchd_fold_live() -> Option<LaunchdFold> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let cmd = vec!["launchctl".to_string(), "list".to_string()];
+    let stdout = crate::king_board::budget::run_with_timeout(
+        &cmd,
+        Path::new("."),
+        std::time::Duration::from_secs(5),
+    )
+    .ok()?;
+    Some(parse_launchctl_list(&String::from_utf8_lossy(&stdout)))
+}
+
+/// Pure fold so tests run without launchctl. Loaded = the label appeared in
+/// `launchctl list`; last exit is column 2; a `-` is no measured exit. The
+/// header row is skipped by name, not by position, so a header-less listing
+/// never loses its first label.
+pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
+    let mut labels: Vec<LaunchdLabelFacts> = LAUNCHD_LABELS
+        .iter()
+        .map(|l| LaunchdLabelFacts {
+            label: (*l).to_string(),
+            loaded: false,
+            last_exit: None,
+        })
+        .collect();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 || cols[0].trim() == "PID" {
+            continue;
+        }
+        let label = cols[2].trim();
+        if let Some(slot) = labels.iter_mut().find(|f| f.label == label) {
+            slot.loaded = true;
+            slot.last_exit = cols[1].trim().parse::<i64>().ok();
+        }
+    }
+    let dead: Vec<LaunchdLabelFacts> = text
+        .lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 3 || cols[0].trim() == "PID" {
+                return None;
+            }
+            let label = cols[2].trim();
+            if !label.starts_with("sh.fno.")
+                && label != "com.user.autocorrect"
+                && label != "com.user.autocorrect-watcher"
+            {
+                return None;
+            }
+            let exit: i64 = cols[1].trim().parse().ok()?;
+            (exit != 0).then(|| LaunchdLabelFacts {
+                label: label.to_string(),
+                loaded: true,
+                last_exit: Some(exit),
+            })
+        })
+        .collect();
+    LaunchdFold {
+        applicable: true,
+        labels,
+        dead,
+    }
+}
+
 /// [`read_tick_trace`] plus one live launchd probe: when any launchd-scheduled
 /// arm is stale, read the registered plist path so the cause can name a
 /// foreign registration instead of a bare tick_overdue. macOS only; bounded to
@@ -587,6 +1048,11 @@ pub fn foreign_plist_path(print_stdout: &str, home: &Path) -> Option<String> {
 /// untouched. A healthy tier runs no exec at all.
 pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: u64) -> TickTrace {
     let mut trace = read_tick_trace(journals, now_unix);
+    // The one live pause read, taken before the tier check so a healthy
+    // tier carries the fact too (the king summary reads it there). A
+    // journal-folded trace stays pause-free.
+    trace.pause = Some(crate::loops_pause::dispatch_pause())
+        .filter(crate::loops_pause::DispatchPause::is_paused);
     let stale_launchd = rows
         .iter()
         .any(|r| r.stale && r.scheduler.as_deref() == Some(SCHED_LAUNCHD));
@@ -744,21 +1210,57 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
     for (i, row) in rows.iter_mut().enumerate() {
         if row.stale {
-            let (cause, hint) = if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
-                tick_overdue_cause(pm_last_ts.as_deref(), trace)
-            } else {
-                let cause =
-                    stale_cause(row, daemon, pm_fresh_failure, trace).unwrap_or_else(|| {
-                        if cross_arm[i] {
-                            "scheduler_down"
-                        } else {
-                            "unexplained"
+            let (mut cause, mut hint) =
+                if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
+                    tick_overdue_cause(pm_last_ts.as_deref(), trace)
+                } else {
+                    let cause =
+                        stale_cause(row, daemon, pm_fresh_failure, trace).unwrap_or_else(|| {
+                            if cross_arm[i] {
+                                "scheduler_down"
+                            } else {
+                                "unexplained"
+                            }
+                            .to_string()
+                        });
+                    let hint = cause_hint(&cause, daemon);
+                    (cause, hint)
+                };
+            // An armed breaker or a hand-pause explains a whole silent
+            // tier by itself: the cause tokens that blame tick recency or
+            // a dead scheduler are wrong under it, and the pause outranks
+            // them. Real faults (foreign plist, dead daemon, timeouts)
+            // keep their cause, and an unreadable breaker stays a fault.
+            let pause = trace.and_then(|t| t.pause.as_ref());
+            if let Some(p) = pause {
+                if matches!(
+                    cause.as_str(),
+                    "tick_overdue" | "scheduler_down" | "unexplained"
+                ) {
+                    cause = p.skip_reason().to_string();
+                    hint = match p {
+                        crate::loops_pause::DispatchPause::FleetIncident { .. }
+                        | crate::loops_pause::DispatchPause::Manual { .. } => {
+                            format!(
+                                "{}; held on purpose; wait for the breaker to clear",
+                                p.detail()
+                            )
                         }
-                        .to_string()
-                    });
-                let hint = cause_hint(&cause, daemon);
-                (cause, hint)
-            };
+                        crate::loops_pause::DispatchPause::FleetIncidentUnavailable { .. } => {
+                            p.detail()
+                        }
+                        crate::loops_pause::DispatchPause::Clear => {
+                            unreachable!("a Clear pause never enters the trace")
+                        }
+                    };
+                    if !matches!(
+                        p,
+                        crate::loops_pause::DispatchPause::FleetIncidentUnavailable { .. }
+                    ) {
+                        row.stale = false;
+                    }
+                }
+            }
             if cause == "daemon_young" {
                 row.stale = false;
             }
@@ -886,45 +1388,47 @@ fn stale_cause(
     None
 }
 
-/// The human hint appended after each cause token.
+/// The human hint appended after each cause token. The text lives in the one
+/// cause table, `arm_repair`; only the young-daemon hint carries a live number.
 fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
-    match cause {
-        "daemon_young" => match daemon {
-            DaemonFacts::Up { uptime_s, .. } => {
-                format!("daemon up {uptime_s}s, first window not elapsed")
-            }
-            _ => "daemon up, first window not elapsed".to_string(),
-        },
-        "stale_daemon" => "daemon predates the installed build; run fno agents restart".to_string(),
-        "configured_off" => {
-            "the arm is off in config; its age is the switch, not a dead scheduler".to_string()
+    match (cause, daemon) {
+        ("daemon_young", DaemonFacts::Up { uptime_s, .. }) => {
+            format!("daemon up {uptime_s}s, first window not elapsed")
         }
-        "daemon_down" => "daemon not running".to_string(),
-        "tick_timeout" => {
-            "the pr-watch tick cut this arm's phase; run fno do pr watch status".to_string()
-        }
-        "scheduler_down" => {
-            "every arm on this scheduler is silent; the job is not running, the arm is fine"
-                .to_string()
-        }
-        _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
+        _ => crate::arm_repair::hint(cause).to_string(),
     }
 }
 
 /// The per-row readout format, owned here so every consumer prints the same
-/// line. Verdict: UNOBSERVED when no producer receipt exists (before every
-/// other verdict: absence is not staleness, failure, or ok), STALE when
-/// stale, FAIL when failing, pending when the cause is daemon_young, else
-/// ok. The `cause=...` suffix is appended by `explain`.
+/// line. Verdict: unarmed when the arm key resolves false, before every
+/// other verdict: the loop is off by config, so absence of receipts is
+/// expected and absence of receipts is not staleness, failure, or ok.
+/// UNOBSERVED follows it. STALE when stale, FAIL when failing, pending when
+/// the cause is daemon_young, else ok. UPSTREAM outranks STALE and FAIL:
+/// the arm is waiting on a red arm, not broken. starved claims only
+/// otherwise-ok rows: an arm running on a fresh receipt that produced
+/// nothing inside the threshold window, and whose ticks never named a skip
+/// reason. The `cause=...` suffix is appended by `explain`.
 pub fn render_row(row: &ArmStatus) -> String {
-    let verdict = if row.producer_evidence == ProducerEvidence::Unobserved {
+    let verdict = if row_is_unarmed(row) {
+        "unarmed"
+    } else if row.producer_evidence == ProducerEvidence::Unobserved {
         "UNOBSERVED"
+    } else if row.cause.as_deref() == Some("upstream_down") {
+        "UPSTREAM"
     } else if row.stale {
         "STALE"
     } else if row.failing {
         "FAIL"
     } else if row.cause.as_deref() == Some("daemon_young") {
         "pending"
+    } else if matches!(
+        row.cause.as_deref(),
+        Some("fleet_stop") | Some("loops_paused")
+    ) {
+        "PAUSED"
+    } else if row.starved {
+        "starved"
     } else {
         "ok"
     };
@@ -956,8 +1460,12 @@ pub fn render_row(row: &ArmStatus) -> String {
     } else {
         String::new()
     };
+    let key = match (&row.arm_key, &row.arm_value) {
+        (Some(k), Some(v)) => format!(" key={k}={v}"),
+        _ => String::new(),
+    };
     format!(
-        "{arm:<16} {verdict:<5} {age:>10}{acted}{skip}{scheduler}{detail}{failing_for}",
+        "{arm:<16} {verdict:<5} {age:>10}{acted}{skip}{scheduler}{key}{detail}{failing_for}",
         arm = row.arm,
         verdict = verdict,
         age = age,
@@ -1010,12 +1518,18 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::select_read::Kind as SrKind;
 
     fn temp_dir() -> PathBuf {
+        // A counter joins pid+nanos: same-process tests can read the same
+        // coarse nanos on macOS, and a collided name made one test's
+        // remove_dir_all delete another test's journal mid-read.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "fno-tick-ledger-{}-{}",
+            "fno-tick-ledger-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1028,7 +1542,16 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 14);
+        assert_eq!(KNOWN_ARMS.len(), 20);
+        let attention = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "attention")
+            .expect("attention row");
+        assert_eq!(
+            attention.default_interval_s,
+            crate::attention_arm::ATTENTION_INTERVAL_S
+        );
+        assert_eq!(attention.scheduler, SCHED_DAEMON);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")
@@ -1052,6 +1575,15 @@ mod tests {
             mc.default_interval_s,
             crate::merge_close::MERGE_CLOSE_INTERVAL_S
         );
+        let fleet = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "fleet_page")
+            .expect("fleet_page row");
+        assert_eq!(
+            fleet.default_interval_s,
+            crate::fleet_page::FLEET_PAGE_INTERVAL_S
+        );
+        assert_eq!(fleet.scheduler, SCHED_DAEMON);
         assert_eq!(mc.scheduler, SCHED_DAEMON);
         let cl = KNOWN_ARMS
             .iter()
@@ -1062,6 +1594,63 @@ mod tests {
             crate::king_ledger::CROWN_LEDGER_INTERVAL_S
         );
         assert_eq!(cl.scheduler, SCHED_DAEMON);
+        let settle = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "king_settle")
+            .expect("king_settle row");
+        assert_eq!(settle.default_interval_s, 300);
+        assert_eq!(settle.scheduler, SCHED_DAEMON);
+    }
+
+    #[test]
+    fn slot_cutover_readout_tracks_opt_in_and_defaults_unarmed() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_config = std::env::var_os("FNO_CONFIG");
+        let old_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::remove_var("FNO_CONFIG");
+        let isolated_global = temp_dir();
+        std::fs::create_dir_all(&isolated_global).unwrap();
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            isolated_global.join("settings.json"),
+        );
+
+        let dir = temp_dir();
+        let settings = dir.join(".fno/config.toml");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "schema_version = 1\n").unwrap();
+        let journal = dir.join("events.jsonl");
+        std::fs::write(&journal, "").unwrap();
+        let mut rows = read_arms(&[journal], 1_800_000_000);
+        fill_arm_values(&mut rows, &dir);
+        let row = rows.iter().find(|row| row.arm == "slot_cutover").unwrap();
+        assert_eq!(row.arm_key.as_deref(), Some("slot_cutover.enabled"));
+        assert_eq!(row.arm_value.as_deref(), Some("false"));
+        assert!(row_is_unarmed(row));
+
+        std::fs::write(&settings, "[slot_cutover]\nenabled = true\n").unwrap();
+        fill_arm_values(&mut rows, &dir);
+        let row = rows.iter().find(|row| row.arm == "slot_cutover").unwrap();
+        assert_eq!(row.arm_value.as_deref(), Some("true"));
+        assert!(!row_is_unarmed(row));
+
+        if let Some(value) = old_config {
+            std::env::set_var("FNO_CONFIG", value);
+        } else {
+            std::env::remove_var("FNO_CONFIG");
+        }
+        if let Some(value) = old_global {
+            std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", value);
+            std::fs::remove_dir_all(isolated_global).ok();
+        } else {
+            std::env::set_var(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                isolated_global.join("settings.json"),
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {
@@ -1098,6 +1687,202 @@ mod tests {
     }
 
     #[test]
+    fn unarmed_row_reads_unarmed_names_its_key_and_needs_no_attention() {
+        let mut row = arm_status("heal", Some(SCHED_LAUNCHD), 600, None, None, 0);
+        row.arm_key = Some("auto_heal.enabled".into());
+        row.arm_value = Some("false".into());
+        let line = render_row(&row);
+        assert!(line.contains(" unarmed "), "{line}");
+        assert!(line.contains("key=auto_heal.enabled=false"), "{line}");
+        assert!(!needs_attention(&row));
+    }
+
+    #[test]
+    fn starved_when_every_in_window_tick_is_a_no_op() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-14T11:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T11:59:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(heal.starved, "{heal:?}");
+        assert!(
+            render_row(heal).contains(" starved "),
+            "{}",
+            render_row(heal)
+        );
+        assert!(!needs_attention(heal));
+    }
+
+    #[test]
+    fn one_acted_tick_in_the_window_reads_ok_not_starved() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-14T11:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T11:59:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(!heal.starved);
+    }
+
+    #[test]
+    fn an_explained_skip_or_a_failing_row_never_reads_starved() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        // Every in-window tick idles, but each names its skip reason: the arm
+        // states its own idleness, which is not starvation.
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("calm"),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T11:59:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("calm"),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(!heal.starved);
+    }
+
+    #[test]
+    fn a_failing_arm_keeps_fail_and_never_reads_starved() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T11:59:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(heal.failing);
+        assert!(!heal.starved);
+        assert_eq!(render_row(heal).split_whitespace().nth(1), Some("FAIL"));
+    }
+
+    #[test]
+    fn heal_row_folds_pr_heal_tick_receipts() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[json!({
+                "ts": "2026-09-21T11:30:00Z",
+                "type": "pr_heal_tick",
+                "source": "pr-heal",
+                "data": {
+                    "root": "/tmp/proj",
+                    "seen": 5, "skip_deadline": 4, "still_red": 1,
+                    "unknown": 2, "dry_run": false,
+                    "rebased": 0, "escalated": 3, "reran": 0,
+                    "duration_s": 70.5,
+                }
+            })],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let rows = read_arms(&vec![path.clone()], now);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert_eq!(heal.producer_evidence, ProducerEvidence::Observed);
+        assert_eq!(heal.acted, Some(1));
+        assert!(heal.detail.as_deref().unwrap_or("").contains("escalated=3"));
+    }
+
+    #[test]
     fn emit_lands_one_row_in_the_journal() {
         let dir = temp_dir();
         let project = dir.join("events.jsonl");
@@ -1112,7 +1897,7 @@ mod tests {
             300,
         );
 
-        let text = std::fs::read_to_string(&project).unwrap();
+        let text = crate::events::committed_journal_text(&project);
         let lines: Vec<Value> = text
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -1128,8 +1913,143 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn commit_row(journal: &Path, row: &Value) {
+        crate::event_store::append_envelope(journal, &serde_json::to_string(row).unwrap(), None)
+            .unwrap();
+    }
+
     #[test]
-    fn newest_row_per_arm_wins_across_journals_and_rotation() {
+    fn a_row_committed_only_to_the_store_reads_fresh() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = tick_envelope(
+            "2026-09-22T08:27:07Z",
+            "king_wake",
+            SCHED_DAEMON,
+            1,
+            json!(null),
+            900,
+        );
+        commit_row(&journal, &row);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let rows = read_arms(&[journal.clone()], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.producer_evidence, ProducerEvidence::Observed);
+        assert_eq!(king.age_s, Some(10));
+        assert!(!king.stale);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_store_falls_back_to_the_live_rows() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-22T05:00:00Z",
+                "king_wake",
+                SCHED_DAEMON,
+                1,
+                json!(null),
+                900,
+            )],
+        );
+        std::fs::write(dir.join("events.db"), b"not a sqlite database").unwrap();
+        let now = parse_rfc3339_unix("2026-09-22T05:00:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.acted, Some(1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_newer_store_row_outranks_a_frozen_live_row() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        let frozen = tick_envelope(
+            "2026-09-22T04:51:51Z",
+            "king_wake",
+            SCHED_DAEMON,
+            1,
+            json!(null),
+            900,
+        );
+        let fresh = tick_envelope(
+            "2026-09-22T08:27:07Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("no_trigger"),
+            900,
+        );
+        write_rows(&journal, &[frozen.clone()]);
+        commit_row(&journal, &frozen);
+        commit_row(&journal, &fresh);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.skip_reason.as_deref(), Some("no_trigger"));
+        assert_eq!(king.age_s, Some(10));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn store_committed_no_op_ticks_mark_the_arm_starved() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        for ts in [
+            "2026-09-22T08:20:00Z",
+            "2026-09-22T08:25:00Z",
+            "2026-09-22T08:30:00Z",
+        ] {
+            let row = tick_envelope(ts, "watchdog", SCHED_DAEMON, 0, json!(null), 600);
+            commit_row(&journal, &row);
+        }
+        let now = parse_rfc3339_unix("2026-09-22T08:30:10Z").unwrap();
+        let mut rows = read_arms(&[journal.clone()], now);
+        mark_starved(&[journal], &mut rows, now, 3_600);
+        let wd = rows
+            .iter()
+            .find(|r| r.arm == "watchdog")
+            .expect("watchdog row");
+        assert!(wd.starved);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_tick_trace_reads_a_store_committed_end() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = json!({
+            "ts": "2026-09-22T08:27:07Z",
+            "type": "pr_watch_tick_end",
+            "source": "pr-watch",
+            "data": {"phase": "merge", "outcome": "ok", "cut": ["merge"]},
+        });
+        commit_row(&journal, &row);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let trace = read_tick_trace(&[journal], now);
+        assert_eq!(trace.end_phase.as_deref(), Some("merge"));
+        assert_eq!(trace.end_outcome.as_deref(), Some("ok"));
+        assert_eq!(trace.end_cut, Some(vec!["merge".to_string()]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newest_row_per_arm_wins_across_journals() {
         let dir = temp_dir();
         let a = dir.join("global.jsonl");
         let a_rotated = dir.join("global.jsonl.1");
@@ -1305,6 +2225,14 @@ mod tests {
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
+            retries: Vec::new(),
         };
         assert!(!needs_attention(&observed_fresh_ok));
         let mut failing = observed_fresh_ok.clone();
@@ -1354,6 +2282,14 @@ mod tests {
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
+            retries: Vec::new(),
         };
         let cause = stale_cause(&row, &DaemonFacts::Down, false, None).unwrap();
         assert_eq!(cause, "configured_off");
@@ -1403,6 +2339,48 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_reconcile_failures_skip_fails_the_merge_close_arm() {
+        // failures is merge_close's partial-sweep token: the sweep ran and
+        // left nodes unresolved. It must read FAIL like error, never ok -
+        // a healthy read with nodes left open is the bug this closes.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // ok tick 3600s ago, failures tick 120s ago (interval 900: fresh).
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "merge_close",
+                    SCHED_DAEMON,
+                    1,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T11:58:00Z",
+                    "merge_close",
+                    SCHED_DAEMON,
+                    0,
+                    json!("failures"),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal], now);
+        let mc = rows.iter().find(|r| r.arm == "merge_close").unwrap();
+        assert!(mc.failing, "failures must set failing");
+        assert_eq!(mc.failing_for_s, Some(3600));
+        let line = render_row(mc);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=failures"), "line: {line}");
+        assert!(line.contains("failing_for=3600s"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn degraded_skip_keeps_a_fresh_arm_row_ok() {
         // The regression the doc comment protects: degraded is deliberately
         // absent from FAILURE_SKIPS, so it must not turn a fresh row red.
@@ -1427,6 +2405,64 @@ mod tests {
         let line = render_row(ab);
         assert!(line.contains(" ok"), "line: {line}");
         assert!(line.contains("skip=degraded"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn budget_spent_short_pass_reads_fail_with_its_count() {
+        // A king_wake pass that ran out of its slice before covering every
+        // crown it enumerated is a failure, not an ok skip: the detail
+        // carries the shortfall count (evaluated=0/5).
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        let mut short = tick_envelope(
+            "2026-09-04T11:58:00Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("budget_spent"),
+            900,
+        );
+        short["data"]["detail"] =
+            json!("crowns=5 evaluated=0/5 truth_reads=0 note=budget spent after 0 of 5 crowns");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "king_wake",
+                    SCHED_DAEMON,
+                    0,
+                    json!("no_trigger"),
+                    900,
+                ),
+                short.clone(),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal.clone()], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        assert!(needs_attention(kw));
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=budget_spent"), "line: {line}");
+        assert!(line.contains("evaluated=0/5"), "line: {line}");
+        assert!(line.contains("failing_for="), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
+
+        // No earlier non-failure row for the arm: still FAIL, and the line
+        // names the missing baseline instead of a failing_for count.
+        let bare = dir.join("bare.jsonl");
+        write_rows(&bare, &[short]);
+        let rows = read_arms(&[bare], now);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing, "budget_spent must set failing");
+        let line = render_row(kw);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("no_ok_in_journal"), "line: {line}");
+        assert!(!line.contains(" ok"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1579,6 +2615,189 @@ mod tests {
         assert!(ac.failing, "an unreadable selection is a failed run");
         assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
         assert!(ac.line.contains("skip=next-error"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_fresh_select_unmeasured_fails_the_auto_continue_arm() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("select-unmeasured"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.failing, "an unmeasured selection is a failed run");
+        assert!(
+            ac.line.contains("skip=select-unmeasured"),
+            "line: {}",
+            ac.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The unmeasured detail as the writer shapes it, so the fold tests
+    /// round-trip the real token format instead of a local lookalike.
+    fn ac_detail(project: &str) -> Value {
+        Value::String(crate::select_read::unmeasured_detail(
+            SrKind::Next,
+            &["--project".to_string(), project.to_string()],
+            120,
+            None,
+        ))
+    }
+
+    /// One auto_continue row with an explicit detail: tick_envelope pins
+    /// `detail: null`, and the per-project retry fold reads the detail.
+    fn ac_envelope(ts: &str, skip: Value, acted: u64, detail: Value) -> Value {
+        json!({
+            "ts": ts,
+            "type": EVENT_TYPE,
+            "source": "loop",
+            "data": {
+                "arm": "auto_continue",
+                "scheduler": "session",
+                "acted": acted,
+                "skip_reason": skip,
+                "detail": detail,
+                "interval_s": 1800,
+            }
+        })
+    }
+
+    /// The masked retry: a later project's healthy tick must not
+    /// erase an earlier project's timed-out select read. The per-project
+    /// fold keeps it as a retry candidate while the newest row reads clean.
+    #[test]
+    fn a_healthy_tick_does_not_mask_an_earlier_projects_unmeasured_attempt() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:58:20Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                tick_envelope(
+                    "2026-09-04T11:59:20Z",
+                    "auto_continue",
+                    "session",
+                    1,
+                    json!(null),
+                    1800,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:20Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.failing, "the newest tick is healthy: {}", ac.line);
+        assert!(!ac.stale);
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "alpha".into(),
+                ts: "2026-09-04T11:58:20Z".into(),
+            }]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two attempts for alpha and one for beta: only the newest per project
+    /// survives, sorted by ts ascending.
+    #[test]
+    fn retries_keep_the_newest_attempt_per_project() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:05:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:10:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("alpha"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T11:10:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![
+                UnmeasuredRetry {
+                    project: "beta".into(),
+                    ts: "2026-09-04T11:05:00Z".into(),
+                },
+                UnmeasuredRetry {
+                    project: "alpha".into(),
+                    ts: "2026-09-04T11:10:00Z".into(),
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An attempt older than twice the interval ages out, and a row whose
+    /// detail names no project folds under `-`.
+    #[test]
+    fn retries_age_out_after_twice_the_interval_and_unnamed_projects_read_dash() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                ac_envelope(
+                    "2026-09-04T11:00:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    ac_detail("beta"),
+                ),
+                ac_envelope(
+                    "2026-09-04T11:58:00Z",
+                    json!("select-unmeasured"),
+                    0,
+                    json!("bound=120s: stalled without a project token"),
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert_eq!(
+            ac.retries,
+            vec![UnmeasuredRetry {
+                project: "-".into(),
+                ts: "2026-09-04T11:58:00Z".into(),
+            }]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2748,5 +3967,156 @@ mod tests {
             Some(1_788_523_200)
         );
         assert_eq!(parse_rfc3339_unix("not-a-ts"), None);
+    }
+
+    /// The AC1 shape, shared by the pause tests: four launchd arms past
+    /// 2x interval, a tick trace whose last end is phase entry, outcome
+    /// paused, and a pause fact set by hand. Tests never read or flip the
+    /// real breaker.
+    fn paused_tier_rows(now: &str) -> (PathBuf, Vec<ArmStatus>, TickTrace) {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "watchdog",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    300,
+                ),
+            ],
+        );
+        let now_unix = parse_rfc3339_unix(now).unwrap();
+        let rows = read_arms(&[journal.clone()], now_unix);
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-17T23:34:07Z").unwrap()),
+            end_phase: Some("entry".to_string()),
+            end_outcome: Some("paused".to_string()),
+            pause: Some(crate::loops_pause::DispatchPause::FleetIncident {
+                generation: 5,
+                reason: "two cargo runs".to_string(),
+                holds: vec!["spawns".to_string(), "tests".to_string()],
+            }),
+            ..TickTrace::default()
+        };
+        (journal, rows, trace)
+    }
+
+    #[test]
+    fn an_armed_breaker_reads_paused_and_names_its_generation() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(!row.stale, "{arm} is held on purpose, line: {}", row.line);
+            assert_eq!(
+                row.cause.as_deref(),
+                Some("fleet_stop"),
+                "line: {}",
+                row.line
+            );
+            assert!(row.line.contains("PAUSED"), "line: {}", row.line);
+            assert!(row.line.contains("generation 5"), "line: {}", row.line);
+            assert!(row.line.contains("two cargo runs"), "line: {}", row.line);
+            assert!(
+                !row.line.contains("tick_overdue"),
+                "{arm} must not read tick_overdue, line: {}",
+                row.line
+            );
+            assert!(
+                !row.line.contains("pr watch refresh"),
+                "{arm} must not prescribe a refresh, line: {}",
+                row.line
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn without_a_pause_fact_the_tier_keeps_tick_overdue() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            pause: None,
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("tick_overdue"),
+            "line: {}",
+            kw.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_real_fault_outranks_the_pause() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            foreign_plist: Some("/tmp/pytest-xyz/sh.fno.pr-watcher.plist".to_string()),
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("launchd_foreign_plist"),
+            "line: {}",
+            kw.line
+        );
+        assert!(kw.stale, "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_breaker_stays_a_fault() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            pause: Some(
+                crate::loops_pause::DispatchPause::FleetIncidentUnavailable {
+                    detail: "no fleet-stop record".to_string(),
+                },
+            ),
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("fleet_stop_unavailable"),
+            "line: {}",
+            kw.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

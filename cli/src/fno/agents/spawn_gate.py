@@ -42,9 +42,11 @@ from fno.harness_identity import claude_transport_short_id
 #   82, 83      fleet incident stop pair, both gates (byte-parity)
 #   84          state root ungranted. Permanent until a human grants.
 #   85          Python sandbox probe: sandbox unreachable.
-#   86          the spawn-gate transport could not get an answer at all (the
+#   86          territory cap (Rust gate only)
+#   87          the spawn-gate transport could not get an answer at all (the
 #               gate verb missing, failed, or timed out); fail closed, never
 #               admit on an unreadable gate.
+#   88          blueprint thread cap (Rust gate only)
 #   90, 91      Rust fleet-incident check verb (fleet_incident.rs).
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
@@ -58,6 +60,9 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 # Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
 # nothing about how it stands toward the fno state root.
 EXIT_STATE_ROOT_UNGRANTED = 84
+# Rust gate only (crates/fno-agents/src/spawn_gate.rs)
+EXIT_TERRITORY_CAP = 86
+EXIT_BLUEPRINT_CAP = 88
 EXIT_GATE_UNAVAILABLE = 87
 
 
@@ -68,7 +73,7 @@ EXIT_GATE_UNAVAILABLE = 87
 #: deadline - not this gate's 600s queue - bounds the wait.
 WAITABLE_REFUSAL_REASONS = frozenset(
     {
-        "load_backstop", "ram_floor", "swap_pressure",
+        "ram_floor", "swap_pressure",
         "cpu_instrument_unreadable",
         "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
         "max_live", "no_wait", "no_wait_mutex_held",
@@ -84,22 +89,11 @@ CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
 #: : a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
-GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
 #: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
 #: `claim status`/`release --force` read `<space>/claims/spawn-gate.lock`
 #: while the gate held `~/.fno/claims/spawn-gate.lock` and both lied.
 GATE_CLAIM_KEY = "gate:spawn"
-#: How long to tolerate an UNBROKEN run of failed mutex acquisitions before
-#: proceeding unserialized. The mutex is a check->dispatch serializer, not a
-#: state owner: a spawner that dies inside the critical section leaves it
-#: `suspect` for the full ``GATE_CLAIM_TTL_MS``, and with no bound here EVERY
-#: spawner on the machine then queues behind that corpse until its own queue
-#: timeout - the gate becoming the very thing that bricks spawning, which the
-#: module contract forbids. Failing open can overshoot the cap by the number of
-#: racing spawners; wedging the whole mesh is strictly worse. Mirrors
-#: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
-MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
 CLAIM_RELEASE_ATTEMPTS = 3
 
@@ -680,7 +674,7 @@ def _release_claim_bounded(key: str, holder: str) -> bool:
             if attempt + 1 < CLAIM_RELEASE_ATTEMPTS:
                 time.sleep(0.01)
     label = "gate mutex" if key == GATE_CLAIM_KEY else f"worker reservation {key}"
-    _warn(f"spawn-gate: could not release {label}: {last_error}")
+    _warn(f"spawn-gate note: could not release {label}: {last_error}")
     return False
 
 
@@ -823,9 +817,7 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
     Maps an unreadable instrument to ``refuse`` on ``cpu_instrument`` (LD3:
     the sensor blinds under exactly the load it measures, and an unreadable
     process table is itself a symptom) and otherwise hands the reading to
-    :func:`cpu_admission` with the 15-minute load as the backstop input. A
-    platform without ``getloadavg`` reads ``load_15m=None``, which the
-    backstop passes (LD3: unreadable load admits).
+    :func:`cpu_admission`, whose fleet CPU share decides alone.
 
     Shared with the ``--explain`` preview, so a dry run answers the question
     the real spawn will.
@@ -852,29 +844,20 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
             capacity_cores=0.0,
             ceiling=0.0,
             gap=None,
-            load_15m=None,
-            backstop=0.0,
         )
     from fno.doctor_footprint import _admission_config, cpu_admission
 
-    share_ceiling, hard_max = _admission_config()
-    try:
-        load_15m: Optional[float] = os.getloadavg()[2]
-    except (OSError, AttributeError):
-        load_15m = None
+    share_ceiling = _admission_config()
     capacity = float(_load_cpus())
     return cpu_admission(
         reading,
         capacity_cores=capacity,
         share_ceiling=share_ceiling,
-        load_15m=load_15m,
-        hard_max_load_per_cpu=hard_max,
-        cpus=int(capacity) or 1,
     )
 
 
 def _load_cpus() -> int:
-    """The CPU denominator for the CPU axis and the backstop.
+    """The CPU denominator for the CPU axis.
 
     Footprint's capacity reading, which is the minimum of the affinity count,
     the host count and the cgroup quota. Two reasons it is worth the import
@@ -953,7 +936,7 @@ def _acquire_worker_slot(
                 f"worker reservation {key} unavailable: {exc}"
             ) from exc
         # Fail open: a slot claim is count VISIBILITY, not a correctness gate.
-        _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
+        _warn(f"spawn-gate note: worker slot claim {key} unavailable; proceeding uncounted")
 
 
 def _call_gate_verb(payload: dict) -> dict:
@@ -980,6 +963,10 @@ def run_gate(
     no_wait: bool = False,
     route_provider: Optional[str] = None,
     account: Optional[str] = None,
+    caller: object = ...,
+    seed: Optional[str] = None,
+    session_phase: Optional[str] = None,
+    succession_scope: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate - by asking the ONE gate in the binary. Returns a
     :class:`GateGuard` to hold across dispatch on pass; raises
@@ -987,9 +974,10 @@ def run_gate(
 
     This is a TRANSPORT, not a second gate: the axes (fleet incident, schema,
     quota lock, provider cap, CPU, slots, RAM, king share) are decided inside
-    ``crates/fno-agents/src/spawn_gate.rs`` and this side only carries the
-    caller's identity and the refusal out. The refusal event still emits from
-    here (locked decision 5), so the journal population is unchanged for
+    ``crates/fno-agents/src/spawn_gate.rs``. This side carries the caller's
+    identity and raw seed/phase inputs in, then carries refusal data out. The
+    refusal event still emits from here (locked decision 5), so journal
+    population is unchanged for
     spawns that enter Python.
     """
     # Set before the first branch that can refuse, so every refusal event in
@@ -1005,6 +993,7 @@ def run_gate(
     except Exception:  # noqa: BLE001 - no identity, no share check (an
         # operator-run spawn is not competing for the commons)
         caller_session = None
+    caller_session = caller_session if caller is ... else caller  # revival names its row's parent
     payload = {
         "mode": "gate",
         "name": name,
@@ -1013,12 +1002,16 @@ def run_gate(
         "no_wait": no_wait,
         "route_provider": route_provider,
         "account": account,
+        "seed": seed,
+        "session_phase": session_phase,
+        "succession_scope": succession_scope,
         "caller_session": caller_session,
         "holder_pid": os.getpid(),
     }
     try:
         answer = _call_gate_verb(payload)
     except Exception as exc:  # noqa: BLE001 - an unanswered gate never admits
+        _warn(f"spawn-gate: refused on gate (gate_unavailable, exit {EXIT_GATE_UNAVAILABLE}): {exc}")
         _refuse(
             EXIT_GATE_UNAVAILABLE,
             {
@@ -1129,7 +1122,7 @@ def qos_demote_pid(pid: int) -> None:
         if rc != 0:
             raise RuntimeError(f"exit {rc}")
     except Exception:
-        _warn(f"spawn-gate: QoS demotion of pid {pid} failed (non-fatal)")
+        _warn(f"spawn-gate note: QoS demotion of pid {pid} failed (non-fatal)")
 
 
 def qos_demote_bg_worker(job_id: str, *, poll_s: float = 10.0) -> None:
@@ -1156,7 +1149,7 @@ def qos_demote_bg_worker(job_id: str, *, poll_s: float = 10.0) -> None:
             pass
         if time.monotonic() >= deadline:
             _warn(
-                f"spawn-gate: bg worker {job_id} pid not in roster "
+                f"spawn-gate note: bg worker {job_id} pid not in roster "
                 f"within {int(poll_s)}s; QoS demotion skipped (non-fatal)"
             )
             return

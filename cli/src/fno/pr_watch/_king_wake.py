@@ -12,6 +12,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, cast
 
@@ -58,8 +59,7 @@ class CrownTarget:
 def _crowned(
     court_fn: Callable, rows_fn: Optional[Callable] = None
 ) -> tuple[list[CrownTarget], str]:
-    """Crowned scopes with holder, root, manifest; no-manifest and disputed
-    rows are skipped."""
+    """Crowned scopes use registry rows for roots; drops are named by scope."""
     if rows_fn is None:
         from fno.agents.registry import load_registry
 
@@ -76,27 +76,35 @@ def _crowned(
     for entry in crowns:
         by_scope.setdefault(entry.get("scope") or "", []).append(entry)
     out: list[CrownTarget] = []
-    skipped_conflicts = 0
+    dropped: list[str] = []
     for scope, entries in by_scope.items():
         if not scope:
+            dropped.append("(no scope): empty scope")
             continue
         if len(entries) > 1:
-            skipped_conflicts += 1
+            holders = ", ".join(str(e.get("holder") or "?") for e in entries)
+            dropped.append(f"{scope}: conflicting holders {holders}")
             continue
         holder = entries[0].get("holder") or ""
+        if not holder:
+            dropped.append(f"{scope}: holderless crown")
+            continue
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
-        if not holder or not cwd:
+        if not cwd:
+            dropped.append(f"{scope}: unregistered holder")
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
         # must refuse, not escape .fno/kings.
         try:
             manifest = king_manifest_path(scope, state_root=king_state_root(root))
-        except ValueError:
+        except ValueError as exc:
+            dropped.append(f"{scope}: {exc}")
             continue
         if not manifest.is_file():
+            dropped.append(f"{scope}: manifest missing at {manifest}")
             continue
         out.append(
             CrownTarget(
@@ -107,8 +115,7 @@ def _crowned(
                 short_id=short_id,
             )
         )
-    note = f"{skipped_conflicts} conflicting scope(s) skipped" if skipped_conflicts else ""
-    return out, note
+    return out, "; ".join(dropped)
 
 
 def _holder_absent(truth: dict) -> "str | None":
@@ -273,20 +280,21 @@ def _birth_cursor(manifest: Path) -> str:
 
 
 def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]] | None]":
-    """``(stored_hash, stored_rows)``; corrupt or row-less reads as a first
-    observation."""
+    """``(stored_hash, stored_rows)``; corrupt reads as no observation."""
     payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
     raw_rows = payload.get("board_rows")
     rows = None
-    if isinstance(raw_rows, list) and raw_rows:
+    if isinstance(raw_rows, list):
         # A corrupt element reads as no observation, never raises out of the
         # tick: every later scope would be stranded with it.
         rows = [
             tuple(str(f) for f in row)
             for row in raw_rows
             if isinstance(row, (list, tuple)) and len(row) == 4
-        ] or None
+        ]
+        if len(rows) != len(raw_rows):
+            rows = None
     return stored_hash, rows
 
 
@@ -294,7 +302,7 @@ def _board_trigger(
     target: CrownTarget, rows
 ) -> tuple[bool, Optional[str], Optional[list], Optional[str], bool]:
     """``(wake?, hash+rows_to_store_after_a_dispatch, diff, first_observation)``.
-    Pure: it never writes. An absent hash or row-less sidecar is a first
+    Pure: it never writes. An absent-hash sidecar is a first
     observation - the caller stores it only after the holder reads present; a
     changed hash stores only after a dispatch; no rows is no signal."""
     if rows is None:
@@ -396,9 +404,25 @@ def _dispatch_walk(
     address: Optional[str] = None,
     detail: Optional[str] = None,
     successor: bool = False,
-) -> None:
+) -> bool:
     """Spawn the wake-mode walk, detached. The address and the diff travel on
-    the command line: the fresh session cannot derive either itself."""
+    the command line: the fresh session cannot derive either itself.
+
+    Neither can it derive a model: the argv carries the crown manifest's pin,
+    and a manifest without one refuses the walk - an unpinned king respawn
+    bills the account default model."""
+    from fno.king.state import parse_manifest
+
+    model = (parse_manifest(target.manifest).get("model") or "").strip()
+    log = target.manifest.with_suffix(".md.wake.log")
+    if not model:
+        with log.open("ab") as sink:
+            sink.write(
+                f"king-wake refused {target.scope}: the crown manifest carries "
+                "no model pin; re-crown pinned, never respawn on the account "
+                "default.\n".encode("utf-8")
+            )
+        return False
     argv = [
         binary,
         "loop",
@@ -407,6 +431,8 @@ def _dispatch_walk(
         "king",
         "--scope",
         target.scope,
+        "--model",
+        model,
         "--wake",
         "--wake-reason",
         reason,
@@ -419,7 +445,6 @@ def _dispatch_walk(
         argv += ["--wake-detail", detail]
     if successor:
         argv += ["--wake-successor"]
-    log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv,
@@ -428,18 +453,20 @@ def _dispatch_walk(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    return True
 
 
-#: A pass stops under 15s left (one truth read measured 10.4s) rather than
-#: being cut mid-read and losing every crown before it.
+#: A pass stops under 15s left rather than be cut mid-step and lose every crown after it.
 _KING_STEP_FLOOR_S = 15.0
 
-_WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
+_GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 
 
-def _graph_entries_for_wake() -> list:
-    """The wake's graph read, one real read per graph identity: an unchanged
-    graph is byte-identical, so the memo is not staleness."""
+def graph_entries(path: Optional[Path] = None) -> list:
+    """The tick's graph read, one real read per graph identity: an unchanged
+    graph is byte-identical, so the memo is not staleness. Serves every
+    phase that needs entries - sweep discovery and the wake alike - so the
+    15 MB store is read once per tick, not once per phase."""
     from fno.graph.api import wire_rows
     from fno.king import drain_cache
     from fno.paths import graph_json
@@ -448,12 +475,13 @@ def _graph_entries_for_wake() -> list:
     try:
         if active_backend_name() != "graph":
             return []
-        ident = drain_cache.graph_ident(graph_json())
-        if ident is not None and _WAKE_ENTRIES_MEMO["ident"] == ident:
-            return _WAKE_ENTRIES_MEMO["entries"]
-        entries = wire_rows(path=graph_json())
+        gpath = path or graph_json()
+        ident = drain_cache.graph_ident(gpath)
+        if ident is not None and _GRAPH_ENTRIES_MEMO["ident"] == ident:
+            return _GRAPH_ENTRIES_MEMO["entries"]
+        entries = wire_rows(path=gpath)
         if ident is not None:
-            _WAKE_ENTRIES_MEMO.update(ident=ident, entries=entries)
+            _GRAPH_ENTRIES_MEMO.update(ident=ident, entries=entries)
         return entries
     except Exception:  # noqa: BLE001 - an unreadable graph is no signal
         return []
@@ -489,21 +517,24 @@ def run_king_wake(
     if court_fn is None:
         from fno.agents.court import gather_court
 
-        court_fn = gather_court
+        # The wake reads holder and scope, never agreement: skip that graph parse.
+        court_fn = partial(gather_court, agree=False)
     if truth_fn is None:
         from fno.agents.session_truth import resolve_session_truth
 
         truth_fn = resolve_session_truth
     if unread_fn is None:
         from fno.bus.cursor import scan_unread
+        from fno.bus.log import iter_messages
 
-        unread_fn = scan_unread
+        # One bus read per pass, not one per address: a crown has up to nine.
+        unread_fn = partial(scan_unread, messages=list(iter_messages()))
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
         answered_fn = read_answered_questions
     if entries_fn is None:
-        entries_fn = _graph_entries_for_wake
+        entries_fn = graph_entries
 
     entries: Optional[list] = None
     if admit_fn is None:
@@ -553,10 +584,7 @@ def run_king_wake(
     except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
         answered_records = []
 
-    # Start where the last pass stopped: rotation by debounce window gives
-    # every crown a turn at the front when the pass keeps running out of
-    # slice. The ceiling is fairness per debounce window, not per crown: a
-    # crown can wait two windows when every pass overruns.
+    # Clock-keyed rotation, no progress kept: the offset advances one crown per window.
     offset = int(now.timestamp() // max(1, debounce_s)) % len(targets) if targets else 0
     for target in targets[offset:] + targets[:offset]:
         sidecar = _read_sidecar(target)
@@ -608,6 +636,7 @@ def run_king_wake(
                 entries = entries_fn()
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
+            _step("board")
             rows = _board_rows(target.scope, entries, scope_resolver) if entries else None
             changed, fresh_board_hash, fresh_board_rows, wake_detail, first_observation = (
                 _board_trigger(target, rows)
@@ -618,7 +647,13 @@ def run_king_wake(
                 target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
             ):
                 reason = "backstop"
-        if reason is None and not pending_answer_seed and not first_observation:
+        if reason is None:
+            # Seeds record what this pass observed, so a crown that cannot
+            # wake never pays the read that was meant to gate them.
+            if pending_answer_seed:
+                _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
+            if first_observation and fresh_board_hash is not None:
+                _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
             summary["evaluated"] += 1
             continue
         if _under_floor():
@@ -643,10 +678,6 @@ def run_king_wake(
             _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
         if first_observation and fresh_board_hash is not None:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
-        if reason is None:
-            # A first observation is a seed, never a trigger: nothing to wake.
-            summary["evaluated"] += 1
-            continue
         if holder_gone:
             from fno.king.state import at_respawn_ceiling, parse_manifest, respawn_ceiling
 
@@ -702,10 +733,11 @@ def run_king_wake(
         window_count = verdict.count
         if dispatch_fn is not None:
             dispatch_fn(target, reason, wake_address, wake_detail, holder_gone)
+            spawned = True
         else:
             import shutil
 
-            _dispatch_walk(
+            spawned = _dispatch_walk(
                 target,
                 reason,
                 shutil.which("fno-agents") or "fno-agents",
@@ -713,7 +745,22 @@ def run_king_wake(
                 wake_detail,
                 holder_gone,
             )
-        if holder_gone:
+            if not spawned:
+                # A refused spawn still spent a wake bill; the feed must say
+                # why nothing launched, not leave it in the wake log alone.
+                refusal = "manifest-carries-no-model-pin"
+                emit(
+                    "king_wake_refused",
+                    {
+                        "scope": target.scope,
+                        "refusal": refusal,
+                        "reason": reason,
+                        "window_count": window_count,
+                        "ceiling": ceiling,
+                    },
+                )
+                summary["refused"].append({"scope": target.scope, "refusal": refusal})
+        if holder_gone and spawned:
             # The new session does not exist yet; its trail is the walk's journal.
             from fno.king.state import parse_manifest as _pm
 

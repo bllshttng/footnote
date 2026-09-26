@@ -63,7 +63,7 @@ def test_restore_refuses_to_clobber_a_pin_written_since_the_clear(script):
 
 
 def test_skipped_does_not_accumulate_across_retries(script):
-    """locked_mutate_graph re-runs the mutator on a version conflict."""
+    """commit_rows_via_store re-runs the mutator on a version conflict."""
     mutator, skipped = script._clear({"x-aaa1": -3.0})
     entries = [{"id": "x-aaa1", "rank": -99.0}]
 

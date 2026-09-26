@@ -11,11 +11,13 @@ The one armed surface that owns every provider-cap move. The watchdog measures a
 For each registry row the snapshot reads:
 
 - provider from `observed_model`. Declared fields are NULL fleet-wide.
-- capped: the newest assistant entry is an API error carrying `429` or a quota marker. This mirrors `error_taxonomy.py`. Liveness is that timestamp, never mtime.
+- capped: the newest assistant entry is an API error carrying `429` or a quota marker. This mirrors `error_taxonomy.py`. Liveness is that timestamp, never mtime. For a codex member, read its rollout instead: the row's `log_path`, else the codex sessions store. If the newest `task_complete` carries `usage_limit_exceeded`, the member is capped.
 - held: compacting, or a compaction stamp inside its ceiling. Listed, never acted on.
 - every row is swept with no liveness filter.
 
 A lane is `open` at `quorum` capped members (default 2). One capped member plus the account's runtime-state lock also opens it. The reset epoch comes from that record. A lane with no reset prints `reset=unknown`. An account missing `reset_timezone` is named on every read.
+
+A lane with no member whose tail was read, and no health lock, reads `unmeasured`, and nothing acts on it.
 
 ## Leaving
 

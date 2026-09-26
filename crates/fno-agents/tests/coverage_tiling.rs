@@ -15,8 +15,8 @@
 
 use fno_agents::loopcheck::{
     classify_coverage_tiled, compute_range_tiling, coverage_event_data_tiled,
-    coverage_receipt_line, Coverage, CoverageProducer, CoverageVerdict, Freshness, RangeTiling,
-    ReviewState,
+    coverage_receipt_line, Coverage, CoverageProducer, CoverageVerdict, Freshness,
+    FreshnessResolver, RangeTiling, ReviewState,
 };
 use std::fs;
 use std::path::Path;
@@ -105,6 +105,7 @@ fn tiling_for(repo: &Path, events: &str) -> RangeTiling {
         BRANCH,
         &git(repo, &["rev-parse", "HEAD"]),
         2,
+        None,
     )
 }
 
@@ -913,6 +914,7 @@ fn round_budget_is_computed_even_when_tiling_fails_closed() {
         BRANCH,
         &head,
         2,
+        None,
     );
     assert!(!tiling.tiled);
     assert_eq!(tiling.rounds_used, 3);
@@ -939,7 +941,7 @@ fn max_rounds_two_is_exhausted_by_the_second_round() {
             None,
         )],
     );
-    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 2);
+    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 2, None);
     assert_eq!(t1.rounds_used, 1);
     assert!(
         !t1.rounds_exhausted,
@@ -953,7 +955,7 @@ fn max_rounds_two_is_exhausted_by_the_second_round() {
             attestation_round("code-review", &shas[0], &head, "fail", None),
         ],
     );
-    let t2 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 2);
+    let t2 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 2, None);
     assert_eq!(t2.rounds_used, 2);
     assert!(
         t2.rounds_exhausted,
@@ -962,7 +964,7 @@ fn max_rounds_two_is_exhausted_by_the_second_round() {
 
     // And a max of 3 leaves the same two rounds unexhausted, so the boundary
     // tracks the configured number rather than being pinned to 2.
-    let t2_of_3 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 3);
+    let t2_of_3 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 3, None);
     assert!(
         !t2_of_3.rounds_exhausted,
         "two of three is still under the cap"
@@ -988,7 +990,7 @@ fn max_rounds_one_and_five_track_the_configured_key() {
             None,
         )],
     );
-    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 1);
+    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 1, None);
     assert_eq!(t1.rounds_used, 1);
     assert!(t1.rounds_exhausted, "one round of a one-round cap is spent");
 
@@ -1001,7 +1003,7 @@ fn max_rounds_one_and_five_track_the_configured_key() {
             attestation_round("code-review", &shas[2], &shas[3], "fail", None),
         ],
     );
-    let t4 = compute_range_tiling("git", repo, "origin/main", &four, BRANCH, &head, 5);
+    let t4 = compute_range_tiling("git", repo, "origin/main", &four, BRANCH, &head, 5, None);
     assert_eq!(t4.rounds_used, 4);
     assert!(!t4.rounds_exhausted, "four of five is still under the cap");
 }
@@ -1318,7 +1320,7 @@ fn cap_a_spent_budget_discharges_coverage_with_no_attestation_at_all() {
 
     // The control: the SAME chain under a budget of 10 is NOT discharged and
     // stays uncovered, so the discharge cannot leak below the cap.
-    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10);
+    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10, None);
     assert!(!under.rounds_exhausted);
     let rep_under = classify_coverage_tiled(
         &[],
@@ -1544,7 +1546,7 @@ fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
     // The control: the SAME fail chain under the budget changes nothing -
     // no pass exists, so no local verdict at all, coverage uncovered. The
     // spent-budget arm must not leak below the cap.
-    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10);
+    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10, None);
     assert!(!under.rounds_exhausted);
     let rep_under = classify_coverage_tiled(
         &[],
@@ -2314,4 +2316,149 @@ fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
         1,
         "sigma stays unattested: {unattested:?}"
     );
+}
+
+// --- the carry: a rebase that ships identical content keeps its chain ---
+// x-ee4c: the tiling walk asks review_freshness the question it already
+// answers, instead of asking git for a sha the rebase deleted.
+
+/// A repo where origin/main moved and BRANCH was rebased onto it. The
+/// branch's commits keep their content, so every sha changes. With
+/// `extra_edit`, a post-rebase commit edits a .rs file: the
+/// conflict-resolution shape that must NOT carry.
+fn rebased_repo(repo: &Path, extra_edit: bool) -> (String, String, String) {
+    Command::new("git")
+        .current_dir(repo)
+        .args(["init", "-q", "-b", BRANCH])
+        .output()
+        .expect("git init");
+    git(repo, &["config", "user.email", "t@t.t"]);
+    git(repo, &["config", "user.name", "t"]);
+    let base = commit(repo, "base");
+    git(repo, &["update-ref", "refs/remotes/origin/main", &base]);
+    let _c1 = commit(repo, "c1");
+    let pre_head = commit(repo, "c2");
+    // main moves with an unrelated file, then the branch rebases onto it.
+    git(repo, &["checkout", "-q", "-b", "main", &base]);
+    fs::write(repo.join("unrelated.txt"), "base moved").unwrap();
+    git(repo, &["add", "unrelated.txt"]);
+    git(repo, &["commit", "-qm", "base moved"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(repo, &["checkout", "-q", BRANCH]);
+    git(repo, &["rebase", "-q", "refs/remotes/origin/main"]);
+    if extra_edit {
+        fs::write(repo.join("code.rs"), "fn main() {}\n// edited line\n").unwrap();
+        git(repo, &["add", "code.rs"]);
+        git(repo, &["commit", "-qm", "conflict edit"]);
+    }
+    let post_head = git(repo, &["rev-parse", "HEAD"]);
+    (base, pre_head, post_head)
+}
+
+#[test]
+fn rebase_with_identical_content_carries_the_chain() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, pre_head, post_head) = rebased_repo(repo, false);
+    assert_ne!(pre_head, post_head, "the rebase must move every sha");
+    let events = events_file(
+        repo,
+        &[attestation("code-review", &base, &pre_head, "pass")],
+    );
+    let resolver = FreshnessResolver::new("git", repo, "origin/main", &post_head, 100);
+    let tiling = compute_range_tiling(
+        "git",
+        repo,
+        "origin/main",
+        &events,
+        BRANCH,
+        &post_head,
+        2,
+        Some(&resolver),
+    );
+    assert!(
+        tiling.tiled,
+        "identical content must carry: {:?}",
+        tiling.gaps
+    );
+    assert!(tiling.gaps.is_empty());
+    // The chain names the PRE-rebase head: the review that happened is the
+    // one the row cites.
+    assert!(
+        tiling.chain_heads.contains(&pre_head),
+        "chain cites the pre-rebase head: {:?}",
+        tiling.chain_heads
+    );
+    // The sha path and the carry are independent answers: the drop is still
+    // recorded even though the carry covered the walk.
+    assert!(
+        tiling.dropped.contains(&pre_head),
+        "the sha-path drop stays auditable: {:?}",
+        tiling.dropped
+    );
+    assert_eq!(
+        tiling.carried,
+        vec![(pre_head.clone(), "carried_base_sync".to_string())],
+        "the carry names its head and its proof"
+    );
+}
+
+#[test]
+fn rebase_that_changed_content_does_not_carry() {
+    // The negative twin, and the test that proves the carry is a proof
+    // rather than a waiver: one edited line of .rs breaks the identity, the
+    // interdiff arm is above zero, and the gap stays named by sha.
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, pre_head, post_head) = rebased_repo(repo, true);
+    let events = events_file(
+        repo,
+        &[attestation("code-review", &base, &pre_head, "pass")],
+    );
+    let resolver = FreshnessResolver::new("git", repo, "origin/main", &post_head, 100);
+    let tiling = compute_range_tiling(
+        "git",
+        repo,
+        "origin/main",
+        &events,
+        BRANCH,
+        &post_head,
+        2,
+        Some(&resolver),
+    );
+    assert!(
+        !tiling.tiled,
+        "changed content must not carry: {:?}",
+        tiling.carried
+    );
+    assert!(
+        !tiling.gaps.is_empty(),
+        "the gap stays named by sha: {:?}",
+        tiling.gaps
+    );
+    assert!(tiling.carried.is_empty());
+}
+
+#[test]
+fn without_a_resolver_the_rebase_carry_stays_off() {
+    // The fail-closed default: None is exactly today's behavior.
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, pre_head, post_head) = rebased_repo(repo, false);
+    let events = events_file(
+        repo,
+        &[attestation("code-review", &base, &pre_head, "pass")],
+    );
+    let tiling = compute_range_tiling(
+        "git",
+        repo,
+        "origin/main",
+        &events,
+        BRANCH,
+        &post_head,
+        2,
+        None,
+    );
+    assert!(!tiling.tiled);
+    assert!(tiling.carried.is_empty());
 }

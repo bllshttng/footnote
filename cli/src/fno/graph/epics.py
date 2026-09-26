@@ -17,26 +17,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from fno.graph.statuses import is_terminal_entry
+
 # Epic statuses that are themselves terminal - a superseded epic is not stuck.
 _EPIC_TERMINAL_STATUSES = frozenset({"done", "superseded"})
 
 
 def holds_epic_open(child: dict) -> bool:
-    """True when ``child`` still represents outstanding epic work.
-
-    The two exception rules: ``superseded`` never holds an epic open, and a
-    ``wont_do`` or ``retracted`` deferral never does. Everything else deferred
-    does - most importantly an UNCLASSIFIED deferral, because classifying it is
-    the operator's judgment call, not this module's.
-    """
-    status = child.get("status")
-    if status == "done":
-        return False
-    if status == "superseded":
-        return False
-    if status == "deferred" and child.get("deferred_kind") in ("wont_do", "retracted"):
-        return False
-    return True
+    """True when ``child`` still represents outstanding epic work."""
+    return not is_terminal_entry(child)
 
 
 @dataclass

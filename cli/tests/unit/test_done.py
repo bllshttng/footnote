@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 # The done shim drives CliRunner captures that break when a loaded xdist
 # worker interleaves them with unrelated files: the deprecation line leaks
@@ -86,6 +87,16 @@ def _seed_ledger(ledger: Path, entries: list[dict]) -> None:
 def _seed(g: Path, entries: list[dict]) -> None:
     """Rows the way the store writes them: the typed api drops a row the
     model cannot parse, so seeds carry the stamped fields."""
+    # A re-seed must reset the store too: graph.db outlives the json seed, so
+    # a second _seed into the same path would read the first seed's rows.
+    for sidecar in (
+        g.parent / (g.name + ".store.sock"),
+        g.parent / (g.name + ".store.sock.lock"),
+        g.with_suffix(".db"),
+        g.with_name(g.stem + ".db-shm"),
+        g.with_name(g.stem + ".db-wal"),
+    ):
+        sidecar.unlink(missing_ok=True)
     complete = []
     for e in entries:
         row = {"type": "feature", "priority": "p2", "status": "idea", **e}
@@ -100,7 +111,7 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    return read_graph_strict(g)
 
 
 def _stub_subprocess(
@@ -130,10 +141,16 @@ def _stub_subprocess(
         def __init__(self, stdout: str = "", rc: int = 0):
             self.stdout = stdout
             self.returncode = rc
+            self.stderr = ""
+
+    real_run = done_cli.subprocess.run
 
     def fake_run(cmd, **kwargs):
         if not cmd:
             return _Result("", 1)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; reach the real binary.
+            return real_run(cmd, **kwargs)
         if cmd[0] == "git" and "branch" in cmd:
             return _Result((branch or "") + "\n", 0 if branch else 0)
         if cmd[0] == "git" and "remote" in cmd:
@@ -492,7 +509,7 @@ def test_rollup_empty_ledger_leaves_fields_null(tmp_graph, tmp_ledger, monkeypat
     entry = _read(tmp_graph)[0]
     assert entry["cost_usd"] is None
     assert entry["cost_sessions"] == []
-    assert entry["points"] is None
+    assert entry.get("points") is None
     assert entry["session_id"] is None
 
 
@@ -565,7 +582,8 @@ def test_rollup_handles_ledger_entry_with_no_sessions(tmp_graph, tmp_ledger, mon
     entry = _read(tmp_graph)[0]
     assert entry["cost_usd"] == 3.0
     assert len(entry["cost_sessions"]) == 1
-    assert entry["cost_sessions"][0]["session_id"] is None
+    # A null session id exports as an absent key (the store strips nulls).
+    assert entry["cost_sessions"][0].get("session_id") is None
 
 
 # -- Backfill tests --
@@ -767,6 +785,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
         "title": "ERR target",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
@@ -828,6 +847,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
         "title": "EDGE target",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
@@ -871,6 +891,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
         "title": "Drive completion",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-drv00001"])
@@ -895,6 +916,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
         "title": "No-drive completion",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-ndr00001"])
@@ -914,6 +936,7 @@ def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
         monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: driving)
         _seed(tmp_graph, [{
             "id": node_id, "title": "Same line", "status": "ready", "domain": "code",
+            "artifact_url": "https://example.test/artifact",
         }])
         _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
         r = runner.invoke(app, ["done", node_id])
@@ -992,6 +1015,7 @@ def test_done_completes_even_when_audit_emit_raises(tmp_graph, monkeypatch):
         "title": "Emit fails",
         "status": "ready",
         "domain": "code",
+        "artifact_url": "https://example.test/artifact",
     }])
     _stub_subprocess_with_stderr(monkeypatch, branch="main", pr_view_rc=0, pr_view_stdout="")
     result = runner.invoke(app, ["done", "ab-fr000001"], catch_exceptions=False)

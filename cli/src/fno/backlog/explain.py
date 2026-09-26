@@ -193,18 +193,6 @@ def probe_capacity() -> dict:
     return _probe()
 
 
-def _cpu_row_refused(probe_answer: dict) -> bool:
-    """The probe answer's cpu-share row refused (refuse/undecidable render as
-    the row's ``refuse`` verdict, exactly what the real gate refuses on)."""
-    rows = probe_answer.get("rows") if isinstance(probe_answer, dict) else None
-    for row in rows or []:
-        if isinstance(row, dict) and row.get("name") == "cpu-share":
-            return row.get("verdict") == "refuse"
-    return False
-
-
-
-
 def routing_for(node: Optional[dict]) -> dict:
     """What the slot resolver picks for ``node``, and from which inputs.
 
@@ -243,23 +231,22 @@ def routing_for(node: Optional[dict]) -> dict:
     profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
         inventory = route_resolve.resolve_inventory()
-        capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
+        # Display, never a probe: the summary rides the verb's answer now.
+        meta: dict = {}
         candidate, chain, verdict = route_resolve.resolve_slot(
             profile_verb,
             node,
-            capacity,
+            None,
             role=role,
             inventory=inventory,
+            meta=meta,
         )
     except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported
         return {
             "chain": [f"grid unreadable: {exc}"], "candidate": None, "inputs": inputs,
             "routing": "unarmed", "skipped": [],
         }
-    inputs["capacity"] = {
-        harness: (state.get("state") if isinstance(state, dict) else state)
-        for harness, state in capacity.items()
-    }
+    inputs["capacity"] = meta.get("capacity") or {}
     # The verdict reads the same terminal the spawn seam refuses on: a policy
     # refusal is held, capacity is held, and neither is "exhausted dispatch".
     return {
@@ -587,13 +574,7 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
-    # The CPU axis refuses machine-wide; a preview that left stop empty
-    # would promise a dispatch the real spawn refuses. ONE probe answer feeds
-    # both this stop and the gates rows below, so the report pays one
-    # footprint read and cannot disagree with the gate that refused.
     probe_answer = probe_capacity()
-    if stop is None and _cpu_row_refused(probe_answer):
-        stop = "load-refused"
 
     ordered_names = [
         "no-project",

@@ -86,7 +86,9 @@ def ruling_graph(mailbox, monkeypatch):
 
 
 def _graph_details(graph_path):
-    return json.loads(graph_path.read_text(encoding="utf-8"))["entries"][0]["details"]
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(graph_path)[0]["details"]
 
 
 def _hosted_dispatch(monkeypatch, before_transport=None):
@@ -264,6 +266,19 @@ def test_inbox_namespace_is_retired(runner, mailbox):
 # ---------------------------------------------------------------------------
 # AC1-HP / AC2-HP: publish durable-first, cursor-consume, ack advances cursor
 # ---------------------------------------------------------------------------
+
+def test_machine_mail_lock_timeout_env_is_forwarded_to_agent_dispatch(
+    runner, mailbox, monkeypatch
+):
+    calls = _hosted_dispatch(monkeypatch)
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "sess-worker", "short note"],
+        env={"_FNO_MACHINE_MAIL_LOCK_TIMEOUT": "5"},
+    )
+    assert sent.exit_code == 0, sent.output
+    assert calls[0]["lock_timeout"] == 5.0
+
 
 def test_send_then_unread_then_ack(runner, mailbox):
     sent = runner.invoke(

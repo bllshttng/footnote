@@ -649,7 +649,8 @@ def test_cli_resume_gates_the_recorded_provider_before_dispatch(
         "gate",
         ("router", "bg", {
             "force": False, "no_wait": False, "route_provider": "zai",
-            "account": None,
+            "account": None, "seed": "go", "session_phase": "",
+            "succession_scope": None,
         }),
     )
     assert events[1][0] == "dispatch"
@@ -913,22 +914,8 @@ def _routed_glm_row(tmp_path, monkeypatch, *, launch_account="makers"):
     return path
 
 
-def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch) -> None:
-    """Door: resume (the Python wake arm; the dead relaunch arm is Rust's and
-    carries --settings there). The woken attach runs under the recorded
-    account namespace with the route restored into its env."""
-    import fno.agents.account_env as account_env_mod
-    import fno.agents.watchdog as watchdog_mod
-
-    class _Overlay:
-        account_id = "makers"
-        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
-        lane = "config-dir"
-
-    monkeypatch.setattr(
-        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
-    )
-    _routed_glm_row(tmp_path, monkeypatch)
+def test_python_resume_refuses_a_routed_claude_row_without_waking(tmp_path) -> None:
+    """The Python fallback cannot own Claude's account-pinned resume route."""
     from types import SimpleNamespace
 
     from fno.agents.resume_cli import resume_logic
@@ -939,55 +926,29 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
         cwd=str(tmp_path),
         short_id="deadbeef",
         harness_session_id="sess-1",
-        route_settings_path=_routed_claude_row(tmp_path, monkeypatch),
+        route_settings_path="/route/settings.json",
         launch_account="makers",
         provider="zai",
     )
-    seen: dict = {}
-    reads: list[str] = []
-
-    def _state():
-        # Stateful supervisor: the row sits at "Needs input" until the first
-        # wake injects the message, then it is "Working" - the transition the
-        # exit-16 loop needs to observe on its post-wake read.
-        reads.append("r")
-        return "Working" if len(reads) > 1 else "Needs input"
-
-    def _wake(short_id, *, message, route_env, cwd, account_env=None):
-        seen["route_env"] = route_env
-        seen["account_env"] = account_env
-
-    # x-6ac3: exit 0 requires the transcript marker, so the wake lands only
-    # with the confirm stubbed positive (the test's subject is the env, not
-    # the receipt).
-    class _Facts:
-        last_event_epoch = 100.0
-
-    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
-    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
+    launches: list[tuple] = []
 
     res = resume_logic(
         name="router",
         registry_loader=lambda: [entry],
         path_checker=lambda b: True,
         cwd_checker=lambda c: True,
-        claim_fn=lambda s: None,
-        execvp=lambda *a, **k: None,
-        emit_event=lambda *a, **k: None,
-        wake_fn=_wake,
-        agents_state_fn=lambda: {"deadbeef": {"live_status": _state()}},
+        execvp=lambda *args, **kwargs: launches.append(args),
     )
-    assert res.exit_code == 0
-    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
-    assert seen["route_env"] and "ANTHROPIC_BASE_URL" in seen["route_env"], (
-        "the recorded route must ride the wake env"
-    )
+    assert res.exit_code == 13
+    assert "resumes through the fno-agents runtime" in res.stderr
+    assert launches == []
 
 
 def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch) -> None:
     """Door: spawn --resume (revive). The revived row inherits the source
     row's launch account - the transcript lives under the config dir it was
-    created in, so the account is a fact about the transcript."""
+    created in, so the account is a fact about the transcript. The recorded
+    account's overlay rides the spawn, so the process BILLS there too."""
 
     from fno.agents import dispatch
     from fno.agents.harnesses.base import ProviderResult
@@ -1002,11 +963,24 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
         lambda home, short: "sess-1",
     )
 
+    seen = {}
+
     def _fake_bg_create(**kwargs):
+        seen.update(kwargs)
         return ProviderResult(0, "", "", 1, session_id_out="feedface")
 
     monkeypatch.setattr(
         "fno.agents.harnesses.claude.bg_create", _fake_bg_create
+    )
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda account_id, **kwargs: _Overlay(),
     )
     result = dispatch.dispatch_spawn(
         name="router",
@@ -1021,6 +995,9 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
     row = load_registry()[0]
     assert row.launch_account == "makers", (
         "a revive inherits the source row's account axis"
+    )
+    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}, (
+        "the recorded account's overlay must ride the resume spawn"
     )
 
 
@@ -1118,6 +1095,7 @@ def test_matrix_spawn_resume_default_control_inherits_default(
                 harness="claude",
                 harness_session_id="sess-1",
                 launch_account="default",
+                requested_model="claude-opus-5",
             )
         ]
     )

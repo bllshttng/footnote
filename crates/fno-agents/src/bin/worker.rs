@@ -13,6 +13,11 @@
 //!   graph file, serves reads and locked mutations over its own socket, and
 //!   outlives the daemon the same way the pane keeper does. Callers build
 //!   this argv; humans never type it.
+//! - `--store-exec`: the one-shot store lane (graph_keeper.rs). Serves ONE
+//!   store request on stdin/stdout and exits, so a client that must not
+//!   leave a resident process behind (the leak shape recorded 2026-09-17: a
+//!   keeper grows with requests served) still gets the full dispatch.
+//!   Callers build this argv; humans never type it.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
 //! terminal going away) cannot take it - and therefore the PTY child -
@@ -42,15 +47,23 @@ fn main() {
         return;
     }
 
-    // Three lanes: `--keeper` (the keeper: pty master ownership outlives the
+    // Four lanes: `--keeper` (the keeper: pty master ownership outlives the
     // mux server; `--pane` is the alias its call sites spell it by),
     // `--stream` (claude stream-json adoption, launched by the daemon's
-    // spawn_claude_stream_lane), and `--store-keeper` (the graph store).
+    // spawn_claude_stream_lane), `--store-keeper` (the resident graph
+    // store), and `--store-exec` (one store request, then exit).
     // Everything else refuses, truthfully.
     if args.iter().any(|a| a == "--store-keeper") {
         if let Err(msg) = store_keeper_lane(&args) {
             eprintln!("fno-agents-worker: {msg}");
             std::process::exit(2);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--store-exec") {
+        if let Err(msg) = store_exec_lane(&args) {
+            eprintln!("fno-agents-worker: {msg}");
+            std::process::exit(1);
         }
         return;
     }
@@ -64,7 +77,8 @@ fn main() {
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
-             (claude stream-json adoption), or --store-keeper (graph store)"
+             (claude stream-json adoption), --store-keeper (graph store), or \
+             --store-exec (one store request)"
         );
         std::process::exit(2);
     }
@@ -78,9 +92,21 @@ fn store_keeper_lane(args: &[String]) -> Result<(), String> {
     fno_agents::graph_keeper::run(cfg)
 }
 
-/// `--keeper` / `--pane` entrypoint: parse, then run the keeper to completion.
+/// `--store-exec` entrypoint: parse, serve one request, exit. A failed
+/// request still prints its reply envelope, then exits 1 (the reply is the
+/// completion record; the exit code is for the shell, the stdout is for the
+/// client).
+fn store_exec_lane(args: &[String]) -> Result<(), String> {
+    let cfg = fno_agents::store_exec::parse_store_exec_args(args)?;
+    fno_agents::store_exec::run_exec(cfg)
+}
+
+/// `--keeper` / `--pane` entrypoint: parse, fill the build-dir env (before any
+/// thread starts, so the env write is sound), then run the keeper; every hosted
+/// harness child inherits it.
 fn pane_keeper_lane(args: &[String]) -> Result<(), String> {
     let cfg = fno_agents::pane_keeper::parse_pane_args(args)?;
+    fno_agents::cargo_build_dirs::fill_build_dir_env(&cfg.cwd);
     fno_agents::pane_keeper::run(cfg)
 }
 

@@ -128,9 +128,14 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(home.root())
         .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
@@ -144,15 +149,27 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
+    start_daemon_env_in(home, home.root(), extra)
+}
+
+/// [`start_daemon_env`] with an explicit launch cwd: the daemon keeps whoever
+/// started it as its cwd, and the cwd-pin test needs a launch from inside a
+/// git worktree to prove the pin.
+fn start_daemon_env_in(home: &AgentsHome, dir: &Path, extra: &[(&str, &str)]) -> DaemonChild {
     let seen = common::count_events(home, "daemon_started");
     let stderr =
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(dir)
         .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
@@ -166,8 +183,7 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
 fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
     let start = Instant::now();
     while start.elapsed() < budget {
-        let events: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
+        let events: Vec<serde_json::Value> = common::event_text(home)
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
@@ -218,8 +234,7 @@ fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, bud
 /// from the home's own event log rather than a process scan, which would also
 /// see every other parallel test's daemon.
 fn daemon_started_pids(home: &AgentsHome) -> Vec<u32> {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    common::event_text(home)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v["type"] == "daemon_started")
@@ -276,6 +291,13 @@ fn daemon_env_bin(
         "export FNO_AGENTS_WORKER_BIN={}\n",
         shell_quote(WORKER_BIN),
     ));
+    // Every successor forked through this wrapper inherits the test binary as
+    // its owner, so the daemon's watchdog reaps it when the test dies - even
+    // under a bare `cargo test`, which sets no owner env of its own. Emitted
+    // before `extra` so a caller's explicit owner still wins.
+    for (key, value) in fno_agents::test_run::self_owner_env() {
+        script.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+    }
     for (key, value) in extra {
         script.push_str(&format!("export {key}={}\n", shell_quote(value)));
     }
@@ -373,7 +395,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     let resp = call(
         &home,
@@ -407,7 +429,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     );
     assert_eq!(entry.pid, None, "ask row never carries a pid");
 
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         events.contains("startup_reconcile_done"),
         "startup_reconcile_done event not emitted"
@@ -440,7 +462,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
     // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
     // on what it did or did not write.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -467,7 +489,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
         "failed sweep must not mutate stored status"
     );
 
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         events.contains("startup_reconcile_failed"),
         "a failed startup sweep must emit startup_reconcile_failed"
@@ -543,7 +565,7 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
          runs; took {served_at:?}"
     );
 
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     let done_at = t0.elapsed();
     // The sweep cannot finish before its own delay elapses, so this reading
     // proves it was still running when the response came back. Both readings
@@ -654,7 +676,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     // The pid-confirmed termination needs the incumbent REAPED, not only
     // dead: this test process is the parent, so an unwaited child lingers as
     // a zombie and kill(pid, 0) answers alive through the whole grace. A
@@ -728,7 +750,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "the restarted daemon rejected the positive probe: {:?}",
         post_restart.error()
     );
-    wait_for_successor_reconcile_order(&home, outcome.new_pid, Duration::from_secs(10));
+    wait_for_successor_reconcile_order(&home, outcome.new_pid, common::RECONCILE_BUDGET);
     println!(
         "daemon_restart_served_during_sweep successor_pid={} rows={} answered={} teardown_casualties={}",
         outcome.new_pid, rows, answered, teardown_casualties
@@ -875,6 +897,7 @@ async fn status_client_exits_13_when_daemon_down() {
         .arg("status")
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client runs");
     assert_eq!(
@@ -959,8 +982,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
 
 /// Read one typed event of `kind` from the home's event log, newest-last.
 fn last_event_of(home: &AgentsHome, kind: &str) -> Option<serde_json::Value> {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    common::event_text(home)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v["type"] == kind)
@@ -978,7 +1000,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
     seed_loss_shaped_registry(&home);
 
     let child = start_daemon(&home);
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     drop(child);
 
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -993,7 +1015,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
         Some("sess-0007"),
         "a surviving row keeps its identity, not just its slot"
     );
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         !events.contains("registry_row_removed"),
         "a restart that keeps every row must announce nothing: {events}"
@@ -1020,7 +1042,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
     drop(child);
 
     assert_eq!(
@@ -1030,7 +1052,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     );
     let reg = state::load_registry(&home.registry_json()).unwrap();
     assert_eq!(reg.entries.len(), 29, "no row is silently dropped");
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         !events.contains("registry_row_removed"),
         "a refusal keeps every row, so nothing is announced: {events}"
@@ -1038,12 +1060,16 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
 }
 
 #[test]
-fn daemon_idle_exits_over_terminal_rows_and_says_why() {
-    // x-cd31 acceptance, in the user's demanded form: assert the exit by BOTH
-    // the pid being gone AND the reason:idle event. The pid alone has two
-    // explanations (an idle exit, a crash); the event names which fired. The
-    // roster here is the established-machine shape - terminal rows, no live
-    // worker - which the old registry-emptiness gate could never exit from.
+fn daemon_on_sandbox_home_runs_no_fleet_arm() {
+    // The leak shape this guards: a daemon on a throwaway home must not run
+    // ANY fleet arm. The active-backlog supervisor would work the operator's
+    // board from a tempdir and pin ab_live true forever; every tick arm
+    // (retirement sweep, crown ledger, machine watch, question pages, ...)
+    // resolves its targets from the real cwd, real graph, mux, ps and fno
+    // porcelain, so it acts on the shared fleet from a throwaway home. One
+    // fleet_scope row names the scope; zero arm rows say the supervisor never
+    // ran; zero daemon-scheduler tick rows say no arm ran; the daemon then
+    // exits idle, even over terminal registry rows.
     let home = short_home();
     home.ensure_root().unwrap();
     seed_codex_source(
@@ -1058,30 +1084,72 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
         "uuid-idle-2",
         fno_agents::AgentStatus::Exited,
     );
+    let cwd = std::env::temp_dir().join(format!("fnoe-sandbox-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::fs::write(
+        cwd.join(".fno/config.toml"),
+        "[active_backlog]\nenabled = true\n",
+    )
+    .unwrap();
 
-    let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
+    let seen = common::count_events(&home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
+    let mut cmd = Command::new(DAEMON_BIN);
+    cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .current_dir(&cwd)
+        .stderr(std::process::Stdio::from(stderr));
+    let mut daemon = DaemonChild(cmd.spawn().expect("daemon spawns"));
     let pid = daemon.id();
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(&home, "daemon_started", seen + 1, Duration::from_secs(10));
 
-    // Wait for the positive marker, not for silence.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let idle_fired = || {
-        last_event_of(&home, "daemon_shutting_down")
-            .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
-            == Some("idle".to_string())
-    };
-    while !idle_fired() {
+    // Exactly one scope row, naming its home: a missing row is never read as
+    // evidence of scope.
+    common::wait_for_event(&home, "daemon_fleet_scope", Duration::from_secs(10));
+    let scope = last_event_of(&home, "daemon_fleet_scope").expect("fleet_scope row");
+    assert_eq!(scope["data"]["scope"], json!("sandbox"));
+    assert_eq!(common::count_events(&home, "daemon_fleet_scope"), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while last_event_of(&home, "daemon_shutting_down")
+        .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
+        != Some("idle".to_string())
+    {
         assert!(
             Instant::now() < deadline,
-            "daemon never idle-exited over terminal rows"
+            "sandbox daemon never idle-exited"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
     let _ = daemon.wait();
     assert!(!pid_alive(pid), "the daemon is gone");
+    // On the unguarded tree the supervisor's first tick row lands within ~3s
+    // of start, long before the 5s idle tick; process death closes the window
+    // for more.
+    assert_eq!(
+        common::count_events(&home, "\"arm\":\"active_backlog\""),
+        0,
+        "a sandbox home starts no active-backlog supervisor"
+    );
+    // Every daemon tick arm writes its row through tick_ledger::emit_tick
+    // with the daemon scheduler key into the home's own events.jsonl. Zero
+    // such rows: the arms never ran, not merely "ran quietly".
+    assert_eq!(
+        common::count_events(&home, "\"scheduler\":\"daemon\""),
+        0,
+        "a sandbox home runs no fleet arm"
+    );
     let exited = last_event_of(&home, "daemon_exited").expect("daemon_exited emitted");
     assert_eq!(exited["data"]["reason"], json!("idle"));
-    assert_eq!(exited["data"]["clean"], json!(true));
+    assert_eq!(exited["data"]["clean"], json!(true), "idle exit is clean");
     std::fs::remove_dir_all(home.root()).ok();
+    std::fs::remove_dir_all(&cwd).ok();
 }
 
 #[test]
@@ -1126,6 +1194,10 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
 /// used to drop. Holds the mux ref INSTEAD of a transport key (mux XOR worker
 /// XOR bg), so `short_id` is empty and `harness_session_id` is the only id.
 fn seed_pane_row(home: &AgentsHome, name: &str) {
+    seed_pane_row_with_session(home, name, "e6f78b98-e594-47ed-ad81-84f8a78b8bb7");
+}
+
+fn seed_pane_row_with_session(home: &AgentsHome, name: &str, session_id: &str) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
             substrate: None,
@@ -1145,7 +1217,7 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             model_basis: None,
             effort: None,
             harness: Some("claude".into()),
-            harness_session_id: Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into()),
+            harness_session_id: Some(session_id.into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             route_provider_id: None,
@@ -1295,6 +1367,7 @@ exit 2
         .args(["rm", "three-surface-worker"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("rm client runs");
     assert!(
@@ -1323,8 +1396,7 @@ exit 2
     assert_eq!(String::from_utf8_lossy(&post_claude.stdout).trim(), "[]");
     assert_eq!(String::from_utf8_lossy(&post_mux.stdout).trim(), "[]");
 
-    let removed = std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    let removed = common::event_text(&home)
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .find(|event| event.get("type").and_then(|value| value.as_str()) == Some("agent_removed"))
@@ -1443,6 +1515,7 @@ exit 2
         .args(["rm", "pinned-worker"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("rm client runs");
     assert!(
@@ -1471,17 +1544,25 @@ exit 2
 // list, stderr-only so --json stdout stays clean).
 // ---------------------------------------------------------------------------
 
-/// A pane-hosted row must never be answered by `agent.stop` with a success:
-/// stop reaches no pane (the row's one live ref is the mux ref), so a success
-/// receipt would report work it did not perform over a live pane. The refusal
-/// names the row's own session:pane and the clearing verb, and the registry
-/// row stays live. Keys on `entry.mux`, never the harness, so it covers
-/// claude, codex, opencode, and agy pane rows in one branch.
+/// `agent.stop` refuses a pane row without hiding the non-pane no-op receipt:
+/// the refusal names the row's session:pane and clearing verb, while a codex
+/// ask row with an empty short id remains a successful no-op.
 #[tokio::test]
 async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     let home = short_home();
     home.ensure_root().unwrap();
     seed_pane_row(&home, "pane-worker-stop");
+    seed_pane_row_with_session(
+        &home,
+        "codex-ask-row",
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    );
+    state::update_registry(&home.registry_json(), |registry| {
+        let row = registry.find_mut("codex-ask-row").unwrap();
+        row.mux = None;
+        row.harness = Some("codex".into());
+    })
+    .unwrap();
     // An empty FNO_MUX_DIR strands the probe's `fno mux pane read`: it cannot
     // reach the session there, which mux_pane_is_absent reads as Absent, so
     // this test never probes a developer's live `main` mux server. Whether
@@ -1489,7 +1570,13 @@ async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     // today's text), so assert only markers both outcomes print; the
     // pane-kill wording is pinned on the builder's unit tests.
     let mux_dir = home.root().join("empty-mux");
-    let _daemon = start_daemon_env(&home, &[("FNO_MUX_DIR", mux_dir.to_str().unwrap())]);
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("FNO_MUX_DIR", mux_dir.to_str().unwrap()),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+        ],
+    );
 
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
@@ -1517,36 +1604,10 @@ async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
         fno_agents::AgentStatus::Live,
         "nothing was reported stopped that was not"
     );
-}
-
-/// A non-pane row with an empty short_id keeps its existing no-op receipt:
-/// the mux refusal must not swallow the genuine codex/gemini arm.
-#[tokio::test]
-async fn stop_keeps_non_pane_noop_receipt() {
-    let home = short_home();
-    home.ensure_root().unwrap();
-    // Seed the pane row, then reshape it in place: a codex ask row is the pane
-    // row with no mux ref and the codex harness. Reusing the helper (rather
-    // than a second full RegistryEntry literal) keeps this file's axis-guard
-    // binding counts unchanged.
-    seed_pane_row(&home, "codex-ask-row");
-    state::update_registry(&home.registry_json(), |r| {
-        let row = r.find_mut("codex-ask-row").unwrap();
-        row.mux = None;
-        row.harness = Some("codex".into());
-    })
-    .unwrap();
-    // The reshaped row (empty short_id, no pid, recorded live) is the stale-ask
-    // shape, and the startup reconcile sweep would settle it to Exited before
-    // the stop call lands - which answers `already_exited`, not the no-op arm
-    // under test. Hold the sweep, the documented lever for a seeded row.
-    let _daemon = start_daemon_env(&home, &[("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")]);
-
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
         &home,
         &daemon_bin,
-        &Request::new(1, "agent.stop", json!({"name": "codex-ask-row"})),
+        &Request::new(2, "agent.stop", json!({"name": "codex-ask-row"})),
     )
     .await
     .expect("stop call");
@@ -1558,6 +1619,11 @@ async fn stop_keeps_non_pane_noop_receipt() {
     let body = resp.result().unwrap().clone();
     assert_eq!(body["no_op"], json!(true), "receipt: {body}");
     assert_eq!(body["stopped"], json!(true), "receipt: {body}");
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 #[tokio::test]
@@ -1581,6 +1647,90 @@ async fn restart_when_down_starts_fresh() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+#[test]
+fn the_default_wrapper_exports_the_test_binary_owner() {
+    // The default (no-extra) wrapper must arm every successor on the test
+    // binary itself: that is the one owner a bare `cargo test` provides, and
+    // the watchdog is what reaps the successor when the test binary dies. The
+    // behavioral counterpart is a_restart_successor_dies_with_its_test_owner,
+    // which hands an explicit owner through `extra`.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let bin = daemon_env_bin(&home, "default-owner", None, &[]);
+    let script = std::fs::read_to_string(&bin).expect("read the wrapper script");
+    let want_pid = std::process::id().to_string();
+    assert!(
+        script.contains(&format!(
+            "export FNO_TEST_OWNER_PID={}",
+            shell_quote(&want_pid)
+        )),
+        "the wrapper must arm successors on the test binary as owner:\n{script}"
+    );
+    assert!(
+        script.contains("export FNO_TEST_OWNER_BIRTH="),
+        "the wrapper must export the owner birth:\n{script}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn a_restart_successor_dies_with_its_test_owner() {
+    // The wrapper exports the owner it is handed, the daemon arms its watchdog
+    // on it, and killing the owner brings the successor down - the path that
+    // used to orphan a daemon for hours when a bare `cargo test` died mid-test.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let mut owner = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn owner process");
+    let owner_pid = owner.id();
+    let owner_birth = fno_agents::daemon::process_start_time(owner_pid)
+        .expect("a just-spawned owner must have a readable birth time");
+    let daemon_bin = daemon_env_bin(
+        &home,
+        "owner-bound",
+        None,
+        &[
+            ("FNO_TEST_OWNER_PID", &owner_pid.to_string()),
+            ("FNO_TEST_OWNER_BIRTH", &owner_birth.to_string()),
+        ],
+    );
+
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, false)
+        .await
+        .expect("restart-when-down succeeds");
+    assert!(pid_alive(outcome.new_pid), "successor is alive");
+
+    // Kill the owner for real: the positive control this test proves against.
+    let _ = owner.kill();
+    let _ = owner.wait();
+
+    let mut reaped = false;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let mut status: libc::c_int = 0;
+        let settled =
+            unsafe { libc::waitpid(outcome.new_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if settled != 0 {
+            // A pid return means we reaped it; -1/ECHILD means tokio's
+            // process driver did. Both read "the successor exited".
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !reaped {
+        terminate_untracked(outcome.new_pid);
+    }
+    assert!(
+        reaped,
+        "successor {} outlived its killed owner",
+        outcome.new_pid
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 #[tokio::test]
 async fn restart_force_recovers_a_wedged_holder() {
     // x-3498 acceptance: a daemon frozen with SIGSTOP holds the singleton lock
@@ -1601,17 +1751,39 @@ async fn restart_force_recovers_a_wedged_holder() {
 
     // A verb against the wedge fails within the client's read deadline, not by
     // hanging. Driven through a CHILD client with a short injected deadline:
-    // the default (90s, sized above the daemon's legit slow-handler budgets)
+    // the default (120s, sized above the daemon's legit slow-handler budgets)
     // is far too long for a test, and the env override must never touch this
     // process's ambient calls.
+    //
+    // The spawn rides a backstop, not a tight wall-clock assert: under the
+    // 20-trial stress run (load average in the hundreds) merely exec-ing this
+    // binary has been measured at 30s+, twice red-lining a 30s bound while the
+    // client inside behaved perfectly. Promptness is therefore proved by the
+    // child's OWN deadline line ("within 500ms" below; a leaked default would
+    // read "within 120s"), and the backstop exists only to turn a true hang
+    // into a bounded failure instead of a stuck job.
     let started = Instant::now();
-    let status_out = Command::new(CLIENT_BIN)
-        .envs(fno_agents::test_run::self_owner_env())
-        .env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
-        .args(["status"])
-        .output()
-        .expect("client runs");
+    let backstop = Duration::from_secs(180);
+    let status_out = match tokio::time::timeout(
+        backstop,
+        tokio::process::Command::new(CLIENT_BIN)
+            .envs(fno_agents::test_run::self_owner_env())
+            .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
+            .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
+            .args(["status"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    {
+        Ok(inner) => inner.expect("client runs"),
+        Err(_) => panic!(
+            "the client never exited: {backstop:?} backstop fired after {:?}; \
+             a hang, not the bounded failure under test",
+            started.elapsed()
+        ),
+    };
     assert!(
         !status_out.status.success(),
         "a verb against the wedge must fail, got: {:?}",
@@ -1623,8 +1795,8 @@ async fn restart_force_recovers_a_wedged_holder() {
         "the failure names the wedge shape: {stderr}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the injected deadline bounded the failure"
+        stderr.contains("within 500ms"),
+        "the injected deadline bounded the failure: {stderr}"
     );
 
     // The recovery: one verb, no operator kill.
@@ -1768,6 +1940,7 @@ async fn drift_warned_on_list_stderr_only() {
     let spawn_daemon = || {
         Command::new(&dcopy)
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
             .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -1827,6 +2000,7 @@ async fn drift_warned_on_list_stderr_only() {
         .args(["list", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .env("FNO_AGENTS_DAEMON_BIN", &dcopy)
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .output()
@@ -1891,6 +2065,28 @@ async fn drift_warned_on_list_stderr_only() {
     assert!(
         stderr.contains("fno agents restart") && stderr.contains("build"),
         "expected drift warning on stderr, got: {stderr}"
+    );
+
+    let status = Command::new(CLIENT_BIN)
+        .args(["status", "--json"])
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_DAEMON_BIN", &dcopy)
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .output()
+        .expect("status client runs");
+    assert!(
+        status.status.success(),
+        "status exited {:?}: {}",
+        status.status,
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("status --json stdout is valid JSON");
+    assert_eq!(
+        status_json["drift"],
+        json!("drifted"),
+        "status --json reports the binary replacement"
     );
 
     unsafe {
@@ -1965,6 +2161,7 @@ async fn registry_startup_refuses_a_divergent_nonempty_registry() {
 
     let mut child = Command::new(DAEMON_BIN)
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -2039,6 +2236,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
         .args(["list", "--all", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client list runs");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2057,7 +2255,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     // the suite runs fast enough to reach the write before the sweep. Its
     // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
     // waits for this event, which is why the same shape is stable there.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);
@@ -2070,6 +2268,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
             .args(args)
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .output()
             .expect("client list runs");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2126,9 +2325,9 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     // OWN completion marker, and a marker that never arrives FAILS the test
     // instead of silently proceeding - a silent timeout here converts "did
     // not wait" into "lookup succeeded".
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     loop {
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = common::event_text(&home);
         if events.contains("startup_reconcile_done") || events.contains("startup_reconcile_failed")
         {
             break;
@@ -2249,6 +2448,7 @@ async fn registry_true_empty_registry_still_serves_zero() {
         .args(["list", "--all", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("client list runs");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2286,7 +2486,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     // the future-schema fixture lands (same race the lookup test fences).
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = common::event_text(&home);
         if events.contains("daemon_started") {
             break;
         }
@@ -2322,6 +2522,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
             .args(["list", "--json"])
             .envs(fno_agents::test_run::self_owner_env())
             .env("FNO_AGENTS_HOME", home.root())
+            .env("HOME", home.root())
             .output()
             .expect("client list runs");
         if !out.status.success() {
@@ -2430,7 +2631,7 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
 
     // The recovery pass runs asynchronously after startup; poll the registry
     // until the row settles (or the bound expires).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     let status = loop {
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let Some(entry) = reg.find("thread-gone") else {
@@ -2454,31 +2655,109 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// status --json carries the drift verdict as a field (x-f188 change 4,
-/// AC4-HP): the census reads it from JSON instead of regex-parsing the
-/// stderr sentence.
+/// AC1-HP: a daemon launched from inside a linked worktree keeps serving after
+/// that worktree is reaped, because main() pins its cwd to the canonical
+/// checkout before any child can inherit it. Fails on pre-pin code: the daemon
+/// holds the removed worktree as its cwd for life, and every child spawned
+/// without an explicit cwd dies with it - the measured shapes were roster
+/// reads exiting 1 and reconcile-style runs failing in os.getcwd.
 #[tokio::test]
-async fn status_json_carries_the_drift_label() {
-    const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
+async fn daemon_cwd_survives_a_reaped_launch_worktree() {
+    fn e2e_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+
+    let base = std::env::temp_dir().join(format!(
+        "fnoe-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    e2e_git(&repo, &["init", "-q"]);
+    e2e_git(&repo, &["config", "user.email", "t@t"]);
+    e2e_git(&repo, &["config", "user.name", "t"]);
+    e2e_git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let wt = base.join("wt");
+    e2e_git(
+        &repo,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt"],
+    );
+
     let home = short_home();
     home.ensure_root().unwrap();
-    let _daemon = start_daemon(&home);
-    let out = Command::new(CLIENT_BIN)
-        .args(["status", "--json"])
-        .envs(fno_agents::test_run::self_owner_env())
-        .env("FNO_AGENTS_HOME", home.root())
-        .output()
-        .expect("client runs");
-    assert!(
-        out.status.success(),
-        "status exits 0 against a live daemon: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let daemon = start_daemon_env_in(&home, &wt, &[]);
+
+    // The reaper deletes the launch worktree under the live daemon.
+    e2e_git(
+        &repo,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
     );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
-    let label = v["drift"].as_str().unwrap_or("MISSING");
-    assert!(
-        matches!(label, "fresh" | "drifted" | "unknown"),
-        "a drift label rides status --json, got {label}"
+    assert!(!wt.exists(), "fixture worktree must actually be gone");
+
+    let cwd = process_cwd(daemon.id()).expect("daemon cwd is readable");
+    let want = std::fs::canonicalize(&repo).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&cwd)
+            .ok()
+            .as_deref()
+            .map(Path::to_path_buf),
+        Some(want.clone()),
+        "daemon cwd must be the canonical checkout, got {:?} (repo {:?})",
+        cwd,
+        want
     );
-    std::fs::remove_dir_all(home.root()).ok();
+
+    let served =
+        fno_agents::client::call_if_running(&home, &Request::new(1, "agent.status", json!({})))
+            .await
+            .expect("daemon still serves agent.status after its launch worktree was reaped");
+    assert!(
+        served.result().is_some(),
+        "agent.status must answer a result, got {:?}",
+        served
+    );
+
+    drop(daemon);
+    std::fs::remove_dir_all(&home.root()).ok();
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The kernel's view of a pid's cwd: `/proc/<pid>/cwd` on Linux, one lsof read
+/// on macOS. The name lsof prints can be a stale name-cache entry after a
+/// delete, so the caller canonicalizes before comparison.
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix('n'))
+            .map(PathBuf::from)
+    }
 }

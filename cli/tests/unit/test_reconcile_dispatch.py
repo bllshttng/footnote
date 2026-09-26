@@ -30,9 +30,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _events(p: Path) -> list[dict]:
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(p)
 
 
 def _dep(tmp_path: Path, node_id="x-dep"):

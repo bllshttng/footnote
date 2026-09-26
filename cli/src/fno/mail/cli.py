@@ -2322,16 +2322,14 @@ def _name_lane_send(
                 if injected:
                     to_harness = "codex"
                 if not injected:
-                    live_reason = (
-                        _codex_probe_reason[0] if _codex_probe_reason else None
-                    )
+                    live_reason = ";".join(_codex_probe_reason) or None
             else:
                 _probe_reason: list = []
                 injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
                 if injected:
                     to_harness = "claude"
                 if not injected:
-                    live_reason = _probe_reason[0] if _probe_reason else None
+                    live_reason = ";".join(_probe_reason) or None
                 if not injected and probe_agent is None:
                     _both_reason: list = []
                     injected = _mail_inject_codex(
@@ -2340,7 +2338,7 @@ def _name_lane_send(
                     if injected:
                         to_harness = "codex"
                     if not injected and _both_reason:
-                        live_reason = _both_reason[0]
+                        live_reason = ";".join(_both_reason) or None
             if not injected:
                 lanes.append("inject=not-delivered")
                 if token_reachable is None:
@@ -2390,16 +2388,14 @@ def _name_lane_send(
                 resolved.session_id, wrapped, reason_out=_resolved_reason
             )
             if not injected:
-                live_reason = _resolved_reason[0] if _resolved_reason else None
+                live_reason = ";".join(_resolved_reason) or None
         elif provider == "codex":
             _resolved_codex_reason: list = []
             injected = _mail_inject_codex(
                 resolved.session_id, wrapped, reason_out=_resolved_codex_reason
             )
             if not injected:
-                live_reason = (
-                    _resolved_codex_reason[0] if _resolved_codex_reason else None
-                )
+                live_reason = ";".join(_resolved_codex_reason) or None
         elif _keeper_thread_row:
             # a keeper-hosted lane-B thread has neither lane-A socket.
             # Its live transport is the keeper's own unix socket, resolved by
@@ -2415,9 +2411,7 @@ def _name_lane_send(
                 reason_out=_resolved_keeper_reason,
             )
             if not injected:
-                live_reason = (
-                    _resolved_keeper_reason[0] if _resolved_keeper_reason else None
-                )
+                live_reason = ";".join(_resolved_keeper_reason) or None
         if not injected and not _keeper_thread_row:
             # A send addressed by session id never consults the roster, so a
             # mux-hosted session of any provider would demote to durable with a
@@ -2578,7 +2572,7 @@ def _name_lane_send(
         # a live-lane failure renders as legs on stdout; the raw token
         # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
         # error string inside a success receipt reads as a broken lane.
-        reason = durable_leg_story(live_reason) or (
+        reason = durable_leg_story(live_reason, recipient) or (
             "self-send" if self_send else (live_reason or "live-miss")
         )
         if reason == "live-miss":
@@ -2915,14 +2909,19 @@ def _raw_send(
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # 1. Refuse an empty or whitespace-only payload. Any single line is a
-    #    legal raw payload (law d-5976045c): a slash verb, a codex skill verb,
-    #    or a plain word. A bare marker is nothing to invoke.
+    # 1. Empty, bare-marker, and command-only refusals. A raw payload is a
+    #    command line (law d-f6570dc9 amends d-5976045c); a message goes wrapped.
     stripped = payload.strip()
     if not stripped:
         _refused("payload is empty", usage=True)
     if stripped in ("/", "$"):
         _refused("payload is just a bare marker; nothing to invoke", usage=True)
+    if not stripped.startswith(("/", "$")):
+        _refused(
+            "raw is for running a command only: the payload must start with / or "
+            "$. Drop --raw and send the message wrapped.",
+            usage=True,
+        )
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.
@@ -2934,18 +2933,13 @@ def _raw_send(
         )
 
 
-    # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
-    # shared size ceiling and structure gate here before any of the reachable
-    # transports can fire. Under --check the cap refusal is a usage error
-    # (exit 2), never a session verdict: exit 1 is the not-injectable code.
+    # Raw sends bypass the wrapped entry points, so enforce the shared ceiling
+    # and structure gate here. Under --check a cap refusal is usage (exit 2).
     _enforce_body_cap(stripped, usage=check)
     _enforce_style(stripped, allow_reason=style_exception)
 
-    # 2b. Forged envelope: a raw payload is one line, but it can still smuggle
-    #     a `<fno_mail>` tag mid-line, and `contains_fno_mail_tag` searches the
-    #     whole payload. The mux lane (`_mux_pane_send` below) pastes this
-    #     string directly and never reaches the Rust mail-inject binary's own
-    #     check, so this is the only door for that lane.
+    # 2b. Forged envelope: a raw payload can smuggle a `<fno_mail>` tag mid-line,
+    #     and the mux lane pastes this string past the Rust check: the only door.
     from fno.mail.envelope import contains_fno_mail_tag
 
     if contains_fno_mail_tag(stripped):
@@ -3201,9 +3195,9 @@ def _raw_send(
                 if not subject_ok:
                     reason = (
                         f"{name!r} review/start would read an empty diff: "
-                        f"{subject_detail}. Fire from the PR worktree session "
-                        "(`fno do target request-self-review --pr <n>`) or "
-                        "spawn the reviewer with --cwd <worktree>."
+                        f"{subject_detail}. Run the review inline in the PR "
+                        "worktree session: `fno do target request-self-review`, "
+                        "or `$fno:review <level>` there."
                     )
                     if check:
                         print(f"not-injectable: {reason}")
@@ -3497,10 +3491,7 @@ def cmd_send(
     ),
     from_name: str | None = typer.Option(
         None, "--from-name",
-        help=(
-            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
-            "agent send, the working dir's project for an inbox-kind send."
-        ),
+        help="XML-safe sender. Unset: session handle or 'fno' for agents; project for inbox notes.",
     ),
     origin: str | None = typer.Option(
         None,
@@ -3579,12 +3570,13 @@ def cmd_send(
         False, "--raw",
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line: one "
-            "line, typed verbatim - a slash verb, a codex skill verb, or a "
-            "plain word. A payload starting /fno: or $fno: is an fno verb, and "
-            "the lane rewrites the marker to the form of the receiving "
-            "harness. A showing prompt is answered with `fno agents ask`. "
-            "Never queues durable. An actor OTHER than the model must supply "
-            "the trigger; self-injection is barred unless --to-self. "
+            "line, typed verbatim - a command only: it must start with / or $. "
+            "A status report or any authored message goes WRAPPED (drop --raw) "
+            "so its sender stays visible. A payload starting /fno: or $fno: is "
+            "an fno verb, and the lane rewrites the marker to the form of the "
+            "receiving harness. A showing prompt is answered with `fno agents "
+            "ask`. Never queues durable. An actor OTHER than the model must "
+            "supply the trigger; self-injection is barred unless --to-self. "
             "Mechanics and the reviewer-off-the-author rationale: "
             "docs/architecture/review-lanes.md."
         ),
@@ -4184,12 +4176,14 @@ def cmd_send(
             _unavailable_token_exit(name, unavailable)
         return
 
+    timeout_override = os.environ.pop("_FNO_MACHINE_MAIL_LOCK_TIMEOUT", None)
     try:
         result = dispatch_send(
             name=name,
             message=message,
             provider=harness,
             cwd=workdir,
+            **({"lock_timeout": float(timeout_override)} if timeout_override else {}),
             from_name=stamp_from(from_name),
             origin=mail_origin,
         )
@@ -4343,9 +4337,7 @@ def cmd_team(
     if not message:
         print("usage: fno agents mail team --scope <all|kings|<crown>|project:<p>> <message>", file=sys.stderr)
         raise typer.Exit(code=2)
-    _refuse_forged_envelope(message)
-    _enforce_body_cap(message)
-    _enforce_style(message, allow_reason=None)
+    _vet_body(message)
 
     sender_kind, sender = _team_sender_kind_and_from(from_name)
 
@@ -4522,7 +4514,7 @@ def cmd_sent(
             elif verdict is False:
                 state = f"handed {age_minutes(m.ts) or 0}m ago, not in transcript"
             else:
-                state = "handed, transcript unreadable"
+                state = "handed, landing unknown"
         # `typed`: a PTY prompt can discard bytes, so never claim it was consumed.
         elif m.delivery == TYPED_DELIVERY:
             state = "typed (unconfirmed)"

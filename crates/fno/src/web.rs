@@ -1,4 +1,4 @@
-//! `fno mux serve --web` : the read-only web bridge.
+//! `fno mux serve --web` : the web bridge.
 //!
 //! A pure client. It attaches to a running mux session over the same per-session
 //! unix socket the native TUI uses, as an OBSERVER (`Attach { rows: 0, cols: 0 }`,
@@ -8,10 +8,12 @@
 //! connections as JSON, unmodified. The browser paints the structured cells
 //! directly (see `web_page.html`).
 //!
-//! Read-only is structural (Locked Decision 5): after sending `Attach` the bridge
-//! `forget()`s the socket's write half, so no code path can forward a browser
-//! byte upstream. The browser also never drives - it drops every inbound WS
-//! message and only picks which already-arriving frame to draw locally.
+//! The pane view is read-only by construction (Locked Decision 5): after sending
+//! `Attach` the bridge `forget()`s the socket's write half, so no code path can
+//! forward a browser byte upstream. The browser also never drives - it drops
+//! every inbound WS message and only picks which already-arriving frame to draw
+//! locally. The backlog board's writes are separate: guarded subprocess runs of
+//! the same `fno` verbs an agent runs (see `write_guard`), never socket input.
 //!
 //! Data flow, one direction only:
 //!   vt::Pane --composite--> Frame --broadcast--> bridge --WS/JSON--> browser
@@ -19,16 +21,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::backlog_model;
 use crate::client::humanize_ago;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{Json, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, UnixStream};
@@ -38,6 +41,10 @@ use crate::proto::{self, ClientMsg, ServerMsg, BUILD_VERSION, PROTO_VERSION};
 
 /// The served page, vendored inline (no CDN) so the strict CSP holds offline.
 const PAGE: &str = include_str!("web_page.html");
+/// The backlog board page, vendored like PAGE. It draws the read model
+/// ([`crate::backlog_model`]) through `/backlog/model.json` and
+/// `/backlog/node.json` and computes nothing the model already answered.
+const BACKLOG_PAGE: &str = include_str!("web_backlog.html");
 /// The browser drives nothing, so anything it sends is dropped - but cap it so
 /// a hostile client cannot OOM the bridge with one giant frame.
 const INBOUND_WS_CAP: usize = 64 * 1024;
@@ -111,8 +118,16 @@ struct AppState {
     tx: broadcast::Sender<String>,
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
-    graph_html: PathBuf,
     reign_html: PathBuf,
+    fleet_html: PathBuf,
+    /// The mux session this bridge attaches to; a backlog launch names it to
+    /// the spawn door.
+    session: Arc<str>,
+    /// True when the bound address is loopback, so the backlog page may act.
+    /// Computed from the bound address, never from `--bind` text.
+    writable: bool,
+    /// The cached backlog read model (`None` until the first gather).
+    model: Arc<tokio::sync::Mutex<Option<CachedModel>>>,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
     /// complete: an open browser tab holds a connection that never closes on
     /// its own, so without this arm the bridge hangs past the signal and the
@@ -120,20 +135,11 @@ struct AppState {
     shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
-fn graph_html_path_from_state_root(state_root: &Path) -> PathBuf {
-    state_root.join("graph.html")
-}
-
-fn graph_html_path() -> PathBuf {
-    #[cfg(not(test))]
-    {
-        graph_html_path_from_state_root(&crate::proto::mux_sidecar_root())
-    }
-    #[cfg(test)]
-    {
-        let graph = crate::backlog_view::graph_path();
-        graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
-    }
+/// One gathered read model, reused while fresh and the store version holds.
+struct CachedModel {
+    version: Option<i64>,
+    at: Instant,
+    inputs: Arc<backlog_model::Inputs>,
 }
 
 fn reign_html_path_from_state_root(state_root: &Path) -> PathBuf {
@@ -149,6 +155,22 @@ fn reign_html_path() -> PathBuf {
     {
         let graph = crate::backlog_view::graph_path();
         reign_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
+    }
+}
+
+fn fleet_html_path_from_state_root(state_root: &Path) -> PathBuf {
+    state_root.join("fleet.html")
+}
+
+fn fleet_html_path() -> PathBuf {
+    #[cfg(not(test))]
+    {
+        fleet_html_path_from_state_root(&crate::proto::mux_sidecar_root())
+    }
+    #[cfg(test)]
+    {
+        let graph = crate::backlog_view::graph_path();
+        fleet_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
     }
 }
 
@@ -673,9 +695,18 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
     } else {
         args.bind.as_str()
     };
+    // Writes ride the bound address, not the `--bind` text: `localhost` and
+    // `::1` count, `0.0.0.0`, `::` and a tailscale address do not.
+    let writable = listener.local_addr().is_ok_and(|a| a.ip().is_loopback());
     println!(
-        "fno mux web (read-only): http://{host}:{}/?t={}",
-        args.port, token
+        "fno mux web ({}): http://{host}:{}/?t={}",
+        if writable {
+            "backlog writes on, loopback only"
+        } else {
+            "read-only"
+        },
+        args.port,
+        token
     );
     if wide {
         println!(
@@ -694,16 +725,14 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         tx,
         snap,
         token,
-        graph_html: graph_html_path(),
         reign_html: reign_html_path(),
+        fleet_html: fleet_html_path(),
+        session: args.session.into(),
+        writable,
+        model: Default::default(),
         shutdown: shutdown_rx,
     };
-    let app = Router::new()
-        .route("/", get(page))
-        .route("/backlog", get(backlog))
-        .route("/crown", get(crown))
-        .route("/ws", get(ws_handler))
-        .with_state(state);
+    let app = router(state);
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -721,6 +750,19 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         return 1;
     }
     0
+}
+
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(page))
+        .route("/backlog", get(backlog))
+        .route("/backlog/model.json", get(backlog_model))
+        .route("/backlog/node.json", get(backlog_node))
+        .route("/backlog/act", post(backlog_act))
+        .route("/crown", get(crown))
+        .route("/fleet", get(fleet))
+        .route("/ws", get(ws_handler))
+        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -924,14 +966,24 @@ struct WsQuery {
 }
 
 async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
-    backlog_response(
-        &st.graph_html,
-        q.t.as_deref(),
-        &st.token,
-        "FNO_NO_OPEN=1 fno backlog view",
-        NavPage::Backlog,
+    if !token_ok(q.t.as_deref(), &st.token) {
+        return unauthorized();
+    }
+    // The page's write controls exist only when the serving bridge can
+    // write: one string replace, no second page.
+    let page = if st.writable {
+        BACKLOG_PAGE.replacen("<body>", "<body data-writable=\"true\">", 1)
+    } else {
+        BACKLOG_PAGE.to_string()
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        with_nav(&page, NavPage::Backlog),
     )
-    .await
+        .into_response()
 }
 
 async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
@@ -942,7 +994,7 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     if crown_needs_republish(authorized, modified, SystemTime::now()) {
         start_crown_republish(&st.reign_html);
     }
-    backlog_response(
+    private_page_response(
         &st.reign_html,
         q.t.as_deref(),
         &st.token,
@@ -952,6 +1004,353 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     .await
 }
 
+async fn fleet(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+    private_page_response(
+        &st.fleet_html,
+        q.t.as_deref(),
+        &st.token,
+        "the fno-agents daemon; its fleet_page arm writes fleet.html every 30 minutes, or run fno-agents intel --fleet --html",
+        NavPage::Fleet,
+    )
+    .await
+}
+
+/// `GET /backlog/model.json`: the whole board as JSON behind the token.
+async fn backlog_model(
+    Query(raw): Query<Vec<(String, String)>>,
+    State(st): State<AppState>,
+) -> Response {
+    if !token_ok(
+        raw.iter().find(|(k, _)| k == "t").map(|(_, v)| v.as_str()),
+        &st.token,
+    ) {
+        return unauthorized();
+    }
+    let q = match backlog_model::Query::from_pairs(&raw) {
+        Ok(q) => q,
+        Err(msg) => return plain_status(StatusCode::BAD_REQUEST, &msg),
+    };
+    let inputs = model_inputs(&st).await;
+    json_response(&backlog_model::board(&inputs, &q))
+}
+
+/// `GET /backlog/node.json?id=<id>`: one node's answer behind the token.
+async fn backlog_node(
+    Query(raw): Query<HashMap<String, String>>,
+    State(st): State<AppState>,
+) -> Response {
+    if !token_ok(raw.get("t").map(String::as_str), &st.token) {
+        return unauthorized();
+    }
+    let Some(id) = raw.get("id").filter(|s| !s.is_empty()) else {
+        return plain_status(StatusCode::BAD_REQUEST, "id is required");
+    };
+    let inputs = model_inputs(&st).await;
+    node_response(&inputs, id)
+}
+
+/// The pure half of `/backlog/node.json`: 503 on a failed source read, 404
+/// when the read holds no such node, 200 with the body otherwise.
+fn node_response(inputs: &backlog_model::Inputs, id: &str) -> Response {
+    if let Some(err) = &inputs.rows_error {
+        return plain_status(StatusCode::SERVICE_UNAVAILABLE, err);
+    }
+    match backlog_model::node(inputs, id) {
+        Some(view) => json_response(&view),
+        None => plain_status(StatusCode::NOT_FOUND, &format!("no node {id}")),
+    }
+}
+
+fn plain_status(status: StatusCode, body: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+fn json_response<T: serde::Serialize>(v: &T) -> Response {
+    match serde_json::to_vec(v) {
+        Ok(body) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(e) => plain_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("model serialization failed: {e}"),
+        ),
+    }
+}
+
+/// True when an HTTP authority names the loopback interface: `localhost`,
+/// a loopback `IpAddr`, or either with a port, IPv6 bracketed or not.
+fn names_loopback(authority: &str) -> bool {
+    if let Ok(ip) = authority.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The ruling's write guards, in order: the bridge must be bound to
+/// loopback, the request's Host must name loopback (DNS-rebinding guard),
+/// and the Origin header, when the browser sent one, must be an http URL
+/// on loopback (cross-site guard; the value `null` included). Host must
+/// always pass; Origin only when sent.
+fn write_guard(headers: &HeaderMap, writable: bool) -> Result<(), (StatusCode, String)> {
+    if !writable {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "the bridge is read-only: it is not bound to loopback".into(),
+        ));
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| names_loopback(h));
+    if host.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "write refused: Host does not name loopback".into(),
+        ));
+    }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+        let ok = origin.strip_prefix("http://").is_some_and(names_loopback);
+        if !ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "write refused: Origin does not name loopback".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One backlog act the page can request.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "act", rename_all = "snake_case")]
+enum Act {
+    Field {
+        id: String,
+        field: String,
+        value: String,
+    },
+    Rank {
+        id: String,
+        place: String,
+    },
+    Blueprint {
+        id: String,
+    },
+    Target {
+        id: String,
+    },
+}
+
+impl Act {
+    fn id(&self) -> &str {
+        match self {
+            Act::Field { id, .. }
+            | Act::Rank { id, .. }
+            | Act::Blueprint { id }
+            | Act::Target { id } => id,
+        }
+    }
+}
+
+/// What a planned act runs: a backlog verb's argv through
+/// [`crate::backlog_write::run_verb`], or a launch through
+/// [`crate::server::agent_launch::run_dispatch_one`].
+#[derive(Debug)]
+enum Planned {
+    Verb(Vec<String>),
+    Dispatch { plan: bool },
+}
+
+/// The pure half of `POST /backlog/act`: 503 on a failed source read, 404
+/// when the read holds no such node, 409 when the card's backend cannot
+/// answer the act or the node is already being worked, 400 on a bad field
+/// value, else the planned argv or launch.
+fn plan_act(inputs: &backlog_model::Inputs, act: &Act) -> Result<Planned, (StatusCode, String)> {
+    if let Some(err) = &inputs.rows_error {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, err.clone()));
+    }
+    let id = act.id();
+    let Some(view) = backlog_model::node(inputs, id) else {
+        return Err((StatusCode::NOT_FOUND, format!("no node {id}")));
+    };
+    let unavailable = |feature: &str| {
+        view.unavailable
+            .iter()
+            .find(|u| u.feature == feature)
+            .map(|u| u.reason.clone())
+    };
+    match act {
+        Act::Field { field, value, .. } => {
+            if let Some(reason) = unavailable(backlog_model::unavailable_features::FIELD_EDITS) {
+                return Err((StatusCode::CONFLICT, reason));
+            }
+            let field = match field.as_str() {
+                "title" => crate::backlog_write::Field::Title,
+                "priority" => crate::backlog_write::Field::Priority,
+                "size" => crate::backlog_write::Field::Size,
+                "status" => crate::backlog_write::Field::Status,
+                other => return Err((StatusCode::BAD_REQUEST, format!("unknown field {other:?}"))),
+            };
+            crate::backlog_write::field_argv(id, field, value, "the web backlog board")
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))
+                .map(Planned::Verb)
+        }
+        Act::Rank { place, .. } => {
+            if let Some(reason) = unavailable(backlog_model::unavailable_features::CARD_MOVES) {
+                return Err((StatusCode::CONFLICT, reason));
+            }
+            let place = match place.as_str() {
+                "top" => crate::backlog_write::Place::Top,
+                "bottom" => crate::backlog_write::Place::Bottom,
+                other => return Err((StatusCode::BAD_REQUEST, format!("unknown place {other:?}"))),
+            };
+            crate::backlog_write::rank_argv(id, place, None)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))
+                .map(Planned::Verb)
+        }
+        Act::Blueprint { .. } | Act::Target { .. } => {
+            if view.card.claimed || view.card.live {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("{id} is already being worked; open its session instead"),
+                ));
+            }
+            Ok(Planned::Dispatch {
+                plan: matches!(act, Act::Blueprint { .. }),
+            })
+        }
+    }
+}
+
+/// The effect half of `POST /backlog/act`: a planned verb argv runs through
+/// the shared shell-out; a launch runs the mux's own dispatch door and
+/// carries its notice back. The launch arm's ok fact is `true`: the door
+/// reports refusals through its notice text.
+async fn run_planned(st: &AppState, id: &str, planned: Planned) -> (bool, String) {
+    match planned {
+        Planned::Verb(argv) => crate::backlog_write::run_verb(&argv, None).await,
+        Planned::Dispatch { plan } => {
+            let notice =
+                crate::server::agent_launch::run_dispatch_one(&st.session, Some(id), None, plan)
+                    .await;
+            (true, notice)
+        }
+    }
+}
+
+/// The 200 body: the verb's exit fact and its own last line.
+fn act_response(ok: bool, notice: &str) -> Response {
+    json_response(&serde_json::json!({ "ok": ok, "notice": notice }))
+}
+
+/// `POST /backlog/act?t=<token>`: guards, then the pure plan, then the
+/// effect. The guard order is the ruling's: loopback bind, loopback Host,
+/// loopback Origin when sent, then the token.
+async fn backlog_act(
+    Query(q): Query<WsQuery>,
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Act>,
+) -> Response {
+    if let Err((code, msg)) = write_guard(&headers, st.writable) {
+        return plain_status(code, &msg);
+    }
+    if !token_ok(q.t.as_deref(), &st.token) {
+        return unauthorized();
+    }
+    let id = body.id().to_string();
+    let inputs = model_inputs(&st).await;
+    let planned = match plan_act(&inputs, &body) {
+        Ok(p) => p,
+        Err((code, msg)) => return plain_status(code, &msg),
+    };
+    let (ok, notice) = run_planned(&st, &id, planned).await;
+    act_response(ok, &notice)
+}
+
+/// The gathered inputs, cached under [`backlog_model::REGATHER_AFTER`] while
+/// the store version holds; the lock is held for the whole call so one
+/// gather runs at a time. A gather with a failed source read is returned
+/// uncached, so the next request retries it.
+async fn model_inputs(st: &AppState) -> Arc<backlog_model::Inputs> {
+    let mut cached = st.model.lock().await;
+    if let Some(c) = cached.as_ref() {
+        if c.at.elapsed() < backlog_model::REGATHER_AFTER {
+            let moved = match c.version {
+                // An external backend has no version: age alone gates it.
+                None => false,
+                Some(v) => {
+                    let graph = crate::backlog_view::graph_path();
+                    tokio::task::spawn_blocking(move || crate::store_client::version(&graph))
+                        .await
+                        .map(|r| r.ok() != Some(v))
+                        .unwrap_or(true)
+                }
+            };
+            if !moved {
+                return c.inputs.clone();
+            }
+        }
+    }
+    let (agents, roster_error) = match layout_agents(&st.snap) {
+        Some(agents) => (agents, None),
+        None => (
+            Vec::new(),
+            Some("no agent roster yet; live, king and session actions are unknown".to_string()),
+        ),
+    };
+    let graph = crate::backlog_view::graph_path();
+    let mut inputs = backlog_model::gather(&graph, agents).await;
+    if inputs.rows_error.is_some() {
+        return Arc::new(inputs);
+    }
+    if let Some(e) = roster_error {
+        inputs.errors.push(e);
+    }
+    let version = inputs.version;
+    let inputs = Arc::new(inputs);
+    *cached = Some(CachedModel {
+        version,
+        at: Instant::now(),
+        inputs: inputs.clone(),
+    });
+    inputs
+}
+
+/// The roster from the snapshot's last `Layout` JSON
+/// (`{"Layout": {"agents": [...]}}`). `None` when no layout has arrived yet.
+fn layout_agents(snap: &Arc<Mutex<Snapshot>>) -> Option<Vec<proto::AgentRow>> {
+    let guard = snap.lock().unwrap();
+    let text = guard.layout.as_ref()?;
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let agents = v.get("Layout")?.get("agents")?.as_array()?;
+    Some(
+        agents
+            .iter()
+            .filter_map(|a| serde_json::from_value(a.clone()).ok())
+            .collect(),
+    )
+}
+
 /// Which page the bridge serves; the shared nav fragment marks the current
 /// one so a reader always knows where they are.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -959,6 +1358,7 @@ enum NavPage {
     Live,
     Backlog,
     Crown,
+    Fleet,
 }
 
 fn token_ok(supplied: Option<&str>, expected: &str) -> bool {
@@ -1061,6 +1461,7 @@ fn nav_fragment(current: NavPage) -> String {
         NavPage::Live => "live",
         NavPage::Backlog => "backlog",
         NavPage::Crown => "crown",
+        NavPage::Fleet => "fleet",
     };
     let link = |p: NavPage| {
         if p == current {
@@ -1091,7 +1492,7 @@ fn nav_fragment(current: NavPage) -> String {
          min-height:30px;padding:0 4px;border-bottom:2px solid transparent}}\
          nav.fno-nav a[aria-current=\"page\"]{{color:#fff;border-bottom-color:#c99b45}}\
          nav.fno-nav a:hover{{color:#fff}}{controls}</style>\
-         {}{}{}\
+         {}{}{}{}\
          <script>(function(){{var nav=document.querySelector(\"nav.fno-nav\");if(!nav)return;\
          var p=location.pathname,base;\
          if(nav.dataset.current===\"live\"){{base=p.endsWith(\"/\")?p:p+\"/\";}}\
@@ -1106,11 +1507,12 @@ fn nav_fragment(current: NavPage) -> String {
         link(NavPage::Live),
         link(NavPage::Backlog),
         link(NavPage::Crown),
+        link(NavPage::Fleet),
     )
 }
 
 /// Insert the nav fragment right after the first `<body ...>` tag (ASCII
-/// case-insensitive; graph.html opens with `<body data-local="true">`).
+/// case-insensitive; a served page opens with `<body data-local="true">`).
 /// With no body tag at all, prepend.
 fn with_nav(html: &str, current: NavPage) -> String {
     let fragment = nav_fragment(current);
@@ -1131,7 +1533,17 @@ fn with_nav(html: &str, current: NavPage) -> String {
     injected
 }
 
-async fn backlog_response(
+/// The one 401 body, shared by every token-gated route.
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "invalid or missing token",
+    )
+        .into_response()
+}
+
+async fn private_page_response(
     path: &Path,
     supplied: Option<&str>,
     expected: &str,
@@ -1139,12 +1551,7 @@ async fn backlog_response(
     nav: NavPage,
 ) -> Response {
     if !token_ok(supplied, expected) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "invalid or missing token",
-        )
-            .into_response();
+        return unauthorized();
     }
     match std::fs::read_to_string(path) {
         Ok(body) => (
@@ -1165,7 +1572,7 @@ async fn backlog_response(
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("backlog unreadable: {err}"),
+            format!("page unreadable: {err}"),
         )
             .into_response(),
     }
@@ -1291,6 +1698,107 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_agents_parses_the_snapshot_layout() {
+        let layout = serde_json::json!({
+            "Layout": {
+                "agents": [{
+                    "squad": null, "name": "w1", "pane_id": null,
+                    "badge": null, "reason": null, "exited": false,
+                    "harness_session_id": "s1"
+                }]
+            }
+        });
+        let mut snap = Snapshot::default();
+        snap.layout = Some(layout.to_string());
+        let snap = Arc::new(Mutex::new(snap));
+        let agents = layout_agents(&snap).expect("the layout parses");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "w1");
+        // No layout yet: None, never an empty roster that reads as truth.
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        assert!(layout_agents(&snap).is_none());
+    }
+
+    #[test]
+    fn node_response_maps_read_failure_miss_and_hit() {
+        // AC17-ERR: a failed source read is 503, never 404.
+        let mut inp = backlog_model::fixture(Vec::new());
+        inp.rows_error = Some("the store read failed".into());
+        let status = node_response(&inp, "x-1").status();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // Miss: 404 naming the id.
+        let inp = backlog_model::fixture(Vec::new());
+        let status = node_response(&inp, "x-nope").status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Hit: 200 with the card's id in the body.
+        let inp = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-1", "status": "ready", "priority": "p1"
+        })]);
+        let response = node_response(&inp, "x-1");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn backlog_json_routes_refuse_bad_tokens_and_queries() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // AC9-ERR: no token, 401 on both routes, before any store read.
+        stream
+            .write_all(b"GET /backlog/model.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        assert!(reply.contains("invalid or missing token"), "{reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /backlog/node.json?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400"), "no id: {reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /backlog/model.json?t=right&lanes=sideways HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400"), "bad lanes: {reply}");
+        assert!(reply.contains("unknown lanes"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn constant_time_eq_matches_only_identical_bytes() {
@@ -1426,12 +1934,12 @@ mod tests {
     /// inside a string or comment in the lifted functions) and is the ceiling:
     /// a future `"{"` inside one of them would cut the slice short, and the
     /// node run then fails loudly on a syntax error rather than passing.
-    fn lift_js_fn(name: &str) -> String {
+    fn lift_js_fn(src: &str, name: &str) -> String {
         let head = format!("function {name}(");
-        let start = PAGE
+        let start = src
             .find(&head)
             .unwrap_or_else(|| panic!("the served page defines {name}()"));
-        let rest = &PAGE[start..];
+        let rest = &src[start..];
         let open = rest.find('{').expect("a function body opens");
         let mut depth = 0usize;
         for (i, c) in rest[open..].char_indices() {
@@ -1527,8 +2035,8 @@ console.log("evictedRowCount: 18 cases ok");
             PAGE.lines()
                 .find(|l| l.contains("const MAX_FIXED_TAIL"))
                 .expect("the page bounds the fixed tail it looks past"),
-            lift_js_fn("scrollWithin"),
-            lift_js_fn("evictedRowCount"),
+            lift_js_fn(PAGE, "scrollWithin"),
+            lift_js_fn(PAGE, "evictedRowCount"),
             asserts
         );
         let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
@@ -1626,74 +2134,163 @@ console.log("evictedRowCount: 18 cases ok");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
     }
 
+    /// The route serves the vendored page behind the token, from a state
+    /// root with no graph.html in it: the page is built in, so no render
+    /// step exists to run first, and no 404 can name one.
     #[tokio::test]
-    async fn backlog_requires_token_and_serves_private_file_without_cache() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-backlog-{}-serve", std::process::id()));
+    async fn router_serves_backlog_page_with_token_and_shared_nav() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-backlog-{}-page", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("graph.html");
-        std::fs::write(&path, "PRIVATE-BACKLOG-MARKER").unwrap();
-        let response = backlog_response(
-            &path,
-            Some("right"),
-            "right",
-            "fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
-
-        let denied = backlog_response(
-            &path,
-            Some("wrong"),
-            "right",
-            "fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
-        let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("cache-control: no-store"), "{reply}");
+        assert!(reply.contains("data-current=\"backlog\""), "{reply}");
+        assert!(reply.contains("default-src 'none'"), "{reply}");
+        assert!(reply.contains("backlog/model.json"), "{reply}");
+        assert!(!reply.contains("fno backlog view"), "{reply}");
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        assert!(reply.contains("invalid or missing token"), "{reply}");
+        server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn missing_backlog_names_the_render_action() {
-        let dir =
-            std::env::temp_dir().join(format!("fno-web-backlog-{}-missing", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(
-            &dir.join("graph.html"),
-            Some("right"),
-            "right",
-            "FNO_NO_OPEN=1 fno backlog view",
-            NavPage::Backlog,
-        )
-        .await;
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("FNO_NO_OPEN=1 fno backlog view"));
-        let _ = std::fs::remove_dir_all(&dir);
+    /// One HTML sink fed from the model is script injection on a page that
+    /// holds the operator's token: node titles, details, notes and decisions
+    /// are free text any session writes. The page must therefore never build
+    /// HTML from data at all.
+    #[test]
+    fn backlog_page_writes_no_html_from_data() {
+        for sink in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ] {
+            assert!(
+                !BACKLOG_PAGE.contains(sink),
+                "the backlog page must not build HTML from data via {sink}"
+            );
+        }
+        assert!(
+            BACKLOG_PAGE.contains("connect-src 'self'"),
+            "the page fetches only same-origin JSON"
+        );
+        assert!(
+            BACKLOG_PAGE.contains(r#"class="controls""#),
+            "the filter bar keeps the controls class the nav offset targets"
+        );
+    }
+
+    /// The three pure helpers must hold their contracts when run for real,
+    /// not when re-implemented in Rust: lift them from the shipped page and
+    /// run the cases under node (same rule as evicted_row_count above).
+    #[test]
+    fn backlog_page_helpers_hold_under_node() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (got !== want) { console.error("FAIL " + what + ": got " + got + ", want " + want); process.exit(1); }
+};
+// cellHead: "<column> <total>"
+eq(cellHead({column: "Now", total: 12}), "Now 12", "cell head");
+// laneTotal: the lane's whole count from its cells' (uncapped) totals.
+eq(laneTotal({cells: [{total: 3}, {total: 4}, {}]}), 7, "lane total");
+// sessionCommand: attach by agent name, resume by the FULL session id, null when dim.
+eq(sessionCommand({action: "attach", agent: "w1"}), "fno agents attach w1", "attach cmd");
+eq(sessionCommand({action: "resume", session_id: "abcd1234-full-id"}),
+   "fno agents resume abcd1234-full-id", "resume cmd carries the full id");
+eq(sessionCommand({action: "none", reason: "done"}), null, "dim row has no command");
+// mergeBoard: an errors-only answer keeps the last lanes and stamps staleness.
+const last = {lanes: [{key: "p"}], fetched_at: 111};
+const bad = mergeBoard(last, {errors: ["boom"], lanes: []}, 222);
+eq(bad.lanes.length, 1, "errors-only keeps the last lanes");
+eq(bad.stale_since, 111, "stale_since names the kept board fetch time");
+eq(bad.errors[0], "boom", "the error lines carry");
+eq(bad.fetched_at, 111, "the kept board keeps its fetch time");
+// A good answer is taken whole, stamped with its own fetch time.
+const good = mergeBoard(last, {errors: [], lanes: [{key: "q"}]}, 333);
+eq(good.lanes.length, 1, "a good answer lanes carry");
+eq(good.errors.length, 0, "a good answer clears the errors");
+eq(good.fetched_at, 333, "a good answer is stamped at its fetch time");
+console.log("backlog page helpers: 12 cases ok");
+"#;
+        let src = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            lift_js_fn(BACKLOG_PAGE, "cellHead"),
+            lift_js_fn(BACKLOG_PAGE, "laneTotal"),
+            lift_js_fn(BACKLOG_PAGE, "mergeBoard"),
+            lift_js_fn(BACKLOG_PAGE, "sessionCommand"),
+            asserts
+        );
+        let path =
+            std::env::temp_dir().join(format!("fno-backlog-helpers-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                // On CI a missing node means the assertions never ran, and a
+                // skip that reads as a pass is exactly the failure to prevent.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped backlog helpers: {e}"
+                );
+                println!(
+                    "SKIPPED backlog_page_helpers_hold_under_node: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                // The end-of-harness marker is the whole verdict.
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                assert!(
+                    stdout.contains("backlog page helpers: 12 cases ok"),
+                    "the shipped backlog helpers did not clear every case:\n{}{}",
+                    stdout,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+        }
     }
 
     #[test]
     fn page_serves_the_shared_nav_not_absolute_links() {
         assert!(!PAGE.contains("\"/backlog?t="));
         assert!(!PAGE.contains("\"/crown?t="));
+        assert!(!PAGE.contains("\"/fleet?t="));
         assert!(!PAGE.contains("${location.host}/ws"));
         assert!(PAGE.contains("<!--fno-nav-->"));
         assert!(PAGE.contains("const base = document.querySelector(\"nav.fno-nav\").dataset.base;"));
@@ -1706,6 +2303,7 @@ console.log("evictedRowCount: 18 cases ok");
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
             (NavPage::Crown, "crown"),
+            (NavPage::Fleet, "fleet"),
         ] {
             let frag = nav_fragment(page);
             // The CSS selector also names the attribute; count the link tags.
@@ -1737,15 +2335,7 @@ console.log("evictedRowCount: 18 cases ok");
         assert!(nav_fragment(NavPage::Backlog).contains(".controls{top:var(--fno-nav-h)}"));
         assert!(!nav_fragment(NavPage::Live).contains(".controls"));
         assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
-    }
-
-    #[test]
-    fn backlog_html_follows_state_root_not_graph_json_override() {
-        let state = Path::new("/configured/state");
-        assert_eq!(
-            graph_html_path_from_state_root(state),
-            PathBuf::from("/configured/state/graph.html")
-        );
+        assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
 
     #[tokio::test]
@@ -1755,7 +2345,7 @@ console.log("evictedRowCount: 18 cases ok");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("reign.html");
         std::fs::write(&path, "<body><p>PRIVATE-CROWN-MARKER</p></body>").unwrap();
-        let response = backlog_response(
+        let response = private_page_response(
             &path,
             Some("right"),
             "right",
@@ -1775,7 +2365,7 @@ console.log("evictedRowCount: 18 cases ok");
         // The served crown page carries the shared nav (inserted after <body>).
         let text = String::from_utf8_lossy(&body).to_string();
         assert!(text.contains("nav class=\"fno-nav\" data-current=\"crown\""));
-        let denied = backlog_response(
+        let denied = private_page_response(
             &path,
             Some("wrong"),
             "right",
@@ -1797,7 +2387,7 @@ console.log("evictedRowCount: 18 cases ok");
             std::env::temp_dir().join(format!("fno-web-crown-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(
+        let response = private_page_response(
             &dir.join("reign.html"),
             Some("right"),
             "right",
@@ -1853,6 +2443,81 @@ console.log("evictedRowCount: 18 cases ok");
             reign_html_path_from_state_root(state),
             PathBuf::from("/configured/state/reign.html")
         );
+    }
+
+    #[test]
+    fn fleet_html_follows_state_root_beside_graph_json() {
+        let state = Path::new("/configured/state");
+        assert_eq!(
+            fleet_html_path_from_state_root(state),
+            PathBuf::from("/configured/state/fleet.html")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_fleet_names_the_daemon_arm() {
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-fleet-{}-missing", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let response = private_page_response(
+            &dir.join("fleet.html"),
+            Some("right"),
+            "right",
+            "the fno-agents daemon; its fleet_page arm writes fleet.html every 30 minutes",
+            NavPage::Fleet,
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("fleet_page"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn router_serves_fleet_with_token_and_shared_nav() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-fleet-{}-route", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fleet_path = dir.join("fleet.html");
+        std::fs::write(&fleet_path, "<html><body>FLEET-MARKER</body></html>").unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: fleet_path,
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /fleet?t=right HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("cache-control: no-store"), "{reply}");
+        assert!(reply.contains("data-current=\"fleet\""), "{reply}");
+        assert!(reply.contains("FLEET-MARKER"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tiny_frame() -> proto::Frame {
@@ -2082,6 +2747,295 @@ console.log("evictedRowCount: 18 cases ok");
         .unwrap();
         assert_eq!(status_web("t", &socket), 1);
         assert!(state.exists(), "status is a read door: it never deletes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn names_loopback_accepts_only_the_loopback_names() {
+        for good in [
+            "localhost",
+            "localhost:8722",
+            "127.0.0.1",
+            "127.0.0.1:8722",
+            "[::1]",
+            "[::1]:8722",
+            "::1",
+        ] {
+            assert!(names_loopback(good), "{good} is loopback");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:8722",
+            "127.0.0.1.example",
+            "0.0.0.0",
+            "0.0.0.0:8722",
+            "[::]",
+            "null",
+        ] {
+            assert!(!names_loopback(bad), "{bad} is not loopback");
+        }
+    }
+
+    // The ruling's guard order: loopback bind, loopback Host, loopback
+    // Origin when sent. The token gate sits after these in the handler.
+    #[test]
+    fn write_guard_refuses_in_ruling_order() {
+        use axum::http::{header, HeaderMap};
+        let mut h = HeaderMap::new();
+        // AC6-ERR: a non-loopback bind is read-only, every request refused.
+        let err = write_guard(&h, false).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            err.1,
+            "the bridge is read-only: it is not bound to loopback"
+        );
+        // Host must always name loopback.
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Host does not name loopback");
+        h.insert(header::HOST, "evil.example:8722".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Host does not name loopback");
+        h.insert(header::HOST, "127.0.0.1:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok(), "no Origin header: pass");
+        // AC5-ERR: an Origin that names another site is refused; `null` too.
+        h.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Origin does not name loopback");
+        h.insert(header::ORIGIN, "null".parse().unwrap());
+        let err = write_guard(&h, true).unwrap_err();
+        assert_eq!(err.1, "write refused: Origin does not name loopback");
+        h.insert(header::ORIGIN, "http://127.0.0.1:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok());
+        h.insert(header::ORIGIN, "http://localhost:8722".parse().unwrap());
+        assert!(write_guard(&h, true).is_ok());
+    }
+
+    // AC4, AC9, AC10, and the 503/404/400 map of the pure half.
+    #[test]
+    fn plan_act_maps_errors_and_plans_the_argv() {
+        let inp = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-1", "status": "ready", "priority": "p1"
+        })]);
+        // AC4's argv half: a priority act plans the field_argv form.
+        let act = Act::Field {
+            id: "x-1".into(),
+            field: "priority".into(),
+            value: "p1".into(),
+        };
+        match plan_act(&inp, &act) {
+            Ok(Planned::Verb(args)) => {
+                assert_eq!(args, vec!["backlog", "update", "x-1", "--priority", "p1"]);
+            }
+            _ => panic!("a field act plans a verb argv"),
+        }
+        // AC9-EDGE: a claimed card refuses a launch, naming the node.
+        let claimed = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-2", "status": "in_progress"
+        })]);
+        let err = plan_act(&claimed, &Act::Blueprint { id: "x-2".into() }).unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(
+            err.1,
+            "x-2 is already being worked; open its session instead"
+        );
+        // AC10-ERR: an external backend's field-edits reason is the 409 body.
+        let mut github = backlog_model::fixture(vec![serde_json::json!({
+            "id": "x-3", "status": "ready"
+        })]);
+        github.backend = "github".into();
+        let err = plan_act(
+            &github,
+            &Act::Field {
+                id: "x-3".into(),
+                field: "status".into(),
+                value: "done".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1, "edit it in github");
+        // A failed read is 503; a miss is 404 naming the id; a bad field is
+        // 400.
+        let mut bad = backlog_model::fixture(Vec::new());
+        bad.rows_error = Some("the store read failed".into());
+        assert_eq!(
+            plan_act(&bad, &Act::Target { id: "x-1".into() })
+                .unwrap_err()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            plan_act(
+                &inp,
+                &Act::Target {
+                    id: "x-nope".into()
+                }
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let err = plan_act(
+            &inp,
+            &Act::Field {
+                id: "x-1".into(),
+                field: "color".into(),
+                value: "blue".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    // The route's refusal order over a real listener: guards, token, then
+    // the JSON extractor. No store read happens in any refusal, so the test
+    // never gathers.
+    #[tokio::test]
+    async fn act_route_refusals_come_in_ruling_order() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-act-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(router_state)).await.unwrap();
+        });
+        async fn post(stream: &mut tokio::net::TcpStream, head: &str, body: &[u8]) -> String {
+            stream.write_all(head.as_bytes()).await.unwrap();
+            if !body.is_empty() {
+                stream.write_all(body).await.unwrap();
+            }
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            reply
+        }
+        let body = br#"{"act":"field","id":"x-1","field":"priority","value":"p1"}"#;
+        // AC6-ERR: a read-only bridge refuses every act.
+        let readonly_state = AppState {
+            writable: false,
+            ..state.clone()
+        };
+        let ro_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ro_addr = ro_listener.local_addr().unwrap();
+        let ro_server = tokio::spawn(async move {
+            axum::serve(ro_listener, router(readonly_state))
+                .await
+                .unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(ro_addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", ro_addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(reply.contains("the bridge is read-only"), "{reply}");
+        ro_server.abort();
+        // AC7-ERR: wrong token, 401.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=wrong HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+        // AC5-ERR: an evil Origin or a rebinding Host, 403 and no process.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: https://evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(
+            reply.contains("write refused: Origin does not name loopback"),
+            "{reply}"
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: evil.example:9\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(
+            reply.contains("write refused: Host does not name loopback"),
+            "{reply}"
+        );
+        // A non-JSON content type is refused by the extractor before the
+        // handler: 415.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let reply = post(&mut stream,
+            &format!("POST /backlog/act?t=right HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", addr.port(), body.len()),
+            body).await;
+        assert!(reply.starts_with("HTTP/1.1 415"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC6's page half: the act controls exist only on a writing bridge.
+    #[tokio::test]
+    async fn backlog_page_flags_writability() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-flag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(router_state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.contains("data-writable=\"true\""), "{reply}");
+        server.abort();
+        // The read-only state: no flag anywhere in the page.
+        let ro_state = AppState {
+            writable: false,
+            ..state.clone()
+        };
+        let ro_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ro_addr = ro_listener.local_addr().unwrap();
+        let ro_server = tokio::spawn(async move {
+            axum::serve(ro_listener, router(ro_state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(ro_addr).await.unwrap();
+        stream
+            .write_all(b"GET /backlog?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(!reply.contains("data-writable"), "{reply}");
+        ro_server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

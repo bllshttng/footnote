@@ -85,7 +85,10 @@ pub struct TruthProbe {
 }
 
 fn family1_truth_command(handle: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("fno");
+    // FNO_BIN-aware (the same override scrape's callers honor); the cargo
+    // test job puts the checkout front on PATH, because a bare "fno" has
+    // no PATH leg in that environment and every probe ENOENTs.
+    let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
@@ -115,8 +118,49 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // fast-failing spawn per affected row, and the second attempt always keeps
     // its WARN, so a stuck probe is loud rather than silent.
     // No deadline: nobody handed this probe a budget, so the latch wait is not
-    // taken out of its attempts. Five seconds each, as it has always had.
-    family1_truth_latched(handle, Duration::from_secs(5), None)
+    // taken out of its attempts. The bound is the batch's one-handle bound
+    // (change 1): the batch bound is funded by measurement, the old
+    // 5 s figure never was, and the wrong handle once walked the transcript
+    // store 15-24 s per row against it. A test pins the relationship so the
+    // two cannot drift apart.
+    family1_truth_latched(handle, family1_truth_batch_timeout(1), None)
+}
+
+/// The bounded drain for an EXITED child whose pipes may still be held by a
+/// grandchild: both pipes are read to EOF on their own threads, the bytes
+/// come back over a channel rather than a join (a join is its own unbounded
+/// wait - a grandchild inherits the fds and outlives the child), and `grace`
+/// bounds that wait. Returns the lossy-UTF-8 texts of stdout and stderr,
+/// trimmed, for the removal cascade to fold into its refusal.
+pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> String {
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
+    let out = out_rx.recv_timeout(grace).unwrap_or_default();
+    let err = err_rx.recv_timeout(grace).unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&out);
+    let stderr = String::from_utf8_lossy(&err);
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => "stderr and stdout were both empty".to_string(),
+        (true, false) => stderr.trim().to_string(),
+        (false, true) => stdout.trim().to_string(),
+        (false, false) => format!("stderr: {}; stdout: {}", stderr.trim(), stdout.trim()),
+    }
 }
 
 /// One `fno agents truth <handle>` in flight per handle, machine-wide.
@@ -700,6 +744,17 @@ pub enum BatchOutcome {
 pub fn family1_truth_probe_many_measured(
     handles: &[String],
 ) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
+    family1_truth_probe_many_measured_within(handles, None)
+}
+
+/// [`family1_truth_probe_many_measured`] under a caller's deadline: each
+/// page's timeout is capped by what remains, and a page reached after the
+/// deadline returns [`BatchOutcome::NotMeasured`] without spawning. `None`
+/// keeps today's self-chosen page bounds.
+pub fn family1_truth_probe_many_measured_within(
+    handles: &[String],
+    deadline: Option<Instant>,
+) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
     // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
     // put on the wire: the reader would split it into two handles that match
     // no row, and that row would go unanswered on every list, silently and
@@ -713,20 +768,25 @@ pub fn family1_truth_probe_many_measured(
         .cloned()
         .partition(|h| is_truth_batchable_handle(h));
     let (mut probes, timed_out) = truth_pages(&batchable, TRUTH_BATCH_PAGE, |page| {
-        family1_truth_probe_batchable(page)
+        family1_truth_probe_batchable_within(page, deadline)
     });
     // A comma handle whose single probe did not answer is the same fact the
     // batchable leg's `timed_out` carries: the instrument never produced a
     // reading for that handle. Fold it into the page outcome, so the row words
     // `unmeasured` instead of publishing the `no-evidence` verdict a clean
-    // page earns.
+    // page earns. A spent deadline answers the same way without spawning:
+    // the fallback probes each carry their own 5s bound.
     let mut fallback_unanswered = false;
-    for handle in unrepresentable {
-        match family1_truth_probe(&handle) {
-            Some(probe) => {
-                probes.insert(handle, probe);
+    if page_bound(Duration::from_secs(5), deadline, Instant::now()).is_none() {
+        fallback_unanswered = unrepresentable.len() > 0;
+    } else {
+        for handle in unrepresentable {
+            match family1_truth_probe(&handle) {
+                Some(probe) => {
+                    probes.insert(handle, probe);
+                }
+                None => fallback_unanswered = true,
             }
-            None => fallback_unanswered = true,
         }
     }
     let outcome = page_outcome(timed_out, fallback_unanswered);
@@ -773,11 +833,15 @@ fn page_outcome(batchable_timed_out: bool, fallback_unanswered: bool) -> BatchOu
 
 /// The batchable leg's answer plus whether its run timed out (`false` when the
 /// batch answered, or when the double-crash fallback probed each handle
-/// itself - that fallback is a real measurement, never a timeout).
-fn family1_truth_probe_batchable(
+/// itself - that fallback is a real measurement, never a timeout). Under a
+/// caller's deadline: the page's self-chosen bound is capped by what remains
+/// of it, and a page reached after the deadline answers unmeasured with
+/// nothing spawned.
+fn family1_truth_probe_batchable_within(
     handles: &[String],
+    deadline: Option<Instant>,
 ) -> (std::collections::HashMap<String, TruthProbe>, bool) {
-    match family1_truth_batch_latched(handles) {
+    match family1_truth_batch_latched(handles, deadline) {
         Some((probes, timed_out)) => (probes, timed_out),
         None => {
             eprintln!(
@@ -805,11 +869,21 @@ fn family1_truth_probe_batchable(
 /// answer rather than starting a second batch.
 fn family1_truth_batch_latched(
     handles: &[String],
+    deadline: Option<Instant>,
 ) -> Option<(std::collections::HashMap<String, TruthProbe>, bool)> {
     if handles.is_empty() {
         return Some((std::collections::HashMap::new(), false));
     }
-    let timeout = family1_truth_batch_timeout(handles.len());
+    // A deadline already spent answers "never measured" with nothing spawned:
+    // the page's self-chosen bound would otherwise run the batch to the full
+    // 20s-to-60s timeout whatever the caller could still afford.
+    let Some(timeout) = page_bound(
+        family1_truth_batch_timeout(handles.len()),
+        deadline,
+        Instant::now(),
+    ) else {
+        return Some((std::collections::HashMap::new(), true));
+    };
     let key = single_flight::flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
     let mut own: Option<Option<TruthBatchAttempt>> = None;
     // The latch wait is NOT subtracted here, unlike the single probe: this
@@ -858,6 +932,59 @@ fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const PER_HANDLE: Duration = Duration::from_millis(750);
     const CEILING: Duration = Duration::from_secs(60);
     std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
+}
+
+/// The bound one page may run under: the caller's deadline capped by the
+/// batch's own timeout, `None` once the deadline is spent. Pure in `now` so
+/// the arithmetic is testable without a race.
+fn page_bound(base: Duration, deadline: Option<Instant>, now: Instant) -> Option<Duration> {
+    match deadline {
+        None => Some(base),
+        Some(d) => {
+            let left = d.saturating_duration_since(now);
+            if left.is_zero() {
+                None
+            } else {
+                Some(left.min(base))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_bound_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_bound_caps_by_deadline_and_refuses_a_spent_one() {
+        let now = Instant::now();
+        // No deadline: the batch keeps its self-chosen bound.
+        assert_eq!(
+            page_bound(Duration::from_secs(20), None, now),
+            Some(Duration::from_secs(20))
+        );
+        // A deadline 2s out caps a 20s batch to 2s.
+        let bound = page_bound(
+            Duration::from_secs(20),
+            Some(now + Duration::from_secs(2)),
+            now,
+        )
+        .expect("future deadline");
+        assert!(
+            bound <= Duration::from_secs(2) && bound > Duration::from_secs(1),
+            "{bound:?}"
+        );
+        // A deadline already past is spent: nothing may spawn.
+        assert_eq!(page_bound(Duration::from_secs(20), Some(now), now), None);
+        assert_eq!(
+            page_bound(
+                Duration::from_secs(20),
+                Some(now - Duration::from_secs(5)),
+                now
+            ),
+            None
+        );
+    }
 }
 
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
@@ -1864,5 +1991,16 @@ mod tests {
         // A non-JSON stdout (e.g. a crashed probe) falls back to the stderr tail.
         let detail = family1_truth_failure_detail(b"not json", "  banner  ");
         assert_eq!(detail, "banner");
+    }
+
+    // change 1: the single probe's bound rides the batch's one-handle
+    // bound, never below it - the batch bound is the one funded by
+    // measurement, and the old flat 5 s was not.
+    #[test]
+    fn the_single_probe_bound_is_never_below_the_batch_one_handle_bound() {
+        assert!(
+            family1_truth_batch_timeout(1) >= std::time::Duration::from_secs(20),
+            "the single probe's bound must track the batch's one-handle bound"
+        );
     }
 }

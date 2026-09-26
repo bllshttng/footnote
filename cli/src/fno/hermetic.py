@@ -72,11 +72,6 @@ _AMBIENT_PREFIXES = ("FNO_", "TARGET_")
 # is already derived from HARNESS_SESSION_MARKERS because a hand-maintained copy
 # had already lost CLAUDE_SESSION_ID once.
 _AMBIENT_NAMES: tuple[str, ...] = (
-    # pi's session store root. It relocates the (cwd, session_id) lookup
-    # wholesale, which is exactly the state a test must not read from a
-    # developer's machine: unscrubbed, a duplicate-refusal test would see real
-    # sessions. Scrubbed, the lookup falls back to the sandboxed HOME.
-    "PI_HOME",
     *AMBIENT_IDENTITY_ENV,
     # Harness config roots. resolve_plugin_script takes the plugin roots as
     # authoritative, so a suite run inside a live session resolves the
@@ -85,9 +80,14 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_PLUGIN_ROOT",
     "CODEX_PLUGIN_ROOT",
     "CLAUDE_CONFIG_DIR",  # the account-alias channel; picks which bill is paid
+    "CLAUDE_DIR_OVERRIDE",  # redirects the Claude config root (the rule-file git repo the corrections hook watches); same category as CLAUDE_CONFIG_DIR
     "CODEX_HOME",  # 12 reads in source; a real per-developer setting
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
+    "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
+    "OPENCODE_DB",  # points the intel fold at one opencode store; same category as CODEX_HOME
+    "GROK_HOME",  # grok's session store root; the same category pi once read a store-root var for
+    "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
@@ -109,13 +109,14 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "NO_COLOR",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
+    "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
     # Relocates uv's tools dir, which scrape::fno_py stats for the wheel's
     # fno-py console script. Scrubbed, the resolver reads the default
     # ~/.local/share/uv layout instead of a developer's XDG customization.
     "XDG_DATA_HOME",
     # Where cargo writes build intermediates. A developer shell that exports it
-    # would point test-built artifacts at an arbitrary tree; _child_env re-sets
-    # it deliberately from the fno build base after this scrub.
+    # would point test-built artifacts at an arbitrary tree; neutralise re-pins
+    # it into the sandbox after this scrub.
     "CARGO_BUILD_BUILD_DIR",
     "STATE_FILE",
     "POSTMORTEMS_DIR",
@@ -185,6 +186,12 @@ _ENVIRONMENT: tuple[str, ...] = (
     "XDG_STATE_HOME",  # pinned into the sandbox below
     "XDG_CACHE_HOME",  # a cache, preserved at its real value
     "CARGO_HOME",  # ditto
+    # The toolchain binary itself (rustup shims set it); the cargo_build_dirs
+    # lane reads it first, before PATH and ~/.cargo/bin/cargo. A developer's
+    # value names the same toolchain the caches above resolve, so a test
+    # seeing it is consistent, and the sandbox build-dir pin depends on a
+    # working cargo surviving the scrub.
+    "CARGO",
     # A unix socket path, not a source of answers. Sandboxing it risks the
     # 108-byte sockaddr limit under a long pytest tmpdir, which would break the
     # mux tests for no isolation gain.
@@ -193,19 +200,17 @@ _ENVIRONMENT: tuple[str, ...] = (
     # the sandbox itself, and it is read here only to widen the config ceiling
     # so a test's OWN config stays findable.
     "TMPDIR",
+    # pi's relocation knobs: a store test sets them for the Rust child.
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
 )
 
 # Set deliberately by a CI workflow, not inherited from a developer's shell.
-# This is the ONE place a runner-configured FNO_* var is exempted; a step that
-# needs a new one adds it here with a comment naming the workflow line, and
-# until then it is dropped and the step fails loudly rather than reading a
-# developer's value. (Vars set inline in a smoke step's own command, e.g.
-# ``FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest ...``, are set inside the child
-# and never travel this path.)
 _RUNNER_PASSTHROUGH = (
     # Native claim-door tests pin the checkout binary; without this runner
     # channel hermetic children resolve an older PATH binary.
     "FNO_AGENTS_BIN",
+    "FNO_BIN",  # the event store client pins the checkout's fno front door
     "FNO_AGENTS_FRONT",  # .github/actions/smoke-setup/action.yml
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
@@ -226,6 +231,9 @@ _RUNNER_PASSTHROUGH = (
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.
     "FNO_KIMI_LIVE",
+    # opt-in live dsh journey. The live test restores real HOME because a key
+    # stored through the dsh credentials service lives there.
+    "FNO_DSH_LIVE",
     # opt-in live agy journey. Real HOME is restored because agy's credential,
     # its conversation store and its Stop hooks.json all live there.
     "FNO_AGY_LIVE",
@@ -363,6 +371,14 @@ def neutralise(
     # State: HOME (POSIX) and USERPROFILE (Windows, which Path.home() reads).
     out["HOME"] = str(home)
     out["USERPROFILE"] = str(home)
+    # Cargo intermediates are pinned into the sandbox like HOME: the scrubbed
+    # var would otherwise let cargo resolve its own default, and the tracked
+    # .cargo/config.toml template lands that default in the REAL
+    # ~/.cargo/build, which grew ~30 GiB/day of test orphans. Every
+    # tree (pytest, shell, cargo) routes through this function, so all three
+    # build into the sandbox; pytest_sessionfinish removes it, and reclaim's
+    # stale_test_scratch lane reaps what a crashed session leaves.
+    out["CARGO_BUILD_BUILD_DIR"] = f"{home / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
     for name in _XDG_SANDBOXED:
         out[name] = str(sandbox / "xdg" / name.lower())
 

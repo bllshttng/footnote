@@ -59,7 +59,17 @@ def graph(tmp_path, monkeypatch):
 
 
 def _entry(node_id: str, **fields) -> dict:
-    return {"id": node_id, **fields}
+    # Every row carries the fields the typed store requires (the seed
+    # import skips a row the model cannot represent, e.g. a slugless one).
+    return {
+        "type": "feature",
+        "status": "idea",
+        "priority": "p2",
+        "slug": node_id,
+        "title": node_id,
+        **fields,
+        "id": node_id,
+    }
 
 
 def _ident(graph: Path) -> tuple:
@@ -72,14 +82,17 @@ def _ident(graph: Path) -> tuple:
 
 def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> None:
     entries = [
-        _entry(f"filler-{i}", type="feature", status="intake", project="web")
+        # idea, not intake: the typed model refuses intake as a status.
+        _entry(f"filler-{i}", type="feature", status="idea", project="web")
         for i in range(FILLER)
     ]
     entries.append(
         _entry(
             SCOPE,
             type="epic",
-            status="done" if done_epic else "intake",
+            # The typed model refuses an epic at intake; ready is the
+            # non-terminal state the scope math expects here.
+            status="done" if done_epic else "ready",
             project="web",
         )
     )
@@ -88,6 +101,12 @@ def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> Non
         if i < done_children:
             child["status"] = "done"
         entries.append(child)
+    # A stale store never re-reads a rewritten seed: drop the db first so
+    # the next open imports the fresh rows (the rust stage_graph contract).
+    for suffix in ("db", "db-wal", "db-shm"):
+        stale = path.with_suffix(f".{suffix}")
+        if stale.exists():
+            stale.unlink()
     path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
 
 
@@ -127,7 +146,6 @@ def test_repeat_fire_answers_inside_the_stopgate_budget_without_the_store(
         raise AssertionError("cached drain re-read the store")
 
     monkeypatch.setattr(store, "read_graph_strict", _forbidden)
-    monkeypatch.setattr(store, "read_graph", _forbidden)
     exit_code, payload, elapsed = _invoke_drain()
     assert exit_code == 0
     assert payload["undelivered"] == UNDELIVERED_COUNT
@@ -201,10 +219,10 @@ def test_external_backend_never_serves_the_cache(graph, monkeypatch):
     assert "999" not in result.output  # the poisoned cache row never surfaced
 
 
-def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
+def test_graph_memo_read_once_per_graph_identity(graph, monkeypatch):
     import fno.pr_watch._king_wake as wake
 
-    wake._WAKE_ENTRIES_MEMO.update(ident=None, entries=None)
+    wake._GRAPH_ENTRIES_MEMO.update(ident=None, entries=None)
     calls: list[int] = []
 
     from fno.graph.api import wire_rows as _real_wire_rows
@@ -214,17 +232,43 @@ def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
         return _real_wire_rows(*args, **kwargs)
 
     monkeypatch.setattr("fno.graph.api.wire_rows", _counting_read)
-    first = wake._graph_entries_for_wake()
-    second = wake._graph_entries_for_wake()
+    first = wake.graph_entries()
+    second = wake.graph_entries()
     assert len(first) == FILLER + CHILDREN + 1
     assert first == second
-    assert len(calls) == 1  # the unchanged graph is served, not re-read
+    assert len(calls) == 1, (
+        f"memo re-read: ident={wake._GRAPH_ENTRIES_MEMO['ident']!r},"
+        f" export_status={__import__('fno.graph.store', fromlist=['x']).store_export_status(graph)!r}"
+    )
 
     _write_graph(graph, done_children=CHILDREN, done_epic=True)
-    third = wake._graph_entries_for_wake()
+    third = wake.graph_entries()
     assert len(calls) == 2  # the write moved the identity: one real re-read
     epic = next(row for row in third if row.get("id") == SCOPE)
     assert epic["status"] == "done"  # the fresh row, not the memo
+
+
+def test_graph_memo_none_ident_reads_and_never_caches(graph, monkeypatch):
+    import fno.pr_watch._king_wake as wake
+
+    wake._GRAPH_ENTRIES_MEMO.update(ident=None, entries=None)
+    calls: list[int] = []
+
+    from fno.graph.api import wire_rows as _real_wire_rows
+
+    def _counting_read(*args, **kwargs):
+        calls.append(1)
+        return _real_wire_rows(*args, **kwargs)
+
+    monkeypatch.setattr("fno.graph.api.wire_rows", _counting_read)
+    # An unreadable identity is a store with no keeper: both calls read, and
+    # nothing lands in the memo to serve a later, different graph.
+    monkeypatch.setattr("fno.king.drain_cache.graph_ident", lambda _p: None)
+    first = wake.graph_entries()
+    second = wake.graph_entries()
+    assert first == second
+    assert len(calls) == 2
+    assert wake._GRAPH_ENTRIES_MEMO["ident"] is None
 
 
 def test_sqlite_backend_keys_on_the_store_version(graph, monkeypatch):

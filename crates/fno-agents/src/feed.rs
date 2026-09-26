@@ -31,7 +31,7 @@ pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
     /// `node_created` | `node_started` | `pr_created` | `node_ended` |
-    /// `session_reaped`
+    /// `session_reaped` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
     pub session_id: Option<String>,
@@ -187,6 +187,16 @@ pub fn project(
             }
         };
         let kind = match v.get("type").and_then(Value::as_str) {
+            Some("day_boundary") => {
+                let boundary_kind = s_field(data, "kind").unwrap_or_default();
+                FeedRow {
+                    ts,
+                    kind: "day_boundary".into(),
+                    title: format!("day {boundary_kind}"),
+                    r#ref: s_field(data, "boundary_id"),
+                    ..FeedRow::default()
+                }
+            }
             Some("operator_question") => {
                 let title = data
                     .get("question")
@@ -386,7 +396,11 @@ pub fn project(
             .and_then(|l| l.get("graph_node_id"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        let removed_by = r.removed_by.as_deref().unwrap_or("reap");
+        let removed_by = if r.removed_by.is_empty() {
+            "unknown"
+        } else {
+            &r.removed_by
+        };
         rows.push(FeedRow {
             ts: r.reaped_at.clone(),
             kind: "session_reaped".into(),
@@ -403,11 +417,24 @@ pub fn project(
                 .and_then(Value::as_str)
                 .map(str::to_string),
             title: format!("{} removed by {removed_by}", r.row_name),
-            actor: r.removed_by.clone(),
+            actor: if r.removed_by.is_empty() {
+                None
+            } else {
+                Some(r.removed_by.clone())
+            },
             // Copied verbatim. It was rendered from the capability table at
             // reap time; re-deriving it would answer a different question if
             // that table has moved since.
-            detail: Some(format!("resume: {} - cwd {}", r.resume, r.cwd)),
+            detail: Some(format!(
+                "resume: {} - cwd {} - trigger {}",
+                r.resume,
+                r.cwd,
+                if r.removal_trigger.is_empty() {
+                    "unknown"
+                } else {
+                    &r.removal_trigger
+                }
+            )),
             ..FeedRow::default()
         });
     }
@@ -562,14 +589,20 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".fno"));
-    let questions_raw =
-        std::fs::read_to_string(fno_dir.join("questions.jsonl")).unwrap_or_else(|_| {
+    let questions_path = fno_dir.join("questions.jsonl");
+    let questions_raw = match crate::event_store::journal_text_checked(
+        &questions_path,
+        &crate::event_store::EventQuery::of_types(&[]),
+    ) {
+        Ok(raw) => raw,
+        Err(e) => {
             eprintln!(
-                "fno-agents feed: questions store unreadable, skipped: {}",
-                fno_dir.join("questions.jsonl").display()
+                "fno-agents feed: questions store unreadable, skipped: {} ({e})",
+                questions_path.display()
             );
             String::new()
-        });
+        }
+    };
 
     let (graph_entries, graph_note): (Vec<Value>, Option<String>) = {
         // The lifecycle leg reads the store, never the file. An absent store
@@ -720,6 +753,16 @@ mod tests {
     }
 
     #[test]
+    fn day_boundary_rows_are_projected_without_being_skipped() {
+        let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
+        let p = project(questions, &[], &[]);
+        assert_eq!(p.skipped_lines, 0);
+        assert_eq!(kinds(&p.rows), ["day_boundary"]);
+        assert_eq!(p.rows[0].title, "day start");
+        assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
+    }
+
+    #[test]
     fn question_rows_carry_ids_and_asker_session() {
         let p = project(&questions_fixture(), &graph_fixture(), &[]);
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
@@ -831,7 +874,8 @@ mod tests {
             reaped_at: "2026-09-06T10:00:00Z".into(),
             resume: "claude --resume 00847995".into(),
             ledger: Some(serde_json::json!({"graph_node_id": "x-aaaa"})),
-            removed_by: None,
+            removed_by: "gc-sweep".into(),
+            removal_trigger: "unattended".into(),
             schema_version: Some(2),
             identity: None,
             native_locator: None,
@@ -896,9 +940,17 @@ mod tests {
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
+        // The stamp is printed, never invented. The fixture carries
+        // a writer, so the row names it and the detail carries the trigger.
+        assert!(
+            row.title.contains("removed by gc-sweep"),
+            "title was {}",
+            row.title
+        );
+        assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
         assert_eq!(
             row.detail.as_deref(),
-            Some("resume: claude --resume 00847995 - cwd /tmp/wt")
+            Some("resume: claude --resume 00847995 - cwd /tmp/wt - trigger unattended")
         );
         assert_eq!(row.node.as_deref(), Some("x-aaaa"));
         assert_eq!(
@@ -907,6 +959,36 @@ mod tests {
         );
         let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
         assert_eq!(only_reaped.len(), 1);
+    }
+
+    // A pre-stamp receipt carries no writer. The feed once invented the
+    // word `reap` for it; now it says `unknown`, and the actor is
+    // empty rather than a door nobody named.
+    #[test]
+    fn a_pre_stamp_receipt_reads_unknown_never_reap() {
+        let mut r = receipt_fixture();
+        r.removed_by.clear();
+        r.removal_trigger.clear();
+        let p = project("", &[], std::slice::from_ref(&r));
+        let row = p
+            .rows
+            .iter()
+            .find(|row| row.kind == "session_reaped")
+            .expect("one reaped row");
+        assert!(
+            row.title.contains("removed by unknown"),
+            "title was {}",
+            row.title
+        );
+        assert!(!row.title.contains("reap"), "title was {}", row.title);
+        assert_eq!(row.actor, None);
+        assert!(
+            row.detail
+                .as_deref()
+                .is_some_and(|d| d.ends_with("trigger unknown")),
+            "detail was {:?}",
+            row.detail
+        );
     }
 
     // The receipt outlives the registry row, so it is the only surviving
@@ -982,5 +1064,23 @@ mod tests {
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
         );
+    }
+
+    #[test]
+    fn the_feed_reads_a_store_committed_question() {
+        // AC12-FEED: a store-only operator_question reaches the questions leg.
+        let dir = tempfile::tempdir().unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-feed-1", "question": "proceed?", "blocks": []}
+        });
+        crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        let raw = crate::event_store::journal_text_checked(
+            &questions,
+            &crate::event_store::EventQuery::of_types(&[]),
+        )
+        .unwrap();
+        assert!(raw.contains("q-feed-1"), "{raw}");
     }
 }

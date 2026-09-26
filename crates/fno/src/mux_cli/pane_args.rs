@@ -14,7 +14,6 @@ pub struct ParsedPane {
     pub cmd: PaneCmd,
 }
 
-pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus|keeper";
 pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
@@ -38,10 +37,11 @@ invocation reads unattributed:<pid>).";
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
-the agent panel, and selecting it resumes the session through its own harness. A keeper-hosted \
-worker pane outlives the server outright and a fresh server re-adopts it in place (`fno mux pane \
-keeper list` reads them); startup restore holds (default) or idles it by policy; `fno mux \
-workspace restore` respawns it on demand. A run without --worker records no member.";
+the agent panel, and selecting it resumes the session through its own harness. Every pane now \
+runs keeper-hosted, so any pane outlives its server and a fresh server re-adopts it in place \
+(`fno mux pane keeper list` reads them); a keeper that cannot start falls back to an inline pane \
+marked unkept, and `fno mux kill-server` refuses while one is live. A run without --worker \
+records no member.";
 
 /// What the `fno_id` column answers, stated where the listing is
 /// read: identity, never idleness or reusability. The dash is reserved for
@@ -61,31 +61,17 @@ fn sargs_of(args: &[OsString]) -> Result<Vec<String>, String> {
         .ok_or_else(|| "non-UTF-8 argument".to_string())
 }
 
-pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
-    let verb = args
-        .first()
-        .and_then(|a| a.to_str())
-        .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
-    if matches!(verb, "-h" | "--help") {
-        return Err(format!(
-            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}\n{PANE_LS_IDENTITY_HELP}"
-        ));
-    }
-
+pub fn parse_pane_args(
+    op: &crate::cli_args::PaneOp,
+    args: &[OsString],
+) -> Result<ParsedPane, String> {
     // Hidden verb subtree: `pane keeper list` reads the keeper sockets
     // directly (no server), so it parses here and dispatches before any
     // session resolution.
-    if verb == "keeper" {
-        let sub = args
-            .get(1)
-            .and_then(|a| a.to_str())
-            .ok_or_else(|| "pane keeper needs a verb: list".to_string())?;
-        if sub != "list" {
-            return Err(format!("unknown pane keeper verb: {sub} (expected list)"));
-        }
+    if matches!(op, crate::cli_args::PaneOp::Keeper { .. }) {
         let mut json = false;
         let mut stale_after = None;
-        let mut i = 2;
+        let mut i = 0;
         while i < args.len() {
             let tok = args[i]
                 .to_str()
@@ -112,7 +98,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
 
     // `run` is special: leading options/directives, then the command argv
     // verbatim (its own flags are NOT ours to parse), optionally after `--`.
-    if verb == "run" {
+    if matches!(op, crate::cli_args::PaneOp::Run(_)) {
         let mut cwd = None;
         let mut claim = false;
         let mut worker = None;
@@ -130,15 +116,11 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut json = false;
         let mut fit = false;
         let sargs = sargs_of(args)?;
-        let mut i = 1;
+        let mut i = 0;
         while i < sargs.len() {
             let tok = sargs[i].as_str();
             match tok {
-                "-h" | "--help" => {
-                    return Err(format!(
-                        "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}\n{PANE_LS_IDENTITY_HELP}"
-                    ))
-                }
+                "-h" | "--help" => return Err(crate::cli_args::pane_group_help()),
                 "--" => {
                     i += 1;
                     break;
@@ -172,8 +154,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     };
                     if !crate::squad_store::valid_worker_name(&name) {
                         return Err(
-                            "--worker needs a registry name ([A-Za-z0-9._-], <=64 chars)"
-                                .into(),
+                            "--worker needs a registry name ([A-Za-z0-9._-], <=64 chars)".into(),
                         );
                     }
                     worker = Some(name);
@@ -307,6 +288,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut style_exception: Option<String> = None;
     let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
+    let mut hand_off_to: Option<String> = None;
     let mut pattern = None;
     let mut timeout_s = None;
     let mut pid = None;
@@ -318,7 +300,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut name = None;
     let mut fno_id = None;
     let mut positionals: Vec<String> = Vec::new();
-    let mut i = 1;
+    let mut i = 0;
     while i < sargs.len() {
         let tok = sargs[i].as_str();
         // One value read for a value-carrying flag; names the flag in the
@@ -379,6 +361,12 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 quiet_ms = Some(parse_u64(&v, "--quiet-ms")?);
             }
             "--pattern" => pattern = Some(value_of!()),
+            // `pane kill --hand-off-to <socket>` is the opposite of a kill:
+            // the keeper socket moves to that path and the child keeps
+            // running. It rides `kill` because it is the same verb from the
+            // server's side - this pane stops being ours - and a second
+            // verb would duplicate the pane-resolution and refusal ladder.
+            "--hand-off-to" => hand_off_to = Some(value_of!()),
             "--timeout" => {
                 let v = value_of!();
                 timeout_s = Some(parse_u64(&v, "--timeout")?);
@@ -410,30 +398,30 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     // Before the match: the Send arm below MOVES `style_exception`, and a
     // post-match validation would not compile. Same refusal shape as the
     // `--raw` check, which sits after only because bool is Copy.
-    if style_exception.is_some() && verb != "send" {
+    if style_exception.is_some() && !matches!(op, crate::cli_args::PaneOp::Send(_)) {
         return Err("--style-exception pairs only with pane send".into());
     }
-    if provenance.is_some() && verb != "send" {
+    if provenance.is_some() && !matches!(op, crate::cli_args::PaneOp::Send(_)) {
         return Err("--source pairs only with pane send".into());
     }
-    let cmd = match verb {
-        "ls" => PaneCmd::Ls { fno_id },
-        "read" => PaneCmd::Read {
+    let cmd = match op {
+        crate::cli_args::PaneOp::Ls(_) => PaneCmd::Ls { fno_id },
+        crate::cli_args::PaneOp::Read(_) => PaneCmd::Read {
             pane: pane_arg("read")?,
             lines,
             block,
         },
-        "split" => PaneCmd::Split {
+        crate::cli_args::PaneOp::Split(_) => PaneCmd::Split {
             pane: pane_arg("split")?,
             direction: direction
                 .ok_or_else(|| "pane split needs --direction <left|right|up|down>".to_string())?,
             focus,
         },
-        "break" => PaneCmd::Break {
+        crate::cli_args::PaneOp::Break(_) => PaneCmd::Break {
             pane: pane_arg("break")?,
             name: name.filter(|n| !n.trim().is_empty()),
         },
-        "focus" => {
+        crate::cli_args::PaneOp::Focus(_) => {
             if fzf && !positionals.is_empty() {
                 return Err("--fzf takes no pane id or selector".into());
             }
@@ -447,7 +435,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             }
             PaneCmd::Focus { target }
         }
-        "send" => {
+        crate::cli_args::PaneOp::Send(_) => {
             let pane = pane_arg("send")?;
             let source = match (text, stdin) {
                 (Some(_), true) => return Err("pane send takes --text OR --stdin, not both".into()),
@@ -471,31 +459,36 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 provenance,
             }
         }
-        "wait" => PaneCmd::Wait {
+        crate::cli_args::PaneOp::Wait(_) => PaneCmd::Wait {
             pane: pane_arg("wait")?,
             quiet_ms,
             pattern,
             timeout_ms: timeout_s.unwrap_or(DEFAULT_WAIT_TIMEOUT_S) * 1000,
             command_done,
         },
-        "kill" => PaneCmd::Kill {
+        crate::cli_args::PaneOp::Kill(_) => PaneCmd::Kill {
             pane: pane_arg("kill")?,
+            hand_off_to,
         },
-        "claim" => PaneCmd::Claim {
+        crate::cli_args::PaneOp::Claim(_) => PaneCmd::Claim {
             pane: pane_arg("claim")?,
             // The holder is the CALLER (it outlives this one-shot CLI); the
             // parent pid is the honest default when --pid is not passed.
             pid: pid.unwrap_or_else(std::os::unix::process::parent_id),
         },
-        "release" => PaneCmd::Release {
+        crate::cli_args::PaneOp::Release(_) => PaneCmd::Release {
             pane: pane_arg("release")?,
         },
-        other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),
+        // Both are handled before the generic parse: run's own loop, and
+        // the keeper read.
+        crate::cli_args::PaneOp::Run(_) | crate::cli_args::PaneOp::Keeper { .. } => {
+            unreachable!("run and keeper parse in their own branches above")
+        }
     };
-    if fzf && verb != "focus" {
+    if fzf && !matches!(op, crate::cli_args::PaneOp::Focus(_)) {
         return Err("--fzf pairs only with pane focus".into());
     }
-    if raw && verb != "send" {
+    if raw && !matches!(op, crate::cli_args::PaneOp::Send(_)) {
         return Err("--raw pairs only with pane send".into());
     }
     if session.is_none() {

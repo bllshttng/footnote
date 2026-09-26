@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -53,7 +54,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text())["entries"]
+    return read_graph_strict(g)
 
 
 def _by_id(g: Path, node_id: str) -> dict:

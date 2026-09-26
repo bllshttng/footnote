@@ -28,7 +28,7 @@
 //! adapter that shape was also drawn from has since been deleted, so no
 //! Python counterpart remains for that provider.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::envelope::{Envelope, JsonEnvelope, NoEnvelope};
@@ -489,10 +489,16 @@ fn footnote_verbs() -> std::collections::HashSet<String> {
 }
 
 fn read_footnote_verbs() -> std::collections::HashSet<String> {
-    let mut verbs = std::collections::HashSet::new();
     let Some(root) = plugin_root() else {
-        return verbs;
+        return Default::default();
     };
+    read_verbs_from(&root)
+}
+
+/// The roster from ONE resolved root, so the installer reads the same
+/// surface as the seed renderers instead of carrying a second list.
+pub(crate) fn read_verbs_from(root: &Path) -> std::collections::HashSet<String> {
+    let mut verbs = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(root.join("skills")) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -599,7 +605,14 @@ pub fn render_verb_seed(message: &str, harness: &str) -> String {
                 }
                 return format!("/{prefix}{verb}{tail}");
             }
-            if harness == "agy" {
+            // A namespaced token renders through the row's own prefix when it
+            // declares one (pi's `/skill:<verb>`, opencode's `/fno:<verb>`),
+            // falling back to the agy and `fno:` forms. A row with no prefix
+            // has no surface of its own for the namespace, so the `fno:`
+            // spelling stands.
+            if !caps.slash_prefix.is_empty() {
+                format!("/{}{verb}{tail}", caps.slash_prefix.as_str())
+            } else if harness == "agy" {
                 format!("/{verb}{tail}")
             } else {
                 format!("/fno:{verb}{tail}")
@@ -1286,7 +1299,7 @@ impl ProviderWithPty for AgyProvider {
 /// the footnote verbs, so a rendered `/fno:verb args` must ride `opencode run
 /// --command fno:verb <args>` to actually invoke the command (/ codex P1).
 /// A non-slash prompt (a plain `ask`/build message) passes through unchanged.
-pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
+pub fn opencode_run_tail(message: &str) -> Vec<String> {
     if let Some(rest) = message.strip_prefix('/') {
         let mut parts = rest.splitn(2, ' ');
         // `/fno:target --no-merge x` -> --command fno:target, then the args as
@@ -1465,8 +1478,8 @@ fn opencode_reachable_with(
 ///
 /// Shelling out to opencode's own binary (rather than opening the sqlite file)
 /// inherits its channel-aware database resolution (`opencode-<channel>.db`,
-/// `OPENCODE_DB`) for free, keeps this crate free of a sqlite dependency, and
-/// pins to the CLI verb rather than a storage layout mid-migration to v2.
+/// `OPENCODE_DB`) for free, and pins to the CLI verb rather than a storage
+/// layout mid-migration to v2.
 ///
 /// The query is a single-row lookup, so its output cannot fill the stdout pipe
 /// while we poll. On timeout only the child pid is killed — never its process
@@ -2031,7 +2044,6 @@ mod tests {
         // PATH mutation is process-global: take the lib-wide test mutex so a
         // concurrent PATH-dependent test does not inherit this stub.
         let _path_guard = crate::path_test_guard();
-        use std::os::unix::fs::PermissionsExt;
 
         let _guard = crate::claims::test_env_lock()
             .lock()
@@ -2045,18 +2057,14 @@ mod tests {
         let plan_dir = dir.path().join("configured-plans");
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let fake_fno = bin.join("fno");
-        std::fs::write(
-            &fake_fno,
-            format!(
+        crate::write_exec_stub(
+            &bin,
+            "fno",
+            &format!(
                 "#!/bin/sh\n[ \"$*\" = 'do plan path --slug codex-sandbox-grant' ] || exit 64\nprintf '%s\\n' '{}'\n",
                 plan_dir.join("probe.md").display()
             ),
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&fake_fno).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake_fno, perms).unwrap();
+        );
         let old_path = std::env::var_os("PATH");
         unsafe { std::env::set_var("PATH", crate::path_with(std::path::Path::new(&bin))) };
 
@@ -2308,6 +2316,32 @@ mod tests {
         assert_eq!(
             render_verb_seed("do a $fno:blueprint", "claude"),
             "do a $fno:blueprint"
+        );
+    }
+
+    /// pi's skill-command form: a namespaced token AND a bare footnote verb
+    /// render through the row's nonempty `slash_prefix`, while pi's own
+    /// native verb stays literal (AC7-HP, AC7-EDGE).
+    #[test]
+    fn render_verb_seed_pi_renders_the_skill_command_form() {
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "pi"),
+            "/skill:target resume"
+        );
+        assert_eq!(render_verb_seed("/target x", "pi"), "/skill:target x");
+        assert_eq!(render_verb_seed("/name", "pi"), "/name");
+        // The other slash surfaces are unchanged by the prefix arm.
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "opencode"),
+            "/fno:target resume"
+        );
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "claude"),
+            "/fno:target resume"
+        );
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "agy"),
+            "/target resume"
         );
     }
 

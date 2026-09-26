@@ -132,10 +132,11 @@ def test_authority_failure_is_unknown(bundled_state, fake_authority) -> None:
     assert "124" in field["detail"]
 
 
-def test_unprobeable_field_emits_no_value(bundled_state) -> None:
+def test_unprobeable_field_emits_no_value(bundled_state, fake_authority) -> None:
     """AC3-ERR: the delay was measured over 15 timed trials on a live pane; a
     probe that emitted a number for it would overwrite a measurement with a
     guess."""
+    fake_authority(AGY_HELP)
     report = _report()
 
     field = _field(report, "send_keys_enter_delay_ms")
@@ -160,8 +161,11 @@ def test_declared_field_without_a_rule_is_undeclared(
     assert "refuses to guess" in field["detail"]
 
 
-def test_behavioral_needs_live_and_never_spawns_read_only(bundled_state) -> None:
+def test_behavioral_needs_live_and_never_spawns_read_only(
+    bundled_state, fake_authority
+) -> None:
     """Read-only by default: a behavioral field spawns nothing."""
+    fake_authority(AGY_HELP)
     report = _report()
 
     field = _field(report, "thread")
@@ -170,10 +174,13 @@ def test_behavioral_needs_live_and_never_spawns_read_only(bundled_state) -> None
 
 
 def test_behavioral_accepts_only_on_a_vendor_marker(
-    bundled_state, monkeypatch
+    bundled_state, monkeypatch, fake_authority
 ) -> None:
     """AC5-HP: the form is accepted only on a marker the vendor's own store
     produced, and the report names the marker it read."""
+    # The subject is the store-marker agreement; the declared-field authority
+    # read is incidental and would exec the real codex on a dev machine.
+    fake_authority(NO_EFFORT_HELP)
     state = {"calls": 0, "marker": "session 01a04 present in `codex thread list` only after the run"}
 
     def fake_instrument(harness: str) -> object:
@@ -202,7 +209,10 @@ def test_behavioral_accepts_only_on_a_vendor_marker(
     assert "not accepted" in field["detail"]
 
 
-def test_behavioral_without_a_wired_instrument_is_unknown(bundled_state) -> None:
+def test_behavioral_without_a_wired_instrument_is_unknown(
+    bundled_state, fake_authority
+) -> None:
+    fake_authority(AGY_HELP)
     report = _report("agy", live=True)
 
     field = _field(report, "thread")

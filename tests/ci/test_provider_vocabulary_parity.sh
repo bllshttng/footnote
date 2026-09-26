@@ -17,11 +17,14 @@ write_match() {
     'fn create(' \
     'provider: Some("anthropic".to_string()),' \
     '#[cfg(test)]' > "$tmp/claude.rs"
+  # claude_adopt.rs keeps the manifest line reader only; the gate reads it
+  # for existence. The adopt-path contract lives on the client_verbs mint.
+  printf '%s\n' 'pub fn manifest_field' > "$tmp/adopt.rs"
   printf '%s\n' \
-    'pub fn mint_adopted_entry' \
+    'fn mint_synthesized_entry(' \
     'provider: None,' \
-    'pub fn upsert_adopted_row' \
-    'provider_from_route_settings(Some(&model))' > "$tmp/adopt.rs"
+    'enum AdoptError' \
+    'provider_from_route_settings(Some(&model))' > "$tmp/client.rs"
   printf '%s\n' \
     'fn dispatch_create(' \
     'provider: Some("openai".to_string()),' \
@@ -41,6 +44,7 @@ check() {
   "$CHECK" \
     --claude-rust "$tmp/claude.rs" \
     --adopt-rust "$tmp/adopt.rs" \
+    --client-rust "$tmp/client.rs" \
     --codex-rust "$tmp/codex.rs" \
     --rust-gate "$tmp/rust-gate.rs" \
     --overlay-rust "$tmp/overlay.rs" \
@@ -87,13 +91,13 @@ fi
 
 # The adopt mint must stamp NO provider: a vendor literal there is the retired
 # wrong-bill guess (adoption observed no route; the provider comes from the
-# route-settings match the fixture carries below the upsert marker).
+# route-settings match the fixture carries below the enum marker).
 write_match
 printf '%s\n' \
-  'pub fn mint_adopted_entry' \
+  'fn mint_synthesized_entry(' \
   'provider: Some("anthropic".into()),' \
-  'pub fn upsert_adopted_row' \
-  'provider_from_route_settings(Some(&model))' > "$tmp/adopt.rs"
+  'enum AdoptError' \
+  'provider_from_route_settings(Some(&model))' > "$tmp/client.rs"
 if check >/dev/null 2>&1; then
   echo "FAIL: adopt vendor literal accepted" >&2
   exit 1
@@ -105,9 +109,9 @@ fi
 # with no provider and no lookup would record none forever.
 write_match
 printf '%s\n' \
-  'pub fn mint_adopted_entry' \
+  'fn mint_synthesized_entry(' \
   'provider: None,' \
-  'pub fn upsert_adopted_row' > "$tmp/adopt.rs"
+  'enum AdoptError' > "$tmp/client.rs"
 if check >/dev/null 2>&1; then
   echo "FAIL: adopt without a route-settings lookup accepted" >&2
   exit 1

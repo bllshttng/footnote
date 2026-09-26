@@ -226,7 +226,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _by_id_file(g: Path) -> dict:
@@ -275,6 +277,11 @@ def test_canonical_done_refuses_over_live_children(tmp_graph):
 
 def test_canonical_done_force_reparents_to_nearest_live_ancestor(tmp_graph):
     grand, parent, kids = _seed_stranded_family(tmp_graph)
+    runner.invoke(
+        app,
+        ["backlog", "update", parent, "--completion-note", "deliberate close"],
+        catch_exceptions=False,
+    )
     r = runner.invoke(
         app,
         ["backlog", "done", parent, "--force", "--reason", "deliberate close"],

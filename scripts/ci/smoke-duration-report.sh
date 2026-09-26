@@ -74,13 +74,14 @@ else
     say "SMOKE_WARN_PCT=$WARN_PCT_RAW is not a number; using 80."
 fi
 
-# Seconds from the cap at which a run is called a TIMEOUT. A job killed by
-# timeout-minutes reports `cancelled` - the same word a superseding push
-# produces - and its EXIT trap never runs, so nothing inside the job said
-# TIMEOUT. The trap-based verdict therefore covers the band just under the cap
-# too: a run this close to the cap either hit it or finished with no margin,
-# and the reader must not have to subtract timestamps to tell. Measured kills
-# landed 15-45s of teardown past their cap, so 90s covers both sides.
+# Seconds from the cap at which a run is called a TIMEOUT. A timeout-minutes
+# kill cancels the step and the EXIT trap DOES run, so a cap kill prints a
+# duration line like any other run (measured on 3 of 3 kills; the older claim
+# that no trap runs was false). The trap-based verdict therefore covers the
+# band just under the cap too: a run this close to the cap either hit it or
+# finished with no margin, and the reader must not have to subtract timestamps
+# to tell. Measured kills landed 15-45s of teardown past their cap, so 90s
+# covers both sides.
 TIMEOUT_MARGIN_RAW="${SMOKE_TIMEOUT_MARGIN_SECS:-90}"
 
 TIMEOUT_MARGIN_SECS=90

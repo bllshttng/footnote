@@ -4,7 +4,9 @@
 //!
 //! Two modes, selected by the payload's `mode` field. `gate` runs the full
 //! admission gate over one JSON round trip; the gate's own prose streams on
-//! stderr passthrough, so `spawn queued: ...` still streams during a queue.
+//! stderr passthrough, so `spawn queued: ...` still streams during a queue,
+//! and a payload with `hold: false` releases the mutex before the answer so
+//! a long-lived caller holds nothing.
 //! `probe` is the read-only capacity reading `fno agents gate-status`, the
 //! lane readouts and the advance width all consume: no mutex, no claims, no
 //! events. The verb exits 0 whenever it produced an ANSWER, including a
@@ -16,6 +18,7 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 
 use crate::agents_config;
+use crate::claims;
 use crate::spawn_gate::{self, GateFlags, GateInput};
 use crate::spawn_gate_lanes;
 
@@ -23,7 +26,13 @@ use crate::spawn_gate_lanes;
 /// an answer was produced, including a refused answer. An unreadable payload
 /// is a loud non-zero: the transport turns that into a gate-unavailable
 /// refusal, never an admit.
-pub fn run_spawn_gate(_args: &[String]) -> i32 {
+pub fn run_spawn_gate(args: &[String]) -> i32 {
+    // The reserve mode is argv-typed, so a king can type it in one line; the
+    // gate and probe modes keep their stdin JSON payloads.
+    if args.first().map(String::as_str) == Some("reserve") {
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return reserve_spawn_gate(&config_cwd, &args[1..]);
+    }
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         eprintln!("spawn-gate: could not read the request payload");
@@ -46,6 +55,183 @@ pub fn run_spawn_gate(_args: &[String]) -> i32 {
     };
     println!("{answer}");
     0
+}
+
+/// The reservation TTL ceiling: only TTL expiry frees a claim and pid death
+/// does not (claims.rs classification), so a four-hour reservation with a
+/// dead holder is the measured four-hour lane wedge. The ceiling bounds the
+/// longest a reservation can hold a slot.
+pub(crate) const RESERVATION_MAX_TTL_MS: i64 = 15 * 60 * 1000;
+/// A reservation holds its lane for its whole TTL when unredeemed, so the
+/// default is short.
+const RESERVATION_DEFAULT_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]`
+///
+/// Mints `worker:<name>` under the global claims root with `model_provider`,
+/// `reserved_by`, `reserved_reason` (and `node` when given) metadata, anchored
+/// to this process's pid with an explicit TTL. Two guards refuse before any
+/// write: a TTL over [`RESERVATION_MAX_TTL_MS`], and a lane whose reservations
+/// would reach the lane cap (at least one slot on every capped lane stays
+/// winnable first-come). Release early with `fno agents claim release --force`
+/// or wait out the TTL; nothing here queues.
+pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("--help")
+        || args.first().map(String::as_str) == Some("-h")
+    {
+        println!("usage: fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason \"<why>\" [--node <id>]");
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
+        return 0;
+    }
+    let mut name: Option<String> = None;
+    let mut provider: Option<String> = None;
+    let mut node: Option<String> = None;
+    let mut ttl_arg: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--provider" | "--ttl" | "--reason" | "--node" => {
+                let flag = arg.as_str();
+                let Some(value) = it.next() else {
+                    eprintln!("spawn-gate: {flag} needs a value");
+                    return 2;
+                };
+                if value.starts_with("--") {
+                    eprintln!("spawn-gate: {flag} needs a value, got the flag {value:?}");
+                    return 2;
+                }
+                match flag {
+                    "--provider" => provider = Some(value.clone()),
+                    "--ttl" => ttl_arg = Some(value.clone()),
+                    "--reason" => reason = Some(value.clone()),
+                    _ => node = Some(value.clone()),
+                }
+            }
+            a if a.starts_with("--") => {
+                eprintln!("spawn-gate: unknown reserve flag {a:?}");
+                return 2;
+            }
+            a => {
+                if name.is_some() {
+                    eprintln!("spawn-gate: reserve takes ONE name; got {a:?} too");
+                    return 2;
+                }
+                name = Some(a.to_string());
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("spawn-gate: reserve needs a worker name and --provider");
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
+        return 2;
+    };
+    let Some(provider) = provider else {
+        eprintln!("spawn-gate: reserve needs --provider");
+        return 2;
+    };
+    let Some(reason) = reason else {
+        eprintln!("spawn-gate: reserve needs --reason (why this lane slot is held)");
+        return 2;
+    };
+    let ttl_ms = match ttl_arg.as_deref() {
+        None => RESERVATION_DEFAULT_TTL_MS,
+        Some(raw) => match claims::parse_ttl_ms(raw) {
+            Some(ms) if ms <= RESERVATION_MAX_TTL_MS => ms,
+            Some(ms) => {
+                eprintln!(
+                    "spawn-gate: refusing --ttl {raw}: {ms}ms is over the {}s reservation ceiling. Only TTL expiry frees a claim, pid death does not; a four-hour reservation with a dead holder is what wedged the zai lane once.",
+                    RESERVATION_MAX_TTL_MS / 1000
+                );
+                return 2;
+            }
+            None => {
+                eprintln!("spawn-gate: unparsable --ttl {raw:?}; want 10m, 90s, 600");
+                return 2;
+            }
+        },
+    };
+    // The lane headroom guard: minting refuses when the slot claims live on
+    // that lane would reach the lane cap, so at least one slot on every
+    // capped lane is always winnable first-come. An uncapped lane skips the
+    // guard: nothing to starve.
+    let mut lane_warnings = Vec::new();
+    if let Some(cap) = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider) {
+        let held = match spawn_gate_lanes::provider_live_slot_claims(
+            &provider,
+            &[],
+            None,
+            &mut lane_warnings,
+        ) {
+            Ok((n, _)) => n,
+            Err(e) => {
+                eprintln!("spawn-gate: reserve could not read the lane: {e}");
+                return 2;
+            }
+        };
+        if held + 1 >= cap {
+            eprintln!(
+                "spawn-gate: refusing reserve {name} on lane {provider}: {} reservation(s) \
+                 plus this one would reach the lane cap {cap}, and at least one slot on \
+                 every capped lane stays winnable first-come. {}",
+                held + 1,
+                crate::spawn_gate_reservations::RESERVATION_RULE
+            );
+            return 2;
+        }
+    }
+    // Mint the claim. holder is the resolved caller session when ambient
+    // identity resolves; the pid defaults to this process, and the explicit
+    // TTL (never HOLDER_PROCESS provenance) is what frees the lane.
+    let (session, _harness) = claims::resolve_identity();
+    let holder = session.unwrap_or_else(|| format!("reserve:{}", std::process::id()));
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("model_provider".into(), json!(&provider));
+    metadata.insert("reserved_by".into(), json!(&holder));
+    metadata.insert("reserved_reason".into(), json!(&reason));
+    if let Some(node) = &node {
+        metadata.insert("node".into(), json!(node));
+    }
+    let key = format!("worker:{name}");
+    let outcome = claims::acquire(
+        &key,
+        &holder,
+        claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ttl_ms: Some(ttl_ms),
+            reason: Some(reason),
+            metadata: Some(metadata),
+            root: claims::global_claims_root(),
+            ..Default::default()
+        },
+    );
+    match outcome {
+        claims::AcquireOutcome::Acquired(record) => {
+            println!(
+                "{}",
+                json!({
+                    "status": "reserved",
+                    "key": key,
+                    "provider": provider,
+                    "holder": holder,
+                    "expires_at": record.expires_at,
+                    "redeem": "the spawn carried --name <this name> redeems it at admission",
+                })
+            );
+            0
+        }
+        claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
+            eprintln!(
+                "spawn-gate: refusing reserve {name}: {key} is already held by {h}; \
+                 a live worker's own claim is never a reservation"
+            );
+            1
+        }
+        claims::AcquireOutcome::Error(e) => {
+            eprintln!("spawn-gate: reserve failed: {e}");
+            2
+        }
+    }
 }
 
 fn gate_answer(payload: &Value) -> Value {
@@ -87,12 +273,30 @@ fn gate_answer(payload: &Value) -> Value {
         substrate: str_of(payload, "substrate"),
         flags,
         route_provider: opt_str_of(payload, "route_provider"),
+        node: opt_str_of(payload, "node"),
         account: opt_str_of(payload, "account"),
         caller_session: opt_str_of(payload, "caller_session"),
+        succession_scope: opt_str_of(payload, "succession_scope"),
         holder_pid: Some(holder_pid as u32),
+        seed: opt_str_of(payload, "seed"),
+        session_phase: opt_str_of(payload, "session_phase"),
     };
     match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
         Ok(mut guard) => {
+            // A `hold: false` caller (the mux revival door) wants the verdict,
+            // not the keys: it is long-lived, so a mutex handed back to its
+            // pid would sit held until the TTL and block every other spawn.
+            // Release everything now; the answer carries null keys.
+            if !payload.get("hold").and_then(Value::as_bool).unwrap_or(true) {
+                guard.release();
+                return json!({
+                    "status": "admitted",
+                    "gate_key": Value::Null,
+                    "gate_holder": Value::Null,
+                    "worker_key": Value::Null,
+                    "worker_holder": Value::Null,
+                });
+            }
             // Take the keys BEFORE the guard drops: releasing them here would
             // free the very claims the caller must hold across dispatch.
             let (gate, worker) = guard.take_keys();
@@ -162,18 +366,67 @@ mod probe {
         if let Err(refusal) = spawn_gate_lanes::check_registry_schema(&registry_path, &mut warnings)
         {
             let receipt = refusal.receipt.unwrap_or(Value::Null);
-            return json!({
-                "verdict": "refused",
-                "reason": "registry_schema",
-                "message": format!(
-                    "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
-                    receipt.get("on_disk").map(|v| v.to_string()).unwrap_or_default(),
-                    receipt.get("understood").map(|v| v.to_string()).unwrap_or_default()
-                ),
-                "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
-                "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
-                "rows": [],
-            });
+            let message = format!(
+                "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
+                receipt
+                    .get("on_disk")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                receipt
+                    .get("understood")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            );
+            return refuse_with(
+                "registry_schema",
+                message,
+                json!({
+                    "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
+                    "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
+                }),
+                &[],
+                out,
+            );
+        }
+
+        // Read provider lanes before any refusal so the answer preserves the
+        // quota evidence that explains a busy fleet. The probe reads the
+        // named spawn's own odds: a reservation minted for that name redeems
+        // at the gate, so the readout skips it the same way the gate does.
+        let probe_name = opt_str_of(payload, "name");
+        let lanes_result = lanes_answer(
+            &config_cwd,
+            &registry_path,
+            probe_name.as_deref().filter(|n| !n.is_empty()),
+            &mut warnings,
+        );
+        if let Ok(lanes) = &lanes_result {
+            out.insert("lanes".into(), lanes.clone());
+        }
+
+        match crate::fleet_incident::verdict_for("spawns") {
+            crate::fleet_incident::Verdict::Clear(_) => {}
+            crate::fleet_incident::Verdict::Stopped(record) => {
+                return refuse_with(
+                    "fleet-stop",
+                    format!(
+                        "fleet incident stop is active (generation {}, reason: {})",
+                        record.generation, record.reason
+                    ),
+                    json!({"generation": record.generation}),
+                    &[],
+                    out,
+                );
+            }
+            crate::fleet_incident::Verdict::Unavailable(detail) => {
+                return refuse_with(
+                    "fleet-stop-unavailable",
+                    format!("fleet incident state is unreadable ({detail})"),
+                    json!({"detail": detail}),
+                    &[],
+                    out,
+                );
+            }
         }
 
         // The route axis of the quota wall: the SAME call the gate makes, so
@@ -208,17 +461,29 @@ mod probe {
 
         // The slot count: the same counter the gate refuses on. The rows are
         // named right away, so every verdict this answer can take (refused on
-        // max_live, refused later, accepted) carries them.
-        let (slot_row_entries, slot_claims) =
+        // max_live, refused later, accepted) carries them. Reservations are
+        // named beside the registry rows, each entry tagged with its kind.
+        let (slot_row_entries, slot_reservations) =
             spawn_gate::slot_reading(&registry_path, &mut warnings);
-        let slots = slot_row_entries.len() + slot_claims;
-        out.insert(
-            "slot_rows".into(),
-            json!(slot_row_entries
-                .iter()
-                .map(|r| json!({"name": r.name, "node": r.node, "provider": r.provider}))
-                .collect::<Vec<_>>()),
-        );
+        let slots = slot_row_entries.len() + slot_reservations.len();
+        let mut slot_rows_json: Vec<Value> = slot_row_entries
+            .iter()
+            .map(|r| {
+                json!({"kind": "registry", "name": r.name, "node": r.node, "provider": r.provider})
+            })
+            .collect();
+        slot_rows_json.extend(slot_reservations.iter().map(|r| {
+            json!({
+                "kind": "reservation",
+                "name": r.name,
+                "holder": r.holder,
+                "pid": r.pid,
+                "age_s": r.age_s,
+                "state": r.state,
+                "provider": r.provider,
+            })
+        }));
+        out.insert("slot_rows".into(), json!(slot_rows_json));
 
         let mut ram_row: Option<Value> = None;
         let mut cpu_rows: Vec<Value> = Vec::new();
@@ -302,10 +567,7 @@ mod probe {
                 Err(why) => (None, Some(why)),
             };
             let admission = spawn_gate::check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
-            cpu_rows = vec![
-                cpu_share_row(&admission.payload),
-                load_backstop_row(&admission.payload),
-            ];
+            cpu_rows = vec![cpu_share_row(&admission.payload)];
             match admission.payload.verdict.as_str() {
                 "hold" => {
                     return refuse_with(
@@ -321,9 +583,7 @@ mod probe {
                     );
                 }
                 "refuse" | "undecidable" => {
-                    let token = if admission.payload.axis == "load_15m" {
-                        "load_backstop"
-                    } else if admission.payload.axis == "cpu_instrument" {
+                    let token = if admission.payload.axis == "cpu_instrument" {
                         "cpu_instrument_unreadable"
                     } else {
                         "cpu_share_undecidable"
@@ -354,17 +614,22 @@ mod probe {
             reading.held,
         ) {
             if !caller.is_empty() && held >= share {
+                let mut message = format!(
+                    "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
+                );
+                message.push_str(&crate::spawn_gate::held_rows_suffix(
+                    reading.held_rows.as_ref(),
+                ));
                 return refuse_with(
                     "king_share",
-                    format!(
-                        "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
-                    ),
+                    message,
                     json!({
                         "king": caller,
                         "held": held,
                         "share": share,
                         "max_live": cap,
                         "kings": kings,
+                        "held_rows": reading.held_rows.clone().unwrap_or_default(),
                     }),
                     &make_rows(None, slots, cap, ram_row, cpu_rows),
                     out,
@@ -373,7 +638,7 @@ mod probe {
         }
 
         // The lanes: every capped provider AND every provider a live row names.
-        let lanes = match lanes_answer(&config_cwd, &registry_path, &mut warnings) {
+        let lanes = match lanes_result {
             Ok(lanes) => lanes,
             Err(fault) => {
                 return json!({
@@ -419,11 +684,6 @@ mod probe {
         if let Some(payload_adm) = &cpu {
             out.insert("share_low".into(), json!(payload_adm.share_low));
             out.insert("ceiling".into(), json!(payload_adm.ceiling));
-            out.insert("load_15m".into(), json!(payload_adm.load_15m));
-            out.insert(
-                "hard_max_load_per_cpu".into(),
-                json!(agents_config::hard_max_load_per_cpu(&config_cwd)),
-            );
         }
         if floor_gb > 0.0 {
             out.insert("min_free_gb".into(), json!(floor_gb));
@@ -458,6 +718,22 @@ fn refuse_with(
     rows: &[Value],
     mut out: Map<String, Value>,
 ) -> Value {
+    let mut refusal_rows = rows.to_vec();
+    if !refusal_rows.iter().any(|row| {
+        matches!(
+            row.get("verdict").and_then(Value::as_str),
+            Some("refuse" | "hold")
+        )
+    }) {
+        refusal_rows.push(json!({
+            "name": "gate-verdict",
+            "measured": reason,
+            "threshold": "accepted",
+            "verdict": "refuse",
+            "note": message.clone(),
+        }));
+    }
+
     out.insert("verdict".into(), json!("refused"));
     out.insert("reason".into(), json!(reason));
     out.insert("message".into(), json!(message));
@@ -468,7 +744,7 @@ fn refuse_with(
             out.insert(k, v);
         }
     }
-    out.insert("rows".into(), json!(rows));
+    out.insert("rows".into(), json!(refusal_rows));
     Value::Object(out)
 }
 
@@ -491,7 +767,7 @@ fn fleet_row(slots: usize, cap: usize) -> Value {
 }
 
 /// The Gate-dict row list: provider-lane per lane, fleet-rows, then whatever
-/// machine rows the mode read (RAM floor, CPU share, load backstop).
+/// machine rows the mode read (RAM floor, CPU share).
 fn make_rows(
     lanes: Option<&Value>,
     slots: usize,
@@ -630,41 +906,6 @@ fn cpu_share_row(payload: &spawn_gate::AdmissionPayload) -> Value {
     Value::Object(row)
 }
 
-fn load_backstop_row(payload: &spawn_gate::AdmissionPayload) -> Value {
-    let unreadable = payload.axis == "cpu_instrument";
-    let mut row = Map::new();
-    row.insert("name".into(), json!("load-backstop"));
-    row.insert(
-        "measured".into(),
-        json!(payload
-            .load_15m
-            .map(|v| format!("{v:.1}"))
-            .unwrap_or_else(|| "-".into())),
-    );
-    row.insert(
-        "threshold".into(),
-        json!(if unreadable {
-            "-".to_string()
-        } else {
-            format!("{:.1}", payload.backstop)
-        }),
-    );
-    row.insert(
-        "verdict".into(),
-        json!(
-            if payload.axis == "load_15m" && payload.verdict == "refuse" {
-                "refuse"
-            } else if payload.load_15m.is_some() {
-                "pass"
-            } else {
-                "skipped: load unreadable"
-            }
-        ),
-    );
-    row.insert("key".into(), json!("agents.hard_max_load_per_cpu"));
-    Value::Object(row)
-}
-
 fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
     let mut share = Map::new();
     share.insert("kings".into(), json!(reading.kings));
@@ -697,8 +938,27 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
 fn lanes_answer(
     config_cwd: &std::path::Path,
     registry_path: &std::path::Path,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
+    let home = crate::paths::AgentsHome::from_env();
+    let now_epoch = crate::provider_cap::now_epoch_secs();
+    let snapshot = crate::provider_cap::read_persisted_snapshot(&home);
+    let fresh = snapshot
+        .as_ref()
+        .is_some_and(|s| now_epoch.saturating_sub(s.measured_at_epoch) <= 1_800);
+    let quota_source = match snapshot.as_ref() {
+        Some(_) if fresh => "snapshot",
+        Some(_) => "stale-snapshot",
+        None => "no-snapshot",
+    };
+    let quota_states = if fresh {
+        snapshot
+            .as_ref()
+            .map(crate::provider_cap::quota_states_from_snapshot)
+    } else {
+        None
+    };
     let mut providers: Vec<String> = Vec::new();
     if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
         .and_then(|t| {
@@ -739,22 +999,43 @@ fn lanes_answer(
             registry_path,
             &provider,
             &questions_raw,
+            redeemer,
             warnings,
         ) {
-            Ok((live, counted, parked)) => {
+            Ok(reading) => {
                 let mut lane = Map::new();
                 lane.insert("cap".into(), json!(cap));
-                lane.insert("live".into(), json!(live));
-                lane.insert("counted".into(), json!(counted));
+                lane.insert("live".into(), json!(reading.count));
+                lane.insert("counted".into(), json!(reading.counted));
+                lane.insert(
+                    "reserved".into(),
+                    json!(reading
+                        .reserved
+                        .iter()
+                        .map(|(name, exp)| serde_json::json!({
+                            "name": name,
+                            "expires_at": json!(exp),
+                        }))
+                        .collect::<Vec<_>>()),
+                );
                 lane.insert(
                     "parked".into(),
-                    json!(parked
+                    json!(reading
+                        .parked
                         .iter()
                         .map(|(name, qid)| serde_json::json!({
                             "name": name,
                             "question_id": json!(qid),
                         }))
                         .collect::<Vec<_>>()),
+                );
+                lane.insert(
+                    "quota".into(),
+                    json!(quota_states
+                        .as_ref()
+                        .and_then(|states| states.get(&provider))
+                        .cloned()
+                        .unwrap_or_else(|| "unmeasured".into())),
                 );
                 lanes.insert(provider, Value::Object(lane));
             }
@@ -763,6 +1044,7 @@ fn lanes_answer(
             }
         }
     }
+    lanes.insert("quota_source".into(), json!(quota_source));
     Ok(Value::Object(lanes))
 }
 
@@ -770,6 +1052,146 @@ fn lanes_answer(
 mod tests {
     use super::*;
     use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
+
+    struct TestEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl TestEnvRestore {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn probe_registry_schema_refusal_names_its_reason_row() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("fno-verb-registry-schema-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let registry_path = home.join("registry.json");
+        let on_disk = crate::state::REGISTRY_SCHEMA_VERSION as u64 + 1;
+        std::fs::write(
+            &registry_path,
+            format!(r#"{{"schema_version":{on_disk},"entries":[]}}"#),
+        )
+        .unwrap();
+
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+
+        let answer = probe::answer(&json!({
+            "name": "probe-registry-schema",
+            "substrate": "headless",
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "registry_schema");
+        assert_eq!(answer["on_disk"], on_disk);
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "registry_schema");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], answer["message"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuse_with_emits_gate_verdict_when_no_measurement_row_refuses() {
+        let message = "king share is active";
+        let answer = refuse_with(
+            "king_share",
+            String::from(message),
+            json!({}),
+            &[],
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "king_share");
+        assert_eq!(rows[0]["threshold"], "accepted");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], message);
+    }
+
+    #[test]
+    fn refuse_with_keeps_an_existing_refusal_without_adding_a_generic_row() {
+        let measured = fleet_row(3, 3);
+        let answer = refuse_with(
+            "max_live",
+            "fleet full".to_string(),
+            json!({}),
+            std::slice::from_ref(&measured),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], measured);
+        assert_eq!(rows[0]["name"], "fleet-rows");
+        assert_eq!(rows[0]["verdict"], "refuse");
+    }
+
+    #[test]
+    fn refuse_with_keeps_a_held_measurement_without_adding_a_generic_row() {
+        let held = json!({
+            "name": "cpu-share",
+            "measured": "2.10/12.00 cores",
+            "threshold": "50%",
+            "verdict": "hold",
+            "note": "measurement unavailable",
+        });
+        let answer = refuse_with(
+            "fleet_cpu_share",
+            "CPU measurement unavailable".to_string(),
+            json!({}),
+            std::slice::from_ref(&held),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], held);
+        assert_eq!(rows[0]["name"], "cpu-share");
+        assert_eq!(rows[0]["verdict"], "hold");
+    }
 
     fn mem(
         avail: Option<f64>,
@@ -939,11 +1361,213 @@ mod tests {
         let slot_rows = answer["slot_rows"].as_array().expect("slot_rows array");
         assert_eq!(slot_rows.len(), 3, "{slot_rows:?}");
         for r in slot_rows {
+            assert!(r.get("kind").is_some(), "{r:?}");
             assert!(r.get("name").is_some(), "{r:?}");
             assert!(r.get("node").is_some(), "{r:?}");
             assert!(r.get("provider").is_some(), "{r:?}");
         }
         assert_eq!(answer["live_workers"], 3, "slots stay rows + reservations");
+        assert_eq!(answer["verdict"], "accepted");
+        assert_ne!(answer["reason"], "fleet-stop");
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_mirrors_fleet_incident_verdict_before_capacity_and_keeps_lanes() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-incident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        std::fs::write(
+            home.join("registry.json"),
+            serde_json::json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "entries": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let incident_path =
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home));
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 19,
+            changed_at: "2026-09-18T19:48:00Z".into(),
+            changed_by: "test".into(),
+            reason: "repro".into(),
+            holds: Vec::new(),
+            source: Some("file".into()),
+        };
+        std::fs::write(&incident_path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        let stopped = probe::answer(&json!({}));
+        assert_eq!(stopped["verdict"], "refused");
+        assert_eq!(stopped["reason"], "fleet-stop");
+        assert!(stopped["message"]
+            .as_str()
+            .unwrap()
+            .contains("generation 19"));
+        assert!(stopped["lanes"].is_object(), "{stopped}");
+
+        std::fs::write(&incident_path, b"broken").unwrap();
+        let unreadable = probe::answer(&json!({}));
+        assert_eq!(unreadable["verdict"], "refused");
+        assert_eq!(unreadable["reason"], "fleet-stop-unavailable");
+        assert!(unreadable["message"]
+            .as_str()
+            .unwrap()
+            .contains("unreadable"));
+
+        let _ = std::fs::remove_file(&incident_path);
+        let clear = probe::answer(&json!({}));
+        assert_eq!(clear["verdict"], "accepted");
+        assert_ne!(clear["reason"], "fleet-stop");
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC2-HP: the probe names a counted reservation in `slot_rows` with its
+    /// kind and the fields an operator needs to free a dead one, and the row
+    /// count still equals `live_workers`.
+    #[test]
+    fn probe_slot_rows_names_reservations() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno/claims")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let row = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{good}}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{}, {}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                row("p1"),
+                row("p2")
+            ),
+        )
+        .unwrap();
+
+        // One counted reservation beside the two registry rows.
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "model_provider".to_string(),
+            serde_json::Value::String("zai".into()),
+        );
+        let outcome = crate::claims::acquire(
+            "worker:w-res",
+            "spawn-gate:me:w-res",
+            crate::claims::AcquireOpts {
+                pid: Some(me),
+                pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
+                ttl_ms: Some(3_600_000),
+                metadata: Some(m),
+                root: Some(claims_root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(outcome, crate::claims::AcquireOutcome::Acquired(_)),
+            "{outcome:?}"
+        );
+
+        let answer = probe::answer(&json!({}));
+        let slot_rows = answer["slot_rows"].as_array().expect("slot_rows array");
+        assert_eq!(slot_rows.len(), 3, "{slot_rows:?}");
+        let res = slot_rows
+            .iter()
+            .find(|r| r["kind"] == "reservation")
+            .expect("the reservation is named");
+        assert_eq!(res["name"], "w-res");
+        assert_eq!(res["state"], "live");
+        assert_eq!(res["pid"], me);
+        assert_eq!(res["provider"], "zai");
+        assert!(res.get("age_s").is_some(), "{res:?}");
+        assert_eq!(res["holder"], "spawn-gate:me:w-res");
+        let registry_kinds: Vec<&str> = slot_rows
+            .iter()
+            .filter(|r| r["kind"] == "registry")
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        assert_eq!(registry_kinds, ["p1", "p2"]);
+        assert_eq!(answer["live_workers"], 3);
         assert_eq!(answer["verdict"], "accepted");
 
         std::env::remove_var(crate::paths::HOME_ENV);
@@ -957,6 +1581,332 @@ mod tests {
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe's king_share refusal names the rows it charged to the
+    /// caller, in `message` and as a `held_rows` key, from the same reading
+    /// `share_json` reports in status mode.
+    #[test]
+    fn probe_king_share_refusal_names_the_held_rows() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-kingshare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            // max_live 2 with one king divides to share 2; the fixture rows
+            // carry no pid, so the fleet slot count stays 0 and the refusal
+            // the probe answers with is the king share, not max_live.
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let crowned = r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
+        let worker = |name: &str, status: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                crowned,
+                worker("w1", "live"),
+                worker("w2", "live"),
+                // The stopped shape: a row the stop wrote terminal while the
+                // process survived. The share does not charge it, so the
+                // naming must not either - the sweep that re-marks it live
+                // is the one that puts it back in the count.
+                worker("w3", "orphaned")
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({
+            "name": "probe-kingshare",
+            "substrate": "bg",
+            "caller_session": "session-aaaaaaaa"
+        }));
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "king_share");
+        assert_eq!(
+            answer["message"],
+            "this reign holds 2 of max_live 2 across 1 kings (share 2); the rows charged to you are w1, w2"
+        );
+        assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_max_live_refusal_carries_provider_lane_quota_state() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let row = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{good}}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                row("p1"),
+                row("p2"),
+                row("p3")
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({}));
+
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "max_live");
+        assert_eq!(answer["lanes"]["zai"]["live"], 3);
+        assert_eq!(answer["lanes"]["zai"]["quota"], "unmeasured");
+        assert_eq!(answer["lanes"]["quota_source"], "no-snapshot");
+
+        std::fs::create_dir_all(home.join("provider-cap")).unwrap();
+        std::fs::write(
+            home.join("provider-cap").join("snapshot.json"),
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "zai:default",
+                    "provider": "zai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": null,
+                    "missing_reset_timezone": [],
+                    "state": "closed",
+                    "members": []
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": crate::provider_cap::now_epoch_secs()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let snapshot_answer = probe::answer(&json!({}));
+        assert_eq!(snapshot_answer["lanes"]["zai"]["quota"], "closed");
+        assert_eq!(snapshot_answer["lanes"]["quota_source"], "snapshot");
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_spawn_refuses_while_crowned_succession_admits_at_full_slot_cap() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnvRestore::capture(&[
+            crate::paths::HOME_ENV,
+            "FNO_CLAIMS_ROOT",
+            "FNO_CONFIG",
+            "FNO_SPAWN_GATE",
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            "FNO_NODE",
+        ]);
+        let dir = std::env::temp_dir().join(format!("fno-verb-succession-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        let config = fnodir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        std::env::set_var("FNO_CONFIG", &config);
+        std::env::remove_var("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_NODE");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let home = crate::paths::AgentsHome::from_env();
+        let registry = home.registry_json();
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        let pid = std::process::id();
+        let start = crate::daemon::process_start_time(pid).unwrap_or(0);
+        std::fs::write(
+            &registry,
+            format!(
+                r#"{{"schema_version":{},"entries":[{{"name":"king","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"crown_level":1,"crown_scope":"x-epic","harness_session_id":"session-king"}},{{"name":"worker","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"session-king"}}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+            ),
+        )
+        .unwrap();
+
+        let plain = gate_answer(&json!({
+            "mode": "gate",
+            "name": "plain-spawn",
+            "substrate": "bg",
+            "no_wait": true,
+            "caller_session": "session-king",
+            "holder_pid": pid,
+        }));
+        let answer = gate_answer(&json!({
+            "mode": "gate",
+            "name": "successor",
+            "substrate": "bg",
+            "no_wait": true,
+            "caller_session": "session-king",
+            "succession_scope": "x-epic",
+            "holder_pid": pid,
+        }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(plain["status"], "refused", "{plain}");
+        assert_eq!(plain["exit_code"], spawn_gate::EXIT_NO_WAIT, "{plain}");
+        assert_eq!(plain["receipt"]["axis"], "max_live", "{plain}");
+        assert_eq!(answer["status"], "admitted", "{answer}");
+    }
+
+    /// The mux revival door asks with `hold: false`: the verb releases the
+    /// spawn-gate mutex before it answers, so a long-lived server never sits
+    /// on the check-dispatch mutex until the TTL. The positive control
+    /// without `hold` pins today's hand-back contract.
+    #[test]
+    fn gate_with_hold_false_releases_the_mutex_and_answers_no_keys() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnvRestore::capture(&[
+            crate::paths::HOME_ENV,
+            "FNO_CLAIMS_ROOT",
+            "FNO_CONFIG",
+            "FNO_SPAWN_GATE",
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            "FNO_NODE",
+        ]);
+        let dir = std::env::temp_dir().join(format!("fno-verb-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        std::env::remove_var("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_NODE");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let home = crate::paths::AgentsHome::from_env();
+        let registry = home.registry_json();
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(
+            &registry,
+            format!(
+                r#"{{"schema_version":{},"entries":[]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+
+        let held = gate_answer(&json!({
+            "mode": "gate",
+            "name": "revival",
+            "substrate": "pane",
+            "no_wait": true,
+            "hold": false,
+            "holder_pid": std::process::id(),
+        }));
+        let claims_dir = claims_root.join(".fno").join("claims");
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        let handed = gate_answer(&json!({
+            "mode": "gate",
+            "name": "revival-two",
+            "substrate": "pane",
+            "no_wait": true,
+            "holder_pid": std::process::id(),
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(held["status"], "admitted", "{held}");
+        assert!(held["gate_key"].is_null(), "{held}");
+        assert!(held["gate_holder"].is_null(), "{held}");
+        assert!(held["worker_key"].is_null(), "{held}");
+        assert!(held["worker_holder"].is_null(), "{held}");
+        assert!(
+            leftovers.is_empty(),
+            "hold false leaves no claim behind: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+        assert_eq!(handed["status"], "admitted", "{handed}");
+        assert!(handed["gate_key"].is_string(), "{handed}");
     }
 
     /// AC1-HP: a gate payload with no `holder_pid` is refused before the gate
@@ -1014,8 +1964,278 @@ mod tests {
         );
         assert!(
             leftovers.is_empty(),
-            "the claims dir holds {:?} after a pid-less refusal",
+            "refusals before the mint write nothing: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gate_refuses_a_review_seed_before_the_bypass() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno").join("claims")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+        let prior_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::set_var("FNO_SPAWN_GATE", "0");
+
+        let review = gate_answer(&json!({
+            "mode": "gate",
+            "name": "review-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "$fno:review high --comment",
+            "session_phase": "do"
+        }));
+        let think = gate_answer(&json!({
+            "mode": "gate",
+            "name": "think-probe",
+            "substrate": "headless",
+            "holder_pid": std::process::id(),
+            "force": true,
+            "seed": "/fno:think why"
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(review["status"], "refused", "{review}");
+        assert_eq!(review["exit_code"], 89, "{review}");
+        assert_eq!(review["receipt"]["reason"], "review_session", "{review}");
+        assert_eq!(think["status"], "admitted", "{think}");
+    }
+
+    /// AC3-HP: reserve mints a claim with the reservation metadata, an expiry
+    /// inside the ceiling, and the next lane count one higher; gate-status
+    /// (AC4-HP) names it in the lane row's `reserved` array.
+    #[test]
+    fn reserve_mints_a_claim_with_metadata_and_lane_count() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // lanes_answer resolves the agents home; a test run must declare a
+        // hermetic root, never the real $HOME.
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let argv: Vec<String> = [
+            "t-reserved-x-4444",
+            "--provider",
+            "zai",
+            "--ttl",
+            "10m",
+            "--reason",
+            "four parked PRs",
+            "--node",
+            "x-4444",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        // AC4-HP: the gate-status lane row names the reservation beside
+        // cap/live/counted/parked.
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        std::fs::write(&reg, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        let mut warnings = Vec::new();
+        let lanes = lanes_answer(&dir, &reg, None, &mut warnings).unwrap();
+        assert_eq!(
+            lanes["zai"]["reserved"][0]["name"],
+            json!("t-reserved-x-4444")
+        );
+        assert_eq!(
+            lanes["zai"]["live"],
+            json!(1),
+            "the reservation spends a lane slot in the readout too"
+        );
+        let (state, rec) = crate::claims::status("worker:t-reserved-x-4444", Some(&root));
+        let rec = rec.expect("the minted claim exists");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::paths::HOME_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0);
+        assert_eq!(state, crate::claims::ClaimState::Live);
+        assert_eq!(
+            rec.metadata.get("model_provider").and_then(Value::as_str),
+            Some("zai")
+        );
+        assert!(
+            rec.metadata.get("reserved_by").is_some(),
+            "reserved_by names the caller"
+        );
+        assert_eq!(
+            rec.metadata.get("reserved_reason").and_then(Value::as_str),
+            Some("four parked PRs")
+        );
+        assert_eq!(
+            rec.metadata.get("node").and_then(Value::as_str),
+            Some("x-4444")
+        );
+        assert!(
+            rec.expires_at.unwrap_or(0) > now,
+            "expires_at sits inside the ceiling, past the mint instant"
+        );
+        assert!(
+            rec.expires_at.unwrap_or(0) <= now + RESERVATION_MAX_TTL_MS,
+            "expires_at within the 15m ceiling"
+        );
+    }
+
+    /// AC3-EDGE: a TTL over the ceiling refuses and writes nothing.
+    #[test]
+    fn reserve_refuses_a_ttl_over_the_ceiling_and_writes_nothing() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-ttl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let argv: Vec<String> = [
+            "t-reserved-x-4444",
+            "--provider",
+            "zai",
+            "--ttl",
+            "4h",
+            "--reason",
+            "too long",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(
+            leftovers.is_empty(),
+            "the ceiling refusal writes no claim: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    /// AC3-EDGE: reservations never hold a whole lane. With zai capped at 2
+    /// and one reservation live, a second refuses and writes nothing.
+    #[test]
+    fn reserve_refuses_to_reserve_the_whole_lane() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n\n\
+             [agents.provider_limits.zai]\nlanes = 2\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let host = crate::claims::hostname();
+        let first = claims_dir.join(format!(
+            "{}.lock",
+            crate::claims::encode_key("worker:t-first-x-4444")
+        ));
+        std::fs::write(
+            &first,
+            format!(
+                "schema_version: {}\nkey: worker:t-first-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                crate::claims::SCHEMA_VERSION,
+                now + 600_000,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        let argv: Vec<String> = [
+            "t-second-x-4444",
+            "--provider",
+            "zai",
+            "--reason",
+            "one slot must stay winnable",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "only the pre-existing fixture claim is on disk; the refused mint wrote nothing"
+        );
+    }
+
+    /// AC4-HP: the usage text names the rule, so the rule cannot drift from
+    /// the behavior it teaches.
+    #[test]
+    fn reserve_usage_names_the_rule() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let code = reserve_spawn_gate(std::path::Path::new("."), &["--help".to_string()]);
+        assert_eq!(code, 0);
+        assert!(crate::spawn_gate_reservations::RESERVATION_RULE.contains("first-come"));
+        assert!(
+            crate::spawn_gate_reservations::RESERVATION_RULE.contains("expires within 15 minutes")
         );
     }
 }

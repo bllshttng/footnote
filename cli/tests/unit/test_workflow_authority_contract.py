@@ -181,10 +181,12 @@ def test_reign_branches_on_harness_capability_before_arming():
     text = _skill("skills/reign/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "On Claude, arm ONE monitor, not six" in arm
-    assert "Fleet settled-PR wake" in arm
-    assert "arm nothing native" in arm
-    assert "wake arm" in arm  # the codex beat is the external wake contract
+    assert "king_settle" in arm  # the daemon settle mail pushes on every harness
+    assert "arms no watch" in arm  # the king arms nothing; the daemon mails
+    assert "Codex uses provider-backed goal actions" in arm
+    assert "positive `provider_goal` receipt" in arm
+    assert "separate positive `stop` receipt" in arm
+    assert "Every Codex wake runs the check-in body" in arm
 
 
 def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
@@ -218,6 +220,20 @@ def test_reign_checkin_names_the_merge_finish_line():
     assert "the team merges green" in checkin
 
 
+def test_reign_finding_starts_a_new_epic():
+    # Law d-08ef1f90: new findings go into a new small epic, not a running
+    # one. The old lever told a king to parent a finding into an active
+    # mission scope, which grew running epics without bound.
+    text = _skill("skills/reign/SKILL.md")
+    assert "### A finding starts a new epic" in text
+    assert "--type epic" in text
+    assert "--parent null" in text
+    assert "fno agents crown <handle> --scope" in text
+    assert "inside an active mission scope" not in text
+    once = _skill("skills/reign/references/once.md")
+    assert "../SKILL.md#a-finding-starts-a-new-epic" in once
+
+
 def test_review_empty_diff_guard_resolves_the_named_target():
     text = _skill("skills/review/SKILL.md")
     guard = text[text.index("### 2a. Empty-diff guard") :]
@@ -245,27 +261,27 @@ def test_execute_kill_criteria_reads_frontmatter_owner():
 def test_review_lanes_names_retired_spawned_reviewer_law_not_the_recipe():
     text = _skill("docs/architecture/review-lanes.md")
     assert "d-384d967c" in text
-    assert "No spawned-reviewer lane" in text
+    assert "No spawned-reviewer lane (operator law d-384d967c)" in text
     assert "--model opus" not in text
     assert "the peer lane" in text
     assert "NO `--fix` remains the review contract" in text
 
 
 def test_king_rule_and_exit_name_the_king_channel_not_decide():
-    text = _skill("skills/king-for-a-day/SKILL.md")
-    rule = text[text.index("**Rule.**") :]
+    text = _skill("skills/reign/SKILL.md")
+    rule = text[text.index("## Recording a ruling") :]
     assert "fno backlog note <node> <text>" in rule
-    assert "--authority" in rule
-    exit_section = text[text.index("Before you abdicate") :]
-    assert "fno backlog note" in exit_section
-    # Agents answer by default: the exit names the answer verb and the
-    # escalation-note lane, not a closed door.
-    assert "--authority crown" in exit_section
-    assert "escalation note" in exit_section
+    assert "--authority crown" in rule
+    assert "escalations directory" in rule
+    assert "fno inbox decisions <subject> --lane law" in rule
+    once = _skill("skills/reign/references/once.md")
+    exit_section = once[once.index("Before you abdicate") :]
+    assert "../SKILL.md#recording-a-ruling" in exit_section
+    assert "fno agents king done" in exit_section
 
 
 def test_king_mailbox_addresses_full_session_ids():
-    text = _skill("skills/king-for-a-day/SKILL.md")
+    text = _skill("skills/reign/references/once.md")
     assert "the bare 8-hex session prefix, the same id" not in text
     assert "FULL session id" in text
     assert "refuses an ambiguous short form" in text
@@ -288,13 +304,14 @@ def test_audit_deliverable_is_bounded_artifact_plans_only_when_authorized():
     assert "the resolved `--perspectives` set" in text
 
 
-def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
+def test_pr_create_and_using_fno_run_inline():
     ship = _skill("skills/ship/SKILL.md")
     assert "Haiku-capable provider" not in ship
     assert "configured role routing" in ship
     using = _skill("skills/using-fno/SKILL.md")
     assert "Haiku worker" not in using
-    assert "routed create worker" in using
+    assert "PR lifecycle: create inline" in using
+    assert "routed create worker" not in using
     assert "a skill spawns a new agent context" not in using
 
 
@@ -304,7 +321,7 @@ def test_ship_and_using_fno_delegate_worker_choice_to_configured_routing():
 def test_agent_and_king_roots_route_to_workflow_routes_references():
     for skill, trigger in (
         ("skills/agent/SKILL.md", "workflow-routes.md"),
-        ("skills/king-for-a-day/SKILL.md", "workflow-routes.md"),
+        ("skills/reign/SKILL.md", "workflow-routes.md"),
     ):
         text = _skill(skill)
         assert trigger in text

@@ -11,7 +11,7 @@ import time
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NoReturn
 
 import typer
 
@@ -346,6 +346,7 @@ def _live_root_pids(
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     recycled_rows: list[Any] = []
+    dead_rows: list[str] = []
     try:
         from fno.agents.registry import load_registry
         from fno.agents.session_procs import bg_socket_pid_map, roster_pid_map
@@ -364,7 +365,7 @@ def _live_root_pids(
                     and row.pid is None
                     and _terminal_row_changed_after_snapshot(row, snapshot_at)
                 ):
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} exited inside the ps snapshot's second, so a later transition cannot be ruled out"
                 if (
                     snapshot_pids is None
                     or row.pid is None
@@ -372,26 +373,26 @@ def _live_root_pids(
                 ):
                     continue
                 if row.pid_start_time is None:
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} sits in the ps snapshot and carries no pid start token"
                 root_live = _root_pid_is_live(row.pid, row.pid_start_time)
                 if root_live is not True:
                     if not _pid_recycled(row.pid, row.pid_start_time):
-                        return roots, "worker root liveness unavailable"
+                        return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} pid {row.pid} is not live and recycling is unproven"
                     continue
                 roots.add(row.pid)
                 continue
             if row.pid is None:
                 continue
             if row.pid_start_time is None:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: registry row {getattr(row, 'name', '?')} carries no pid start token"
             root_live = _root_pid_is_live(row.pid, row.pid_start_time)
             if root_live is None:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: pid {row.pid} start time could not be read for row {getattr(row, 'name', '?')}"
             if root_live:
                 roots.add(row.pid)
             elif snapshot_pids is not None and row.pid in snapshot_pids:
                 if not _pid_recycled(row.pid, row.pid_start_time):
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: row {getattr(row, 'name', '?')} pid {row.pid} is dead, sits in the ps snapshot, and recycling is unproven"
                 recycled_rows.append(row)
         pidless_rows = [
             row for row in rows if row.status in LIVE_STATUSES and row.pid is None
@@ -438,7 +439,9 @@ def _live_root_pids(
             pid = codex_pids.get(sid)
             if pid is not None:
                 if _root_pid_is_live(pid, None) is not True:
-                    return roots, "worker root liveness unavailable"
+                    dead_rows.append(f"{getattr(row, 'name', '?')} (codex rollout pid={pid})")
+                    resolved_codex_ids.add(id(row))  # named here; keep it out of the pidless gap below
+                    continue
                 roots.add(pid)
                 resolved_codex_ids.add(id(row))
         # a routless row is a NAMED gap, not a dead reading -:
@@ -477,23 +480,25 @@ def _live_root_pids(
                     f"{getattr(row, 'name', '?')} (pid={row.pid})" for row in recycled_rows
                 ))
             )
+        if dead_rows:
+            gap_rows.append(f"{len(dead_rows)} live row(s) whose resolved pid is not live: " + ", ".join(sorted(dead_rows)))
+            dead_rows.clear()
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
-        if deadline is not None and time.monotonic() >= deadline:
-            gap_rows.append("bg-socket resolution timed out")
-            return roots, AttributionGap("; ".join(gap_rows))
-        socket_pids = bg_socket_pid_map(
+        # The deadline binds the lsof sweep only; the roster below is one file read.
+        socket_blind = deadline is not None and time.monotonic() >= deadline
+        socket_pids = {} if socket_blind else bg_socket_pid_map(
             timeout=15.0 if deadline is None else max(0.01, deadline - time.monotonic())
         )
+        socket_blind = socket_blind or (deadline is not None and time.monotonic() >= deadline)
         missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
         if missing:
             # the socket map is the FIRST oracle; a key in neither is a
-            # corpse, an unreadable roster stays a gap, the read may spend the deadline.
-            spent = deadline is not None and time.monotonic() >= deadline
-            roster_pids = None if spent else roster_pid_map()
+            # corpse, an unreadable roster stays a gap.
+            roster_pids = roster_pid_map()
             still_missing: list[Any] = []
             for key, row in missing:
-                if roster_pids is not None and key not in roster_pids:
+                if roster_pids is not None and key not in roster_pids and not socket_blind:
                     continue  # absent from a readable oracle: a corpse drops
                 pid = (roster_pids or {}).get(key)
                 if pid is None:
@@ -501,12 +506,14 @@ def _live_root_pids(
                     still_missing.append(row)
                     continue
                 if not _root_pid_is_live(pid, None):
-                    return roots, "worker root liveness unavailable"
+                    dead_rows.append(f"{getattr(row, 'name', '?')} (roster pid={pid})")
+                    continue
                 roots.add(pid)
             missing = still_missing
         if missing:
             gap_rows.append(
-                f"{len(missing)} bg-socket row(s) missing from the socket map"
+                f"{len(missing)} bg-socket row(s) "
+                + ("unresolved: bg-socket resolution timed out" if socket_blind else "missing from the socket map")
                 + ("" if roster_pids is not None else " (roster oracle unavailable)")
             )
         for key, row in routed_keys:
@@ -514,17 +521,17 @@ def _live_root_pids(
             if pid is None:
                 continue
             root_live = _root_pid_is_live(pid, None)
-            if root_live is None:
-                return roots, "worker root liveness unavailable"
             if root_live:
                 roots.add(pid)
             else:
-                return roots, "worker root liveness unavailable"
+                dead_rows.append(f"{getattr(row, 'name', '?')} (socket pid={pid})")
+        if dead_rows:
+            gap_rows.append(f"{len(dead_rows)} live row(s) whose resolved pid is not live: " + ", ".join(sorted(dead_rows)))
         return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
     except ImportError:
         raise
-    except Exception:
-        return roots, "worker root discovery unavailable"
+    except Exception as exc:
+        return roots, f"worker root discovery unavailable: {type(exc).__name__}"
 
 
 def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], str]:
@@ -584,7 +591,7 @@ def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], s
 
 def _live_shared_serve_root_pids(
     *, snapshot_pids: set[int] | None = None
-) -> tuple[set[int], str | None]:
+) -> tuple[set[int], str | AttributionGap | None]:
     """Return the confirmed PID of the detached shared opencode serve."""
     roots: set[int] = set()
     try:
@@ -594,7 +601,7 @@ def _live_shared_serve_root_pids(
             (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
         )
         if not isinstance(record, dict):
-            return roots, "shared serve root discovery unavailable"
+            return roots, AttributionGap("shared opencode serve root unattributed: opencode-serve.json is not a mapping")
         pid = record.get("pid")
         pid_start = record.get("pid_start")
         if (
@@ -605,19 +612,19 @@ def _live_shared_serve_root_pids(
             or isinstance(pid_start, bool)
             or pid_start <= 0
         ):
-            return roots, "shared serve root liveness unavailable"
+            return roots, AttributionGap("shared opencode serve root unattributed: opencode-serve.json carries no usable pid and pid_start pair")
         root_live = _root_pid_is_live(pid, pid_start)
         if root_live is None:
-            return roots, "shared serve root liveness unavailable"
+            return roots, AttributionGap(f"shared opencode serve root unattributed: pid {pid} start time could not be read")
         if root_live:
             roots.add(pid)
         elif snapshot_pids is not None and pid in snapshot_pids:
             if not _pid_recycled(pid, pid_start):
-                return roots, "shared serve root liveness unavailable"
+                return roots, AttributionGap(f"shared opencode serve root unattributed: pid {pid} is dead, sits in the ps snapshot, and recycling is unproven")
     except FileNotFoundError:
         return roots, None
-    except Exception:
-        return roots, "shared serve root discovery unavailable"
+    except Exception as exc:
+        return roots, f"shared serve root discovery unavailable: {type(exc).__name__}"
     return roots, None
 
 
@@ -646,7 +653,8 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
         snapshot_pids=snapshot_pids
     )
-    if shared_serve_error is not None:
+    serve_gap = shared_serve_error.text if isinstance(shared_serve_error, AttributionGap) else None
+    if shared_serve_error is not None and serve_gap is None:
         return None, f"footprint unavailable: {shared_serve_error}"
     codex_roots, codex_verdict = _codex_app_server_serve(snapshot_pids)
     root_pids, root_error = _live_root_pids(
@@ -690,6 +698,8 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
                 f"footprint unavailable: all {reading.unparsed_lines} ps row(s) "
                 "failed to parse" + _unparsed_sample_evidence(reading)
             )
+    if serve_gap is not None:
+        attribution_gap = "; ".join(text for text in (attribution_gap, serve_gap) if text)
     if attribution_gap is not None:
         reading = reading._replace(attribution_gap=attribution_gap)
     return reading, None
@@ -786,31 +796,25 @@ def _share_segment(
     return seg
 
 
-def _admission_config() -> tuple[float, float]:
-    """``(max_fleet_cpu_share, hard_max_load_per_cpu)``, degraded to defaults."""
+def _admission_config() -> float:
+    """``max_fleet_cpu_share``, degraded to the default."""
     try:
         from fno.config import load_settings
 
         agents = load_settings().agents
-        return (
-            float(getattr(agents, "max_fleet_cpu_share", 0.5)),
-            float(getattr(agents, "hard_max_load_per_cpu", 40.0)),
-        )
+        return float(getattr(agents, "max_fleet_cpu_share", 0.5))
     except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
-        return 0.5, 40.0
+        return 0.5
 
 
 def _compute_admission(reading: Footprint, load_snapshot: Any) -> Admission:
     """Feed :func:`cpu_admission` from one snapshot; the seam the payload
     and the exit decision share."""
-    share_ceiling, hard_max = _admission_config()
+    share_ceiling = _admission_config()
     return cpu_admission(
         reading,
         capacity_cores=_cpu_capacity_cores(),
         share_ceiling=share_ceiling,
-        load_15m=getattr(load_snapshot, "load_15m", None),
-        hard_max_load_per_cpu=hard_max,
-        cpus=int(getattr(load_snapshot, "load_cpu_count", 0) or 1),
     )
 
 
@@ -836,41 +840,14 @@ def cpu_admission(
     *,
     capacity_cores: float,
     share_ceiling: float,
-    load_15m: float | None,
-    hard_max_load_per_cpu: float,
-    cpus: int,
 ) -> Admission:
     """The one CPU-axis decider, consumed by both gates and every readout
     (LD1/LD3). The fleet's attributed share decides; a gap widens it
     to an interval bounded above by the machine's measured CPU, so a ceiling
     above the interval admits, below its floor holds, and inside it refuses.
-    The 15-minute load is the absolute backstop and refuses first; disabled
-    or unreadable passes onward. Pure: no clocks, no subprocesses, no config."""
-    backstop = hard_max_load_per_cpu * cpus
+    Pure: no clocks, no subprocesses, no config."""
     holder = _top_holder(reading)
     holder_clause = f"; top holder {holder}" if holder else ""
-    if load_15m is not None and hard_max_load_per_cpu > 0 and load_15m > backstop:
-        return Admission(
-            verdict="refuse",
-            axis="load_15m",
-            reason=(
-                f"spawn-gate: 15-minute load {load_15m:.1f} against backstop "
-                f"{backstop:.1f} (hard_max_load_per_cpu "
-                f"{hard_max_load_per_cpu:g} x {cpus} cpus){holder_clause}; refusing "
-                f"(--force to bypass)"
-            ),
-            share_low=0.0,
-            share_high=0.0,
-            bound="exact",
-            fleet_cores=reading.fleet_cpu_cores,
-            machine_cores=reading.measured_cpu_cores,
-            capacity_cores=float(capacity_cores),
-            ceiling=share_ceiling,
-            gap=reading.attribution_gap,
-            load_15m=load_15m,
-            backstop=backstop,
-            top_holder=holder,
-        )
     capacity = float(capacity_cores)
     share_low = reading.fleet_cpu_cores / capacity if capacity > 0 else 0.0
     gap = reading.attribution_gap
@@ -888,8 +865,6 @@ def cpu_admission(
         capacity_cores=capacity,
         ceiling=share_ceiling,
         gap=gap,
-        load_15m=load_15m,
-        backstop=backstop,
         top_holder=holder,
     )
     if share_high <= share_ceiling:
@@ -928,90 +903,6 @@ def cpu_admission(
             f"(--force to bypass)"
         ),
         **fields,
-    )
-
-
-class MachinePressure(NamedTuple):
-    """The whole-machine band's verdict, read verbatim by machine_watch
-    (LD3); ``load_15m`` and ``runnable`` are context, never deciders."""
-
-    verdict: str
-    busy_fraction: float | None
-    band: float
-    machine_cores: float | None
-    capacity_cores: float
-    runnable: int | None
-    processes: int | None
-    load_15m: float | None
-    throttle_minutes: int
-    reason: str
-
-
-def machine_pressure(
-    reading: Footprint | None,
-    *,
-    capacity_cores: float,
-    busy_band: float,
-    load_15m: float | None,
-    throttle_minutes: int,
-    failure: str | None = None,
-) -> MachinePressure:
-    """The one whole-machine decider (LD2/LD4). A ``None`` reading is
-    ``unreadable``, never calm. Pure: no clocks, no subprocesses, no config."""
-    if reading is None:
-        busy = None
-        verdict, reason = "unreadable", failure or "machine reading unavailable"
-        cores = runnable = processes = None
-    else:
-        raw_busy = reading.measured_cpu_cores / capacity_cores if capacity_cores > 0 else 0.0
-        busy = round(raw_busy, 3)
-        verdict = "hot" if raw_busy > busy_band else "calm"
-        load_text = f"{load_15m:.1f}" if load_15m is not None else "unavailable"
-        reason = (
-            f"machine {raw_busy * 100:.1f}% "
-            + ("crosses" if verdict == "hot" else "of")
-            + f" band {busy_band * 100:.0f}% "
-            f"({reading.measured_cpu_cores:.3f} of {capacity_cores:.2f} cores) -> "
-            f"{verdict}; load_15m {load_text}, {reading.runnable_count} runnable of "
-            f"{reading.machine_process_count} processes"
-        )
-        cores, runnable, processes = (
-            reading.measured_cpu_cores,
-            reading.runnable_count,
-            reading.machine_process_count,
-        )
-    return MachinePressure(
-        verdict=verdict,
-        busy_fraction=busy,
-        band=busy_band,
-        machine_cores=cores,
-        capacity_cores=capacity_cores,
-        runnable=runnable,
-        processes=processes,
-        load_15m=load_15m,
-        throttle_minutes=throttle_minutes,
-        reason=reason,
-    )
-
-
-def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> MachinePressure:
-    """Feed :func:`machine_pressure` from one snapshot; band and throttle
-    come from ``config.resource_meter``, degraded to the registry defaults."""
-    try:
-        from fno.config import load_settings
-
-        meter = load_settings().resource_meter
-        band = float(meter.thresholds.cpu_busy_fraction)
-        # Clamped: a wild value fails the Rust reader's u64 and blinds the read.
-        throttle = min(max(int(meter.notifications.throttle_minutes), 0), 10_080)
-    except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
-        band, throttle = 0.9, 60
-    return machine_pressure(
-        reading,
-        capacity_cores=_cpu_capacity_cores(),
-        busy_band=band,
-        load_15m=getattr(load_snapshot, "load_15m", None),
-        throttle_minutes=throttle,
     )
 
 
@@ -1067,9 +958,6 @@ def _payload(
         # code. `capacity_verdict` stays one release as an alias of the verdict.
         "admission": admission._asdict(),
         "capacity_verdict": admission.verdict,
-        # LD3: the whole-machine verdict on every emission (cause-only
-        # included); the machine_watch arm reads THIS and computes none of its own.
-        "machine": _compute_machine_pressure(reading, load_snapshot)._asdict(),
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -1125,7 +1013,7 @@ def _emit_result(
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
         # The CPU axis keeps the historical exit (callers depend on 3);
-        # AC8: it fires on hold, undecidable, or the backstop - an
+        # AC8: it fires on hold or undecidable - an
         # attribution gap no longer forces an exit, because both gates read
         # the admission interval, not the gap. When BOTH alarms fire, the
         # CPU axis wins the exit and the leak still prints.
@@ -1163,19 +1051,6 @@ def _emit_result(
             f"against max_fleet_cpu_share {adm['ceiling'] * 100:.1f}% "
             f"-> {adm['verdict']}"
         )
-        load15 = adm["load_15m"]
-        cpus = int(payload.get("load_cpu_count") or 1)
-        hard = adm["backstop"] / cpus if cpus else 0.0
-        if isinstance(load15, (int, float)):
-            typer.echo(
-                f"load_15m: {load15:.1f} against backstop {adm['backstop']:.1f} "
-                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
-            )
-        else:
-            typer.echo(
-                f"load_15m: unavailable against backstop {adm['backstop']:.1f} "
-                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
-            )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
             f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
@@ -1215,9 +1090,7 @@ def _emit_result(
                 "machine's measured CPU)"
             )
         axis = adm["axis"]
-        if axis == "load_15m" and isinstance(adm.get("load_15m"), (int, float)):
-            axis_numbers = f" ({adm['load_15m']:.1f} against {adm['backstop']:.1f})"
-        elif axis == "fleet_cpu_share":
+        if axis == "fleet_cpu_share":
             axis_numbers = (
                 f" ({adm['share_low'] * 100:.1f}% against "
                 f"{adm['ceiling'] * 100:.1f}%)"

@@ -12,6 +12,12 @@ use std::path::Path;
 /// undeclared reign still lands a receipt well inside a healthy window.
 pub const DEFAULT_TERM: &str = "span:96h";
 
+/// The stale-crown-doc window: past the compaction ceiling, a handoff doc
+/// older than this (six default check-in beats) reads as stale. A config
+/// knob for it would cost a registry row plus Python; added when someone
+/// asks to tune it, not before.
+pub(crate) const STALE_CROWN_DOC_MAX_AGE_SECS: i64 = 24 * 3600;
+
 const LEGAL_FORMS: &str = "legal forms: span:<N>[smhd], compactions:<N>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

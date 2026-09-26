@@ -1,0 +1,19 @@
+# Generated copies. An Edit or Write to a path here is refused by hooks/generated-write-guard.sh.
+# Columns (tab-separated): path-glob, canonical source, regenerate command. Globs are bash [[ == ]] patterns on the repo-relative path.
+# Skill-bundle copies are not listed here: skill-bundles.yaml owns them.
+cli/src/fno/agents/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+crates/fno/src/harness_capabilities.toml	crates/fno-agents/src/harness_capabilities.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/agents/merge_posture.toml	crates/fno-agents/src/merge_posture.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/graph/page_reload.js	crates/fno-agents/src/page_reload.js	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/agents/spawn_phase.toml	crates/fno-agents/src/spawn_phase.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/agents/slot_lanes.toml	crates/fno-agents/src/slot_lanes.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/agents/registry_schema.toml	crates/fno-agents/src/registry_schema.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+crates/fno-agents/src/events_limits.toml	cli/src/fno/events/schema.yaml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+cli/src/fno/pr/_check_supersession_generated.py	crates/fno-agents/codegen/check_supersession.toml	cargo build --manifest-path crates/fno-agents/Cargo.toml
+docs/harnesses/capability-matrix.md	crates/fno-agents/src/harness_capabilities.toml	cd cli && uv run fno-py doctor harness-matrix --write
+docs/harnesses/verb-matrix.md	crates/fno-agents/src/harness_capabilities.toml and skills/*/SKILL.md frontmatter	cd cli && uv run fno-py doctor harness-matrix --write
+.codex/agents/*.toml	agents/*.md	python3 scripts/sync-codex-agents.py
+docs/configuration-guide.md	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --markdown --write
+docs/config.example.toml	SettingsModel and cli/src/fno/config/registry.py	cd cli && uv run fno-py config schema --toml --write
+*Cargo.lock	the sibling Cargo.toml	cargo build in that crate
+docs/loops.md	crates/fno-agents/src/tick_ledger.rs KNOWN_ARMS	cargo run --manifest-path crates/fno-agents/Cargo.toml -- loops table --markdown > docs/loops.md

@@ -20,9 +20,9 @@ A spawn picks three independent things. Confusing them is the mistake this surfa
 | **model** | `--model` | `-m` | `opus`, `glm-5.2[1m]`, ... | The **model**, at whichever vendor is in play. |
 
 ```bash
-fno agents spawn "review this diff" --name worker --harness codex          # binary only
-fno agents spawn "review this diff" --name worker --model opus             # harness-native model
-fno agents spawn "review this diff" bg --provider zai --model glm-5.2     # routed
+fno agents spawn "fix the failing test" --name worker --harness codex          # binary only
+fno agents spawn "fix the failing test" --name worker --model opus             # harness-native model
+fno agents spawn "fix the failing test" bg --provider zai --model glm-5.2     # routed
 ```
 
 `--harness` defaults to the invoking harness, then `claude`. `--provider` + `--model` together name a **route** and are the decomposed spelling of `--route <vendor>,<model>`; passing both spellings exits 2, and `--provider` without `--model` exits 2 (a vendor is not a model).
@@ -40,7 +40,7 @@ A spawn with no `--substrate` seats a **thread** wherever the harness seats one.
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
 
 ```bash
-fno agents spawn "review this diff" --name glm-worker --substrate bg --provider zai --model glm-5.2
+fno agents spawn "fix the failing test" --name glm-worker --substrate bg --provider zai --model glm-5.2
 ```
 
 Routing is claude-only and reaches the `bg` and `headless` substrates only. The route is applied by writing a `0600` claude `--settings` file and passing `--settings <path>`: a `claude --bg` session's serving process is forked by the claude daemon, which drops per-spawn `ANTHROPIC_*` env before the first model request, and a settings file is read by the session process itself so it survives that fork. `pane` is not a routed lane and is refused rather than silently running the primary model.
@@ -74,8 +74,8 @@ Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno
 Pane-hosted agents can join an existing mux workspace and tile beside its focused pane:
 
 ```bash
-fno agents spawn "review the current diff" --name reviewer \
-  -H codex --workspace reviews --split right
+fno agents spawn "fix the failing test" --name helper \
+  -H codex --workspace helpers --split right
 ```
 
 `--workspace` (short `-s`) selects a workspace by the same visible name shown in the mux sideline. `--split` (short `-x`) accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that workspace. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
@@ -135,7 +135,7 @@ A thread hosts no pane until a portal opens one. Before `--portal`, that took tw
 ### Spawn and place in one call
 
 ```bash
-fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1
+fno agents spawn "fix the failing test" --name w2 --substrate thread --portal 1
 ```
 
 When the command completes, portal 1 is open and already shows the new worker. Outside a mux, omitting `--portal` creates the thread with no portal and nothing appears on screen. From inside a mux, a spawn that takes the default thread substrate opens portal 0 on the new worker automatically. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
@@ -143,7 +143,7 @@ When the command completes, portal 1 is open and already shows the new worker. O
 ### Choose the geometry
 
 ```bash
-fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1 --tab 2 --split right
+fno agents spawn "fix the failing test" --name w2 --substrate thread --portal 1 --tab 2 --split right
 ```
 
 If the portal at index 1 does not exist yet, the worker lands in tab 2, tiled right of that tab's focused pane. `--workspace` and `--split` name the destination the same way they do for a pane.
@@ -170,9 +170,9 @@ Every refusal below exits 2 before the worker starts, and each message names the
 
 ### Give a running worker a portal
 
-A thread that already runs gets a portal later with `fno mux thread <name> --portal N`. Omit the index there and the verb uses portal 0. In the sideline, Enter on a paneless live row opens portal 0, and `P` opens the next free index.
+A thread that already runs gets a portal later with `fno mux thread <key>`. Omit `--portal N` there and the verb uses portal 0. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints. A thread-shaped Codex row answers to the full id. Claude answers to its printed `short_id`. The door matches one live row exactly and never creates, resumes, or duplicates a worker. Zero matches, or several rows answering the same key, refuse and spawn no worker. The broad selector tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`, not to this door. In the sideline, Enter on a paneless live row opens portal 0. `P` opens the next free index. A row already shown through a portal takes focus with Enter. `fno mux thread reseat <name> --portal N` moves it to another index.
 
-Portals are never persisted. If the mux server restarts, every portal is gone and every thread keeps running. Spawn again with `--portal`, or open a portal by hand.
+Portals persist across a restart as slots, not live panes. The restored seat sits held-idle while the thread keeps running. A reach, a focus, or an explicit `fno mux workspace restore` fills it. The mechanism is the first rule under "Three rules that are easy to get wrong" in [portals.md](../architecture/portals.md).
 
 The index map, the one-row-one-viewer rule, and restore pruning live in [portals.md](../architecture/portals.md).
 

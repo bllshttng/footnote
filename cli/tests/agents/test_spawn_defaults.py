@@ -135,7 +135,6 @@ def _grid_candidate(monkeypatch, candidate, chain):
         sd, "_grid_node", lambda toks, env=None: {"id": "x-test", "difficulty": "high"}
     )
     monkeypatch.setattr(rr, "resolve_inventory", lambda: _Inv())
-    monkeypatch.setattr(rr, "runtime_capacity", lambda inventory=None: {})
     monkeypatch.setattr(rr, "resolve_slot", lambda *a, **k: (candidate, chain, "unarmed"))
 
 
@@ -310,7 +309,7 @@ def _stub_route_slot(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[di
 
     seen: list[dict] = []
 
-    def _call(payload: dict) -> dict:
+    def _call(payload: dict, **_: object) -> dict:
         seen.append(payload)
         if "op" in payload:
             return {"status": "ok"}
@@ -346,7 +345,7 @@ def test_strict_seam_refuses_when_the_decision_is_unavailable(
 
     import fno.route_slot_client as rsc
 
-    def _unavailable(payload: dict) -> dict:
+    def _unavailable(payload: dict, **_: object) -> dict:
         raise rsc.RouteSlotUnavailable("binary missing")
 
     monkeypatch.setattr(rsc, "route_slot_call", _unavailable)
@@ -602,3 +601,47 @@ def test_crown_stays_crown_when_the_seam_sends_no_verb(
     journals = [p["event"] for p in seen if "event" in p]
     assert journals, seen
     assert all(row["verb"] == "crown" for row in journals)
+
+
+def test_yolo_pins_the_config_permission_probe(monkeypatch, journal) -> None:
+    """An explicit --yolo pins the permission axis, so the config default is
+    never injected and never probed: no mappability refusal line prints
+    (x-6c8a). The stub turns any probe into a failure."""
+    import fno.rust_binary as rb
+
+    def _no_probe(verb, payload, exc):
+        raise AssertionError("no mappability probe may run when the axis is pinned")
+
+    monkeypatch.setattr(rb, "verb_call", _no_probe)
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "--harness", "codex", "--substrate", "thread", "--yolo", "hi"],
+        err=err,
+        permission_mode="bypassPermissions",
+    )
+    assert "permission mappability" not in err.getvalue()
+
+
+def test_unpinned_config_permission_still_refuses_on_codex(
+    monkeypatch, journal, capsys
+) -> None:
+    """Positive control: the same config default with NO explicit permission
+    axis still probes per substrate and names the refusal on stderr (x-6c8a).
+    _permission_mappable prints to process stderr, not the injected stream."""
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(
+        rb,
+        "verb_call",
+        lambda verb, payload, exc, **_kwargs: {
+            "refusal": f"{payload['provider']} --permission-mode {payload['mode']} unmappable",
+            "mappable": False,
+        },
+    )
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "--harness", "codex", "--substrate", "thread", "hi"],
+        err=err,
+        permission_mode="bypassPermissions",
+    )
+    assert capsys.readouterr().err.count("permission mappability refused") == 2

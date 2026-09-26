@@ -44,37 +44,74 @@ pub(super) async fn ensure_codex_thread_handle(
             entry.name
         )
     })?;
-    let bounded = !entry_posture_is_full_access(entry);
-    let driver = crate::codex_thread::CodexThread::resume(
+    let bounded = !crate::codex_posture::entry_posture_is_full_access(entry);
+    // AC3-EDGE: read the spawn-time record BEFORE the resume runs, so the
+    // write-back after it can never overwrite the only durable copy of the
+    // grant with a narrowed result. What the resume actually re-applied is
+    // read off the driver and unioned below.
+    let recorded_roots = entry.granted_writable_roots.clone();
+    // The row's recorded posture, rebuilt typed: the v35 requested mode when
+    // it still resolves, else the recorded posture name with the lane's
+    // historical `never` approval. A pre-v19 row with neither reads bounded.
+    let posture = crate::codex_posture::CodexPosture::from_record(
+        entry.requested_permission_mode.as_deref(),
+        entry.sandbox_posture.as_deref(),
+    );
+    let config = carry.config;
+    let driver = crate::codex_thread::CodexThread::resume_with_state_dirs(
         cwd,
         &session_id,
         entry.model.as_deref(),
-        entry_posture_is_full_access(entry),
+        &posture,
         entry.effort.as_deref(),
-        Some(&carry.config),
+        &recorded_roots,
+        Some(&config),
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
-    if bounded {
+    // The event narrows to its true meaning: a row that CARRIED nothing to
+    // restore. A row with recorded roots got them re-applied (state_dirs
+    // above), and a full-access thread needs no grant, so neither fires.
+    // An event that fires on the healthy path is telemetry an operator
+    // learns to ignore.
+    if bounded && recorded_roots.is_empty() {
         let _ = ctx.emitter.emit(
             "codex_thread_resumed_without_state_grant",
             &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
         );
     }
-    // The durable fix promised above: persist what THIS resume actually
-    // resolved, not what the original spawn recorded. `resume()` (unlike
-    // `start_with_state_dirs`) carries no state_dirs, so a bounded thread's
-    // `granted_writable_roots` goes to empty here - an accurate report of the
-    // very loss the event above announces, not a stale echo of the spawn-time
-    // grant. Read from the driver BEFORE `into_actor` consumes it; the actor
-    // exposes neither field.
+    // Persist what THIS resume actually resolved beside the record it was
+    // built from. Read from the driver BEFORE `into_actor` consumes it; the
+    // actor exposes neither field.
     let resolved_sandbox = driver.resolved_sandbox_posture().to_string();
-    let granted_writable_roots = driver.granted_writable_roots().to_vec();
+    // AC3-EDGE: the record survives the resume. The spawn-time roots are
+    // unioned back in (recorded order first, dedup), so a narrowed resume
+    // cannot erase the only durable copy of the grant and a second resume
+    // can still restore them.
+    let mut granted_writable_roots = driver.granted_writable_roots().to_vec();
+    for root in &recorded_roots {
+        if !granted_writable_roots
+            .iter()
+            .any(|existing| existing == root)
+        {
+            granted_writable_roots.push(root.clone());
+        }
+    }
+    // v35 backfill: a pre-v35 row carries no requested mode; the posture the
+    // resume rebuilt is the best record of it. Never overwrites a recorded
+    // string.
+    let requested_permission_mode = entry
+        .requested_permission_mode
+        .clone()
+        .or_else(|| Some(posture.requested.clone()).filter(|r| !r.is_empty()));
     let resumed_name = entry.name.clone();
+    let turn_policy_source = driver.turn_policy_source().to_string();
     let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if let Some(row) = registry.find_mut(&resumed_name) {
             row.resolved_sandbox = Some(resolved_sandbox);
             row.granted_writable_roots = granted_writable_roots;
+            row.requested_permission_mode = requested_permission_mode;
+            row.turn_policy_source = Some(turn_policy_source);
         }
     })
     .await;

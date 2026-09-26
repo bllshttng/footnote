@@ -70,10 +70,16 @@ fn pane_list_at(scratch: &Scratch, mux: &PathBuf) -> Vec<serde_json::Value> {
 }
 
 fn kill_server_at(scratch: &Scratch, mux: &PathBuf) {
+    // --end-unkept is load-bearing here: SHELL=/bin/sh is keeper-ineligible,
+    // so every plain shell this test spawns (the detach substitute shell, the
+    // bootstrap pane) is unkept, and an unkept-gated kill-server refuses -
+    // the server survives, the "restart" reattaches the old process, and the
+    // resume gesture reads the live-detached row. Ending those shells is the
+    // point of this teardown; only the keeper-hosted worker is contract.
     let _ = scratch
         .command()
         .env("FNO_MUX_DIR", mux)
-        .args(["mux", "kill-server"])
+        .args(["mux", "kill-server", "--end-unkept"])
         .output();
 }
 
@@ -776,6 +782,104 @@ fn agent_edge_bare_list_roster_renders_every_live_session() {
         .collect();
     let want: std::collections::BTreeSet<(String, String)> = expected.into_iter().collect();
     assert_eq!(got, want, "names and attach ids key off the capture");
+
+    client.detach();
+    kill_server(&scratch);
+}
+
+/// (AC2-HP) A pane exits, the registry row it hosted reads `orphaned` with a
+/// confirmed-dead pid: `fno mux rows --json` must go paneless on its own
+/// (the server reaps an exited pane and closes its leaf) and then offer
+/// resume - `resumable: true`, `reason: null` - whatever the status word says.
+#[test]
+fn an_exited_pane_row_with_a_dead_reading_is_resumable() {
+    let scratch = Scratch::new("agent_edge_dead_row_resume");
+    let dir = scratch.0.to_str().unwrap().to_string();
+
+    // A keeper pane outlives the test so the session survives the agent
+    // pane's exit: the last-pane-exit rule shuts the server down when the
+    // ONLY pane goes, and this test never attaches a client.
+    let keeper = pane(
+        &scratch,
+        &["run", "--cwd", &dir, "--", "/bin/sh", "-c", "sleep 300"],
+    );
+    assert!(
+        keeper.status.success(),
+        "keeper stderr: {:?}",
+        String::from_utf8_lossy(&keeper.stderr)
+    );
+
+    // A pane that exits on its own, so reap_dead_children closes its leaf
+    // and the row goes paneless without anyone touching the registry again.
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", &dir, "--", "/bin/sh", "-c", "sleep 1"],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let pane_id: u64 = stdout(&run).parse().expect("machine-readable pane id");
+
+    // Registry row hosted by that pane: status orphaned (reconcile's word
+    // for a row it measured gone - never `exited`), pid in range but never
+    // live, so derive_liveness reads it Dead with no timestamp.
+    write_registry(
+        &scratch,
+        &format!(
+            r#"{{"name":"w-dead","cwd":"{dir}","status":"orphaned","harness":"codex",
+                 "harness_session_id":"01a0dead-0000-7000-8000-000000000001",
+                 "pid":2147483632,
+                 "mux":{{"session":"main","pane_id":{pane_id}}}}}"#
+        ),
+    );
+
+    // The registry reader skips its file reads while no viewer is attached
+    // (server.rs: no viewer -> skip both file reads entirely), so attach one
+    // or the row set never populates and `mux rows` stays empty.
+    let mut client = FakeClient::attach(&scratch.main_sock(), 30, 100, &dir);
+
+    // Poll the real receipt path until the server notices the pane is gone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let row = loop {
+        let out = scratch
+            .command()
+            .args(["mux", "rows", "--json"])
+            .env("FNO_AGENTS_HOME", agents_home(&scratch))
+            .output()
+            .expect("fno binary runs");
+        assert!(
+            out.status.success(),
+            "mux rows stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The receipt prints a BARE ARRAY of rows, not an object keyed by
+        // "agents"; a paneless row omits the "pane" key entirely.
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&stdout(&out)).expect("rows JSON parses");
+        let found = rows
+            .iter()
+            .find(|r| r["name"] == "w-dead" && r.get("pane").is_none())
+            .cloned();
+        if let Some(row) = found {
+            break row;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the w-dead row never went paneless; last rows: {rows:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+
+    assert_eq!(
+        row["resumable"], true,
+        "a dead row must offer resume; row: {row}"
+    );
+    assert!(
+        row["reason"].is_null(),
+        "a resumable row names no refusal; row: {row}"
+    );
 
     client.detach();
     kill_server(&scratch);

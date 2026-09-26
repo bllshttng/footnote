@@ -46,7 +46,7 @@ In any Claude Code session:
 /plugin install fno@footnote
 ```
 
-The postinstall hook puts the `fno` CLI on your PATH in a new session. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `pip install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel. The wheel bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route. It builds the Rust front door with your Rust toolchain. The front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
+On the first session after install, footnote starts its installer in the background and logs to `~/.claude/plugins/data/fno-footnote/postinstall.log`. After it finishes, open a new session, and `fno` is on your PATH. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `pip install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel. The wheel bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route. It builds the Rust front door with your Rust toolchain. The front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
 
 ### Windows (WSL2)
 
@@ -66,7 +66,7 @@ Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.
 fno --version          # prints a version
 ```
 
-If `fno` is "command not found", your install predates the complete payload or is a source/editable dev build (those are development artifacts and carry no binaries). Every supported channel - wheel, plugin postinstall, `fno.sh`, Homebrew - ships the Rust **`fno` front door**, which owns the mux and bootstraps the Python CLI. Repair: upgrade to a current release through your channel, or install the front door directly with `cargo install fno` (needs a **Rust toolchain**, `rustup`). When the front door is missing, a Claude Code session also reminds you. Until it is installed, reach the CLI directly as `fno-py`.
+If `fno` is "command not found", your install predates the complete payload or is a source/editable dev build (those are development artifacts and carry no binaries). Every supported channel ships the Rust **`fno` front door**: the wheel, the plugin's first-session installer, `fno.sh`, and Homebrew. The front door owns the mux and bootstraps the Python CLI. Repair: upgrade to a current release through your channel, or install the front door directly with `cargo install fno` (needs a **Rust toolchain**, `rustup`). When the front door is missing, a Claude Code session also reminds you. Until it is installed, reach the CLI directly as `fno-py`.
 
 Inside Claude Code, type `/fno:` and you should see skill autocomplete (`target`, `think`, `blueprint`, ...).
 
@@ -165,7 +165,7 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 | Command | What it's for |
 |---------|---------------|
 | `/fno:review` | Review a diff before you push. Default is the owned lane: one inline reviewer that emits a head-pinned attestation; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
-| `/fno:pr create` | Open a PR from your commits (a routed pr-create worker writes the description). |
+| `/fno:pr create` | Open a PR from your commits inline in the invoking session. |
 | `/fno:pr check` | Poll for the external review bot, then implement its feedback. |
 | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |
 
@@ -176,8 +176,8 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 footnote can spawn a worker on another provider and coordinate with it over a message bus. Quickstart: [the agents guide](guides/agents-quickstart.md).
 
 ```bash
-fno agents spawn "review the diff on this branch" --name reviewer -H codex   # spawn a Codex peer
-fno agents ask reviewer "what did you find?"                          # message it; it works on its own
+fno agents spawn "find why tests/test_login.py is flaky" --name helper -H codex
+fno agents ask helper "what did you find?"
 ```
 
 For a one-off question to another model without keeping a peer around, spawn an ephemeral worker:

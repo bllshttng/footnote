@@ -48,39 +48,9 @@ mod keeper_adopt_tests;
 // The pane_send fail-closed gate family.
 #[path = "server/tests/pane_send_gate_tests.rs"]
 mod pane_send_gate_tests;
-
-#[test]
-fn node_from_argv_reads_the_wrapper_token() {
-    // env(1) wrapper prefix: `env FNO_AGENT_SELF=... FNO_NODE=x-66e8 ... claude`.
-    let argv: Vec<String> = [
-        "env",
-        "FNO_AGENT_SELF=peer",
-        "FNO_NODE=x-66e8",
-        "FNO_SLUG=some-slug",
-        "claude",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    assert_eq!(node_from_argv(&argv), Some("x-66e8".to_string()));
-}
-
-#[test]
-fn node_from_argv_is_none_for_ad_hoc_pane() {
-    let ad_hoc = |a: &[&str]| node_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    // A plain `pane run htop` (no wrapper) has no provenance.
-    assert_eq!(ad_hoc(&["htop"]), None);
-    // An empty-valued token is treated as absent (no empty-string exports).
-    assert_eq!(ad_hoc(&["env", "FNO_NODE=", "sh"]), None);
-    // A command that merely MENTIONS FNO_NODE= in its own args is not
-    // provenance: scanning stops at the command (first non-`NAME=` token).
-    assert_eq!(
-        ad_hoc(&["env", "FOO=1", "grep", "FNO_NODE=x", "file"]),
-        None
-    );
-    // No `env` wrapper at all -> never scanned, even with a bare token.
-    assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
-}
+// The dead-row resume disposition family.
+#[path = "server/tests/dead_row_resume_tests.rs"]
+mod dead_row_resume_tests;
 
 #[test]
 fn account_from_argv_reads_the_fno_account_token() {
@@ -914,9 +884,12 @@ fn bare_pane_row_carries_its_own_activity_and_age() {
     );
     core.agents = vec![];
     // Feed an open command block (OSC 133 A then C, no D): Running.
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-    tx.try_send((pid, b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()))
-        .unwrap();
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    tx.try_send((
+        pid,
+        PaneChunk::Output(b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()),
+    ))
+    .unwrap();
     drop(tx);
     let mut first_out = HashSet::new();
     drain_pty_output(&mut core, &mut rx, None, &mut first_out);
@@ -1237,36 +1210,11 @@ fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
 fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
     // x-9de7: the paneless join has no pane fact; `unmeasured` passes the registry read.
     let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
-        model: None,
-        route: None,
-        route_provider_id: None,
-        spawned_by_session: None,
-        lineage_kind: None,
-        session_id: None,
-        harness_session_id: None,
-        predecessor_session_ids: Vec::new(),
-        related_session_id: None,
-        forked_from_session_id: None,
-        harness_title: None,
         name: name.into(),
         cwd: "/w".into(),
         exited: true,
-        dnd: false,
-        badge: None,
-        reason: None,
-        mux: None,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        account: None,
-        claude_session_uuid: None,
-        log_path: None,
-        updated_at: None,
-        crown_level: None,
-        crown_scope: None,
         liveness,
-        liveness_measured_at: None,
-        harness: None,
+        ..Default::default()
     };
     let mut core = empty_core();
     core.agents = vec![
@@ -1497,7 +1445,7 @@ fn rename_tab_sanitizes_hostile_wire_names() {
 
 // -- x-96e8 squad management verbs ----------------------------------
 
-fn leaf_tab(id: TabId, pane: u64) -> Tab {
+pub(super) fn leaf_tab(id: TabId, pane: u64) -> Tab {
     Tab {
         name: None,
         id,
@@ -3415,9 +3363,8 @@ fn session_lineage_pane_ls_reports_thread_and_current_beside_each_other() {
 
 #[test]
 fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
-    // AC1-EDGE + AC1-ERR (server half): a blank rename clears an origin-
-    // backed squad to its derived label, but an origin-less (NewSquad)
-    // squad has no derivable label, so the blank is refused (name kept).
+    // A blank rename clears an origin-backed squad to its derived label. An
+    // origin-less squad has no derivable label, so the blank is refused.
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/x".into()], Some("work".into()), leaf_tab(5, 1));
@@ -4156,9 +4103,7 @@ fn attach_agent_refuses_unknown_or_malformed_jobid() {
     }
 }
 
-// -- x-76ea agent-row lifecycle (server-side validation) ------------
-
-fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
+pub(super) fn client_with_rx(id: u64) -> (Client, mpsc::Receiver<ServerMsg>) {
     let (tx, rx) = mpsc::channel::<ServerMsg>(8);
     let mut c = client(id, 5, (24, 80), false);
     c.reliable_tx = tx;
@@ -4196,7 +4141,7 @@ fn stop_agent_unknown_name_refused() {
 
 /// A helper for the respawn refusal tests: an EXITED registry row with an
 /// optional recorded claude session uuid.
-fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
+pub(super) fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
     RegistryAgent {
         model: None,
         route: None,
@@ -4226,62 +4171,6 @@ fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
         harness: None,
         ..Default::default()
     }
-}
-
-#[test]
-fn respawn_agent_live_row_refused() {
-    // AC2-ERR: RespawnAgent on a still-live row is refused (a plain #[test]
-    // has no tokio runtime, so the clean refusal is also proof the spawn arm
-    // is never reached).
-    let mut core = empty_core();
-    core.agents = vec![bg_row("live-worker", "/w", None)]; // exited: false
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "live-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx).unwrap().contains("still live"));
-}
-
-#[test]
-fn respawn_agent_no_uuid_refused() {
-    // AC2-ERR: an exited row with no recorded claude_session_uuid (also the
-    // non-claude case, since derive_rows only carries the uuid for claude).
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", None)];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("no claude session recorded"));
-}
-
-#[test]
-fn respawn_agent_malformed_uuid_refused_before_argv() {
-    // AC2-ERR: a malformed uuid is refused with the SPECIFIC reason (a
-    // generic "error" would fail this AC) before it could reach argv.
-    let mut core = empty_core();
-    core.agents = vec![exited_claude_row("dead-worker", Some("not-a-uuid"))];
-    let (c, mut rx) = client_with_rx(1);
-    core.clients.push(c);
-    core.command(
-        1,
-        Command::RespawnAgent {
-            name: "dead-worker".into(),
-        },
-    );
-    assert!(drain_notice(&mut rx)
-        .unwrap()
-        .contains("malformed session id"));
 }
 
 #[test]
@@ -4840,25 +4729,26 @@ fn row_resume_disposition_gates_on_harness_form_and_session_id() {
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
         );
-    let mut backend_not_live = base();
-    backend_not_live.exited = false;
-    backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+    let mut not_exited = base();
+    not_exited.exited = false;
+    not_exited.liveness = agents_view::Liveness::Unmeasured;
     assert!(
         !matches!(
-            Core::row_resume_disposition(&backend_not_live),
+            Core::row_resume_disposition(&not_exited),
             RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
         ),
         "an unmeasured backend must not be labeled live"
     );
     assert_eq!(
-        Core::row_resume_disposition(&backend_not_live),
+        Core::row_resume_disposition(&not_exited),
         RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
         "(x-d401) unmeasured names the absent reading, not a dead backend"
     );
-    backend_not_live.liveness = agents_view::Liveness::Dead;
+    not_exited.liveness = agents_view::Liveness::Dead;
     assert_eq!(
-        Core::row_resume_disposition(&backend_not_live),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        Core::row_resume_disposition(&not_exited),
+        RowResumeDisposition::Resumable,
+        "a positive dead reading resumes whatever the status word says"
     );
     let mut agy = base();
     agy.harness = Some("agy".into());
@@ -4925,40 +4815,6 @@ fn row_resume_disposition_gates_on_harness_form_and_session_id() {
     assert_eq!(
         Core::row_resume_disposition(&no_harness),
         RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
-    );
-}
-
-#[test]
-fn row_resume_disposition_unmeasured_names_the_absent_reading() {
-    // (x-d401, AC2-EDGE) Liveness::Unmeasured is NOT a dead backend, and
-    // must not print one. The old fold returned BackendNotLive for every
-    // non-Alive reading, so a row whose pane was live eight rows down the
-    // same sideline told the operator its backend was not live. The
-    // narrowed BackendNotLive fires only on the falsified case (Dead).
-    let base = || RegistryAgent {
-        harness_session_id: Some("01a027ad".into()),
-        harness: Some("codex".into()),
-        name: "w".into(),
-        cwd: "/w".into(),
-        exited: true,
-        liveness: agents_view::Liveness::Alive,
-        ..Default::default()
-    };
-    let mut unmeasured = base();
-    unmeasured.exited = false;
-    unmeasured.liveness = agents_view::Liveness::Unmeasured;
-    assert_eq!(
-        Core::row_resume_disposition(&unmeasured),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
-        "an unmeasured backend must read as no-reading, never as dead"
-    );
-    let mut dead = base();
-    dead.exited = false;
-    dead.liveness = agents_view::Liveness::Dead;
-    assert_eq!(
-        Core::row_resume_disposition(&dead),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive),
-        "a falsified backend keeps the confident verdict"
     );
 }
 
@@ -5051,12 +4907,12 @@ fn resume_target_from_argv_parses_both_harness_forms_anchored() {
 }
 
 #[test]
-fn unbound_pane_running_a_session_makes_backend_not_live_unreachable() {
+fn unbound_pane_running_a_session_keeps_its_row_live_paneless() {
     // (x-d401, AC2-HP) A pane in this session whose argv resumes the
     // row's session id is DIRECT OBSERVATION the backend is live. The
     // row must read LivePaneless (peek, do not resume - a resume opens a
     // second writer on the live rollout), whatever the registry's
-    // liveness field says, and BackendNotLive must be unreachable.
+    // liveness field says.
     let mut core = empty_core();
     core.session_name = "main".into();
     core.shells = vec!["/bin/cat".into()];
@@ -5099,11 +4955,12 @@ fn unbound_pane_running_a_session_makes_backend_not_live_unreachable() {
         !core.row_resumable_in_session(&row),
         "a session a pane is already running must not be resumed again"
     );
-    // A pane resuming a DIFFERENT session leaves the row's own reading.
+    // A pane resuming a DIFFERENT session leaves the row's own dead
+    // reading, which resumes.
     core.panes.get_mut(&pid).unwrap().resume_target = Some("other-session".into());
     assert_eq!(
         core.row_resume_disposition_in_session(&row),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        RowResumeDisposition::Resumable
     );
 }
 
@@ -5158,98 +5015,9 @@ fn sanitize_mail_text_strips_trims_and_bounds() {
 }
 
 #[test]
-fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
-    assert!(valid_session_uuid("12345678-1234-1234-1234-1234567890ab"));
-    assert!(!valid_session_uuid("not-a-uuid"));
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890AB")); // uppercase
-    assert!(!valid_session_uuid("12345678123412341234567890ab")); // no dashes
-    assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
-}
-
-#[test]
-fn agent_rows_join_pr_from_holder_map() {
-    // A name-resolved row gets its pr without a claim; a holder-only row
-    // keeps the harness-native fallback. updated_at passes through.
-    let mut core = empty_core();
-    core.session_name = "main".into();
-    let mut worker = bg_row("t-xdae5-reviewflags-glm", "/w", None);
-    worker.updated_at = Some(42);
-    core.agents = vec![worker, bg_row("holder-only", "/x", None)];
-    core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "holder-only".to_string())]);
-    core.backlog_pr = HashMap::from([("x-dae5".to_string(), 999), ("x-9c5f".to_string(), 385)]);
-    let rows = core.agent_rows();
-    let joined = rows
-        .iter()
-        .find(|r| r.name == "t-xdae5-reviewflags-glm")
-        .unwrap();
-    assert_eq!(joined.pr, Some(999));
-    assert_eq!(joined.updated_at, Some(42));
-    let fallback = rows.iter().find(|r| r.name == "holder-only").unwrap();
-    assert_eq!(fallback.pr, Some(385));
-}
-
-#[test]
-fn an_active_mission_header_renders_but_never_groups_worker_rows() {
-    // The header renders with done/total, and its synthetic id reaches no
-    // agent row: no section draws mission ids, so a row there vanishes.
-    let mut core = empty_core();
-    core.missions = backlog_view::MissionMap {
-        missions: vec![backlog_view::Mission {
-            epic_id: "x-aaaa".into(),
-            slug: "mux-squad".into(),
-            done: 1,
-            total: 2,
-        }],
-        node_to_epic: HashMap::from([
-            ("x-c1b9".to_string(), "x-aaaa".to_string()),
-            ("x-cd1e".to_string(), "x-aaaa".to_string()),
-        ]),
-    };
-    core.agents = vec![
-        bg_row("king-cliverbs-x-c1b9-g2", "/w", None),
-        bg_row("build-xcd1e", "/w", None),
-    ];
-    let sid = crate::mission_squad::mission_sid("x-aaaa");
-    let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-    let missions = match &msg {
-        ServerMsg::Layout { missions, .. } => missions,
-        _ => unreachable!(),
-    };
-    assert_eq!(missions[0].id, sid);
-    assert_eq!(missions[0].name, "mux-squad  1/2");
-    let rows = core.agent_rows();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|r| r.squad != Some(sid)));
-}
-
-#[test]
-fn empty_but_active_mission_still_renders() {
-    // An active mission with no matching worker rows still shows its
-    // header - "nothing running" stays visible, never vanishes.
-    let mut core = empty_core();
-    core.missions = backlog_view::MissionMap {
-        missions: vec![backlog_view::Mission {
-            epic_id: "x-aaaa".into(),
-            slug: "mux-squad".into(),
-            done: 0,
-            total: 0,
-        }],
-        node_to_epic: HashMap::new(),
-    };
-    let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-    let missions = match &msg {
-        ServerMsg::Layout { missions, .. } => missions,
-        _ => unreachable!(),
-    };
-    assert!(missions
-        .iter()
-        .any(|s| s.id == crate::mission_squad::mission_sid("x-aaaa")));
-}
-
-#[test]
 fn derive_failure_leaves_workers_ungrouped() {
-    // A malformed/absent graph read leaves `missions` at its default: no
-    // mission squad header, and workers render via their normal path.
+    // A malformed/absent graph read leaves workers rendering via their
+    // normal path: no squad matches, so the rows stay ungrouped.
     let mut core = empty_core();
     core.agents = vec![bg_row("target-x-bbbb-foo", "/w", None)];
     let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
@@ -5396,7 +5164,7 @@ fn remove_external_without_stopped_record_refused() {
     );
     assert!(drain_notice(&mut rx)
         .unwrap()
-        .contains("no such stopped row"));
+        .contains("no external lifecycle record"));
     // A stopping record refuses with the stop-first ordering.
     crate::squad_store::begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
     core.command(
@@ -5604,7 +5372,7 @@ fn fresh_attach_unknown_target_fails_closed_before_spawn() {
 // -- x-9f75 open-here (PanePlacement.here) ---------------------------
 
 /// Collect every notice text still queued on `rx`.
-fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
+pub(super) fn drain_notices(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(msg) = rx.try_recv() {
         if let ServerMsg::Notice { text } = msg {
@@ -6837,7 +6605,7 @@ async fn remove_on_an_alive_row_is_not_refused_on_the_server() {
 
 /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
 /// are the join surfaces; everything else is the quiet default.
-fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
+pub(super) fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
     RegistryAgent {
         model: None,
         route: None,
@@ -7014,6 +6782,12 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
 // shrink-only line, and test motion is the sanctioned shrink.
 #[path = "server/tests/external_lifecycle_and_backlog_tests.rs"]
 mod external_lifecycle_and_backlog_tests;
+
+#[path = "server/tests/row_set_tests.rs"]
+mod row_set_tests;
+
+#[path = "server/tests/agent_launcher_tests.rs"]
+mod agent_launcher_tests;
 
 #[test]
 fn classify_guard_registry_keeps_document_and_row_failures_distinct() {
@@ -7234,7 +7008,6 @@ fn staged_reentry_verdict() -> ReentryVerdict {
             "CLAUDE_CONFIG_DIR=/acct/makers/cfg".into(),
         ],
         config_dir: Some("/acct/makers/cfg".into()),
-        mechanism: None,
     }
 }
 
@@ -7381,7 +7154,6 @@ fn resume_agent_runs_the_staged_reentry_verdict() {
         ],
         env: vec!["FNO_ACCOUNT=makers".into()],
         config_dir: Some("/acct/makers/cfg".into()),
-        mechanism: None,
     });
 
     core.command(
@@ -8677,37 +8449,6 @@ fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
     }
 }
 
-// -- W4 touch telemetry (human_touch emitters) -------------------------
-
-#[test]
-fn touch_coalesce_window() {
-    let mut last = HashMap::new();
-    let t0 = Instant::now();
-    assert!(
-        touch_coalesce(&mut last, 7, t0),
-        "first keystroke of a burst emits"
-    );
-    assert!(
-        !touch_coalesce(&mut last, 7, t0 + Duration::from_secs(3)),
-        "a keystroke inside the window coalesces into the burst"
-    );
-    assert!(
-        touch_coalesce(&mut last, 7, t0 + Duration::from_secs(6)),
-        "past the window a new burst emits"
-    );
-}
-
-#[test]
-fn touch_coalesce_per_pane() {
-    let mut last = HashMap::new();
-    let t0 = Instant::now();
-    assert!(touch_coalesce(&mut last, 1, t0));
-    assert!(
-        touch_coalesce(&mut last, 2, t0),
-        "panes coalesce independently"
-    );
-}
-
 // -- x-9454 wheel-passthrough rate gate --------------------------------
 
 // AC1-HP / AC2-HP: a 30-tick same-direction flood inside one window
@@ -8877,45 +8618,6 @@ fn reap_pane_clears_wheel_gate() {
 }
 
 #[test]
-fn pane_touch_provenance_cwd_fallback_and_none() {
-    let mut core = empty_core();
-    // No PaneEntry exists for either pane (no FNO_NODE provenance), so
-    // the squad-cwd-basename fallback decides the node id.
-    core.session.add_squad(
-        1,
-        vec!["/tmp/worktrees/x-aff6".into()],
-        None,
-        Tab {
-            name: None,
-            id: 1,
-            root: Node::Leaf(7),
-            focus: 7,
-        },
-    );
-    core.session.add_squad(
-        2,
-        vec!["/tmp/worktrees/footnote".into()],
-        None,
-        Tab {
-            name: None,
-            id: 2,
-            root: Node::Leaf(8),
-            focus: 8,
-        },
-    );
-    let (node, cwd) = core.pane_touch_provenance(7);
-    assert_eq!(node.as_deref(), Some("x-aff6"));
-    assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-aff6"));
-    // Unshaped basename: no node (the emit carries resolution=failed,
-    // never a drop - AC4-FR), but the squad cwd still routes the event.
-    let (node, cwd) = core.pane_touch_provenance(8);
-    assert!(node.is_none());
-    assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/footnote"));
-    // Unknown pane: (None, None).
-    assert_eq!(core.pane_touch_provenance(99), (None, None));
-}
-
-#[test]
 fn node_id_shape_check() {
     assert!(node_id_shaped("x-aff6"));
     assert!(node_id_shaped("ab-1234abcd"));
@@ -8932,8 +8634,8 @@ fn node_id_shape_check() {
 
 // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
-fn empty_core() -> Core {
-    let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+pub(super) fn empty_core() -> Core {
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
     Core {
@@ -8955,6 +8657,7 @@ fn empty_core() -> Core {
         agents: Vec::new(),
         agents_read_ok: false,
         journal: crate::spawn_journal::JournalCache::default(),
+        launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -8964,7 +8667,7 @@ fn empty_core() -> Core {
         backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
-        missions: backlog_view::MissionMap::default(),
+        backlog_driver: HashMap::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -8986,6 +8689,7 @@ fn empty_core() -> Core {
         pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
+        shared_identity_notified: HashSet::new(),
         restored: false,
         restore_pending: false,
         store_generations: HashMap::new(),
@@ -8997,6 +8701,8 @@ fn empty_core() -> Core {
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
+        shell_rc_dirs: std::collections::HashMap::new(),
+        portal_session_guards: std::collections::BTreeMap::new(),
     }
 }
 
@@ -9587,17 +9293,13 @@ fn focus_only_push_layout_preserves_pending_pane_frames() {
 /// prunes the client, breaking every later `Command::FocusPane` (no
 /// client view to act on).
 fn seen_test_core() -> (Core, u64, u64, u64, mpsc::Receiver<ServerMsg>) {
-    // attach() below runs a once-per-server restore_squads() ->
-    // squad_store::load(), which defaults to the real $HOME/.fno/squads.json.
-    // A dev box with a live store imports its squads here (an extra $HOME
-    // pane, a squad-id collision), making squad/row-count asserts pass on a
-    // fresh-home CI runner but fail locally. Point the store at a per-thread
-    // path that does not exist, so load() reads it as an empty store and
-    // restore is a no-op. We deliberately do NOT create the dir: a missing
-    // file already reads empty, and the store's own writer create_dir_all's
-    // its parent, so leaving nothing on disk means nothing to clean up.
-    // TEST_PATH is thread-local and one test == one thread, so it never
-    // leaks across tests and needs no teardown.
+    // attach() runs restore_squads() -> squad_store::load(), which defaults
+    // to the real $HOME/.fno/squads.json; a dev box with a live store then
+    // imports its squads and breaks squad/row-count asserts that pass on a
+    // fresh-home CI runner. Point the store at a nonexistent per-thread path
+    // (missing file reads as an empty store; the writer creates its parent
+    // only when a real write happens) and restore becomes a no-op. TEST_PATH
+    // is thread-local and one test == one thread: no leaks, no teardown.
     let scratch = std::env::temp_dir().join(format!(
         "fno-seen-store-{}-{:?}",
         std::process::id(),
@@ -10088,63 +9790,6 @@ fn copy_source_refuses_open_truncated_and_implicit_blocks() {
 // their only consumers (shrink-only file budget).
 
 #[test]
-fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
-    // The contract the future sigwait reaper must keep: a shutdown-shaped
-    // sweep kills plain pane children and leaves keeper-hosted panes for
-    // the next server to re-adopt. Deliberate close (reap_pane) is the
-    // only path that kills a keeper pane.
-    let mut core = empty_core();
-    core.shells = vec!["/bin/sh".into()];
-    let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
-
-    let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let keeper_pane = {
-        let id = core.reserve_pane_id().unwrap();
-        core.register_pane(
-            id,
-            PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
-            24,
-            80,
-            None,
-            None,
-            "/tmp".into(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        id
-    };
-
-    core.kill_all_panes();
-
-    // The plain child is dead (poll: SIGKILL is fast but not instant).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while core.panes[&plain].pty.is_child_alive() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the plain pane's child must die in the shutdown sweep"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // The keeper pane got NO kill: nothing arrives on its wire inside a
-    // window far longer than the Local kill takes.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let mut probe = a;
-    use std::io::Read as _;
-    probe
-        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
-        .unwrap();
-    let mut byte = [0u8; 1];
-    assert!(
-        probe.read(&mut byte).is_err(),
-        "the shutdown sweep must never send a Kill frame to a keeper pane"
-    );
-    assert!(core.panes.contains_key(&keeper_pane));
-}
-
-#[test]
 fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
     let plain =
         ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
@@ -10178,36 +9823,8 @@ fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
     // what they read is unchanged and the test leaves no zombie.
 }
 
-#[test]
-fn keeper_list_parses_as_a_hidden_pane_verb() {
-    let args: Vec<OsString> = vec!["keeper".into(), "list".into(), "--json".into()];
-    let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
-    assert_eq!(
-        parsed.cmd,
-        crate::mux_cli::PaneCmd::KeeperList {
-            json: true,
-            stale_after: None
-        }
-    );
-    let args: Vec<OsString> = vec![
-        "keeper".into(),
-        "list".into(),
-        "--stale-after".into(),
-        "24h".into(),
-    ];
-    let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
-    assert_eq!(
-        parsed.cmd,
-        crate::mux_cli::PaneCmd::KeeperList {
-            json: false,
-            stale_after: Some(std::time::Duration::from_secs(86_400)),
-        }
-    );
-    // Named in the refusal surface (the verb-ratchet requires the
-    // dispatcher's message to name every verb it accepts); the curated
-    // root menu stays the one advertisement surface.
-    assert!(crate::mux_cli::PANE_VERBS.contains("keeper"));
-}
+#[path = "server_tests_keeper.rs"]
+mod server_tests_keeper;
 
 #[test]
 fn keeper_list_reports_zero_as_zero_and_exits_zero() {

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agents_config;
@@ -29,11 +29,13 @@ use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
 use crate::spawn_gate_lanes;
 use crate::spawn_gate_lanes::{
-    check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
+    check_account_login, check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
+};
+use crate::spawn_gate_reservations::{
+    release_redeemed_reservation, reserved_note, reserved_receipt, RESERVATION_RULE,
 };
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Exit codes, allocated by the shared table in
@@ -51,6 +53,8 @@ pub const EXIT_TERRITORY_CAP: i32 = 86;
 /// `agents.profiles.blueprint.max_live` live `bp` threads, or more than one
 /// per territory, refuses the spawn and teaches the subagent path.
 pub const EXIT_BLUEPRINT_CAP: i32 = 88;
+/// A spawn whose seed or label names review is refused before every bypass.
+pub const EXIT_REVIEW_SESSION: i32 = 89;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
@@ -73,6 +77,14 @@ pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
 /// to the per-territory team cap, which landed first; the gate-unavailable
 /// number moved to the next free slot.
 pub const EXIT_GATE_UNAVAILABLE: i32 = 87;
+
+/// The prefix every PASS-path gate line carries. Only a refusal may start
+/// `spawn-gate: ` - the verdict line and the refusal sentences - so the
+/// readers (`cli/src/fno/backlog/advance.py _gate_refusal_detail`,
+/// `crates/fno/src/dispatch_launch.rs refusal_detail`) can pick the refusal
+/// out of a stderr that is full of passing readings. Contract:
+/// docs/architecture/spawn-gate.md (Reading a refusal).
+pub(crate) const NOTE: &str = "spawn-gate note:";
 
 /// A refusal as data: the exit code the caller's arm returns, the stdout
 /// receipt it prints (byte-shape unchanged from when `run_gate` printed it
@@ -111,13 +123,73 @@ impl Refusal {
     }
 }
 
+/// The one-line verdict every refusal ends with: `spawn-gate: refused on
+/// <axis> (<reason>, exit <code>): <figures>`. The axis prefers the event's
+/// explicit axis, then the receipt's axis/held_on/reason; the figures are
+/// the receipt's scalar fields in key order (serde_json `preserve_order`),
+/// skipping the words already named. Contract:
+/// docs/architecture/spawn-gate.md (Reading a refusal).
+pub(crate) fn verdict_line(r: &Refusal) -> String {
+    let ev_str = |k: &str| r.event.get(k).and_then(serde_json::Value::as_str);
+    let rc = r.receipt.as_ref();
+    let rc_str = |k: &str| {
+        rc.and_then(|v| v.get(k))
+            .and_then(serde_json::Value::as_str)
+    };
+    let axis = ev_str("axis")
+        .or_else(|| rc_str("axis"))
+        .or_else(|| rc_str("held_on"))
+        .or_else(|| rc_str("reason"))
+        .or_else(|| ev_str("reason"))
+        .unwrap_or("unknown");
+    let reason = rc_str("reason")
+        .or_else(|| ev_str("reason"))
+        .unwrap_or("unknown");
+    let mut figures: Vec<String> = Vec::new();
+    let collect = |map: &serde_json::Map<String, serde_json::Value>, figures: &mut Vec<String>| {
+        for (k, v) in map {
+            if matches!(k.as_str(), "status" | "reason" | "axis" | "held_on") {
+                continue;
+            }
+            match v {
+                serde_json::Value::String(s) => figures.push(format!("{k}={s}")),
+                serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                    figures.push(format!("{k}={v}"));
+                }
+                _ => {}
+            }
+        }
+    };
+    if let Some(obj) = rc.and_then(serde_json::Value::as_object) {
+        collect(obj, &mut figures);
+    }
+    if figures.is_empty() {
+        // A receipt-less refusal (king share, fleet incident) keeps its
+        // measurements in the event; the verdict names them, or it names
+        // no breach at all.
+        collect(&r.event, &mut figures);
+    }
+    if figures.is_empty() {
+        format!(
+            "spawn-gate: refused on {axis} ({reason}, exit {})",
+            r.exit_code
+        )
+    } else {
+        format!(
+            "spawn-gate: refused on {axis} ({reason}, exit {}): {}",
+            r.exit_code,
+            figures.join(", ")
+        )
+    }
+}
+
 /// The first admission boundary of the native gate: a durable
-/// incident stop or an unreadable incident state refuses before the
-/// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
-/// capacity math. Mail stays ungated so the incident can be announced and
-/// explained; `fno agents incident clear` reopens admission.
+/// incident stop that holds spawns (or an unreadable incident state)
+/// refuses before the `FNO_SPAWN_GATE=0` operator bypass, before `--force`,
+/// and before any capacity math. Mail stays ungated so the incident can be
+/// announced and explained; `fno agents incident clear` reopens admission.
 fn fleet_incident_gate() -> Result<(), Refusal> {
-    match crate::fleet_incident::verdict() {
+    match crate::fleet_incident::verdict_for("spawns") {
         crate::fleet_incident::Verdict::Clear(_) => Ok(()),
         crate::fleet_incident::Verdict::Stopped(record) => {
             eprintln!(
@@ -153,21 +225,30 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
 /// `spawn_gate.py::CPU_HOLD_POLL_S`.
 const CPU_HOLD_POLL: Duration = Duration::from_secs(15);
 const CPU_ADMIT_SAMPLES: u32 = 2;
+/// A blind CPU read (an undecidable band or an unreadable probe) gets at most
+/// this many total samples before the gate refuses. A blind read is not
+/// evidence the fleet is over. It never holds for the whole queue budget and
+/// never admits: worst case is 3 probes of FOOTPRINT_PROBE_BUDGET plus 2 pauses.
+const CPU_BLIND_SAMPLES: u32 = 3;
+#[cfg(not(test))]
+const CPU_BLIND_POLL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CPU_BLIND_POLL: Duration = Duration::from_millis(10);
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
-/// How long to tolerate an UNBROKEN run of failed mutex acquisitions before
-/// proceeding unserialized. The mutex is a check→dispatch serializer, not a
-/// state owner: a spawner that dies inside the critical section leaves it
-/// `Suspect` for the full [`GATE_CLAIM_TTL_MS`], and with no bound here EVERY
-/// spawner on the machine then queues behind that corpse until its own queue
-/// timeout; the gate becomes the very thing that bricks spawning, which LD5
+/// How long an uncapped spawner tolerates an UNBROKEN run of failed mutex
+/// acquisitions before proceeding unserialized. The claim records the holder
+/// pid, so a holder that dies frees the mutex on the next acquire. This bound
+/// covers a LIVE holder stuck in dispatch: the mutex is a check→dispatch
+/// serializer, not a state owner, and a gate that bricks spawning is what LD5
 /// forbids. Failing open can overshoot the cap by the number of racing
-/// spawners; wedging the whole mesh is strictly worse. Mirrors
-/// `spawn_gate.py::MUTEX_WAIT_BUDGET_S`.
+/// spawners, so a capped spawner keeps queueing instead.
 const MUTEX_WAIT_BUDGET: Duration = Duration::from_secs(60);
-/// worker:<name> headless slot TTL: bounds a one-shot that outlives its
-/// client pid record; PID liveness is the primary release.
+/// worker:<name> headless slot TTL: bounds a LIVE holder's stay; a dead
+/// holder frees the slot at once (the claim carries its holder pid stamped
+/// `holder-process`, so PID liveness is the primary release and the TTL is
+/// only the backstop).
 const WORKER_CLAIM_TTL_MS: i64 = 4 * 60 * 60 * 1000;
 const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";
 
@@ -192,7 +273,7 @@ pub(crate) fn status_is_liveish(s: &AgentStatus) -> bool {
 
 /// Page size from a `vm_stat` header
 /// ("Mach Virtual Memory Statistics: (page size of 16384 bytes)").
-fn vm_stat_page_size(text: &str) -> Option<u64> {
+pub(crate) fn vm_stat_page_size(text: &str) -> Option<u64> {
     text.lines()
         .next()?
         .split("page size of")
@@ -273,6 +354,11 @@ fn available_bytes() -> Option<u64> {
 /// (`total = 18432.00M  used = 17080.75M  free = 1351.25M  (encrypted)`) to
 /// percent used. `None` when the line does not parse or total is 0.
 pub fn parse_swapusage(text: &str) -> Option<f64> {
+    let (total, used) = parse_swapusage_mb(text)?;
+    Some(used / total * 100.0)
+}
+
+pub(crate) fn parse_swapusage_mb(text: &str) -> Option<(f64, f64)> {
     let mut total_m = None;
     let mut used_m = None;
     let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -294,10 +380,7 @@ pub fn parse_swapusage(text: &str) -> Option<f64> {
         }
     }
     let (total, used) = (total_m?, used_m?);
-    if total <= 0.0 {
-        return None;
-    }
-    Some(used / total * 100.0)
+    (total > 0.0).then_some((total, used))
 }
 
 /// Swap percent used beside [`available_ram_gb`]: available counts reclaimable
@@ -454,7 +537,7 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
                 .collect(),
             Err(e) => {
                 warnings.push(format!(
-                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                    "{NOTE} claude roster unreadable ({e}); pid-less bg rows uncounted"
                 ));
                 Default::default()
             }
@@ -479,7 +562,7 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
             }
         }
         Err(e) => warnings.push(format!(
-            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
+            "{NOTE} fno registry unreadable ({e}); slot count degraded to 0"
         )),
     }
     rows
@@ -511,16 +594,16 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
     let (rows, claims) = slot_reading(registry_path, warnings);
-    rows.len() + claims
+    rows.len() + claims.len()
 }
 
 /// The slot count's two inputs, together: the live registry rows and the live
-/// `worker:<name>` headless reservations. `slot_count` is the sum; the
-/// refusal paths need the rows themselves to name them.
+/// `worker:<name>` headless reservations, each reservation named. `slot_count`
+/// is the sum; the refusal paths need the rows themselves to name them.
 pub(crate) fn slot_reading(
     registry_path: &Path,
     warnings: &mut Vec<String>,
-) -> (Vec<RegistryEntry>, usize) {
+) -> (Vec<RegistryEntry>, Vec<SlotReservation>) {
     let rows = live_rows(registry_path, warnings);
     let claims = live_worker_slot_claims(warnings);
     (rows, claims)
@@ -530,12 +613,13 @@ pub(crate) fn slot_reading(
 /// never quote a count the gate did not measure. Pure text; the caller adds
 /// its own tail (`refusing (--no-wait).`, or the queue line's advice). The
 /// rows are named by the probe's `slot_rows` field (`fno agents gate-status`),
-/// never by a second walk.
+/// never by a second walk. When a reservation is counted, the sentence names
+/// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
     cap: usize,
     rows: usize,
-    claims: usize,
+    claims: &[SlotReservation],
     waiting: usize,
     tail: &str,
 ) -> String {
@@ -544,102 +628,81 @@ fn slot_refusal_line(
     } else {
         String::new()
     };
+    // Name the remedy only for a SUSPECT reservation: a live one still holds
+    // its slot on purpose, and releasing it would leave the worker running
+    // uncounted. All-live saturation names no release target.
+    let remedy = match claims.iter().find(|r| r.state == "suspect") {
+        Some(r) => format!(
+            "; free a dead reservation: fno agents claim release worker:{} --force \
+             --reason \"<why>\"",
+            r.name
+        ),
+        None => String::new(),
+    };
     format!(
-        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {claims} headless \
+        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {n} headless \
          reservations{waiting_note}); every counted row: fno agents gate-status, field \
-         slot_rows; {tail}"
+         slot_rows{remedy}; {tail}",
+        n = claims.len()
     )
 }
 
-/// The territory (key, member node ids) a node belongs to, or `None` when the
-/// answer cannot be READ (unreadable graph, node absent, uncompilable live
-/// crown). Mirrors the Python `_territory_of_node`: membership is EXCLUSIVE
-/// and most-specific-first - a node under a live crown scope counts for that
-/// crown's territory; an uncrowned node counts for its project's loose
-/// territory (project nodes minus every crowned set), so one worker never
-/// consumes two territories' caps. AC9-HP parity: keep both sides agreeing.
+/// The territory (key, member node ids, kingless) a node belongs to, or
+/// `None` when the answer cannot be READ (unreadable graph, node absent,
+/// unreadable registry, uncompilable live crown). Membership is exclusive:
+/// the deepest live crown whose scope holds the node owns it, the lowest
+/// canonical scope on a tie (`territory::node_owners`); an unowned node
+/// counts for its project's loose territory, so one worker never consumes
+/// two territories' caps. `kingless` is false for a crown scope, true for
+/// the loose fallback.
 pub(crate) fn territory_of_node(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
     warnings: &mut Vec<String>,
-) -> Option<(String, std::collections::HashSet<String>)> {
-    use crate::king_board::graph_json_path;
+) -> Option<(String, std::collections::HashSet<String>, bool)> {
     use crate::king_board::project_map;
-    use crate::territory::compile_territory;
 
-    let entries: Vec<Value> = {
-        let path = graph_json_path(config_cwd);
-        let raw = std::fs::read_to_string(&path).ok()?;
-        let parsed: Value = serde_json::from_str(&raw).ok()?;
-        if let Some(list) = parsed.get("entries").and_then(Value::as_array) {
-            list.clone()
-        } else if let Some(list) = parsed.as_array() {
-            list.clone()
-        } else {
-            return None;
-        }
+    // Through the backend switch (`graph_store::read_rows_strict`): a cap
+    // answered from a frozen sqlite mirror polices a territory the store
+    // does not recognize. Unreadable is None, the cannot-READ contract.
+    let entries: Vec<Value> = match crate::territory::graph_entries(config_cwd) {
+        Ok(rows) => rows,
+        Err(_) => return None,
     };
-    let by_id: HashMap<String, &Value> = entries
+    let row = entries
         .iter()
-        .filter_map(|e| {
-            let id = e.get("id").and_then(Value::as_str)?;
-            Some((id.to_string(), e))
-        })
-        .collect();
-    let row: Option<&Value> = by_id.get(node).copied();
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(node));
     if row.is_none() {
         return None;
     }
-
-    // Live crowns from the registry cache, canonical scope strings.
-    let mut crowns: Vec<String> = Vec::new();
-    match load_registry(registry_path) {
-        Ok(Registry { entries: rows, .. }) => {
-            for r in &rows {
-                let scope = r.crown_scope.as_deref().unwrap_or("").trim();
-                if scope.is_empty() || !status_is_liveish(&r.status) {
-                    continue;
-                }
-                let mut members: Vec<String> = scope
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                members.sort();
-                members.dedup();
-                let canon = members.join(",");
-                if !canon.is_empty() && !crowns.contains(&canon) {
-                    crowns.push(canon);
-                }
-            }
-        }
+    let crowns = match crate::territory::live_crowns(registry_path) {
+        Ok(c) => c,
         Err(e) => {
-            warnings.push(format!("territory: registry unreadable ({e}); refusing"));
+            warnings.push(format!("{e}; refusing"));
             return None;
         }
-    }
-    crowns.sort();
-
-    let projects = match project_map(config_cwd) {
-        Ok(m) => m,
-        Err(_) => HashMap::new(),
     };
-    let mut crowned: HashSet<String> = HashSet::new();
-    for scope in &crowns {
-        let compiled = compile_territory(scope, &entries, &Ok(projects.clone()));
-        match compiled {
-            Ok((_, ids)) => {
-                if ids.contains(node) {
-                    return Some((scope.clone(), ids));
-                }
-                crowned.extend(ids);
-            }
-            Err(e) => {
-                warnings.push(format!("territory: crown {scope} uncompilable: {e}"));
-                return None;
-            }
-        }
+    let (owners, failures) = crate::territory::node_owners(
+        &crowns,
+        &entries,
+        &Ok(project_map(config_cwd).unwrap_or_default()),
+    );
+    if !failures.is_empty() {
+        warnings.extend(
+            failures
+                .iter()
+                .map(|(s, e)| format!("territory: crown {s} uncompilable: {e}")),
+        );
+        return None;
+    }
+    if let Some(owner) = owners.get(node) {
+        let members: HashSet<String> = owners
+            .iter()
+            .filter(|(_, s)| *s == owner)
+            .map(|(id, _)| id.clone())
+            .collect();
+        return Some((owner.clone(), members, false));
     }
     let project = row
         .and_then(|r| r.get("project").and_then(Value::as_str))
@@ -647,16 +710,16 @@ pub(crate) fn territory_of_node(
     if project.is_empty() {
         return None;
     }
-    let mut loose: HashSet<String> = HashSet::new();
-    for e in &entries {
-        if let Some(id) = e.get("id").and_then(Value::as_str) {
-            let p = e.get("project").and_then(Value::as_str).unwrap_or("");
-            if p == project && !crowned.contains(id) {
-                loose.insert(id.to_string());
-            }
-        }
-    }
-    Some((format!("loose:{project}"), loose))
+    let loose: HashSet<String> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id").and_then(Value::as_str)?;
+            (e.get("project").and_then(Value::as_str).unwrap_or("") == project
+                && !owners.contains_key(id))
+            .then(|| id.to_string())
+        })
+        .collect();
+    Some((format!("loose:{project}"), loose, true))
 }
 
 /// The per-territory team cap. `Err` carries the refusal receipt the
@@ -675,7 +738,7 @@ pub(crate) fn check_territory_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members)) = state else {
+    let Some((scope, members, _kingless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -772,7 +835,7 @@ pub(crate) fn check_blueprint_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members)) = state else {
+    let Some((scope, members, _kingless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -821,37 +884,31 @@ fn blueprint_refusal(receipt: &str) -> Refusal {
         .ev("axis", serde_json::json!("blueprint"))
 }
 
-/// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
-/// for one node as JSON on stdout. The single counting leg: the Python gate
-/// passes the node through this door and recomputes nothing. Exit is 0 for
-/// every READABLE verdict (including a refusal - the verdict is the answer);
-/// only a malformed invocation exits non-zero.
-pub fn run_territory_verdict(args: &[String]) -> i32 {
-    let mut node: Option<String> = None;
-    let mut iter = args.iter();
-    while let Some(a) = iter.next() {
-        if a == "--node" {
-            node = iter.next().cloned();
-        }
-    }
-    let Some(node) = node else {
-        eprintln!("territory-verdict: --node is required");
-        return 2;
-    };
-    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
-    let cap = agents_config::territory_max_live(&config_cwd);
+/// The verdict receipt for one node, from explicit paths - the counting leg
+/// `run_territory_verdict` serves and the tests pin. `kingless` rides every
+/// readable verdict; `territory_unknown` stays without one, because an
+/// unreadable attribution has no territory and a `kingless` value there
+/// would be a guess wearing a boolean.
+fn territory_verdict_receipt(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    cap: u32,
+) -> Value {
     let mut warnings = Vec::new();
-    let state = territory_of_node(&config_cwd, &registry_path, &node, &mut warnings);
-    let verdict = match state {
+    let state = territory_of_node(config_cwd, registry_path, node, &mut warnings);
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    match state {
         None => serde_json::json!({
             "verdict": "territory_unknown",
             "reason": "territory_unknown",
             "node": node,
             "max_live_per_territory": cap,
         }),
-        Some((scope, members)) => {
-            let live = live_rows(&registry_path, &mut warnings);
+        Some((scope, members, kingless)) => {
+            let live = live_rows(registry_path, &mut warnings);
             let count = live
                 .iter()
                 .filter(|r| {
@@ -866,6 +923,7 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
                     "verdict": "territory_cap",
                     "reason": "territory_cap",
                     "territory": scope,
+                    "kingless": kingless,
                     "count": count,
                     "current_count": count,
                     "max_live_per_territory": cap,
@@ -874,12 +932,41 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
                 serde_json::json!({
                     "verdict": "ok",
                     "territory": scope,
+                    "kingless": kingless,
                     "current_count": count,
                     "max_live_per_territory": cap,
                 })
             }
         }
+    }
+}
+
+/// The `--node <id>` argument of a territory door verb, or `None`.
+fn parse_node_arg(args: &[String]) -> Option<String> {
+    let mut node: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--node" {
+            node = iter.next().cloned();
+        }
+    }
+    node
+}
+
+/// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
+/// for one node as JSON on stdout. The single counting leg: the Python gate
+/// passes the node through this door and recomputes nothing. Exit is 0 for
+/// every READABLE verdict (including a refusal - the verdict is the answer);
+/// only a malformed invocation exits non-zero.
+pub fn run_territory_verdict(args: &[String]) -> i32 {
+    let Some(node) = parse_node_arg(args) else {
+        eprintln!("territory-verdict: --node is required");
+        return 2;
     };
+    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+    let cap = agents_config::territory_max_live(&config_cwd);
+    let verdict = territory_verdict_receipt(&config_cwd, &registry_path, &node, cap);
     println!(
         "{}",
         serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string())
@@ -887,22 +974,46 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
     0
 }
 
-/// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
-/// one-shots write no registry row, so their gate acquires one of these for
-/// the call duration; concurrent gates see them here. `Suspect` counts like
-/// `Live` (TTL-protected, never up for grabs).
-fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
+/// One counted `worker:<name>` reservation the slot census named, so a
+/// reader can see what holds each slot and free a dead one. The provider
+/// walker (`spawn_gate_lanes`) reuses this record instead of a third walk.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SlotReservation {
+    /// The claim key's name half (`worker:<name>` minus the prefix).
+    pub name: String,
+    /// The claim's holder string (a credential, never parsed for identity).
+    pub holder: String,
+    /// The recorded holder pid, when the writer proved one.
+    pub pid: Option<i32>,
+    /// Seconds since `acquired_at`.
+    pub age_s: Option<u64>,
+    /// `live` or `suspect` - the only states the census counts.
+    pub state: &'static str,
+    /// The `model_provider` metadata tag the provider count reads.
+    pub provider: Option<String>,
+}
+
+/// Live `worker:<name>` slot claims under the GLOBAL claims root, named.
+/// Headless one-shots write no registry row, so their gate acquires one of
+/// these for the call duration; concurrent gates see them here. `Suspect`
+/// counts like `Live` (TTL-protected, never up for grabs); a dead
+/// holder-process claim reads `Stale` before this counts it.
+fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
     let root = match gate_claims_root() {
         Some(r) => r,
-        None => return 0,
+        None => return Vec::new(),
     };
     let dir = root.join(".fno/claims");
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return 0, // no claims dir yet: nothing held.
+        Err(_) => return Vec::new(), // no claims dir yet: nothing held.
     };
     let prefix = claims::encode_key("worker:");
-    let mut n = 0usize;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut found = Vec::new();
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy();
@@ -916,14 +1027,30 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
             None => continue,
         };
         match claims::status(&key, Some(&root)) {
-            (claims::ClaimState::Live, _) | (claims::ClaimState::Suspect, _) => n += 1,
+            (state @ (claims::ClaimState::Live | claims::ClaimState::Suspect), Some(rec)) => {
+                found.push(SlotReservation {
+                    name: key.strip_prefix("worker:").unwrap_or(&key).to_string(),
+                    holder: rec.holder,
+                    pid: rec.pid,
+                    age_s: u64::try_from((now_ms - rec.acquired_at).max(0) / 1000).ok(),
+                    state: match state {
+                        claims::ClaimState::Live => "live",
+                        _ => "suspect",
+                    },
+                    provider: rec
+                        .metadata
+                        .get("model_provider")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
             (claims::ClaimState::Corrupted, _) => {
-                warnings.push(format!("spawn-gate: corrupted slot claim {key} ignored"));
+                warnings.push(format!("{NOTE} corrupted slot claim {key} ignored"));
             }
             _ => {}
         }
     }
-    n
+    found
 }
 
 /// Minimal percent-decoder for claim filenames (inverse of
@@ -1080,7 +1207,21 @@ fn maybe_emit_spawn_cap_escape() {
 ///
 /// Fails open on exactly one case: `roots` is empty. There is then no root to
 /// grant and nothing to refuse.
+/// The state-root grant gate. Sits BEFORE `run_gate` in the spawn path
+/// (bin/client.rs), so it carries the same wrapper duty: its refusal ends
+/// with one [`verdict_line`], or the reader sees the remedy prose with no
+/// verdict.
 pub fn state_root_grant_gate(
+    harness: &str,
+    substrate: &str,
+    roots: &[String],
+) -> Result<(), Refusal> {
+    state_root_grant_gate_decide(harness, substrate, roots).inspect_err(|r| {
+        eprintln!("{}", verdict_line(r));
+    })
+}
+
+fn state_root_grant_gate_decide(
     harness: &str,
     substrate: &str,
     roots: &[String],
@@ -1134,9 +1275,41 @@ pub struct GateInput {
     pub substrate: String,
     pub flags: GateFlags,
     pub route_provider: Option<String>,
+    pub node: Option<String>,
     pub account: Option<String>,
     pub caller_session: Option<String>,
+    pub succession_scope: Option<String>,
     pub holder_pid: Option<u32>,
+    /// The spawn's seed message. Its first verb names the session phase.
+    pub seed: Option<String>,
+    /// An explicit `--session-phase` label.
+    pub session_phase: Option<String>,
+}
+
+const REVIEW_SESSION_REMEDY: &str = "run the review in the session that did the work: \
+     /fno:review <level> ($fno:review <level> on codex), or fno do target request-self-review";
+
+/// Refuse before `--force` and `FNO_SPAWN_GATE=0`: a review runs in the
+/// session that did the work, never in a new one.
+fn review_session_gate(input: &GateInput) -> Option<Refusal> {
+    let seeded = input
+        .seed
+        .as_deref()
+        .and_then(crate::spawn_phase::seed_phase);
+    if input.session_phase.as_deref() != Some("review") && seeded != Some("review") {
+        return None;
+    }
+    Some(
+        Refusal::with_receipt(
+            EXIT_REVIEW_SESSION,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "review_session",
+                "remedy": REVIEW_SESSION_REMEDY,
+            }),
+        )
+        .ev("axis", serde_json::json!("review")),
+    )
 }
 
 /// The held keys of a [`GateGuard`], taken out before the guard drops so a
@@ -1148,7 +1321,29 @@ pub type GateKeys = (Option<(String, String)>, Option<(String, String)>);
 /// output goes to stderr (LD10: the stdout receipt is byte-reserved for the
 /// pass path); the receipt itself travels as data in the [`Refusal`] for the
 /// caller's arm to print.
+///
+/// Every refusal ends with one [`verdict_line`] on stderr, so a reader of
+/// the stderr sees the refusing axis and breach as the last line, whatever
+/// notes preceded it.
 pub fn run_gate(
+    config_cwd: &Path,
+    registry_path: &Path,
+    input: GateInput,
+) -> Result<GateGuard, Refusal> {
+    decide_gate(config_cwd, registry_path, input)
+        .map_err(|r| {
+            crate::machine_sample::stamp_refusal(
+                r,
+                &crate::paths::AgentsHome::from_env().events_jsonl(),
+                chrono::Utc::now(),
+            )
+        })
+        .inspect_err(|r| eprintln!("{}", verdict_line(r)))
+}
+
+/// The gate's decision body, split from [`run_gate`] so the wrapper can
+/// append the verdict line at ONE site for all three production callers.
+fn decide_gate(
     config_cwd: &Path,
     registry_path: &Path,
     input: GateInput,
@@ -1156,6 +1351,9 @@ pub fn run_gate(
     // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
+    if let Some(refusal) = review_session_gate(&input) {
+        return Err(refusal);
+    }
 
     // FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
     // precedent): test suites exercising spawn plumbing must not queue behind
@@ -1174,6 +1372,7 @@ pub fn run_gate(
     let substrate = input.substrate.as_str();
     let flags = input.flags;
     let route_provider = input.route_provider.as_deref();
+    let admitted_node = input.node.clone().or_else(gate_node);
     let holder_pid = input.holder_pid.unwrap_or_else(std::process::id);
     let holder = format!("spawn-gate:{}:{}", holder_pid, name);
     let root = gate_claims_root();
@@ -1201,6 +1400,7 @@ pub fn run_gate(
     if let Some(account) = input.account.as_deref() {
         let mut quota_warnings = Vec::new();
         check_account_quota_lock(config_cwd, account, &mut quota_warnings)?;
+        check_account_login(route_provider, account, &mut quota_warnings)?;
         for w in &quota_warnings {
             eprintln!("{w}");
         }
@@ -1235,7 +1435,7 @@ pub fn run_gate(
         // Force speaks for the machine being busy, never for one territory
         // overrunning its team, so the per-territory cap stays enforced
         // here - the one axis --force does not excuse.
-        if let Some(node) = gate_node() {
+        if let Some(node) = admitted_node.as_deref() {
             let mut warnings = Vec::new();
             let live = live_rows(registry_path, &mut warnings);
             if let Err(receipt) = check_territory_cap(
@@ -1261,7 +1461,7 @@ pub fn run_gate(
                 config_cwd,
                 registry_path,
                 name,
-                gate_node().as_deref(),
+                admitted_node.as_deref(),
                 &live,
             ) {
                 eprintln!("{receipt}");
@@ -1270,10 +1470,10 @@ pub fn run_gate(
                 return Err(blueprint_refusal(&receipt));
             }
         }
-        eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
+        eprintln!("{NOTE} forced past cap, RAM floor, and CPU share ceiling (--force)");
         if substrate == "headless" {
             // fail_closed=false: this arm cannot fault, only warn.
-            acquire_worker_slot(&mut guard, name, &holder, route_provider, false).ok();
+            acquire_worker_slot(&mut guard, name, &holder, holder_pid, route_provider, false).ok();
         }
         return Ok(guard);
     }
@@ -1282,19 +1482,25 @@ pub fn run_gate(
     let mut last_progress = Instant::now();
     let mut announced = false;
     let mut last_slots: usize = 0;
+    let mut last_succession_error: Option<&'static str>;
     // LD4: a fleet-over sample holds, and admission after a hold is
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
     let mut under_streak: u32 = 0;
+    // Consecutive blind CPU reads in the current run. Reset by the hold and
+    // admit arms, so the count covers back-to-back blind reads only and the
+    // receipt's `samples` names what actually happened.
+    let mut blind_samples: u32 = 0;
     // Start of the current UNBROKEN run of failed acquisitions (None = holding
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
     let mut mutex_blocked_since: Option<Instant> = None;
-    // Axes read so far, accumulating across passes exactly like the Python
-    // twin's dict, so the timeout receipt can name what was read (AC13).
-    let mut axes_read = serde_json::Map::new();
 
     loop {
+        // Each pass reads afresh: a refusal names only what IT read, never a
+        // slot count from an earlier pass.
+        last_succession_error = None;
+        let mut axes_read = serde_json::Map::new();
         let mut pause = QUEUE_POLL;
         // The footprint probe runs OUTSIDE the gate mutex (it costs seconds
         // and the mutex serializes every spawner), re-taken each pass so a
@@ -1317,14 +1523,15 @@ pub fn run_gate(
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
                 root: root.clone(),
-                pid: fail_closed.then_some(holder_pid),
+                // Always the holder pid: a dead holder then frees the mutex
+                // on the next acquire, whatever the TTL says.
+                pid: Some(holder_pid),
                 ..Default::default()
             },
         ) {
             claims::AcquireOutcome::Acquired(_) => true,
-            // Contention is a peer or a corpse, never a verdict: queue. The
-            // wait budget's takeover decides a dead holder; --no-wait refuses
-            // fast. Exactly the Python gate's CLAIM_UNAVAILABLE arm.
+            // Contention is a holder acquire could not prove dead: a dead
+            // holder's pid already freed the claim. Queue; --no-wait refuses fast.
             claims::AcquireOutcome::HeldByOther { .. } => false,
             claims::AcquireOutcome::Error(e) => {
                 if fail_closed {
@@ -1335,7 +1542,7 @@ pub fn run_gate(
                     ));
                 }
                 // Fail open: the mutex is a serializer, not a state owner.
-                eprintln!("spawn-gate: mutex unavailable ({e}); proceeding unserialized");
+                eprintln!("{NOTE} mutex unavailable ({e}); proceeding unserialized");
                 true
             }
         };
@@ -1352,8 +1559,8 @@ pub fn run_gate(
             // tell "cap is full" from "the gate is wedged".
             if flags.no_wait {
                 eprintln!(
-                    "spawn-gate: another spawner holds the gate mutex; refusing \
-                     (--no-wait). See `fno agents top`."
+                    "spawn-gate: a holder the gate cannot prove dead holds the gate mutex; refusing \
+                     (--no-wait). Read the holder with `fno agents claim status gate:spawn`."
                 );
                 return Err(Refusal::with_receipt(
                     EXIT_NO_WAIT,
@@ -1364,41 +1571,12 @@ pub fn run_gate(
                     }),
                 ));
             }
-            if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
-                if fail_closed {
-                    // Contention is a peer or a corpse, never a full cap. The
-                    // takeover asks THE single reap decision: force
-                    // only a provably-dead holder, queue past anything else.
-                    match takeover_dead_gate_mutex(root.as_deref()) {
-                        Takeover::Freed => {
-                            mutex_blocked_since = None;
-                            continue;
-                        }
-                        Takeover::Kept(basis) => {
-                            eprintln!(
-                                "spawn-gate: gate claim kept ({basis}); queueing past \
-                                 the wait budget"
-                            );
-                        }
-                        Takeover::Gone => {
-                            mutex_blocked_since = None;
-                            continue;
-                        }
-                        Takeover::Unreadable(why) => {
-                            eprintln!(
-                                "spawn-gate: gate claim unreadable by the native door \
-                                 ({why}); queueing"
-                            );
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "spawn-gate: gate mutex still held after {}s (holder likely died \
-                         mid-gate); proceeding unserialized",
-                        MUTEX_WAIT_BUDGET.as_secs()
-                    );
-                    acquired_mutex = true;
-                }
+            if now.duration_since(since) >= MUTEX_WAIT_BUDGET && !fail_closed {
+                eprintln!(
+                    "{NOTE} the gate mutex stayed held for {}s; proceeding unserialized",
+                    MUTEX_WAIT_BUDGET.as_secs()
+                );
+                acquired_mutex = true;
             }
         }
 
@@ -1413,24 +1591,31 @@ pub fn run_gate(
                 match spawn_gate_lanes::provider_live_count(
                     registry_path,
                     route_provider.unwrap_or_default(),
+                    Some(name),
                     &mut lane_warnings,
                 ) {
-                    Ok((live, _counted, parked)) => {
+                    Ok(reading) => {
+                        let live = reading.count;
                         for w in &lane_warnings {
                             eprintln!("{w}");
                         }
                         if live >= cap_value {
                             guard.release_gate_mutex();
                             let parked_names: Vec<String> =
-                                parked.iter().map(|(n, _)| n.clone()).collect();
-                            let wait_note = if parked.is_empty() {
+                                reading.parked.iter().map(|(n, _)| n.clone()).collect();
+                            let wait_note = if reading.parked.is_empty() {
                                 String::new()
                             } else {
-                                format!("; {} waiting on the operator, not counted", parked.len())
+                                format!(
+                                    "; {} waiting on the operator, not counted",
+                                    parked_names.len()
+                                )
                             };
+                            let reserved_note = reserved_note(&reading.reserved);
                             eprintln!(
                                 "spawn-gate: provider {}, cap {cap_value}, current count \
-                                 {live}{wait_note}; refusing; no worker launched",
+                                 {live}{wait_note}{reserved_note}; refusing; no worker launched. \
+                                 {RESERVATION_RULE}",
                                 route_provider.unwrap_or("unknown")
                             );
                             return Err(Refusal::with_receipt(
@@ -1443,6 +1628,7 @@ pub fn run_gate(
                                     "count": live,
                                     "current_count": live,
                                     "parked": parked_names,
+                                    "reserved": reserved_receipt(&reading.reserved),
                                 }),
                             ));
                         }
@@ -1464,14 +1650,23 @@ pub fn run_gate(
                 // Byte-twin with the Python gate: force also bypasses the king
                 // share here; the provider cap above stays enforced.
                 eprintln!(
-                    "spawn-gate: forced past cap, RAM floor, and load ceiling \
+                    "{NOTE} forced past cap, RAM floor, and CPU share ceiling \
                      (--force); provider cap remains enforced"
                 );
                 if substrate == "headless" {
+                    // A forced spawn of the reserved name redeems too: force
+                    // speaks for the machine being busy, never for keeping a
+                    // reservation the spawn itself was promised.
+                    release_redeemed_reservation(name, guard.root.as_deref());
                     // A worker-slot claim fault is not the gate mutex; name the site.
-                    if let Err(fault) =
-                        acquire_worker_slot(&mut guard, name, &holder, route_provider, true)
-                    {
+                    if let Err(fault) = acquire_worker_slot(
+                        &mut guard,
+                        name,
+                        &holder,
+                        holder_pid,
+                        route_provider,
+                        true,
+                    ) {
                         guard.release();
                         return Err(gate_fault_refusal(
                             route_provider,
@@ -1487,41 +1682,51 @@ pub fn run_gate(
             // backstop behind it (LD1).
             let cpu = check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
             let admission = &cpu.payload;
-            if admission.axis == "load_15m" && admission.verdict == "refuse" {
-                axes_read.insert("load_15m".into(), serde_json::json!("over"));
-                axes_read.insert("cpu".into(), serde_json::json!("not-read"));
-            } else {
-                axes_read.insert(
-                    "load_15m".into(),
-                    serde_json::json!(if admission.load_15m.is_some() {
-                        "ok"
-                    } else {
-                        "unavailable"
-                    }),
-                );
-                axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
-            }
+            axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
             let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
-                    // The refusal is decided; drop the mutex BEFORE printing
-                    // so queued spawners (and --no-wait callers) never sit
-                    // behind anything.
-                    guard.release();
-                    eprintln!("{}", admission.reason);
-                    let mut receipt = serde_json::json!({
-                        "status": "refused",
-                        "reason": cpu.token,
-                        "axes_read": axes_read.clone(),
-                    });
-                    for (k, v) in figures.as_object().into_iter().flatten() {
-                        receipt[k] = v.clone();
+                    // A blind read breaks both consecutive-sample runs.
+                    under_streak = 0;
+                    // A blind read is not evidence the fleet is over: the
+                    // instrument can be blind for one pass while the machine
+                    // is fine (2026-09-19: a worker refused twice on
+                    // cpu_instrument_unreadable, a footprint read seconds
+                    // later admitted clean). A waiting spawn re-reads a
+                    // bounded number of times before it believes the
+                    // refusal; --no-wait keeps one sample.
+                    blind_samples += 1;
+                    if !flags.no_wait && blind_samples < CPU_BLIND_SAMPLES {
+                        guard.release_gate_mutex();
+                        eprintln!(
+                            "{NOTE} {reason}; re-reading in {s}s (read \
+                             {blind_samples} of {CPU_BLIND_SAMPLES})",
+                            s = CPU_BLIND_POLL.as_secs(),
+                            reason = admission.reason,
+                        );
+                        pause = CPU_BLIND_POLL;
+                    } else {
+                        // The refusal is decided; drop the mutex BEFORE printing
+                        // so queued spawners (and --no-wait callers) never sit
+                        // behind anything.
+                        guard.release();
+                        eprintln!("{}", admission.reason);
+                        let mut receipt = serde_json::json!({
+                            "status": "refused",
+                            "reason": cpu.token,
+                            "samples": blind_samples,
+                            "axes_read": axes_read.clone(),
+                        });
+                        for (k, v) in figures.as_object().into_iter().flatten() {
+                            receipt[k] = v.clone();
+                        }
+                        return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
+                            .ev("reason", serde_json::json!(cpu.token))
+                            .ev("samples", serde_json::json!(blind_samples))
+                            .ev("axis", serde_json::json!("cpu"))
+                            .ev("axes_read", serde_json::json!(axes_read))
+                            .ev("figures", figures));
                     }
-                    return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
-                        .ev("reason", serde_json::json!(cpu.token))
-                        .ev("axis", serde_json::json!("cpu"))
-                        .ev("axes_read", serde_json::json!(axes_read))
-                        .ev("figures", figures));
                 }
                 "hold" => {
                     // LD4: over is a HOLD - the fleet's own work drains - not
@@ -1529,6 +1734,7 @@ pub fn run_gate(
                     // fails on the first over sample.
                     held_on_cpu = true;
                     under_streak = 0;
+                    blind_samples = 0;
                     guard.release_gate_mutex();
                     if flags.no_wait {
                         eprintln!("{}", admission.reason);
@@ -1564,6 +1770,7 @@ pub fn run_gate(
                     pause = CPU_HOLD_POLL;
                 }
                 "admit" => {
+                    blind_samples = 0;
                     // A held spawn needs CPU_ADMIT_SAMPLES consecutive
                     // under-ceiling samples before it believes the drain
                     // (LD4); a spawn that was never held admits on the first.
@@ -1576,7 +1783,7 @@ pub fn run_gate(
                             hold_pause = true;
                         } else {
                             eprintln!(
-                                "spawn-gate: fleet share {:.1}% under the ceiling for \
+                                "{NOTE} fleet share {:.1}% under the ceiling for \
                                  {under_streak} consecutive samples; admitting",
                                 admission.share_low * 100.0
                             );
@@ -1589,17 +1796,32 @@ pub fn run_gate(
                     }
                     if !hold_pause {
                         let mut warnings = Vec::new();
-                        let (live, claims) = slot_reading(registry_path, &mut warnings);
-                        let slots = live.len() + claims;
+                        let (live, reservations) = slot_reading(registry_path, &mut warnings);
+                        let slots = live.len() + reservations.len();
                         last_slots = slots;
+                        let succession = input.succession_scope.as_deref().map(|scope| {
+                            spawn_gate_lanes::succession_replaces(
+                                &live,
+                                input.caller_session.as_deref(),
+                                scope,
+                            )
+                        });
+                        last_succession_error = succession
+                            .as_ref()
+                            .and_then(|result| result.as_ref().err().copied());
+                        let replaced = usize::from(matches!(succession.as_ref(), Some(Ok(_))));
                         for w in &warnings {
                             eprintln!("{w}");
                         }
-                        if slots < cap {
-                            axes_read.insert(
-                                "slots".into(),
-                                serde_json::json!(format!("{slots}/{cap} ok")),
-                            );
+                        if slots.saturating_sub(replaced) < cap {
+                            let slot_reading = succession
+                                .as_ref()
+                                .and_then(|result| result.as_ref().ok())
+                                .map(|name| {
+                                    format!("{slots}/{cap} ok (succession replaces {name})")
+                                })
+                                .unwrap_or_else(|| format!("{slots}/{cap} ok"));
+                            axes_read.insert("slots".into(), serde_json::json!(slot_reading));
                             // Re-checked on dequeue for the same reason the RAM floor is: a
                             // spawn can sit queued past QUEUE_POLL for minutes, and another
                             // process can raise the shared schema inside that window.
@@ -1615,19 +1837,26 @@ pub fn run_gate(
                             for w in &dequeue_warnings {
                                 eprintln!("{w}");
                             }
-                            check_king_share(
-                                registry_path,
-                                cap,
-                                input.caller_session.as_deref(),
-                                &axes_read,
-                            )
-                            .inspect_err(|_| guard.release())?;
-                            axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            if replaced == 1 {
+                                axes_read.insert(
+                                    "king_share".into(),
+                                    serde_json::json!("skipped (crowned succession)"),
+                                );
+                            } else {
+                                check_king_share(
+                                    registry_path,
+                                    cap,
+                                    input.caller_session.as_deref(),
+                                    &axes_read,
+                                )
+                                .inspect_err(|_| guard.release())?;
+                                axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            }
                             // The per-territory team cap: beside the machine cap,
                             // never instead of it. Refuses (never queues) - waiting cannot
                             // help while the node's own territory is full, and other
                             // territories keep their headroom.
-                            if let Some(node) = gate_node() {
+                            if let Some(node) = admitted_node.as_deref() {
                                 if let Err(receipt) = check_territory_cap(
                                     config_cwd,
                                     registry_path,
@@ -1646,18 +1875,24 @@ pub fn run_gate(
                                 config_cwd,
                                 registry_path,
                                 name,
-                                gate_node().as_deref(),
+                                admitted_node.as_deref(),
                                 &live,
                             ) {
                                 guard.release();
                                 eprintln!("{receipt}");
                                 return Err(blueprint_refusal(&receipt));
                             }
+                            // Redemption sits after every refusing axis and
+                            // at the point of admission, just before the spawn
+                            // takes its own slot claim: earlier would burn the
+                            // reservation on an unrelated CPU or RAM refusal.
+                            release_redeemed_reservation(name, guard.root.as_deref());
                             if substrate == "headless" {
                                 if let Err(fault) = acquire_worker_slot(
                                     &mut guard,
                                     name,
                                     &holder,
+                                    holder_pid,
                                     route_provider,
                                     provider_cap.is_some(),
                                 ) {
@@ -1698,29 +1933,34 @@ pub fn run_gate(
                                 slots,
                                 cap,
                                 live.len(),
-                                claims,
+                                &reservations,
                                 waiting.len(),
                                 "refusing (--no-wait).",
                             );
                             eprintln!("spawn-gate: {line}");
-                            return Err(Refusal::with_receipt(
-                                EXIT_NO_WAIT,
-                                serde_json::json!({
-                                    "status": "refused",
-                                    "reason": "no_wait",
-                                    "axis": "max_live",
-                                    "axes_read": axes_read.clone(),
-                                    "held_on": "max_live",
-                                    "max_live": cap,
-                                    "count": slots,
-                                    "current_count": slots,
-                                    "slot_rows": live.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
-                                    "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
-                                        "name": name,
-                                        "question_id": qid,
-                                    })).collect::<Vec<_>>(),
-                                }),
-                            ));
+                            let mut receipt = serde_json::json!({
+                                "status": "refused",
+                                "reason": "no_wait",
+                                "axis": "max_live",
+                                "axes_read": axes_read.clone(),
+                                "held_on": "max_live",
+                                "max_live": cap,
+                                "count": slots,
+                                "current_count": slots,
+                                "slot_rows": live
+                                    .iter()
+                                    .map(|r| r.name.clone())
+                                    .chain(reservations.iter().map(|r| r.name.clone()))
+                                    .collect::<Vec<_>>(),
+                                "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
+                                    "name": name,
+                                    "question_id": qid,
+                                })).collect::<Vec<_>>(),
+                            });
+                            if let Some(reason) = last_succession_error {
+                                receipt["succession"] = serde_json::json!(reason);
+                            }
+                            return Err(Refusal::with_receipt(EXIT_NO_WAIT, receipt));
                         }
                         if !announced {
                             let row_refs: Vec<&RegistryEntry> = live.iter().collect();
@@ -1737,7 +1977,7 @@ pub fn run_gate(
                                 slots,
                                 cap,
                                 live.len(),
-                                claims,
+                                &reservations,
                                 waiting.len(),
                                 "waiting for a free slot (--no-wait to fail fast, --force to bypass)",
                             );
@@ -1758,8 +1998,10 @@ pub fn run_gate(
                     // an admit: fail closed (LD3).
                     guard.release();
                     eprintln!(
-                        "spawn-gate: the CPU instrument is unreadable (the payload carries the \
-                         unknown verdict {other:?}); refusing to spawn (--force to bypass)"
+                        "{}",
+                        instrument_refusal_sentence(&format!(
+                            "the payload carries the unknown verdict {other:?}"
+                        ))
                     );
                     return Err(Refusal::with_receipt(
                         EXIT_LOAD_REFUSED,
@@ -1787,24 +2029,34 @@ pub fn run_gate(
             } else {
                 "queue_timeout"
             };
-            eprintln!(
-                "spawn-gate: {reason} after {}s held on {held_on}; \
-                 inspect live workers with `fno agents top`, or retry with --no-wait/--force",
-                QUEUE_TIMEOUT.as_secs()
-            );
-            return Err(Refusal::with_receipt(
-                EXIT_QUEUE_TIMEOUT,
-                serde_json::json!({
-                    "status": "refused",
-                    "reason": reason,
-                    "held_on": held_on,
-                    "axis": held_on,
-                    "axes_read": axes_read.clone(),
-                    "max_live": cap,
-                    "count": last_slots,
-                    "current_count": last_slots,
-                }),
-            ));
+            if mutex_blocked_since.is_some() {
+                eprintln!(
+                    "spawn-gate: {reason} after {}s; a holder the gate cannot prove dead holds the gate mutex. \
+                     Read it with `fno agents claim status gate:spawn`. Release a stuck holder \
+                     with `fno agents claim release gate:spawn --force --reason \"<why>\"`.",
+                    QUEUE_TIMEOUT.as_secs()
+                );
+            } else {
+                eprintln!(
+                    "spawn-gate: {reason} after {}s held on {held_on}; \
+                     inspect live workers with `fno agents top`, or retry with --no-wait/--force",
+                    QUEUE_TIMEOUT.as_secs()
+                );
+            }
+            let mut receipt = serde_json::json!({
+                "status": "refused",
+                "reason": reason,
+                "held_on": held_on,
+                "axis": held_on,
+                "axes_read": axes_read.clone(),
+                "max_live": cap,
+                "count": last_slots,
+                "current_count": last_slots,
+            });
+            if let Some(reason) = last_succession_error {
+                receipt["succession"] = serde_json::json!(reason);
+            }
+            return Err(Refusal::with_receipt(EXIT_QUEUE_TIMEOUT, receipt));
         }
         std::thread::sleep(pause);
     }
@@ -1884,35 +2136,42 @@ pub(crate) fn ram_floor_term(
 /// unreadable term skips (fail open, as before). Both readings ride every
 /// verdict: a floor that only speaks on refusal cannot be audited, and a
 /// passing gate must not look like a healthy box.
+/// The pass-path RAM readings line, pure so the note prefix is testable:
+/// it starts [`NOTE`], never the `spawn-gate: ` verdict marker, because
+/// these readings ride ADMITTED spawns too.
+pub(crate) fn ram_readings_line(m: &MemoryReading, floor_gb: f64, max_swap_pct: f64) -> String {
+    // A disabled term renders `off`, never `unreadable`: it was not read
+    // because it is disabled, and a broken sensor must not read as a
+    // tuned knob.
+    let off_or = |disabled: bool, value: &Option<f64>, unit: &str| -> String {
+        if disabled {
+            "off".into()
+        } else {
+            value
+                .map(|v| format!("{v:.1}{unit}"))
+                .unwrap_or_else(|| "unreadable".into())
+        }
+    };
+    let swapin_word: String = if max_swap_pct <= 0.0 {
+        "off".into()
+    } else if m.swap.is_none_or(|s| s < max_swap_pct) {
+        "not sampled (under cap)".into()
+    } else {
+        m.swapin_bps
+            .map(|r| format!("{:.1} MiB/s", r / MIB))
+            .unwrap_or_else(|| "unreadable".into())
+    };
+    format!(
+        "{NOTE} ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
+        off_or(floor_gb <= 0.0, &m.avail, "GB"),
+        off_or(max_swap_pct <= 0.0, &m.swap, "%"),
+    )
+}
+
 fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
     let m = read_memory(floor_gb, max_swap_pct);
     if floor_gb > 0.0 || max_swap_pct > 0.0 {
-        // A disabled term renders `off`, never `unreadable`: it was not read
-        // because it is disabled, and a broken sensor must not read as a
-        // tuned knob.
-        let off_or = |disabled: bool, value: &Option<f64>, unit: &str| -> String {
-            if disabled {
-                "off".into()
-            } else {
-                value
-                    .map(|v| format!("{v:.1}{unit}"))
-                    .unwrap_or_else(|| "unreadable".into())
-            }
-        };
-        let swapin_word: String = if max_swap_pct <= 0.0 {
-            "off".into()
-        } else if m.swap.is_none_or(|s| s < max_swap_pct) {
-            "not sampled (under cap)".into()
-        } else {
-            m.swapin_bps
-                .map(|r| format!("{:.1} MiB/s", r / MIB))
-                .unwrap_or_else(|| "unreadable".into())
-        };
-        eprintln!(
-            "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
-            off_or(floor_gb <= 0.0, &m.avail, "GB"),
-            off_or(max_swap_pct <= 0.0, &m.swap, "%"),
-        );
+        eprintln!("{}", ram_readings_line(&m, floor_gb, max_swap_pct));
     }
     match ram_floor_term(m.avail, floor_gb, m.swap, m.swapin_bps, max_swap_pct) {
         Some((reason, term)) => {
@@ -1961,10 +2220,6 @@ pub(crate) struct AdmissionPayload {
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) gap: Option<String>,
-    #[serde(default)]
-    pub(crate) load_15m: Option<f64>,
-    #[serde(default)]
-    pub(crate) backstop: f64,
     /// The Python decider's short form of the fleet's largest program; absent
     /// on an older wheel and whenever no attributed row exists.
     #[serde(default)]
@@ -1993,8 +2248,6 @@ fn receipt_fields(admission: &AdmissionPayload) -> serde_json::Value {
         "machine_cores": fig(admission.machine_cores),
         "capacity_cores": fig(admission.capacity_cores),
         "ceiling": fig(admission.ceiling),
-        "load_15m": admission.load_15m,
-        "backstop": fig(admission.backstop),
     })
 }
 
@@ -2045,68 +2298,20 @@ pub struct FootprintCausePayload {
     /// as `cpu_instrument_unreadable` rather than guessing (LD3).
     #[serde(default)]
     admission: Option<AdmissionPayload>,
-    /// The whole-machine band's verdict from the ONE Python decider
-    /// (`machine_pressure`); the machine_watch arm reads it verbatim (
-    /// LD3). Absent on a degraded payload: the arm reads that as
-    /// `machine_unreadable`, never as calm.
-    #[serde(default)]
-    pub(crate) machine: Option<MachinePressurePayload>,
     /// Top fleet consumers by summed ps %cpu; the machine_watch escalation
     /// names the first three by their own argv strings (AC7).
     #[serde(default)]
     pub(crate) top: Vec<TopConsumer>,
 }
 
-impl FootprintCausePayload {
-    /// The arm-and-test seam: a payload carrying only the machine verdict and
-    /// the top consumers; everything else defaults.
-    #[cfg(test)]
-    pub(crate) fn from_parts(
-        machine: Option<MachinePressurePayload>,
-        top: Vec<TopConsumer>,
-    ) -> Self {
-        Self {
-            machine,
-            top,
-            ..Default::default()
-        }
-    }
-}
-
 /// One `top` row of the footprint payload.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopConsumer {
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) cpu_percent: f64,
     #[serde(default)]
     pub(crate) command: String,
-}
-
-/// The payload's `machine` object (LD3/LD4): computed by
-/// `machine_pressure` in doctor_footprint.py, read verbatim here. This module
-/// computes no machine verdict of its own.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MachinePressurePayload {
-    pub(crate) verdict: String,
-    #[serde(default)]
-    pub(crate) reason: String,
-    #[serde(default)]
-    pub(crate) busy_fraction: Option<f64>,
-    #[serde(default)]
-    pub(crate) band: f64,
-    #[serde(default)]
-    #[allow(dead_code)] // read only through serde: machine sizing context, no verdict reads it
-    pub(crate) machine_cores: Option<f64>,
-    #[serde(default)]
-    pub(crate) capacity_cores: f64,
-    #[serde(default)]
-    pub(crate) runnable: Option<u64>,
-    #[serde(default)]
-    pub(crate) processes: Option<u64>,
-    #[serde(default)]
-    pub(crate) load_15m: Option<f64>,
-    #[serde(default)]
-    pub(crate) throttle_minutes: u64,
 }
 
 /// The CPU axis's answer for THIS spawn: the admission to branch on plus the
@@ -2114,9 +2319,19 @@ pub struct MachinePressurePayload {
 /// refusal is built when the payload carries no decidable admission.
 pub(crate) struct CpuAdmission {
     pub(crate) payload: AdmissionPayload,
-    /// refuse|undecidable -> load_backstop | cpu_share_undecidable |
+    /// refuse|undecidable -> cpu_share_undecidable |
     /// cpu_instrument_unreadable. Empty for admit/hold (they never refuse).
     pub(crate) token: &'static str,
+}
+
+/// The one spelling of the instrument refusal: the condition, the probe's
+/// own words for what it measured, and a verb the reader can run.
+fn instrument_refusal_sentence(why: &str) -> String {
+    format!(
+        "spawn-gate: the CPU instrument is unreadable ({why}); \
+         read the instrument yourself with `fno doctor footprint --json --cause-only`; \
+         refusing to spawn (--force to bypass)"
+    )
 }
 
 /// Read the CPU axis from the prefetched footprint payload (LD3).
@@ -2134,10 +2349,7 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
             payload: AdmissionPayload {
                 verdict: "refuse".to_string(),
                 axis: "cpu_instrument".to_string(),
-                reason: format!(
-                    "spawn-gate: the CPU instrument is unreadable ({why}); \
-                     refusing to spawn (--force to bypass)"
-                ),
+                reason: instrument_refusal_sentence(why),
                 share_low: 0.0,
                 share_high: 0.0,
                 bound: "exact".to_string(),
@@ -2146,8 +2358,6 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
                 capacity_cores: 0.0,
                 ceiling: 0.0,
                 gap: None,
-                load_15m: None,
-                backstop: 0.0,
                 top_holder: None,
             },
             token: "cpu_instrument_unreadable",
@@ -2177,7 +2387,6 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
         Some(admission) => {
             let token = match (admission.verdict.as_str(), admission.axis.as_str()) {
                 ("undecidable", _) => "cpu_share_undecidable",
-                ("refuse", "load_15m") => "load_backstop",
                 ("refuse", _) => "cpu_instrument_unreadable",
                 _ => "",
             };
@@ -2228,52 +2437,24 @@ pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     let payload: Option<FootprintCausePayload> = footprint_cause_raw()
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    let footer = payload.as_ref().and_then(|p| machine_footer_line(p));
+    let home = crate::paths::AgentsHome::from_env();
+    let footer = crate::machine_sample::newest(&home.events_jsonl())
+        .map(|row| {
+            let mut line = crate::machine_sample::footer_line(&row, chrono::Utc::now());
+            if let Some(payload) = payload.as_ref().filter(|p| p.spare_pool_process_count > 0) {
+                line.push_str(&format!(
+                    " claude_spare_pool={}proc/{:.2}cores",
+                    payload.spare_pool_process_count, payload.spare_pool_cpu_cores
+                ));
+            }
+            line
+        })
+        .or_else(|| Some(crate::machine_sample::no_row_footer()));
     let keeper = payload.as_ref().and_then(|payload| {
         let commands: Vec<String> = payload.top.iter().map(|c| c.command.clone()).collect();
         crate::drift::keeper_path_note(&commands, std::env::current_exe().ok().as_deref())
     });
     (footer, keeper)
-}
-
-/// The footer line from a parsed payload. It reads the `machine` object - the
-/// ONE Python decider's verdict - and leads with the busy fraction against
-/// the band, never with a bare load figure (AC9/LD2).
-fn machine_footer_line(payload: &FootprintCausePayload) -> Option<String> {
-    let machine = payload.machine.as_ref()?;
-    let load = machine
-        .load_15m
-        .filter(|v| v.is_finite())
-        .map(|v| format!("{v:.1}"))
-        .unwrap_or_else(|| "unknown".to_string());
-    let pool = if payload.spare_pool_process_count > 0 {
-        format!(
-            " claude_spare_pool={}proc/{:.2}cores",
-            payload.spare_pool_process_count, payload.spare_pool_cpu_cores
-        )
-    } else {
-        String::new()
-    };
-    match machine.busy_fraction {
-        Some(busy) => Some(format!(
-            "{:.0}% busy of {:.2} cores against band {:.0}% -> {} · load_15m {} · \
-             {} runnable of {} processes{pool}",
-            busy * 100.0,
-            machine.capacity_cores,
-            machine.band * 100.0,
-            machine.verdict,
-            load,
-            machine.runnable.unwrap_or(0),
-            machine.processes.unwrap_or(0)
-        )),
-        None => Some(format!("{} · load_15m {load}{pool}", machine.verdict)),
-    }
-}
-
-/// The test seam for the footer: the same formatter over a raw payload string.
-#[cfg(test)]
-fn format_machine_status_line(raw: &str) -> Option<String> {
-    machine_footer_line(&serde_json::from_str(raw).ok()?)
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
@@ -2283,6 +2464,24 @@ pub(crate) fn footprint_cause_raw() -> Result<String, String> {
     if let Ok(raw) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD") {
         if !raw.is_empty() {
             return Ok(raw);
+        }
+    }
+    // Test seam for the re-read loop: one payload PER read. Each call
+    // consumes the first line; the last line sticks, so a positive control
+    // can count the reads that actually happened. `ERR <words>` answers the
+    // no-payload path.
+    #[cfg(test)]
+    if let Ok(seq) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ") {
+        if !seq.is_empty() {
+            let raw = std::fs::read_to_string(&seq).expect("payload-seq file readable");
+            let (first, rest) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
+            if !rest.is_empty() {
+                std::fs::write(&seq, rest).expect("payload-seq file writable");
+            }
+            if let Some(why) = first.strip_prefix("ERR ") {
+                return Err(why.to_string());
+            }
+            return Ok(first.to_string());
         }
     }
     let argv = footprint_probe_argv().ok_or_else(|| {
@@ -2351,13 +2550,17 @@ fn footprint_cause_raw_with(argv: &[String], budget: Duration) -> Result<String,
 
 /// Take the headless worker slot claim. The claim carries `model_provider`
 /// (the route provider, else the un-routed marker) because the provider count
-/// reads that tag. `fail_closed` (a provider cap applies) turns a fault into
-/// the caller's refusal; without a cap the claim is count VISIBILITY, not a
-/// correctness gate, and a fault proceeds uncounted.
+/// reads that tag. The claim carries the holder pid stamped `holder-process`
+/// (the same stamp the flight gate writes), so a dead holder frees its slot
+/// at once instead of reading Suspect for the whole TTL. `fail_closed` (a
+/// provider cap applies) turns a fault into the caller's refusal; without a
+/// cap the claim is count VISIBILITY, not a correctness gate, and a fault
+/// proceeds uncounted.
 fn acquire_worker_slot(
     guard: &mut GateGuard,
     name: &str,
     holder: &str,
+    holder_pid: u32,
     route_provider: Option<&str>,
     fail_closed: bool,
 ) -> Result<(), String> {
@@ -2376,6 +2579,8 @@ fn acquire_worker_slot(
         &key,
         holder,
         claims::AcquireOpts {
+            pid: Some(holder_pid),
+            pid_provenance: Some(claims::HOLDER_PROCESS.to_string()),
             ttl_ms: Some(WORKER_CLAIM_TTL_MS),
             metadata: Some(metadata),
             root: guard.root.clone(),
@@ -2392,7 +2597,7 @@ fn acquire_worker_slot(
             if fail_closed {
                 Err(fault)
             } else {
-                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                eprintln!("{NOTE} worker slot claim {key} unavailable; proceeding uncounted");
                 Ok(())
             }
         }
@@ -2401,7 +2606,7 @@ fn acquire_worker_slot(
             if fail_closed {
                 Err(fault)
             } else {
-                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                eprintln!("{NOTE} worker slot claim {key} unavailable; proceeding uncounted");
                 Ok(())
             }
         }
@@ -2410,7 +2615,7 @@ fn acquire_worker_slot(
 
 /// The claims-layer fault refusal: the gate could not serialize the decision
 /// or take a lane reservation, so no count was measured and no cap may be
-/// named. The reason names the faulted site, never a cap.
+/// named. The reason is the faulted site, never a cap.
 fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refusal {
     Refusal::with_receipt(
         EXIT_PROVIDER_CAP,
@@ -2423,54 +2628,28 @@ fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refu
     )
 }
 
-/// The outcome of asking the native claim verdict about a gate mutex held
-/// past the wait budget.
-enum Takeover {
-    /// The claim was provably dead and has been removed; retry the acquire.
-    Freed,
-    /// The claim vanished while we looked; retry the acquire.
-    Gone,
-    /// A live peer holds it; keep queueing.
-    Kept(&'static str),
-    /// The verdict itself could not be read; keep queueing.
-    Unreadable(String),
-}
-
-/// THE single reap decision for the spawn-gate mutex: force only a
-/// provably-dead holder, queue past anything else. Used when a provider cap
-/// applies, where an unserialized overshoot would break the cap.
-fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
-    let path = match claims::claim_path("gate:spawn", root) {
-        Ok(path) => path,
-        Err(_) => return Takeover::Unreadable("claims root unresolved".into()),
-    };
-    if !path.exists() {
-        let _ = std::fs::remove_file(&path);
-        return Takeover::Gone;
-    }
-    let record = match claims::read_claim_file(&path) {
-        Ok(record) => record,
-        // Atomic writes mean corruption is damage, not a hold.
-        Err(_) => {
-            let _ = std::fs::remove_file(&path);
-            return Takeover::Gone;
-        }
-    };
-    let (provably_dead, bucket) =
-        claims::classify_for_sweep(&record, None, &|pid| claims::probe_pid(pid), None, None);
-    if provably_dead {
-        let _ = std::fs::remove_file(&path);
-        return Takeover::Freed;
-    }
-    Takeover::Kept(bucket)
-}
-
 /// The king-share refusal (W4 / LD1): the share divides
 /// `max_live` by CROWNS; `held` counts the caller's own worker rows; a caller
 /// with no resolved session is not share-checked; waiting cannot help, so
 /// this refuses like the provider cap. Every number comes from
 /// [`spawn_gate_lanes::share_reading`]: the count the gate refuses on and the
 /// count any readout prints are one value.
+/// The held-rows clause of the king-share refusal: the row names the caller
+/// can act on, capped at five with an ellipsis like the unattributed suffix.
+pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
+    match held_rows.filter(|r| !r.is_empty()) {
+        Some(rows) => {
+            let shown: Vec<String> = rows.iter().take(5).cloned().collect();
+            format!(
+                "; the rows charged to you are {}{}",
+                shown.join(", "),
+                if rows.len() > 5 { "..." } else { "" }
+            )
+        }
+        None => String::new(),
+    }
+}
+
 fn check_king_share(
     registry_path: &Path,
     cap: usize,
@@ -2496,6 +2675,9 @@ fn check_king_share(
          (--force to bypass)",
         &caller[..caller.len().min(8)]
     );
+    // The held names read before the unattributed bucket: they are the rows
+    // the caller can stop, where the bucket names nobody.
+    msg.push_str(&held_rows_suffix(reading.held_rows.as_ref()));
     if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
         let shown: Vec<String> = rows.iter().take(5).cloned().collect();
         msg.push_str(&format!(
@@ -2512,7 +2694,11 @@ fn check_king_share(
         .ev("held", serde_json::json!(held))
         .ev("share", serde_json::json!(share))
         .ev("max_live", serde_json::json!(cap))
-        .ev("kings", serde_json::json!(kings)))
+        .ev("kings", serde_json::json!(kings))
+        .ev(
+            "held_rows",
+            serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2587,7 +2773,7 @@ pub fn qos_demote_pid(config_cwd: &Path, pid: u32) {
     };
     match status {
         Ok(s) if s.success() => {}
-        _ => eprintln!("spawn-gate: QoS demotion of pid {pid} failed (non-fatal)"),
+        _ => eprintln!("{NOTE} QoS demotion of pid {pid} failed (non-fatal)"),
     }
 }
 
@@ -2608,7 +2794,7 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "spawn-gate: bg worker {job_id} pid not in roster within 10s; \
+                "{NOTE} bg worker {job_id} pid not in roster within 10s; \
                  QoS demotion skipped (non-fatal)"
             );
             return;
@@ -2620,6 +2806,208 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_seed_or_label_is_refused_and_other_phases_pass() {
+        for seed in [
+            "$fno:review high --comment",
+            "/fno:review x",
+            "/code-review this diff",
+            "/review x-1",
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .expect(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+            let receipt = refusal.receipt.as_ref().unwrap();
+            assert_eq!(receipt["reason"], "review_session");
+            let remedy = receipt["remedy"].as_str().unwrap();
+            assert!(remedy.contains("/fno:review"));
+            assert!(remedy.contains("$fno:review"));
+            assert!(verdict_line(&refusal)
+                .starts_with("spawn-gate: refused on review (review_session, exit 89)"));
+        }
+
+        for (seed, phase) in [
+            ("/fno:triage deep", Some("review")),
+            ("/code-review this diff", Some("do")),
+        ] {
+            let refusal = review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                session_phase: phase.map(str::to_string),
+                ..Default::default()
+            })
+            .expect(seed);
+            assert_eq!(refusal.exit_code, EXIT_REVIEW_SESSION);
+        }
+
+        for seed in [
+            "/fno:think why",
+            "/fno:target x-1",
+            "review the diff",
+            "/Users/x/review",
+            "",
+        ] {
+            assert!(review_session_gate(&GateInput {
+                seed: Some(seed.to_string()),
+                ..Default::default()
+            })
+            .is_none());
+        }
+        assert!(review_session_gate(&GateInput::default()).is_none());
+    }
+
+    /// The no_wait specimen renders the verdict line the plan pins: axis and
+    /// breach named, figures from the receipt in key order.
+    #[test]
+    fn verdict_line_names_axis_and_breach_for_no_wait() {
+        let refusal = Refusal::with_receipt(
+            EXIT_NO_WAIT,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "no_wait",
+                "axis": "max_live",
+                "axes_read": {"cpu": "admit", "slots": "15/15 queued"},
+                "held_on": "max_live",
+                "max_live": 15,
+                "count": 15,
+                "current_count": 15,
+                "slot_rows": ["w1", "w2"],
+                "waiting_on_operator": [],
+            }),
+        );
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on max_live (no_wait, exit 76): max_live=15, count=15, current_count=15"
+        );
+    }
+
+    /// A territory refusal: the event's axis wins over the receipt's, and
+    /// the live_blueprints array never enters the figures.
+    #[test]
+    fn verdict_line_reads_event_axis_and_skips_arrays() {
+        let refusal = Refusal::with_receipt(
+            EXIT_TERRITORY_CAP,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "territory_cap",
+                "territory": "team-x",
+                "count": 3,
+                "current_count": 3,
+                "max_live_per_territory": 3,
+                "live_blueprints": ["bp-a", "bp-b"],
+            }),
+        )
+        .ev("axis", serde_json::json!("territory"));
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on territory (territory_cap, exit 86): territory=team-x, count=3, current_count=3, max_live_per_territory=3"
+        );
+    }
+
+    /// No receipt and no event: the line still names the exit.
+    #[test]
+    fn verdict_line_without_receipt_names_the_exit() {
+        let refusal = Refusal::code(82);
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on unknown (unknown, exit 82)"
+        );
+    }
+
+    /// A receipt-less refusal keeps its measurements in the event; the
+    /// verdict falls back to the event's scalars so the breach is named.
+    #[test]
+    fn verdict_line_falls_back_to_event_scalars() {
+        let refusal = Refusal::code(EXIT_KING_SHARE)
+            .ev("reason", serde_json::json!("king_share"))
+            .ev("king", serde_json::json!("abc12345"))
+            .ev("held", serde_json::json!(5))
+            .ev("share", serde_json::json!(3))
+            .ev("max_live", serde_json::json!(15))
+            .ev("kings", serde_json::json!(2));
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on king_share (king_share, exit 80): king=abc12345, held=5, share=3, max_live=15, kings=2"
+        );
+    }
+
+    /// The readings of an admitted spawn carry the note prefix, never the
+    /// verdict marker.
+    #[test]
+    fn ram_readings_line_is_a_note() {
+        let m = MemoryReading {
+            avail: Some(35.9),
+            swap: Some(85.5),
+            swapin_bps: None,
+        };
+        let line = ram_readings_line(&m, 2.0, 90.0);
+        assert!(
+            line.starts_with("spawn-gate note: ram readings:"),
+            "got: {line}"
+        );
+        assert!(!line.starts_with("spawn-gate:"), "got: {line}");
+    }
+
+    /// The marker is the refusal wire format (advance.py and
+    /// dispatch_launch.rs both key on it). A pass-path word beside the
+    /// marker breaks the readers, so the source itself is scanned.
+    #[test]
+    fn pass_path_lines_never_carry_the_verdict_marker() {
+        const NEEDLE: &str = concat!("spawn-gate", ": ");
+        const BARRED: [&str; 9] = [
+            "proceeding",
+            "readings",
+            "not refusing",
+            "admitting",
+            "non-fatal",
+            "forced past",
+            "ignored",
+            "uncounted",
+            "degraded",
+        ];
+        for file in [
+            include_str!("spawn_gate.rs"),
+            include_str!("spawn_gate_lanes.rs"),
+        ] {
+            for line in file.lines() {
+                if line.contains(NEEDLE) {
+                    for word in BARRED {
+                        assert!(
+                            !line.contains(word),
+                            "pass-path word {word:?} beside the verdict marker in: {line}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A refusal receipt carries only the readings of the pass that refused.
+    /// No fixture can flip the CPU payload between queue
+    /// passes (the test seam is one static env var), so the plan's fallback
+    /// pins it structurally: the binding must sit inside run_gate's queue
+    /// loop, not before it.
+    #[test]
+    fn axes_read_is_per_pass() {
+        let src = include_str!("spawn_gate.rs");
+        let loop_at = src
+            .find("\n    loop {\n")
+            .expect("run_gate's queue loop must be present");
+        let bind_at = src
+            .find("let mut axes_read = serde_json::Map::new();")
+            .expect("axes_read binding must be present");
+        assert!(
+            bind_at > loop_at,
+            "axes_read must reset per pass: it sits before the queue loop"
+        );
+        assert!(
+            !src[loop_at..bind_at].lines().any(|l| l.starts_with('}')),
+            "axes_read binding drifted outside the queue loop"
+        );
+    }
 
     /// The receipt names swap when the ceiling fires beside live swap-ins.
     #[test]
@@ -2783,6 +3171,7 @@ mod tests {
             changed_at: "2026-09-11T00:00:00Z".into(),
             changed_by: "op".into(),
             reason: "wedged lock".into(),
+            holds: Vec::new(),
             source: Some("file".into()),
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
@@ -2985,50 +3374,6 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
     }
 
-    /// The `fno agents status` machine line: the busy fraction against the
-    /// band, the verdict, and the load and runnable census beside them
-    /// (AC9), with the pool named so a caller sees the pool's share
-    /// before a spawn is ever refused on it.
-    #[test]
-    fn machine_status_line_names_band_verdict_and_census() {
-        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2,"spare_pool_process_count":45,"spare_pool_cpu_cores":7.98,"machine":{"verdict":"hot","reason":"r","busy_fraction":0.917,"band":0.9,"machine_cores":11.0,"capacity_cores":12.0,"runnable":160,"processes":1100,"load_15m":279.12,"throttle_minutes":30}}"#;
-        let line = format_machine_status_line(raw).expect("payload formats");
-        assert_eq!(
-            line,
-            "92% busy of 12.00 cores against band 90% -> hot · load_15m 279.1 · \
-             160 runnable of 1100 processes claude_spare_pool=45proc/7.98cores"
-        );
-    }
-
-    /// Negative control: no pool, no load reading. The line still prints -
-    /// best-effort status is not all-or-nothing on one field.
-    #[test]
-    fn machine_status_line_omits_pool_and_reads_load_unknown() {
-        let raw = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"calm","reason":"r","busy_fraction":0.432,"band":0.9,"machine_cores":5.186,"capacity_cores":12.0,"runnable":66,"processes":1010,"load_15m":null,"throttle_minutes":60}}"#;
-        let line = format_machine_status_line(raw).expect("payload formats");
-        assert_eq!(
-            line,
-            "43% busy of 12.00 cores against band 90% -> calm · load_15m unknown · \
-             66 runnable of 1010 processes"
-        );
-    }
-
-    /// An absent machine object yields no line at all rather than a
-    /// fabricated one, and the verdict-only shape prints for an unreadable
-    /// sensor (busy_fraction null).
-    #[test]
-    fn machine_status_line_is_none_without_a_machine_object() {
-        assert_eq!(format_machine_status_line("{}"), None);
-        assert_eq!(format_machine_status_line("not json"), None);
-        assert_eq!(
-            format_machine_status_line(r#"{"cpu_capacity_cores":12}"#),
-            None
-        );
-        let unreadable = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"unreadable","reason":"footprint probe did not answer inside 8s","busy_fraction":null,"band":0.9,"machine_cores":null,"capacity_cores":12.0,"runnable":null,"processes":null,"load_15m":null,"throttle_minutes":60}}"#;
-        let line = format_machine_status_line(unreadable).expect("payload formats");
-        assert!(line.starts_with("unreadable · load_15m unknown"), "{line}");
-    }
-
     /// AC9: the shared fixture pins the branch this gate takes per
     /// payload. The Python suite feeds the same file to `cpu_admission`, so
     /// neither runtime can grow its own opinion about who gets in.
@@ -3063,9 +3408,10 @@ MemAvailable:    8000000 kB\n";
         }
     }
 
-    /// Junk, an admission-less payload, and no payload at all all refuse as
-    /// the unreadable instrument (LD3) - never as an idle machine; the
-    /// probe's own failure words travel into the sentence.
+    /// Junk, an admission-less payload, an answered failure, and no payload
+    /// at all all refuse as the unreadable instrument (LD3) - never as an
+    /// idle machine; the probe's own failure words travel into the sentence
+    /// and the sentence names the verb that re-reads the instrument.
     #[test]
     fn junk_and_admission_less_payloads_refuse_as_unreadable() {
         let cases = [
@@ -3074,6 +3420,12 @@ MemAvailable:    8000000 kB\n";
             (Some("not json"), None),
             (
                 Some(r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12}"#),
+                None,
+            ),
+            (
+                Some(
+                    r#"{"error":"footprint unavailable: worker root liveness unavailable: registry row w1 carries no pid start token","exit_code":4}"#,
+                ),
                 None,
             ),
         ];
@@ -3085,6 +3437,18 @@ MemAvailable:    8000000 kB\n";
             assert!(
                 cpu.payload.reason.contains("--force to bypass"),
                 "{payload:?}"
+            );
+            if let Some(probe_words) = err {
+                assert!(
+                    cpu.payload.reason.contains(probe_words),
+                    "{}",
+                    cpu.payload.reason
+                );
+            }
+            assert!(
+                cpu.payload.reason.contains("fno doctor footprint"),
+                "{}",
+                cpu.payload.reason
             );
         }
     }
@@ -3107,19 +3471,23 @@ MemAvailable:    8000000 kB\n";
             "machine_cores",
             "capacity_cores",
             "ceiling",
-            "backstop",
         ] {
             assert!(fields[key].is_null(), "{key} must be null");
         }
         assert_eq!(fields["detail"], cpu.payload.reason);
         assert_eq!(fields["bound"], "exact");
+        assert!(
+            cpu.payload.reason.contains("fno doctor footprint"),
+            "{}",
+            cpu.payload.reason
+        );
     }
 
     /// The periodic held reprint prints the payload's holder clause
     /// verbatim; an absent holder leaves the line exactly as before.
     #[test]
     fn held_progress_line_prints_the_payloads_holder_verbatim() {
-        let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null,"load_15m":45.0,"backstop":480.0}"#;
+        let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null}"#;
         let mut admission: AdmissionPayload = serde_json::from_str(raw).unwrap();
         assert_eq!(
             held_progress_line(&admission, 40),
@@ -3159,7 +3527,8 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
 
-        // Hold the mutex as somebody else, exactly as a corpse would.
+        // Hold the mutex as somebody else. The claim defaults its pid to this
+        // live test process, so it reads as a live holder.
         let held = claims::acquire(
             "gate:spawn",
             "spawn-gate:999999:ghost",
@@ -3173,11 +3542,9 @@ MemAvailable:    8000000 kB\n";
             matches!(held, claims::AcquireOutcome::Acquired(_)),
             "test setup: ghost must hold the mutex, got {held:?}"
         );
-        // Positive control on the test's own premise. The ghost pid is dead, so
-        // the claim is `Suspect` (TTL unexpired, holder gone) and acquire must
-        // still report it held by another. Assert that instead of assuming it:
-        // if claim semantics ever let a dead holder be reclaimed, the mutex
-        // would be FREE, run_gate would sail through, and this test would pass
+        // Positive control on the test's own premise: acquire must report the
+        // mutex held by another. Assert that instead of assuming it: a free
+        // mutex would let run_gate sail through, and this test would pass
         // while exercising none of the branch it exists to pin.
         let contended = claims::acquire(
             "gate:spawn",
@@ -3223,6 +3590,112 @@ MemAvailable:    8000000 kB\n";
             elapsed < QUEUE_TIMEOUT,
             "must refuse fast, not queue: took {elapsed:?}"
         );
+    }
+
+    /// A holder that dies by signal leaves no release behind. The claim's pid
+    /// must free the mutex anyway, so the next capped spawner acquires at once
+    /// instead of queueing behind the TTL.
+    #[test]
+    fn a_gate_holder_killed_by_a_signal_frees_the_mutex_at_once() {
+        use std::os::unix::process::CommandExt;
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-sigdeath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n\n\
+             [agents.provider_limits.zai]\nlanes = 99\n",
+        )
+        .unwrap();
+        let registry = dir.join("registry.json");
+        std::fs::write(&registry, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+
+        for sig in [libc::SIGTERM, libc::SIGKILL, libc::SIGPIPE] {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("300");
+            // The test process ignores SIGPIPE and an ignored disposition
+            // survives exec, so reset it or SIGPIPE would not kill the child.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::signal(sig, libc::SIG_DFL);
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let child_pid = child.id();
+            let holder = format!("spawn-gate:{child_pid}:holder");
+            let held = claims::acquire(
+                "gate:spawn",
+                &holder,
+                claims::AcquireOpts {
+                    ttl_ms: Some(GATE_CLAIM_TTL_MS),
+                    root: Some(root.clone()),
+                    pid: Some(child_pid),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(held, claims::AcquireOutcome::Acquired(_)),
+                "setup: the child must hold the mutex, got {held:?}"
+            );
+            unsafe { libc::kill(child_pid as i32, sig) };
+            let _ = child.wait();
+
+            let (state, _) = claims::status("gate:spawn", Some(&root));
+            assert!(
+                !matches!(
+                    state,
+                    claims::ClaimState::Live | claims::ClaimState::Suspect
+                ),
+                "signal {sig}: a dead holder must not read held, got {state:?}"
+            );
+
+            let started = Instant::now();
+            let got = run_gate(
+                &dir,
+                &registry,
+                GateInput {
+                    name: "w-after-death".into(),
+                    substrate: "bg".into(),
+                    flags: GateFlags {
+                        force: true,
+                        no_wait: true,
+                    },
+                    route_provider: Some("zai".into()),
+                    ..GateInput::default()
+                },
+            );
+            let elapsed = started.elapsed();
+            let guard = got.unwrap_or_else(|r| {
+                panic!(
+                    "signal {sig}: gate refused after holder death: {:?}",
+                    r.receipt
+                )
+            });
+            let me = format!("spawn-gate:{}:w-after-death", std::process::id());
+            assert_eq!(
+                guard.gate_key.as_ref().map(|(_, h)| h.as_str()),
+                Some(me.as_str())
+            );
+            assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+            drop(guard);
+        }
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// AC5-HP: a route spawn onto a provider whose lane snapshot shows a
@@ -3341,7 +3814,7 @@ MemAvailable:    8000000 kB\n";
     /// blames a population its own recommended reader cannot see.
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
-        let line = slot_refusal_line(3, 2, 3, 0, 1, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, 2, 3, &[], 1, "refusing (--no-wait).");
         assert!(line.contains("fno agents gate-status"), "{line}");
         assert!(line.contains("slot_rows"), "{line}");
         assert!(
@@ -3351,7 +3824,7 @@ MemAvailable:    8000000 kB\n";
         assert!(!line.contains("--status quiet"), "{line}");
         assert!(!line.contains("fno agents top"), "{line}");
 
-        let line = slot_refusal_line(3, 2, 3, 0, 0, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, 2, 3, &[], 0, "refusing (--no-wait).");
         assert!(!line.contains("wait on an operator question"), "{line}");
     }
 
@@ -3569,6 +4042,11 @@ MemAvailable:    8000000 kB\n";
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
+        // A prior test's FNO_CONFIG can name a deleted TempDir; config
+        // candidates then resolve to that dead path alone and max_live
+        // defaults, so this test's own config.toml never gets read.
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
         // Pin the CPU axis to an admit: the king share under test sits AFTER
         // the CPU axis in gate order, so a busy machine (or a CI runner with
         // no probe installed) would refuse with 79 before reaching it.
@@ -3632,6 +4110,10 @@ MemAvailable:    8000000 kB\n";
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
         }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
         match prior_payload {
             Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
@@ -3645,6 +4127,57 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(refusal.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(refusal.event.get("share"), Some(&serde_json::json!(2)));
         assert_eq!(refusal.event.get("kings"), Some(&serde_json::json!(2)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The held-rows clause names the caller's rows (never the bucket),
+    /// caps at five with an ellipsis, and vanishes when there are none.
+    #[test]
+    fn held_rows_suffix_names_rows_and_caps_at_five() {
+        let rows =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2"]))),
+            "; the rows charged to you are w1, w2"
+        );
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2", "w3", "w4", "w5", "w6", "w7"]))),
+            "; the rows charged to you are w1, w2, w3, w4, w5..."
+        );
+        assert_eq!(held_rows_suffix(Some(&rows(&[]))), "");
+        assert_eq!(held_rows_suffix(None), "");
+    }
+
+    /// The refusal event carries held_rows beside held, so the rows the
+    /// count came from are readable back from the spawn_gate_refused event.
+    #[test]
+    fn king_share_refusal_event_carries_the_held_rows() {
+        let dir = std::env::temp_dir().join(format!("fno-gate-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
+                r#"{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
+                r#"{"name":"w2","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
+            ),
+        )
+        .unwrap();
+        // One king -> share = cap = 2; the caller holds both rows, so the
+        // share refuses and the event must name w1 and w2.
+        let err = check_king_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
+            .err()
+            .expect("the full share must refuse");
+        assert_eq!(err.exit_code, EXIT_KING_SHARE);
+        assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            err.event.get("held_rows"),
+            Some(&serde_json::json!(["w1", "w2"]))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3672,7 +4205,15 @@ MemAvailable:    8000000 kB\n";
             root: Some(root.clone()),
         };
 
-        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test", None, false).unwrap();
+        acquire_worker_slot(
+            &mut guard,
+            "plain-codex",
+            "spawn-gate:test",
+            std::process::id(),
+            None,
+            false,
+        )
+        .unwrap();
 
         let claim_path = root
             .join(".fno/claims")
@@ -3942,7 +4483,7 @@ MemAvailable:    8000000 kB\n";
             let live = live_rows(&reg, &mut warnings);
             let got = match territory_of_node(&dir, &reg, node, &mut warnings) {
                 None => "territory_unknown".to_string(),
-                Some((scope, members)) => {
+                Some((scope, members, _kingless)) => {
                     let count = live
                         .iter()
                         .filter(|r| {
@@ -3970,6 +4511,248 @@ MemAvailable:    8000000 kB\n";
                 sc["name"].as_str().unwrap_or("?")
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Snapshot-and-restore scope for the env vars a fixture pins: the
+    /// original value (or its absence) is put back on drop, panic included,
+    /// so a fixture cannot permanently discard an ambient pin.
+    struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvPin {
+        fn take(vars: &[&'static str]) -> Self {
+            Self(
+                vars.iter()
+                    .map(|var| (*var, std::env::var_os(var)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvPin {
+        fn drop(&mut self) {
+            for (var, saved) in &self.0 {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
+    /// AC9: `kingless` rides every readable verdict receipt. A node inside a
+    /// live crown's compiled scope reads false, a node in a project no crown
+    /// rules reads true, and an unreadable attribution stays the existing
+    /// territory_unknown shape with NO kingless key - a boolean there would
+    /// be a guess wearing a boolean.
+    #[test]
+    fn territory_verdict_receipt_names_kingless_on_readable_verdicts() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-verdict-kingless-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-out", "project": "other" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+            ),
+        )
+        .unwrap();
+        // The territory read resolves its graph through the config climb
+        // (graph_json_path never reads <cwd>/graph.json), so pin it with an
+        // absolute paths.graph_json instead of touching process env - these
+        // tests then race no other test's FNO_HOME writes.
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n",
+                dir.join("graph.json").display()
+            ),
+        )
+        .unwrap();
+        // Defense in depth against an FNO_CONFIG another test leaked toward a
+        // deleted tempdir: the config pin answers first, FNO_HOME catches the
+        // fall-through, and the pin restores the ambient value on drop.
+        let _env = EnvPin::take(&["FNO_HOME"]);
+        std::env::set_var("FNO_HOME", &dir);
+
+        let crowned = territory_verdict_receipt(&dir, &reg, "x-1", 4);
+        assert_eq!(crowned["verdict"], "ok", "{crowned}");
+        assert_eq!(crowned["kingless"], false, "{crowned}");
+        let loose = territory_verdict_receipt(&dir, &reg, "x-out", 4);
+        assert_eq!(loose["verdict"], "ok", "{loose}");
+        assert_eq!(loose["kingless"], true, "{loose}");
+        let unknown = territory_verdict_receipt(&dir, &reg, "x-ghost", 4);
+        assert_eq!(unknown["verdict"], "territory_unknown", "{unknown}");
+        assert!(
+            unknown.get("kingless").is_none(),
+            "an unreadable attribution must not guess a boolean: {unknown}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// AC9: the two territory attributions on one branch - resolve_territories
+    /// for the drain readout, territory_of_node for the cap - agree on
+    /// kingless for the same node. The fixture carries one epic crown and one
+    /// uncrowned workspace project, so both the crowned and the loose leg are
+    /// pinned: a divergence between the readers ships caught, not silent.
+    #[test]
+    fn territory_of_node_and_resolve_territories_agree_on_kingless() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-territory-agree-kingless-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-out", "project": "other" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+            ),
+        )
+        .unwrap();
+        // Same double pin as the receipt test, plus the workspace map the
+        // resolve_territories leg needs: one config file answers both
+        // lookups through the climb, so no FNO_CONFIG write can leak.
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n\n[[work.workspaces.main.projects]]\nname = \"other\"\npath = \"/repo/other\"\n",
+                dir.join("graph.json").display()
+            ),
+        )
+        .unwrap();
+        let _env = EnvPin::take(&["FNO_HOME"]);
+        std::env::set_var("FNO_HOME", &dir);
+
+        let mut warnings = Vec::new();
+        let crowned =
+            territory_of_node(&dir, &reg, "x-1", &mut warnings).expect("crowned node attributes");
+        let loose =
+            territory_of_node(&dir, &reg, "x-out", &mut warnings).expect("loose node attributes");
+        let territories =
+            crate::territory::resolve_territories(&dir, &reg).expect("fixture resolves");
+        let crown_row = territories
+            .iter()
+            .find(|t| t.key == "x-epic")
+            .expect("crown territory resolves");
+        let loose_row = territories
+            .iter()
+            .find(|t| t.key == "other")
+            .expect("uncrowned workspace project resolves as a loose territory");
+        assert!(!crowned.2, "a live crown scope is not kingless");
+        assert!(loose.2, "a project no crown rules is kingless");
+        assert_eq!(crowned.2, crown_row.kingless, "crowned leg diverges");
+        assert_eq!(loose.2, loose_row.kingless, "loose leg diverges");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// AC6-HP: nested crowns split one project exclusively; an uncompilable
+    /// live crown blinds the whole read (None), the fail-closed posture.
+    #[test]
+    fn territory_of_node_attributes_nested_crowns_exclusively() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-nested-crowns-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-root", "project": "fno" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            format!(
+                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n\n[[work.workspaces.main.projects]]\nname = \"fno\"\npath = \"/repo/fno\"\n",
+                dir.join("graph.json").display()
+            ),
+        )
+        .unwrap();
+        let reg_row = |name: &str, scope: &str, level: i64| {
+            format!(
+                r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"{scope}","crown_level":{level}}}"#
+            )
+        };
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{},{}]}}"#,
+                reg_row("king-fno", "fno", 1),
+                reg_row("king-epic", "x-epic", 2)
+            ),
+        )
+        .unwrap();
+        let _env = EnvPin::take(&["FNO_HOME"]);
+        std::env::set_var("FNO_HOME", &dir);
+        let mut warnings = Vec::new();
+        let mut of =
+            |node: &str| territory_of_node(&dir, &reg, node, &mut warnings).expect("attributes");
+        let under_epic = of("x-1");
+        assert_eq!(under_epic.0, "x-epic");
+        assert!(!under_epic.1.contains("x-root"), "{:?}", under_epic.1);
+        let root = of("x-root");
+        assert_eq!(root.0, "fno");
+        assert!(
+            !root.1.contains("x-epic") && !root.1.contains("x-1"),
+            "{:?}",
+            root.1
+        );
+        // One uncompilable live crown refuses every node-bearing read.
+        let reg_bad = dir.join("registry-bad.json");
+        std::fs::write(
+            &reg_bad,
+            format!(
+                r#"{{"schema_version":1,"entries":[{}]}}"#,
+                reg_row("king-bad", "x-root", 2)
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        assert!(territory_of_node(&dir, &reg_bad, "x-1", &mut warnings).is_none());
+        assert!(
+            warnings.iter().any(|w| w.contains("uncompilable")),
+            "{warnings:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4132,3 +4915,11 @@ MemAvailable:    8000000 kB\n";
         e
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_gate_slot_tests.rs"]
+mod spawn_gate_slot_tests;
+
+#[cfg(test)]
+#[path = "spawn_gate_blind_tests.rs"]
+mod spawn_gate_blind_tests;

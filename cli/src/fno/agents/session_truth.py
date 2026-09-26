@@ -43,7 +43,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, BinaryIO, Callable, Iterator, Optional
 
 # Exact tag openers only: `<promise>` / `<promise ...>`, never `<promised>` or a
 # word that merely starts with the tag name. Mirrors the loop runtime's protocol
@@ -276,22 +276,34 @@ def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
     return float(rows[0][0]) / 1000.0
 
 
+def _lines_newest_first(fh: BinaryIO, block: int = 1 << 20) -> Iterator[bytes]:
+    """A binary file's lines, last line first, read ``block`` bytes at a time."""
+    end, carry = fh.seek(0, 2), b""
+    while end > 0:
+        start = max(0, end - block)
+        fh.seek(start)
+        lines = (fh.read(end - start) + carry).split(b"\n")
+        carry = lines.pop(0) if start else b""  # this line starts in an earlier block
+        yield from reversed(lines)
+        end = start
+
+
 def observed_title(agent: str, transcript_path: Optional[Path]) -> Optional[str]:
     """The title the HARNESS carries for this session, or ``None``.
     claude only: the last ``{"type":"agent-name",...}`` transcript record
     (a Ctrl+R rename) IS the current title. ``None`` renders as absence.
+    The read walks back from the end and stops at the newest record.
     """
     if agent != "claude" or transcript_path is None:
         return None
     try:
-        title: Optional[str] = None
-        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(transcript_path, "rb") as fh:
             # agent-name records are rare: pre-filter so json.loads is rare.
-            for line in fh:
-                if '"agent-name"' not in line:
+            for line in _lines_newest_first(fh):
+                if b'"agent-name"' not in line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    rec = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
                     continue
                 if (
@@ -300,8 +312,8 @@ def observed_title(agent: str, transcript_path: Optional[Path]) -> Optional[str]
                     and isinstance(rec.get("agentName"), str)
                     and rec["agentName"].strip()
                 ):
-                    title = rec["agentName"]
-        return title
+                    return rec["agentName"]
+        return None
     except OSError:
         return None
 
@@ -540,7 +552,10 @@ _EVIDENCE = {
     "your-move": "awaiting your reply",
     "working": "active",
     "stalled": "silent",
+    "dead": "falsified",
+    "exited": "resumable",
 }
+RESUMABLE_BASES = frozenset({"exit-recorded", "process-gone", "pane-gone"})  # resume relaunches
 
 
 def _humanize_age(seconds: Optional[int]) -> str:

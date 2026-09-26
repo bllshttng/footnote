@@ -138,29 +138,104 @@ done < "$LOG_PATH"
 
 EVENT_COUNT=$(wc -l < "$FILTERED_EVENTS" | tr -d ' ')
 
+# The postmortems root of the home the LOG resolved through (same ladder as
+# corrections_log_path). A vanished path under it is a real row whose file
+# aged out; a vanished path anywhere else is a unit-test fixture that leaked
+# past the writer guard and is skipped with a count, not rendered.
+PM_ROOT="${FNO_HOME:-$HOME/.fno}/postmortems"
+REPO_ROOT_PACK="$(cd "$SCRIPT_DIR/.." && pwd)"
+SKIPPED_FIXTURE_ROWS=0
+SKIPPED_DEAD_ROWS=0
+
+# The `skill=<name>` pair an intel correction line carries: print that
+# shipped skill's SKILL.md when it exists. No pair, or no such skill, adds
+# nothing.
+_pack_skill_from_details() {
+  local line="$1" det name candidate
+  det="$(printf '%s' "$line" | awk -F' \\| ' '{print $5}')"
+  name="$(printf '%s' "$det" | grep -oE '(^| )skill=[A-Za-z0-9_-]+' | head -1 | sed 's/.*skill=//')" || name=""
+  if [[ -z "$name" ]]; then
+    return 0
+  fi
+  candidate="$REPO_ROOT_PACK/skills/$name/SKILL.md"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+  fi
+  return 0
+}
+
 # -------------------------------------------------------------------
 # Collect implicated files (from LOCATION field). Resolve full text or
-# mark as deleted.
+# mark as deleted. An absolute or ~ LOCATION is a file pointer as today;
+# a relative one resolves against the root its SOURCE names (the job cwd
+# is meaningless under launchd, which sets no WorkingDirectory), and a
+# source with no root is evidence, not a pointer.
 # -------------------------------------------------------------------
 IMPLICATED_LIST="$TMPDIR_PACK/implicated.txt"
 : > "$IMPLICATED_LIST"
 while IFS= read -r line; do
   loc="$(printf '%s' "$line" | awk -F' \\| ' '{print $4}')"
   [[ -z "$loc" || "$loc" == "-" ]] && continue
+  src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
   # Strip :line suffix if present.
   file_path="${loc%%:*}"
   # Expand ~ if present.
   file_path="${file_path/#\~/$HOME}"
+  if [[ "$file_path" != /* ]]; then
+    case "$src" in
+      git-rule-edit) file_path="$CLAUDE_DIR/$file_path" ;;
+      skill-commit) file_path="$REPO_ROOT_PACK/$file_path" ;;
+      insights-tag)
+        # The report file named by LOCATION is evidence; a `skill=` pair
+        # pulls the named skill in.
+        _pack_skill_from_details "$line" >> "$IMPLICATED_LIST"
+        continue
+        ;;
+      *) continue ;;
+    esac
+  elif [[ "$src" == "insights-tag" ]]; then
+    _pack_skill_from_details "$line" >> "$IMPLICATED_LIST"
+  fi
   # Only treat as a file reference if it looks like a path (contains /
   # or .) or actually exists. Session-ids and repo-names without
   # separators don't pollute implicated_rules.
   if [[ "$file_path" != */* && "$file_path" != *.* && ! -f "$file_path" ]]; then
     continue
   fi
+  if [[ ! -f "$file_path" && "$file_path" != "$PM_ROOT"/* ]]; then
+    # A dead path on a postmortem row is the fixture leak signature; a dead
+    # path on any other source is ordinary file aging. Count them apart so
+    # corpus poisoning stays readable.
+    case "$src" in
+      *-postmortem) SKIPPED_FIXTURE_ROWS=$((SKIPPED_FIXTURE_ROWS + 1)) ;;
+      *) SKIPPED_DEAD_ROWS=$((SKIPPED_DEAD_ROWS + 1)) ;;
+    esac
+    continue
+  fi
   printf '%s\n' "$file_path" >> "$IMPLICATED_LIST"
 done < "$FILTERED_EVENTS"
+
+# -------------------------------------------------------------------
+# The SOURCE field names the verb its postmortem rows came from
+# (target-postmortem -> target). Resolve that verb's SKILL.md into the
+# implicated set with its full text, so the review can propose a diff to
+# the skill itself. A source that is not *-postmortem, or whose resolved
+# path does not exist, adds nothing.
+# -------------------------------------------------------------------
+SKILL_LIST="$TMPDIR_PACK/skills.txt"
+: > "$SKILL_LIST"
+while IFS= read -r line; do
+  src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
+  case "$src" in
+    *-postmortem) verb="${src%-postmortem}" ;;
+    *) continue ;;
+  esac
+  [[ -z "$verb" ]] && continue
+  skill_file="$REPO_ROOT_PACK/skills/$verb/SKILL.md"
+  [[ -f "$skill_file" ]] && printf '%s\n' "$skill_file" >> "$SKILL_LIST"
+done < "$FILTERED_EVENTS"
 UNIQ_IMPLICATED="$TMPDIR_PACK/implicated-uniq.txt"
-sort -u "$IMPLICATED_LIST" > "$UNIQ_IMPLICATED"
+{ cat "$IMPLICATED_LIST"; cat "$SKILL_LIST"; } | sort -u > "$UNIQ_IMPLICATED"
 
 # -------------------------------------------------------------------
 # Backlog graph BLOCKED state, if a store exists.
@@ -253,6 +328,18 @@ PY
 fi
 
 # -------------------------------------------------------------------
+# Verify block: score the window's applied corrections against the
+# friction they targeted (crates/fno-agents corrections_verify.rs).
+# -------------------------------------------------------------------
+AGENTS_BIN="${FNO_AGENTS_BIN:-$(command -v fno-agents 2>/dev/null || true)}"
+VERIFY_BLOCK="$TMPDIR_PACK/verify.txt"
+: > "$VERIFY_BLOCK"
+VERIFY_STATUS=unavailable
+if [[ -n "$AGENTS_BIN" ]] && "$AGENTS_BIN" corrections-verify --markdown --since "${WINDOW_DAYS}d" > "$VERIFY_BLOCK" 2>/dev/null; then
+  VERIFY_STATUS=ok
+fi
+
+# -------------------------------------------------------------------
 # Emit yaml.
 # -------------------------------------------------------------------
 emit() {
@@ -266,6 +353,8 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
   emit "window_end: $WINDOW_END_ISO"
   emit "severity_filter: [$(printf "%s" "$SEVERITY_FILTER" | sed 's/,/, /g')]"
   emit "event_count: $EVENT_COUNT"
+  emit "skipped_fixture_rows: $SKIPPED_FIXTURE_ROWS"
+  emit "skipped_dead_rows: $SKIPPED_DEAD_ROWS"
   emit ""
   emit "events:"
   if [[ "$EVENT_COUNT" -gt 0 ]]; then
@@ -325,6 +414,13 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
     done < "$UNIQ_IMPLICATED"
   else
     emit "  []"
+  fi
+  emit ""
+  emit "verify: |"
+  if [[ "$VERIFY_STATUS" == "ok" ]]; then
+    sed 's/^/  /' "$VERIFY_BLOCK"
+  else
+    emit "  unavailable  # fno-agents corrections-verify did not run"
   fi
   emit ""
   emit "watermark:"

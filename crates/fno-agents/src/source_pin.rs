@@ -4,11 +4,14 @@
 //! resolution cached a bare path: a linked worktree whose HEAD diverged from
 //! origin/main got installed machine-wide and every later update re-installed
 //! it (measured 2026-09-09 and 2026-09-13). This module owns the decision
-//! natively so Python keeps only transport. The gate covers ONLY proven linked
-//! worktrees picked implicitly. An explicit `--source` stays the escape hatch
-//! (accepted, but loud). Non-git packaged candidates keep existing behavior.
-//! Missing git evidence for a linked worktree refuses; it never reads as
-//! eligible. Ancestry is probed live; the cached companion never supplies it.
+//! natively so Python keeps only transport. The gate covers any git checkout
+//! picked implicitly: a proven non-ancestor of the remote-default ref refuses,
+//! whatever the kind, because a divergent main checkout is the canonical
+//! checkout after a pull merged a ref origin never merged. Ancestry that
+//! cannot be proven refuses a linked worktree and allows a main checkout. An
+//! explicit `--source` stays the escape hatch (accepted, but loud). Non-git
+//! packaged candidates keep existing behavior. Ancestry is probed live; the
+//! cached companion never supplies it.
 
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -45,7 +48,7 @@ pub struct ResolveAnswer {
     pub decision: Decision,
     /// Resolved CLI source directory; null when nothing validated.
     pub path: Option<String>,
-    /// explicit | env | cache | candidate.
+    /// explicit | env | checkout | cache | candidate.
     pub origin: Option<String>,
     pub worktree_kind: Option<WorktreeKind>,
     /// Symbolic branch name; null when detached or unreadable.
@@ -250,7 +253,13 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         &["rev-parse", "--verify", &format!("{rref}^{{commit}}")],
     );
 
-    let (ancestor, detail): (Option<bool>, Option<String>) = if kind != WorktreeKind::LinkedWorktree
+    // Ancestry is probed for every git checkout, not only a linked worktree:
+    // a divergent main checkout is the same hazard on an implicit pick (the
+    // canonical checkout after a pull merged a ref origin never merged). A
+    // main checkout with no remote-default ref cannot prove divergence, so it
+    // keeps today's eligible answer with the instrument detail cleared.
+    let (ancestor, detail): (Option<bool>, Option<String>) = if kind == WorktreeKind::NonGit
+        || (kind == WorktreeKind::MainCheckout && remote_head.is_none())
     {
         (None, None)
     } else if remote_head.is_none() {
@@ -285,20 +294,25 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         }
     };
 
-    let eligibility = if kind != WorktreeKind::LinkedWorktree {
-        "eligible"
-    } else {
-        match ancestor {
-            Some(true) => "eligible",
-            Some(false) => "divergent",
-            None => "ancestry_unknown",
-        }
+    let eligibility = match (kind, ancestor) {
+        (WorktreeKind::LinkedWorktree, None) => "ancestry_unknown",
+        (_, Some(false)) => "divergent",
+        _ => "eligible",
     };
 
     let explicit = origin == "explicit";
     let state = branch_label(heads.branch.as_deref(), heads.detached);
     let (decision, mut warning, refusal) = match eligibility {
         "eligible" => (Decision::Allow, None, None),
+        "divergent" if explicit && kind == WorktreeKind::MainCheckout => (
+            Decision::Allow,
+            Some(format!(
+                "warning: --source {path} is a divergent main checkout ({state} HEAD {sh} vs {rref} HEAD {rh}); installing by explicit request",
+                sh = short(&heads.source_head),
+                rh = short(&remote_head),
+            )),
+            None,
+        ),
         "divergent" if explicit => (
             Decision::Allow,
             Some(format!(
@@ -307,6 +321,15 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
                 rh = short(&remote_head),
             )),
             None,
+        ),
+        "divergent" if kind == WorktreeKind::MainCheckout => (
+            Decision::Refuse,
+            None,
+            Some(format!(
+                "refusing source {path}: main checkout {state} HEAD {sh} is not an ancestor of {rref} HEAD {rh}, so it holds commits {rref} never merged. A machine-wide install ships them to every fno process on the machine. Save those commits on a branch and reset the checkout to {rref}, or re-run with --source {path} to install it on purpose.",
+                sh = short(&heads.source_head),
+                rh = short(&remote_head),
+            )),
         ),
         "divergent" => (
             Decision::Refuse,
@@ -403,14 +426,20 @@ fn branch_label(branch: Option<&str>, detached: Option<bool>) -> String {
 struct ResolveArgs {
     override_path: Option<String>,
     env_source: Option<String>,
+    /// `<main checkout>/cli` of the repo the process runs in, set by the verb
+    /// from its own cwd.
+    checkout: Option<String>,
     cache: Option<String>,
     candidate_paths: Vec<String>,
 }
 
-/// Precedence lives HERE, natively: override > env > cache > candidates,
-/// first directory whose `[project] name` is `fno` wins. Paths arrive already
-/// expanded and resolved from the transport layer; duplicate paths keep the
-/// earliest origin bucket.
+/// Precedence lives HERE, natively: override > env > checkout > cache >
+/// candidates, first directory whose `[project] name` is `fno` wins. Paths
+/// arrive already expanded and resolved from the transport layer; duplicate
+/// paths keep the earliest origin bucket. `checkout` is the `cli/` of the main
+/// checkout that owns the process cwd, from a linked worktree too, so a run
+/// inside the repo installs that repo's main checkout and the cache answers
+/// only a run from outside any fno checkout.
 fn resolve(args: &ResolveArgs) -> ResolveAnswer {
     let mut candidates: Vec<(&str, String)> = Vec::new();
     if let Some(o) = &args.override_path {
@@ -418,6 +447,9 @@ fn resolve(args: &ResolveArgs) -> ResolveAnswer {
     }
     if let Some(e) = &args.env_source {
         candidates.push(("env", e.clone()));
+    }
+    if let Some(c) = &args.checkout {
+        candidates.push(("checkout", c.clone()));
     }
     if let Some(cache) = &args.cache {
         if let Some(line) = std::fs::read_to_string(cache)
@@ -465,7 +497,7 @@ fn no_source_answer(invalid_override: Option<&str>) -> ResolveAnswer {
             // The plugins dir is named in prose, not as a path literal: the
             // placement-rule gate bars ~/.claude path construction here, and
             // the guidance does not need the exact prefix to be followable.
-            "Could not locate the fno CLI source. Pass --source /path/to/fno/cli, set $FNO_SOURCE, or install the fno plugin (the Claude plugins directory).".to_string(),
+            "Could not locate the fno CLI source. Run it from inside an fno checkout, pass --source /path/to/fno/cli, set $FNO_SOURCE, or install the fno plugin (the Claude plugins directory).".to_string(),
         )
     };
     ResolveAnswer {
@@ -636,7 +668,16 @@ pub fn run_source_pin(args: &[String]) -> i32 {
     };
     match sub {
         "resolve" => match parse_resolve_args(rest) {
-            Ok(a) => print_json(&resolve(&a)),
+            Ok(mut a) => {
+                // The verb fills `checkout` from its own cwd: the cli/ of the
+                // main checkout that owns this process, linked worktree
+                // included, so a bare run inside the repo installs that repo.
+                a.checkout = std::env::current_dir()
+                    .ok()
+                    .and_then(|d| crate::paths::canonical_repo_root(&d))
+                    .map(|root| root.join("cli").to_string_lossy().into_owned());
+                print_json(&resolve(&a))
+            }
             Err(e) => {
                 eprintln!("fno-agents source-pin: {e}");
                 2
@@ -697,6 +738,7 @@ fn parse_resolve_args(args: &[String]) -> Result<ResolveArgs, String> {
     let mut p = ResolveArgs {
         override_path: None,
         env_source: None,
+        checkout: None,
         cache: None,
         candidate_paths: Vec::new(),
     };
@@ -839,6 +881,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![wt],
         });
@@ -861,6 +904,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![wt.clone()],
         });
@@ -891,6 +935,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: Some(wt.clone()),
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![],
         });
@@ -918,6 +963,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![wt.clone()],
         });
@@ -938,6 +984,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![wt.clone()],
         });
@@ -968,6 +1015,7 @@ mod tests {
         let r = resolve(&ResolveArgs {
             override_path: Some(o_cli.clone()),
             env_source: Some(e_root.join("cli").to_string_lossy().into_owned()),
+            checkout: None,
             cache: None,
             candidate_paths: vec![],
         });
@@ -985,6 +1033,7 @@ mod tests {
         let r = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![cli],
         });
@@ -999,6 +1048,7 @@ mod tests {
         let r = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![plain],
         });
@@ -1076,6 +1126,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![cli],
         });
@@ -1106,6 +1157,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![cli],
         });
@@ -1128,6 +1180,7 @@ mod tests {
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
+            checkout: None,
             cache: None,
             candidate_paths: vec![wt],
         });
@@ -1176,5 +1229,252 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("unknown flag"), "err was {err}");
+    }
+
+    /// A main checkout whose main merged a local branch origin never merged
+    /// (the 2026-09-19 incident shape): origin/main pinned at the base commit,
+    /// then a --no-ff merge of a side branch. cli/ stays untracked throughout.
+    fn divergent_main_checkout(root: &std::path::Path) -> String {
+        new_repo(root);
+        let cli = add_cli(root);
+        git_in(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(root, &["checkout", "-q", "-b", "side"]);
+        fs::write(root.join("side.txt"), "x\n").unwrap();
+        git_in(root, &["add", "side.txt"]);
+        git_in(root, &["commit", "-q", "-m", "side"]);
+        git_in(root, &["checkout", "-q", "main"]);
+        git_in(root, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        cli
+    }
+
+    #[test]
+    fn main_checkout_merged_unmerged_branch_refuses() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = divergent_main_checkout(&base.path().join("m1"));
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: None,
+            cache: None,
+            candidate_paths: vec![cli.clone()],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert_eq!(a.eligibility, "divergent");
+        assert_eq!(a.worktree_kind, Some(WorktreeKind::MainCheckout));
+        assert_eq!(a.ancestor, Some(false));
+        let refusal = a.refusal.unwrap();
+        assert!(refusal.contains(&cli), "refusal names the path: {refusal}");
+        assert!(
+            refusal.contains("main checkout"),
+            "names the kind: {refusal}"
+        );
+        assert!(
+            refusal.contains("not an ancestor"),
+            "names the divergence: {refusal}"
+        );
+        assert!(
+            refusal.contains("origin/main"),
+            "names the remote ref: {refusal}"
+        );
+        assert!(
+            refusal.contains("--source"),
+            "names the override: {refusal}"
+        );
+        let guidance = a.guidance.unwrap();
+        assert!(
+            guidance.starts_with("update blocked:"),
+            "guidance leads with the block: {guidance}"
+        );
+    }
+
+    #[test]
+    fn main_checkout_divergent_explicit_warns_and_allows() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = divergent_main_checkout(&base.path().join("m2"));
+        let a = resolve(&ResolveArgs {
+            override_path: Some(cli),
+            env_source: None,
+            checkout: None,
+            cache: None,
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.eligibility, "divergent");
+        let warning = a.warning.unwrap();
+        assert!(
+            warning.contains("divergent main checkout"),
+            "warning names a divergent main checkout: {warning}"
+        );
+    }
+
+    #[test]
+    fn main_checkout_without_remote_ref_keeps_allow() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("m3");
+        new_repo(&root);
+        let cli = add_cli(&root);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "extra"]);
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: None,
+            cache: None,
+            candidate_paths: vec![cli],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.eligibility, "eligible");
+        assert_eq!(a.ancestor, None);
+        assert_eq!(a.refusal, None);
+        assert_eq!(a.detail, None);
+    }
+
+    #[test]
+    fn checkout_outranks_dangling_cache() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("repo");
+        new_repo(&root);
+        let cli = add_cli(&root);
+        let cache = base.path().join("gone").join("source-path");
+        std::fs::create_dir_all(base.path().join("gone")).unwrap();
+        std::fs::write(
+            &cache,
+            base.path()
+                .join("noped")
+                .join("cli")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: Some(cli.clone()),
+            cache: Some(cache.to_string_lossy().into_owned()),
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.origin.as_deref(), Some("checkout"));
+        assert_eq!(a.path, Some(cli.clone()));
+
+        // Today's failure, pinned: no checkout bucket and the same dangling
+        // cache answers no_source.
+        let b = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: None,
+            cache: Some(cache.to_string_lossy().into_owned()),
+            candidate_paths: vec![],
+        });
+        assert_eq!(b.eligibility, "no_source");
+        assert!(
+            b.refusal.unwrap().contains("inside an fno checkout"),
+            "refusal names the new remedy"
+        );
+    }
+
+    #[test]
+    fn checkout_outranks_live_worktree_cache() {
+        let base = tempfile::tempdir().unwrap();
+        let (clone, wt) = clone_with_worktree(&base.path().join("w1"));
+        let cache = base.path().join("w1").join("cache").join("source-path");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, &wt).unwrap();
+        let clone_cli = std::path::Path::new(&clone)
+            .join("cli")
+            .to_string_lossy()
+            .into_owned();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: Some(clone_cli.clone()),
+            cache: Some(cache.to_string_lossy().into_owned()),
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.origin.as_deref(), Some("checkout"));
+        assert_eq!(a.path, Some(clone_cli));
+        assert_eq!(a.worktree_kind, Some(WorktreeKind::MainCheckout));
+    }
+
+    #[test]
+    fn divergent_checkout_refuses_without_cache_fallback() {
+        let base = tempfile::tempdir().unwrap();
+        let (clone, wt) = clone_with_worktree(&base.path().join("w2"));
+        // The clone's main commits past origin/main: HEAD is no longer an
+        // ancestor. The worktree cache entry stays eligible throughout.
+        fs::write(std::path::Path::new(&clone).join("new.txt"), "x\n").unwrap();
+        git_in(std::path::Path::new(&clone), &["add", "new.txt"]);
+        git_in(
+            std::path::Path::new(&clone),
+            &["commit", "-q", "-m", "ahead"],
+        );
+        let cache = base.path().join("w2").join("cache").join("source-path");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, &wt).unwrap();
+        let clone_cli = std::path::Path::new(&clone)
+            .join("cli")
+            .to_string_lossy()
+            .into_owned();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            checkout: Some(clone_cli.clone()),
+            cache: Some(cache.to_string_lossy().into_owned()),
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert_eq!(a.origin.as_deref(), Some("checkout"));
+        assert_eq!(a.eligibility, "divergent");
+        assert_eq!(a.path, Some(clone_cli));
+    }
+
+    #[test]
+    fn env_outranks_checkout() {
+        let base = tempfile::tempdir().unwrap();
+        let e_root = base.path().join("e");
+        let c_root = base.path().join("c");
+        new_repo(&e_root);
+        new_repo(&c_root);
+        add_cli(&e_root);
+        let c_cli = add_cli(&c_root);
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: Some(e_root.join("cli").to_string_lossy().into_owned()),
+            checkout: Some(c_cli),
+            cache: None,
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.origin, Some("env".to_string()));
+        assert_eq!(
+            a.path,
+            Some(e_root.join("cli").to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn non_fno_checkout_falls_through_to_cache() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("repo");
+        new_repo(&root);
+        let cli = add_cli(&root);
+        let cache = base.path().join("cache").join("source-path");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, &cli).unwrap();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            // A cwd whose repo has no fno cli/: the bucket skips and the
+            // cache answers as before.
+            checkout: Some(
+                base.path()
+                    .join("other")
+                    .join("cli")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            cache: Some(cache.to_string_lossy().into_owned()),
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.origin, Some("cache".to_string()));
+        assert_eq!(a.path, Some(cli));
     }
 }

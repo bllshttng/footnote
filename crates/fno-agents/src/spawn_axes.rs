@@ -45,7 +45,7 @@ fn opt_str(payload: &Value, key: &str) -> Option<String> {
 /// the value contains a single quote and no double quote, backslashes and
 /// control characters escaped. The receipts quote operator-typed values, so
 /// the spelling must match what the Python seam used to print.
-fn repr(s: &str) -> String {
+pub(crate) fn repr(s: &str) -> String {
     let has_sq = s.contains('\'');
     let has_dq = s.contains('"');
     let (open, close) = if has_sq && !has_dq {
@@ -397,7 +397,13 @@ pub fn decide(payload: &Value) -> Value {
         let eff = explicit_substrate
             .or(injected_substrate)
             .unwrap_or_else(|| "pane".to_string());
-        let mappable = prov == "claude" || (eff == "pane" && flag(payload, "pane_tokens_ok"));
+        // The capability table decides which lanes carry the axis; the seam
+        // precomputes both lanes' answers from the one Rust vocabulary (see
+        // codex_posture.rs). Claude is honored everywhere, as the front doors
+        // have always read.
+        let mappable = prov == "claude"
+            || (eff == "pane" && flag(payload, "pane_tokens_ok"))
+            || ((eff == "thread" || eff == "bg") && flag(payload, "thread_tokens_ok"));
         if !prov.is_empty() && mappable {
             inject.push(json!(["--permission-mode", permission.value]));
             applied.push(json!([
@@ -583,6 +589,124 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     // action, never a new action).
     if let Some(seed) = parsed.get("node_seed") {
         println!("{}", crate::node_seed::decide(seed));
+        return 0;
+    }
+    // A `keeper_posture` field asks the agy_launch owner which permission
+    // tokens a launch carries (same field-on-a-verb shape as node_seed).
+    if let Some(ask) = parsed.get("keeper_posture") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).map(|v| v.to_string());
+        let answer = match crate::agy_launch::keeper_posture(
+            ask.get("harness").and_then(Value::as_str).unwrap_or(""),
+            ask.get("lane").and_then(Value::as_str).unwrap_or("pane"),
+            s("permission_mode").as_deref(),
+            ask.get("yolo").and_then(Value::as_bool).unwrap_or(false),
+        ) {
+            Ok(p) => serde_json::json!({
+                "tokens": p.tokens,
+                "effective": p.effective,
+                "source": p.source,
+                "note": p.note,
+            }),
+            Err(reason) => serde_json::json!({"refused": reason}),
+        };
+        println!("{answer}");
+        return 0;
+    }
+    // An `agy_mint` field asks for the conversation-mint argv.
+    if let Some(ask) = parsed.get("agy_mint") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).map(|v| v.to_string());
+        let answer = match crate::agy_launch::agy_mint_argv(
+            s("model").as_deref(),
+            s("effort").as_deref(),
+            s("permission_mode").as_deref(),
+            ask.get("yolo").and_then(Value::as_bool).unwrap_or(false),
+        ) {
+            Ok(argv) => serde_json::json!({"argv": argv}),
+            Err(reason) => serde_json::json!({"refused": reason}),
+        };
+        println!("{answer}");
+        return 0;
+    }
+    // A `resume_pin` field routes the same way: which model a resume comes
+    // back on, answered by crates/fno-agents/src/resume_pin.rs.
+    if let Some(pin) = parsed.get("resume_pin") {
+        println!("{}", crate::resume_pin::decide(pin));
+        return 0;
+    }
+    // A `reap_receipt` field asks the receipt builder for the Python
+    // registry choke point's removal receipt (same field-on-a-verb shape).
+    if let Some(ask) = parsed.get("reap_receipt") {
+        println!("{}", crate::receipt::decide_reap_receipt(ask));
+        return 0;
+    }
+    // A `pi_session_lookup` field asks the pi store owner what a
+    // (cwd, session id) pair resolves to right now (same field-on-a-verb
+    // shape as node_seed).
+    if let Some(ask) = parsed.get("pi_session_lookup") {
+        use std::path::PathBuf;
+        let cwd = PathBuf::from(ask.get("cwd").and_then(Value::as_str).unwrap_or(""));
+        let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
+        // An unnamed cwd never touches the filesystem: resolving the store
+        // against "" would read the process cwd's own project settings and
+        // answer about a directory nobody asked about.
+        if cwd.as_os_str().is_empty() {
+            let answer = serde_json::json!({
+                "state": "unknown",
+                "files": [],
+                "directory": "",
+                "reason": "cwd is required",
+            });
+            println!("{answer}");
+            return 0;
+        }
+        let (lookup, directory) = match crate::pi::pi_store(&cwd) {
+            Ok(store) => {
+                let dir = match store.layout {
+                    crate::pi::StoreLayout::CwdScoped => {
+                        store.root.join(crate::pi::encode_cwd(&cwd))
+                    }
+                    crate::pi::StoreLayout::Flat => store.root.clone(),
+                };
+                (crate::pi::lookup_sessions_in(&store, &cwd, session_id), dir)
+            }
+            Err(reason) => (
+                crate::pi::SessionLookup::Unknown {
+                    dir: PathBuf::new(),
+                    reason,
+                },
+                PathBuf::new(),
+            ),
+        };
+        let (state, files, reason) = match &lookup {
+            crate::pi::SessionLookup::Unknown { reason, .. } => {
+                ("unknown", Vec::new(), reason.clone())
+            }
+            crate::pi::SessionLookup::None => ("none", Vec::new(), String::new()),
+            crate::pi::SessionLookup::One { file } => ("one", vec![file.clone()], String::new()),
+            crate::pi::SessionLookup::Duplicate { files } => {
+                ("duplicate", files.clone(), String::new())
+            }
+        };
+        let answer = serde_json::json!({
+            "state": state,
+            "files": files,
+            "directory": directory,
+            "reason": reason,
+        });
+        println!("{answer}");
+        return 0;
+    }
+    // A `pi_route` field asks the pi route owner which provider, model and
+    // effort tokens a launch carries (same field-on-a-verb shape).
+    if let Some(ask) = parsed.get("pi_route") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let route = crate::pi::pi_route(&s("model"), &s("effort"), &s("tools"), &s("deny_tools"));
+        let answer = serde_json::json!({
+            "tokens": route.tokens,
+            "route_source": route.route_source,
+            "note": route.note,
+        });
+        println!("{answer}");
         return 0;
     }
     println!("{}", decide(&parsed));

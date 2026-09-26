@@ -13,7 +13,6 @@ sees two live crowns over one scope and none sees zero.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -38,8 +37,10 @@ def _clear_parent_markers(monkeypatch):
 
 
 @pytest.fixture
-def court(tmp_path, monkeypatch):
-    """An fno home with a fake claude, and the CALLER identified as a live king."""
+def court(tmp_path, monkeypatch, native_backlog_door):
+    """An fno home with a fake claude, and the CALLER identified as a live king.
+    Pins the crown-settle occupancy call to this checkout's dev build (crown
+    occupancy runs through Rust now)."""
     from tests.agents._fake_claude import install_fake_claude
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -145,21 +146,21 @@ def test_same_scope_spawn_refuses_without_explicit_succession(court) -> None:
     assert _row("heir") is None
 
 
-def test_a_stranger_s_crown_is_declined_not_stolen(court, monkeypatch) -> None:
-    """Succession is the caller handing down what it holds. Someone ELSE's live
-    crown is untouchable: the spawn succeeds uncrowned rather than seizing it.
+def test_a_shell_spawn_over_a_held_scope_refuses_before_launch(court, monkeypatch) -> None:
+    """A shell (no agent identity) is authorized to grant any scope, but a live
+    holder still means the heir would launch with no crown - so without
+    --succeed the spawn refuses before anything is created, rather than
+    launching uncrowned and stranding the heir at its crown check."""
+    from fno.agents.dispatch import DispatchAskError
 
-    The caller is an attended human (no agent identity), so it is authorized to
-    attempt the grant; the one-live-crown guard then declines it because another
-    live king holds the scope. An agent caller holding nothing over the scope
-    would be refused earlier at the grantor check, which is a different path."""
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    _spawn_heir()
+    with pytest.raises(DispatchAskError, match="--succeed"):
+        _spawn_heir()
 
     assert _row("other-king").crown_level == 2, "another king's crown must not move"
-    assert _row("heir").crown_level is None, "the heir must not be crowned"
+    assert _row("heir") is None, "a refused crown must launch nothing"
 
 
 def test_a_dead_king_does_not_need_succession(court) -> None:
@@ -365,18 +366,13 @@ def test_an_attended_human_may_grant_anything(court, monkeypatch) -> None:
 
 
 def _events() -> list:
-    """Every parsed line of the tmp journal. The real events.emit writes the
-    real file; a monkeypatched list would re-prove only the call."""
+    """Every committed row of the tmp journal. The real events.emit commits
+    through the store; a monkeypatched list would re-prove only the call."""
     from fno import paths
 
-    journal = paths.state_dir() / "events.jsonl"
-    if not journal.is_file():
-        return []
-    return [
-        json.loads(line)
-        for line in journal.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 def test_a_succession_journals_the_vacate_and_the_grant(court) -> None:
@@ -400,17 +396,94 @@ def test_a_succession_journals_the_vacate_and_the_grant(court) -> None:
     assert [h.name for h in holders] == ["heir"]
 
 
-def test_a_declined_spawn_journals_no_crown_event(court, monkeypatch) -> None:
-    """An uncrowned launch moved no crown, so the journal stays silent."""
+def test_a_refused_spawn_journals_no_crown_event(court, monkeypatch) -> None:
+    """A refusal launches nothing, so the journal stays silent."""
+    from fno.agents.dispatch import DispatchAskError
+
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
-    _spawn_heir()
+    with pytest.raises(DispatchAskError, match="--succeed"):
+        _spawn_heir()
 
-    assert _row("heir").crown_level is None
+    assert _row("heir") is None
     crown_events = [
         e
         for e in _events()
         if e["kind"] in ("agent_crown_vacated", "agent_crowned")
     ]
     assert crown_events == []
+
+
+def test_a_shell_succession_transfers_a_live_king_s_crown(court, monkeypatch) -> None:
+    """An attended shell spawning with --crown --succeed over a scope another
+    live king holds transfers the crown rather than declining: a human may
+    grant any scope, and --succeed names the transfer explicitly."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("other-king", "a-different-session")
+
+    _spawn_heir(succeed=True)
+
+    heir = _row("heir")
+    assert heir.crown_level == 2
+    assert heir.crown_scope == SCOPE
+    assert heir.crown_grantor == "human"
+    assert _row("other-king").crown_level is None, "the old king is vacated"
+
+    vacates = [e for e in _events() if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    assert vacates[0]["holder"] == "other-king"
+    assert vacates[0]["cause"] == "succession"
+    crowns = [e for e in _events() if e["kind"] == "agent_crowned"]
+    assert [c["name"] for c in crowns] == ["heir"]
+
+
+def test_a_race_holder_still_declines_in_the_write(court, monkeypatch, capsys) -> None:
+    """The plan is a snapshot read before the lock: a holder that appears
+    between the pre-launch check and the registry write still declines there -
+    the one case two live crowns over one scope cannot be undone from."""
+    from fno.agents import dispatch as dispatch_mod
+
+    refusal, plan = dispatch_mod.plan_spawn_crown(SCOPE, None, False)
+    assert refusal is None
+    assert plan is not None
+    _seat("other-king", "a-different-session")
+    monkeypatch.setattr(
+        dispatch_mod,
+        "plan_spawn_crown",
+        lambda *a, **k: (None, plan),
+    )
+
+    _spawn_heir()
+
+    assert _row("heir").crown_level is None
+    assert _row("other-king").crown_level == 2, "the actual holder is untouched"
+    assert "crown declined" in capsys.readouterr().err
+
+
+def test_a_name_rebound_since_the_plan_keeps_its_crown(court, monkeypatch, capsys) -> None:
+    """A reclaimed name with a new session is not the holder the plan saw."""
+    from fno.agents import crown, dispatch as dispatch_mod
+
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("other-king", "old-session")
+    refusal, plan = crown.plan_spawn_crown(SCOPE, None, True)
+    assert refusal is None
+    assert plan is not None
+
+    update_registry(lambda rows: [row for row in rows if row.name != "other-king"])
+    _seat("other-king", "new-session")
+    monkeypatch.setattr(dispatch_mod, "plan_spawn_crown", lambda *a, **k: (None, plan))
+
+    _spawn_heir(succeed=True)
+
+    heir = _row("heir")
+    holder = _row("other-king")
+    assert heir is not None and heir.crown_level is None
+    assert holder is not None
+    assert (holder.crown_level, holder.harness_session_id) == (2, "new-session")
+    assert "crown declined" in capsys.readouterr().err
+    assert not any(
+        event["kind"] == "agent_crown_vacated" and event["holder"] == "other-king"
+        for event in _events()
+    )

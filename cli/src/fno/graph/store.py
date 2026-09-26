@@ -17,13 +17,9 @@ one cannot be reached or spawned, every call raises
 :class:`StoreUnavailable` naming the keeper-lane state - an unreachable
 store is NEVER read as an empty graph (the absence-as-answer trap).
 
-The mutation cycle is a versioned transaction: ``begin`` returns the
-defaulted entries plus the file's content digest, the mutator runs
-client-side against that snapshot, and ``commit`` refuses to publish over a
-changed file, so an interleaved writer turns into a retry instead of a
-silent clobber. The claim-release hook, renders, and the active-backlog
-nudge run after the commit lands, exactly where the flock version ran them
-after the lock dropped.
+The mutation cycle is a versioned transaction: read one snapshot through
+the keeper, publish the row diff through ``commit_rows``, retry on a
+changed base. Post-publish hooks run where the flock version ran them.
 
 Read-failure taxonomy (unchanged): :class:`GraphCorruptError` (the soft
 read's parse failure, swallowed to [] by read_graph, exit 1 by the mutate
@@ -55,6 +51,7 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_JSON,
     GRAPH_MD,
 )
+from fno.rust_binary import newest_runnable
 
 
 
@@ -153,6 +150,15 @@ class StoreUnavailable(RuntimeError):
         super().__init__(f"graph store unavailable ({state}): {detail}")
 
 
+# The read failures a caller may treat as "the store could not be read".
+STORE_READ_ERRORS = (
+    GraphCorruptError,
+    GraphUnreadableError,
+    GraphMalformedRootError,
+    StoreUnavailable,
+)
+
+
 class WriteUnconfirmed(StoreUnavailable):
     """A write was sent, but its keeper never confirmed the outcome."""
 
@@ -209,9 +215,7 @@ def store_socket_for(path: Path) -> Path:
 def _worker_binary() -> Path | None:
     """Locate `fno-agents-worker` for an on-demand keeper spawn.
 
-    Dev-checkout artifacts come before PATH on purpose: a stale `cargo
-    install`ed worker predating the `--store-keeper` lane exits 0 with a
-    usage refusal, and a silent old binary is worse than an honest absence.
+    The newest runnable candidate wins among checkout artifacts and PATH; env pins outrank it.
     The worker is a sibling of the daemon binary everywhere it ships, and it
     is never deleted by the smoke shard's @requires_rust clear (which
     removes only `fno-agents`), so the store keeps working where the parity
@@ -228,19 +232,16 @@ def _worker_binary() -> Path | None:
         if candidate.is_file():
             return candidate
     here = Path(__file__).resolve()
+    candidates: list[Path] = []
     for ancestor in here.parents:
         if (ancestor / "crates" / "fno-agents").is_dir():
             for base in (ancestor / "crates/fno-agents/target", ancestor / "target"):
-                for profile in ("debug", "release"):
-                    candidate = base / profile / "fno-agents-worker"
-                    if candidate.is_file() and os.access(candidate, os.X_OK):
-                        return candidate
+                candidates += [base / p / "fno-agents-worker" for p in ("debug", "release")]
             break
     found = shutil.which("fno-agents-worker")
-    # which() answers are normally real files; a stale or faked PATH entry
-    # reaches Popen as FileNotFoundError here, so verify before trusting it.
-    if found and Path(found).is_file():
-        return Path(found)
+    candidates += [Path(found)] if found else []
+    if (newest := newest_runnable(candidates)) is not None:
+        return newest
     try:
         from fno.rust_binary import resolve_binary
 
@@ -272,86 +273,6 @@ def _is_canonical(path: Path) -> bool:
         return path.resolve() == configured.resolve()
     except OSError:
         return False
-
-
-def _spawn_keeper(path: Path) -> subprocess.Popen:
-    """Spawn a store keeper for `path`, detached from this process's group."""
-    binary = _worker_binary()
-    if binary is None:
-        raise StoreUnavailable(
-            STATE_SPAWN_FAILED,
-            "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
-        )
-    sock = store_socket_for(path)
-    argv = [
-        str(binary),
-        "--store-keeper",
-        "--sock",
-        str(sock),
-        "--graph",
-        str(path),
-        "--session",
-        f"store-{os.getpid()}",
-        "--lock-timeout-secs",
-        str(_LOCK_TIMEOUT_SECS),
-    ]
-    if _is_canonical(path):
-        from fno import paths as _paths
-
-        argv.extend(["--events", str(_paths.project_events_json())])
-        argv.append("--canonical")
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    # The ledger every test-session reaper reads: a keeper is detached and
-    # outlives its spawner by design, so the spawn that created it owes the
-    # teardown an addressable handle. The Popen is kept, not just the pid:
-    # poll() reaps the exited child, which a kill(pid, 0) liveness probe
-    # cannot do (a zombie answers).
-    _SPAWNED_KEEPERS[proc.pid] = (proc, sock)
-    return proc
-
-
-_SPAWNED_KEEPERS: "dict[int, tuple[subprocess.Popen, Path]]" = {}
-
-
-def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
-    """Stop this process's detached keepers; return survivors after timeout."""
-    import signal
-    import time as _time
-
-    for proc, _sock in list(_SPAWNED_KEEPERS.values()):
-        if proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-    deadline = _time.monotonic() + timeout
-    while _SPAWNED_KEEPERS and _time.monotonic() < deadline:
-        for pid in list(_SPAWNED_KEEPERS):
-            proc, _sock = _SPAWNED_KEEPERS[pid]
-            if proc.poll() is not None:
-                del _SPAWNED_KEEPERS[pid]
-        if _SPAWNED_KEEPERS:
-            _time.sleep(0.05)
-    survivors = list(_SPAWNED_KEEPERS)
-    _SPAWNED_KEEPERS.clear()
-    return survivors
-
-
-def drain_exited_keepers() -> int:
-    """Collect exited keeper children and return how many were reaped."""
-    reaped = 0
-    for pid in list(_SPAWNED_KEEPERS):
-        proc, _sock = _SPAWNED_KEEPERS[pid]
-        if proc.poll() is not None:
-            del _SPAWNED_KEEPERS[pid]
-            reaped += 1
-    return reaped
 
 
 def _orphaned_keeper_pids() -> "list[int]":
@@ -543,9 +464,9 @@ class _Keeper:
                 if isinstance(outcome, dict):
                     targets.append(outcome)
                 if any(target.get("entries_elided") for target in targets):
-                    entries = status_client.request(
-                        "read", {"strict": True, "keep_malformed": False}
-                    )["entries"]
+                    body = status_client.request("read_file", {})
+                    doc = json.loads(_base64.b64decode(body["bytes_b64"]))
+                    entries = doc.get("entries", []) if isinstance(doc, dict) else []
                     for target in targets:
                         if target.get("entries_elided"):
                             target["entries"] = copy.deepcopy(entries)
@@ -564,25 +485,13 @@ class _Keeper:
 
     # -- typed helpers -----------------------------------------------------
     # The keeper is single-graph (it binds to whatever --graph named), so
-    # read/read_file/begin carry no path; only read_archive does, because the
-    # archive is a DIFFERENT file than the one the keeper owns.
+    # read/read_file/begin carry no path.
 
     def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
-        del path  # single-graph keeper: the bound graph IS the target
-        try:
-            return self.request(
-                "read" if not strict else "read_strict",
-                {"strict": strict, "keep_malformed": keep_malformed},
-            )
-        except GraphCorruptError as exc:
-            if not strict:
-                raise
-            # Taxonomy, not wording: the strict read's contract is that EVERY
-            # parse failure is a GraphUnreadableError (cli.py catches that
-            # class to tell "graph unreadable" from "node absent"), while the
-            # soft path's parse failure is the swallower's GraphCorruptError.
-            # The keeper carries one kind for both; the client splits it.
-            raise GraphUnreadableError(str(exc)) from None
+        """The store's entries, defaults applied. strict/keep_malformed are
+        accepted-and-ignored: the typed store has one row shape."""
+        del path, strict, keep_malformed
+        return self.request("read", {})
 
     def read_file(self, path: Path) -> dict:
         del path
@@ -615,11 +524,108 @@ class _Keeper:
         self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
 
 
+# Wall-clock bound for one --store-exec request; a hung child cannot outlive it.
+_EXEC_TIMEOUT_S = 60.0
+
+
+class _ExecClient(_Keeper):
+    """One-shot transport: every request execs `--store-exec` and the child
+    exits, so a request-driven leak has no process to grow in. A lost write
+    raises `WriteUnconfirmed` - no process survives to answer write_status.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        # No `sock`: nothing on this transport connects, and the inherited
+        # helpers answer through `request` alone.
+
+    def request(self, method: str, params: dict) -> Any:
+        is_write = method in {"commit", "commit_rows", "op", "api"}
+        request_params = {**params, "request_id": uuid.uuid4().hex} if is_write else params
+        binary = _worker_binary()
+        if binary is None:
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+            )
+        argv = [
+            str(binary),
+            "--store-exec",
+            "--graph",
+            str(self.path),
+            "--lock-timeout-secs",
+            str(_LOCK_TIMEOUT_SECS),
+        ]
+        if _is_canonical(self.path):
+            from fno import paths as _paths
+
+            argv.extend(["--events", str(_paths.project_events_json())])
+            argv.append("--canonical")
+        try:
+            # Popen, not run(): the CLI test suites stub subprocess.run as
+            # their git/gh seam and would answer the store's own request with
+            # an empty rc-1 reply; Popen is the module's unstubbed primitive.
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:  # the request was never sent
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        try:
+            out, _ = proc.communicate(
+                json.dumps({"id": 1, "method": method, "params": request_params}).encode(),
+                timeout=_EXEC_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            failure = StoreUnavailable(
+                STATE_UNREACHABLE, f"store-exec timed out after {_EXEC_TIMEOUT_S}s"
+            )
+            if is_write:
+                raise WriteUnconfirmed(
+                    failure.state, f"{failure.detail}; the write was not confirmed"
+                ) from None
+            raise failure from None
+        except OSError as exc:  # the pipe broke mid-request
+            proc.kill()
+            proc.wait()
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        if not out:
+            detail = f"store-exec exited with code {proc.returncode} and no reply"
+            if is_write:
+                raise WriteUnconfirmed(
+                    STATE_UNCONFIRMED, f"{detail}; read the graph before retrying"
+                ) from None
+            try:
+                built = datetime.fromtimestamp(binary.stat().st_mtime, timezone.utc).isoformat()
+            except OSError:  # the worker vanished mid-exec; the path still names what ran
+                built = "an unstatable path"
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                f"{detail}; ran {binary} built {built}; is fno-agents-worker"
+                " current? `fno doctor` names lag",
+            ) from None
+        try:
+            reply = json.loads(out.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise StoreUnavailable(STATE_UNREACHABLE, f"store-exec reply is not JSON: {exc}") from None
+        if reply.get("ok"):
+            return reply.get("result")
+        error = reply.get("error") or {}
+        _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
+
+    def shutdown(self) -> None:
+        pass  # one-shot: nothing resident to shut down
+
+
 def shutdown_keeper(path: Path) -> None:
     """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
     try:
         _client_for(path).shutdown()
-    except Exception:  # noqa: BLE001 - a refusing keeper is the caller's absence
+    except Exception:  # noqa: BLE001 - a refusing store is the caller's absence
         pass
 
 
@@ -636,8 +642,13 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
-def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
-    """Connect to `path`'s keeper, spawning only for a positively dead socket."""
+def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
+    """Connect to `path`'s keeper; when nothing is listening, serve by exec.
+    A live keeper is still preferred (old binaries spawn them); the
+    spawn-needed branch no longer mints one, because a resident keeper's
+    memory grows with requests served. An unreachable store still raises
+    StoreUnavailable - never an empty graph.
+    """
     path = Path(path)
     sock = store_socket_for(path)
     keeper = _Keeper(sock)
@@ -648,36 +659,12 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     except StoreUnavailable as exc:
         if not spawn or exc.state not in (STATE_ABSENT, STATE_NO_LISTENER):
             raise
-    proc = _spawn_keeper(path)
-    deadline = time.monotonic() + 10.0
-    last: StoreUnavailable | None = None
-    while time.monotonic() < deadline:
-        if proc.poll() is not None and proc.returncode != 3:
-            # Our spawned worker died before binding (a stale binary without
-            # the store lane, or an unexpected crash). Probe once: a live
-            # listener means the seat is taken by a valid keeper and the
-            # request can ride it; still dead means our binary is the
-            # problem, and that never justifies waiting out the clock.
-            try:
-                probe = keeper._connect()
-                probe.close()
-                return keeper
-            except StoreUnavailable as exc:
-                raise StoreUnavailable(
-                    STATE_SPAWN_FAILED,
-                    f"keeper exited immediately with code {proc.returncode} "
-                    f"({proc.args!r}); is fno-agents-worker current? "
-                    "`fno doctor` names lag",
-                ) from exc
-        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
-        try:
-            probe = keeper._connect()
-            probe.close()
-            return keeper
-        except StoreUnavailable as exc:
-            last = exc
-            time.sleep(0.05)
-    raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
+    return _ExecClient(path)
+
+
+def _refusal(exc: Exception, message: str) -> Exception:
+    exc.fno_refusal = message  # type: ignore[attr-defined]
+    return exc
 
 
 def _raise_store_error(kind: str, message: str) -> None:
@@ -690,27 +677,17 @@ def _raise_store_error(kind: str, message: str) -> None:
     if kind == "lock_timeout":
         raise GraphLockTimeout(message)
     if kind == "empty_field_update":
-        raise ValueError(message)
+        raise _refusal(ValueError(message), message)
     if kind == "conflict":
         raise _Conflict(message)
     if kind == "claims_unavailable":
         raise ClaimsUnavailableError(message)
-    raise RuntimeError(f"store error ({kind}): {message}")
+    err = RuntimeError(f"store error ({kind}): {message}")
+    raise _refusal(err, message) if kind == "invalid" else err
 
 
 class _Conflict(Exception):
     """Internal: the commit's snapshot is stale; the tx loop retries."""
-
-
-_ROWS_FALLBACK_WARNED = False
-
-
-def _warn_rows_fallback(reason: str) -> None:
-    global _ROWS_FALLBACK_WARNED
-    if _ROWS_FALLBACK_WARNED:
-        return
-    _ROWS_FALLBACK_WARNED = True
-    print(f"Warning: commit_rows unavailable; using whole commit ({reason})", file=sys.stderr)
 
 
 def _row_index(entries: list[dict]) -> dict[str, dict] | None:
@@ -735,46 +712,34 @@ def _row_diff(before: list[dict], after: list[dict]) -> tuple[list[dict], list[s
     return changed, removed
 
 
-def _graph_setting(name: str, default: str) -> str:
-    try:
-        from fno.config import load_settings
-
-        return str(getattr(load_settings().graph, name))
-    except Exception:
-        return default
+def _read_snapshot(client) -> tuple[str, list[dict], dict]:
+    """One gate-held read: entries, the commit token, and their row digests."""
+    snap = client.request("begin", {})
+    return snap["version"], snap.get("entries", []), snap.get("base_digests", {})
 
 
-def _graph_commit_mode() -> str:
-    return _graph_setting("commit_mode", "rows")
-
-
-def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],
-                     plan_rungs: dict, attempt: int) -> dict:
-    if _graph_commit_mode() == "rows":
-        diff = _row_diff(base_entries, entries)
-        digests = snap.get("base_digests")
-        if diff is not None and isinstance(digests, dict):
-            changed, removed = diff
-            try:
-                return client.request("commit_rows", {
-                    "base_version": snap["version"],
-                    "base_digests": digests,
-                    "base_plan_rungs": _plan_rung_map(base_entries),
-                    "changed": changed,
-                    "removed": removed,
-                    "plan_rungs": plan_rungs,
-                    "attempt": attempt,
-                })
-            except RuntimeError as exc:
-                marker = 'store error (invalid): unknown store method "commit_rows"'
-                if str(exc) != marker:
-                    raise
-                _warn_rows_fallback("running keeper predates commit_rows")
-        else:
-            _warn_rows_fallback("snapshot cannot be represented as row diff")
-    return client.request("commit", {
-        "version": snap["version"],
-        "entries": entries,
+def _commit_rows(client, base_version: str, base_digests: dict,
+                 base_entries: list[dict], entries: list[dict],
+                 plan_rungs: dict, attempt: int) -> dict:
+    """Publish the row diff; `_Conflict` on a version mismatch retries the tx."""
+    diff = _row_diff(base_entries, entries)
+    if diff is None:
+        raise WriteUnconfirmed(
+            STATE_UNCONFIRMED,
+            "the mutation's snapshot cannot be represented as a row diff; "
+            "read the graph before retrying",
+        )
+    changed, removed = diff
+    # Per-row digests from the begin snapshot; the keeper verifies them
+    # inside its write transaction. The rung maps ride along because repo
+    # law keeps plan-document reading on this side of the seam: without
+    # them the keeper keeps stored statuses instead of re-deriving.
+    touched = [row["id"] for row in changed] + removed
+    return client.request("commit_rows", {
+        "base_version": base_version,
+        "base_digests": {rid: base_digests[rid] for rid in touched if rid in base_digests},
+        "changed": changed,
+        "removed": removed,
         "plan_rungs": plan_rungs,
         "attempt": attempt,
     })
@@ -820,9 +785,36 @@ def set_related(entries: list[dict], node_id: str, desired: list[str]) -> None:
     Symmetry is stored on both endpoints, not derived. Mutates ``entries``
     in place (both halves land in the caller's ``locked_mutate_graph`` call,
     so a half-written edge aborts the mutation before anything persists).
+
+    The keeper returns fresh dicts. Copy them into the existing ones, so a
+    caller that holds a row keeps writing to the row that persists.
     """
     out = _pure(entries, "set_related", {"node_id": node_id, "desired": desired})
+    held = {e.get("id"): e for e in entries}
+    for i, row in enumerate(out):
+        old = held.get(row.get("id"))
+        if old is not None:
+            old.clear()
+            old.update(row)
+            out[i] = old
     entries[:] = out
+
+
+def apply_related_update(entries: list[dict], node: dict, related: list[str], resolve) -> dict:
+    """Resolve ``related`` tokens via ``resolve``, write the set, and return
+    the live node object for ``node["id"]``.
+
+    ``set_related`` replaces every element of ``entries`` with new objects
+    from the keeper round trip, so any ``node`` reference taken before this
+    call is orphaned afterward; callers that keep writing fields onto the old
+    reference lose those writes silently.
+    """
+    from fno.graph._intake import _find_node, _parse_blocker_list
+
+    tokens = _parse_blocker_list(related)
+    desired = [] if tokens == ["null"] else [resolve(t) for t in tokens]
+    set_related(entries, node["id"], desired)
+    return _find_node(entries, node["id"]) or node
 
 
 def canonicalize_entries(entries: list[dict]) -> list[dict]:
@@ -939,6 +931,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    filter_args: "list[str] | None" = None,
     occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
@@ -966,6 +959,8 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
+    if filter_args:
+        params["filter_args"] = filter_args
     if occupancy is not None:
         params["claimed"] = sorted(occupancy)
     else:
@@ -994,6 +989,8 @@ def ready(
         result = _client_for(_paths.graph_json()).request("ready", params)
     except RuntimeError as exc:
         text = str(exc)
+        if "ready filter: " in text:
+            raise ValueError(text[text.index("ready filter: ") :]) from None
         if "no such node" in text:
             # The verb's own refusal wording, without the store-error prefix
             # the transport wraps it in.
@@ -1058,26 +1055,6 @@ def _read_json(path: Path) -> list[dict]:
     return entries
 
 
-def _write_json(entries: list[dict], path: Path) -> None:
-    """Raw atomic write of an entries file. ARCHIVE ONLY: the working graph's
-    write path is the keeper's publish pipeline, and hand-rolling one here is
-    exactly the two-write window the port retired. The archive store keeps
-    its own readers and lifetime (out of the port's scope), and its writers
-    keep this primitive."""
-    path = Path(path)
-    data = {"entries": entries}
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def _graph_lock_path(path: Path) -> Path:
     """The keeper's lockfile for a graph file: ``<canonical path>.lock``.
 
@@ -1118,15 +1095,11 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
 
 
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
-    """Failure-surfacing counterpart to :func:`read_graph`.
+    """The whole-graph read, defaults applied. Raises when the store cannot
+    be read cleanly, so "node absent" stays apart from "graph unreadable"."""
+    from fno.graph.api import wire_rows
 
-    Returns entries (defaults applied) for a populated OR legitimately empty
-    graph, and for an absent file. RAISES instead of returning [] when the
-    graph cannot be read cleanly, so a resolution caller can tell "node
-    absent" apart from "graph unreadable". Diagnosis is read-only: no .bak
-    is written on this path.
-    """
-    return _client_for(path).read(path, strict=True)["entries"]
+    return wire_rows(path=path)
 
 
 def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
@@ -1161,16 +1134,20 @@ def served_store_path(path: Path) -> Path:
     return path
 
 
-def read_archive_entries() -> list[dict]:
-    """The archived nodes, best-effort: an absent archive is []. Callers that
-    may test many ids read once and pass the list to
-    :func:`resolve_node_with_archive`."""
-    from fno.paths import graph_archive_json
+def read_archive_entries(path: Path | None = None) -> list[dict]:
+    """The archived residents: one include_archived read of the same store.
+    A store failure raises, an absent store is []."""
+    if path is None:
+        from fno.paths import graph_json
 
-    archive_path = graph_archive_json()
-    if not archive_path.exists():
-        return []
-    return read_graph(archive_path)
+        path = graph_json()
+    from fno.graph.api import wire_rows
+
+    return [
+        row
+        for row in wire_rows(include_archived=True, path=path)
+        if isinstance(row, dict) and row.get("archived_at")
+    ]
 
 
 def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
@@ -1197,26 +1174,14 @@ def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[di
     )
 
 
-def entries_with_archive(entries: list) -> list:
-    """``entries`` plus archived nodes, the working graph winning on id.
-
-    Best-effort and read-only: an absent or unreadable archive degrades to
-    the working graph. The archive store keeps its own readers and lifetime;
-    only its bytes ride the keeper.
-    """
-    from fno.paths import graph_archive_json
-
+def entries_with_archive(entries: list, path: Path | None = None) -> list:
+    """``entries`` plus archived residents, the working graph winning on id.
+    Advisory: any store failure degrades to ``entries`` alone."""
     try:
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
         live = {e.get("id") for e in entries if isinstance(e, dict)}
-        archived = _client_for(archive_path).request(
-            "read_archive", {"path": str(archive_path)}
-        )["entries"]
         return [
             *entries,
-            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
+            *(a for a in read_archive_entries(path) if a.get("id") not in live),
         ]
     except Exception:  # noqa: BLE001 - archive is advisory; any read failure degrades
         return entries
@@ -1228,7 +1193,7 @@ def read_graph_with_archive(path: Path | None = None) -> list[dict]:
         from fno.paths import graph_json
 
         path = graph_json()
-    return entries_with_archive(read_graph_strict(path))
+    return entries_with_archive(read_graph_strict(path), path)
 
 
 # ---------------------------------------------------------------------------
@@ -1262,8 +1227,8 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     runs them after the keeper's publish lands, which is the same position
     relative to other writers."""
     path = Path(path)
-    dropped = outcome["dropped"]
-    backup = outcome["backup"]
+    dropped = outcome.get("dropped", 0)
+    backup = outcome.get("backup")
     if warning := outcome.get("shadow_warning"):
         print(f"Warning: {warning}", file=sys.stderr)
     if dropped > 0:
@@ -1281,7 +1246,7 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
 
     # Claim releases run AFTER the publish: root resolution and recovery
     # mutexes never belong inside the store's critical section.
-    for release in outcome["closure_releases"]:
+    for release in outcome.get("closure_releases", []):
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
     # The client renders in-call when the write landed on the configured
@@ -1320,7 +1285,7 @@ def render_canonical_views() -> int:
 
     failures: list[str] = []
     graph = Path(_paths.graph_json())
-    entries = read_graph(graph)
+    entries = read_graph_strict(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
@@ -1399,16 +1364,38 @@ def _emit_graph_tx_event(**data: Any) -> None:
     try:
         from fno.events import _build, append_event
 
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+        if session:
+            data["session_id"] = session
         append_event(_build("graph_tx_conflict", "python", data))
     except Exception:  # noqa: BLE001 - telemetry never changes a store outcome
         pass
 
 
+def _promote_linked_rows(entries: list[dict]) -> None:
+    """The write-path ladder's plan branch, in place: an ``idea`` row whose
+    linked plan reached a rung ships ``ready`` (the keeper cannot read docs,
+    so the client derives the word). Same branch requeue's release uses."""
+    from fno.graph.ladder import Rung, plan_rung
+
+    # One doc read per distinct plan document per publish.
+    rung_cache: "dict[tuple[str, str], Rung]" = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("status") != "idea":
+            continue
+        key = (str(entry.get("cwd") or ""), str(entry.get("plan_path") or ""))
+        rung = rung_cache.get(key)
+        if rung is None:
+            rung = plan_rung(entry)
+            rung_cache[key] = rung
+        if rung not in (Rung.IDEA, Rung.NONE):
+            entry["status"] = "ready"
+
+
 def commit_rows_via_store(path: Path, mutator) -> list[dict]:
-    """The modern raw write: begin, mutate client-side, publish through the
-    keeper's row-commit with the bounded retry, return the committed rows.
-    The write seam for callers with no named op; `locked_mutate_graph` is
-    the legacy name the remaining (pre-wave-9) callers still use. The
+    """The raw write: read one snapshot, mutate it client-side, publish the
+    diff through the keeper's row commit with the bounded retry, return the
+    committed rows. The write seam for callers with no named op; the
     keeper re-derives the write pipeline and publishes under its lock.
     """
     path = Path(path)
@@ -1416,13 +1403,17 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     client = _client_for(path)
 
     for attempt in range(_TX_ATTEMPTS):
-        snap = client.request("begin", {})
-        base_entries = copy.deepcopy(snap["entries"])
-        entries = mutator(snap["entries"])
+        base_version, base_entries, base_digests = _read_snapshot(client)
+        base_entries = copy.deepcopy(base_entries)
+        entries = mutator(copy.deepcopy(base_entries))
         _validate_company_work(entries)
+        _promote_linked_rows(entries)
         plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs, attempt + 1)
+            outcome = _commit_rows(
+                client, base_version, base_digests, base_entries, entries,
+                plan_rungs, attempt + 1,
+            )
             break
         except WriteUnconfirmed as exc:
             diff = _row_diff(base_entries, entries)
@@ -1438,13 +1429,17 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
                 exc.args = (f"graph store unavailable ({exc.state}): {exc.detail}",)
             raise
         except _Conflict as conflict:
+            diff = _row_diff(base_entries, entries)
+            touched = ([r["id"] for r in diff[0]] + diff[1]) if diff else []
             _emit_graph_tx_event(
                 attempt=attempt + 1,
                 attempts_max=_TX_ATTEMPTS,
                 entries=len(entries),
                 exhausted=attempt == _TX_ATTEMPTS - 1,
                 graph_path=str(path),
+                touched=touched,
             )
+            print(f"graph conflict: retrying {attempt + 1}/{_TX_ATTEMPTS} {path}", file=sys.stderr)
             if attempt == _TX_ATTEMPTS - 1:
                 detail = str(conflict)
                 if detail.startswith("graph conflict on "):
@@ -1452,7 +1447,7 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
                         f"{detail} after {_TX_ATTEMPTS} attempts at {path}"
                     ) from None
                 raise RuntimeError(
-                    f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
+                    f"graph mutated under us {_TX_ATTEMPTS} times at {path}; nothing was written, retry when the fleet quiets"
                 ) from None
             # Full jitter between attempts: the colliding writers all woke at
             # the same instant, so a fixed delay would only line them up again.
@@ -1463,12 +1458,6 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     return _finish_mutation(path, outcome)
 
 
-def locked_mutate_graph(path: Path, mutator) -> list[dict]:
-    """The legacy name of `commit_rows_via_store`, kept for the callers
-    wave 9 has not moved yet."""
-    return commit_rows_via_store(path, mutator)
-
-
 # ---------------------------------------------------------------------------
 # Node resolution + the targeted helpers (typed ops over the keeper)
 # ---------------------------------------------------------------------------
@@ -1476,18 +1465,18 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
 def _resolve_node_id(
     client_keeper_path: Path, node_id: str, *, entries_out: "list | None" = None
 ) -> str | None:
-    """Resolve a (possibly partial) node id against the begin snapshot.
+    """Resolve a (possibly partial) node id against the current snapshot.
 
     The fuzzy resolver is surface: it stays Python (`_intake._find_node`),
-    reads the snapshot the mutation is keyed on, and the keeper op re-checks
-    the resolved id under the lock. ``entries_out``, when given, receives that
-    snapshot: it is already in hand, and a caller that needs it next would
-    otherwise read the whole graph again.
+    reads a fresh snapshot, and the keeper op re-checks the resolved id
+    under the lock. ``entries_out``, when given, receives that snapshot: it
+    is already in hand, and a caller that needs it next would otherwise read
+    the whole graph again.
     """
     from fno.graph._intake import _find_node
 
     if entries_out is None:
-        # The by-id fast path: one exact row instead of a whole-graph begin.
+        # The by-id fast path: one exact row instead of a whole-graph read.
         # The tier guard keeps resolution identical to _find_node's exact
         # tiers (exact id, exact slug); anything else falls through to the
         # snapshot so title-fuzzy and id-prefix never change.
@@ -1496,10 +1485,10 @@ def _resolve_node_id(
             row = fast["entries"][0]
             if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
                 return row.get("id")
-    snap = _client_for(client_keeper_path).request("begin", {})
+    _, snap_entries, _ = _read_snapshot(_client_for(client_keeper_path))
     if entries_out is not None:
-        entries_out.extend(snap["entries"])
-    node = _find_node(snap["entries"], node_id)
+        entries_out.extend(snap_entries)
+    node = _find_node(snap_entries, node_id)
     return node.get("id") if node else None
 
 
@@ -1619,23 +1608,17 @@ def _readback_row(path: Path, node_id: str) -> "tuple[dict | None, bool]":
 def _run_op(path: Path, name: str, params: dict) -> dict:
     """One typed op through the keeper's full locked cycle, followed by the
     same post-publish duties a mutator-based write ran (renders, releases,
-    nudge): the targeted helpers replaced locked_mutate_graph calls, so they
+    nudge): the targeted helpers replaced the raw mutator calls, so they
     carry the same visible effects.
 
     The plan-rung map rides in the op params, computed over a light
     plan_refs read (id, plan_path, cwd per node) instead of a full
-    begin, which ships the whole graph for one derived value. A session op
-    that opens or closes a do row re-derives in_progress the way any full
-    write would. No Python op mutates plan_path, so the map is exact. The
-    begin fallback keeps a keeper predating the verb working."""
+    snapshot read. A session op that opens or closes a do row re-derives
+    in_progress the way any full write would. No Python op mutates
+    plan_path, so the map is exact."""
     path = Path(path)
     client = _client_for(path)
-    try:
-        rung_entries = client.request("plan_refs", {})["entries"]
-    except RuntimeError as exc:
-        if str(exc) != 'store error (invalid): unknown store method "plan_refs"':
-            raise
-        rung_entries = client.request("begin", {})["entries"]
+    rung_entries = client.request("plan_refs", {})["entries"]
     params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}
     result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
@@ -1845,12 +1828,12 @@ def reap_open_session_record(
 ) -> dict:
     """Close one exact open observer-owned session row and report settlement.
 
-    ``do`` REMOVES the row (an open do window wedges node status in_progress,
-    so after death the honest state is "no do window"); every other phase
-    FILLS ``ended_at`` and keeps the row (a reviewer session's provenance did
-    happen); ``all`` applies both semantics to every open row carrying the
-    identity. The fill value defaults to the reap instant, an UPPER BOUND on
-    the true end. ``node_id=None`` is the death-cascade form: every node
+    Every phase, ``do`` included, FILLS ``ended_at`` and keeps the row: a
+    filled row is not open, so node status un-wedges exactly as the retired
+    do-removal did, and the session provenance survives. The fill value
+    defaults to the reap instant, an UPPER BOUND on the true end;
+    ``abandoned_leg`` passes the transcript tail instant instead.
+    ``node_id=None`` is the death-cascade form: every node
     holding an open row for the identity settles, and the receipt's
     ``node_ids`` names them."""
     if phase != "all" and phase not in _SESSION_PHASES:
@@ -1887,7 +1870,7 @@ def reap_open_session_record(
         report["settled"] = bool(report.get("found"))
         return report
     try:
-        entries = read_graph(Path(path))
+        entries = read_graph_strict(Path(path))
         node = next((e for e in entries if e.get("id") == resolved), None)
         if node is None:
             report.update({"status_after": None, "remaining_open_do": 0, "settled": report.get("found", False)})
@@ -1913,7 +1896,7 @@ def find_nodes_for_pr(
     """Node ids carrying ``pr_number``, optionally narrowed to one repo slug
     (: pr_number is not unique across repos; the url is the only
     per-node field carrying the repo slug)."""
-    entries = read_graph(Path(path))
+    entries = read_graph_strict(Path(path))
     result = _query(entries, "find_for_pr", {"pr_number": pr_number, "repo": repo})
     return result.get("ids", [])
 

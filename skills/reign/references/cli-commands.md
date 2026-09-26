@@ -48,7 +48,7 @@ Verbs that exist only for a crowned session. One reign ran a whole territory wit
 
 | You are trying to | Verb | The gotcha |
 |---|---|---|
-| Move the operator's view to a pane | `fno mux pane focus <n>` | The only pane verb that acts on the OPERATOR's view. Every other pane verb acts FOR an agent. This is the one that answers "show me that". |
+| Move the user's view to a pane | `fno mux pane focus <n>` | The only pane verb that acts on the USER's view. Every other pane verb acts FOR an agent. This is the one that answers "show me that". |
 | Find where a handle lives | `fno mux where <handle>` | Pane-only. Any thread agent answers `hosts no live pane` (exit 17). That is a true answer, not an error. |
 | Read a worker that has no pane | `fno agents peek <handle> --follow` | Tails the transcript. This is the read that works after `where` says there is no pane. |
 | Read a worker's output log | `fno agents logs <name> --tail <n>` | Registry-scoped output log, distinct from `peek` (a transcript tail through the mux ref). |
@@ -98,7 +98,7 @@ Never follow `rm` with a bare `claude rm <id>`. `rm` already made that call itse
 Measured on a live registry: `fno agents rm` lands the registry removal, then hangs on harness teardown. A timeout is not a failed removal. Re-read the registry before you believe the receipt.
 
 <!-- retired-ok: states why driving these directly fails, as the reason to reach for the fno verbs instead. -->
-Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the operator sees.
+Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the user sees.
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.
 
@@ -116,11 +116,11 @@ It is a dry run by default. `--apply` executes the wake lane only, the one actio
 
 `--apply-all` adds reroute, which stops and respawns a session.
 
-## Delivery to a live session
+## Delivery to a parked or live session
 
-`fno-agents resume <name> -m <text>` forwards the text on exactly one path: a live, non-mux Claude row. A pruned-worktree recovery uses `fno agents resume <full-harness-session-id> --cross-project --cwd <existing-checkout>`.
+`fno-agents resume <name> -m <text>` delivers the text to a live, non-mux Claude row. It also delivers to a Claude row that `claude agents` lists as parked: Needs input, Done, stopped, or failed. A parked session whose process has exited is revived in place first. A pruned-worktree recovery uses `fno agents resume <full-harness-session-id> --cross-project --cwd <existing-checkout>`.
 
-Every other resume parses `-m` and drops the value: a dead Claude relaunch, a mux pane relaunch, every non-Claude harness. The resume succeeds and the instruction never lands.
+A mux pane relaunch still drops the value, as does every non-Claude harness. The resume succeeds and the instruction never lands. A session that carries `FNO_AGENTS_RUNTIME=python` reaches the older Python leg, which refuses a Done row. Run the verb with `env -u FNO_AGENTS_RUNTIME` until spawned sessions stop inheriting that pin.
 
 On the one path that forwards it, the warning `timed out after 3.0s, falling back to registry-only view` is noise. The roster probe times out, the command falls back to the registry view, and the message still lands.
 
@@ -130,10 +130,11 @@ Everywhere else, resume first and deliver the instruction with `fno agents mail 
 
 ## Blueprint retask
 
-Close blueprint provenance before clearing its pane:
+Close blueprint provenance under the worker's identity before clearing its pane:
 
 ```bash
-fno backlog session close <node> --summary "<summary>" --launch "/fno:target <node>"
+read -r WORKER_HARNESS WORKER_SESSION < <(fno agents list --json | jq -r '.agents[] | select(.name == "<blueprint-worker>") | "\(.harness) \(.harness_session_id)"')
+fno backlog session close <node> --harness "$WORKER_HARNESS" --session-id "$WORKER_SESSION" --summary "<summary>" --launch "/fno:target <node>"
 fno agents retask <blueprint-worker> --node <node>
 ```
 
@@ -147,7 +148,7 @@ Answer a message with `fno agents mail reply --to <msg-id>`. It threads the repl
 
 | Receipt reads | What it means |
 |---|---|
-| `delivered (hosted)` | Confirmed. |
+| `delivered (hosted)` | Inject accepted. It does not prove it was read. Check `landed` in `fno agents mail sent`. |
 | `queued (durable)` | Can sit undrained. No receipt is no coordination. |
 | `[bus-only]` | Drains by design at the recipient's turn boundary. The receipt IS coordination. |
 
@@ -167,12 +168,12 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 |---|---|
 | `fno do pr status <n>` | `ready` means green AND `optional_reviews_unresolved == 0`. Advisory, never the exit code. Costs GraphQL quota through its `reviewThreads` read. |
 | `fno do pr merge <n>` | Gates on the `review_coverage` event read from local `events.jsonl`. Never reads threads. |
-| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and `/commits/<sha>/status` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see. Free of the GraphQL budget. |
+| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`, `/commits/<sha>/status`, and `actions/runs?head_sha=<sha>` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see, plus the Actions runs listing: a run that failed before minting a job (a workflow file GitHub cannot parse) owns no check run and reads red by its workflow path. Free of the GraphQL budget. |
 | `fno-agents review-coverage` | The standalone coverage producer. Exit 4 carries `graphql_exhausted` on stdout. |
 
 ## Backlog
 
-`fno backlog done` takes no `--note`. Write the detail first with `fno backlog update <id> --details <text>`, then run `done`.
+A close needs a record of why. For work that shipped without a PR, pass it: `fno backlog done <id> --note "<why>"`. A bare close on a node with no `--pr-number`, `--note` or `--link` is refused by the store. Nothing is written. For a forced close, write the note first with `fno backlog update <id> --completion-note "<why>"`.
 
 Its `--reason` flag pairs with `--force` only, to explain bypassing the merged-PR cross-check. It does not carry a completion note.
 

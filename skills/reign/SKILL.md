@@ -1,23 +1,26 @@
 ---
 name: reign
-description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. Composes king-for-a-day (the one-wave pass) with a self-injected beat. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory'."
+description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. With --once, rule one wave: encode it into the graph, kick off, abdicate. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory', 'crown me on <epic>', 'plan the next wave'."
 argument-hint: "<scope> [--once]"
 metadata:
   requires:
     harness:
       - loop
+      - spawn
 ---
 
 <!-- style-exception: monitor cadences and verb spellings are load-bearing literals -->
 
 # Reign
 
-When `$CODEX_THREAD_ID` is nonblank, before anything else, Print exactly once:
-`codex posture: reign has no /goal, /loop or Monitor on codex; the wake arm's backstop is this king's only beat.`
+When `$CODEX_THREAD_ID` is nonblank, the Codex provider goal is the primary
+continuation receipt. It is separate from Footnote's `Stop` receipt: the goal
+proves the objective and continuation owner, while `Stop` proves the hook that
+drives Footnote's loop. Neither receipt substitutes for the other.
 
-You are the tenured king over `<scope>`. A pass encodes a wave and abdicates; you stay. Your job is not to build. It is to keep the territory moving: read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
+You are the tenured king over `<scope>`. With `--once` you rule one wave and abdicate. Without it you stay. Your job is not to build. It is to keep the territory moving. Read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
 
-An operator turn that tells the reign to stand down blocks the stop gate until it is acked. Answer it as a verdict on this reign, not as a general question.
+A user turn that tells the reign to stand down blocks the stop gate until it is acked. Answer it as a verdict on this reign, not as a general question.
 
 ## Who runs this
 
@@ -29,6 +32,8 @@ The crown is bestowed, never inferred. Verify it before anything else:
 4. A split, a conflict, or an unknown STOPS the skill and prints both session ids. For a conflict, print the two holders the entry names. A `conflicts` of null means the reader could not answer. That is an unknown and it stops the skill, because an absent answer is not the same as no rival. A king cannot reign through a crown two readers disagree about, it cannot reign beside a rival, and it cannot re-crown itself.
 5. Otherwise print `not crowned over <scope>; from an attended shell: fno agents crown <handle> --scope <scope>` and stop.
 
+How a crown is bestowed, the ladder and succession: [the crown model](references/once.md#who-runs-this-the-crown-is-bestowed).
+
 ## On crowning
 
 - `fno agents king init --scope <scope>`. Print level, scope, mail handle. When the output carries a settled-findings section, those titles are what this epic already established: read them before the first check-in and never re-derive them.
@@ -37,45 +42,25 @@ The crown is bestowed, never inferred. Verify it before anything else:
 - Declare the shape now: `fno agents king shape pass` for a one-wave pass, and `fno agents king shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
 - Declare the term now: `fno agents king term <span:Nh|compactions:N>` (e.g. `fno agents king term span:96h`). An undeclared term still reads a 96h default, so this is optional but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`, or extend it with a written reason: `fno agents king term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt.
 
+## One wave: --once
+
+With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term and native beat. Do not arm a native monitor or inject `/goal` or `/loop` through raw mail; the one-wave controller owns its provider receipts. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
+
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude supports harness-tracked Monitors and self-injected native commands: run the full arm below. Codex supports none of them - no `/goal`, no `/loop`, no Monitor tool - and the codex posture line above is that branch: arm nothing native, inject neither command, and never read `CronList` or `/hooks` as a gate. The codex beat is the externally owned wake arm: verify the daemon waker row exists in `fno agents status`, and if it does not, report that honestly and stop - it is never a reason to attempt a native command. Every codex wake runs the check-in body below; that cadence is the reign.
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat. Codex uses provider-backed goal actions, never raw prompt-line `/goal` or `/loop`. Read effective readiness and require a positive `provider_goal` receipt plus a separate positive `stop` receipt. The verified provider goal is the primary continuation state, and Stop proves a different boundary. Every Codex wake runs the check-in body below. Other harnesses use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md).
 
-On Claude, arm ONE monitor, not six. The 2026-09-10 measurement over one 12-hour reign is the arming contract: the stop hook drove all four real dispatches and the six monitor arms surfaced nothing the king acted on, and this skill charges court costs per wake, not per hour. The monitor is a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands. The deleted arms are demand reads, not beats: mail arrives as a conversation turn and cannot be missed; the board, crown liveness and main CI are read when a decision needs them (the check-in body names each read); capacity is the spawn gate's job, which refused twice in that reign, correctly, while the band's five readings changed no decision.
+The daemon mails the settle push on every harness:
 
-1. **Fleet settled-PR wake, 600s.** The stop hook only fires when an agent stops, so a session that stopped while its PR was pending and whose CI went settled an hour later has nothing watching for it. This one arm is the fleet's query for exactly that. The until-loop exits when a roster row that has gone quiet, parked or unknown carries a node whose `pr_number` reads settled: `fno agents list --json` rows carry `node` and a status word (`quiet`, `parked`, `unknown` when no probe answered, which is probe failure, not health), and the PR is read with `fno do pr status <n>`, one `green|red|pending|unknown` verdict where `green` is settled; never hand-rolled jq. Green alone is not settled work, and two skips gate the exit before any poke: the `fno do pr status` payload the loop already fetched carries `pr_state`, so a row whose `pr_state` reads `MERGED` or `CLOSED` is skipped, because a merged PR still reports `verdict: green` and `settled: true`; a row that passes that skip reads its node with `fno backlog get <node>` and is skipped when the node `status` reads `done` or `superseded`. Without them, every crown merge whose worker has parked wakes the crown to resume a finished worker: observed 2026-09-15, the wake fired `SETTLED pr=2037 node=` minutes after the crown merged 2037 and closed done at 13:39:35Z. On wake, poke the stopped session with `fno agents resume <id>`, which confirms the wake by content in the transcript; never a fresh dispatch. Measured by hand on 2026-09-10 over PRs 1650, 1694 and 1649: three pokes, three resumed sessions, zero slot cost. One query run centrally beats six timers run per king.
+1. **Settle mail, 300s.** The daemon's `king_settle` arm mails the crown once per covered PR that settles green. It mails again once per covered node that merges and closes. The king arms no watch and relaunches nothing. A red settle stays with the daemon nudge ladder, which names the failing checks. Codex arms nothing native: its provider goal and Stop receipts are the beat.
 
-Every arm emits on **probe failure** as well as on the watched condition. A monitor that is silent when its instrument breaks reports "nothing happened" and "the reader is dead" with the same silence. Gate on a positive marker in the output, never on the exit code alone: `fno backlog show` does not exist and the failure exits 0, so an exit-code caller reads a missing verb as a healthy empty node.
-
-Not monitored, because each has an owner: individual worker transcripts (court-mode watching, the machinery's job), per-PR CI (the merge arm and the heal driver), and the raw load average (the spawn gate refuses on its own reading, which is the owner a band monitor would only duplicate).
-
-Then, still on the Claude branch only, inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
-
-Inject the loop, end the turn so the harness actually delivers it, then confirm a cron exists before going on:
+On Claude, inject the loop as the cheap heartbeat:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
 ```
 
-`CronList` must now name the job. An empty list means the loop never landed, so re-send it and stop: a reign with a goal and no loop has no beat, and only the operator can restart one. Once the cron is there, inject the goal:
-
-```
-fno agents mail send "/goal ${king.goal_text}" --to-self --raw
-```
-
-Read both texts with `fno config get`. The defaults, verbatim, so a fresh install runs with no config:
-
-```
-king.checkin_interval = 4h
-king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. The heartbeat confirms that the settled-PR monitor still runs. If it does not, the heartbeat re-arms it.
-king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
-```
-
-These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.
-
-The monitor and stop hook are the beat. The cron is a 4-hour heartbeat whose job is to prove the reign and its monitor are alive.
-
-Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` above. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
+Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with it. For Codex, record its positive provider-goal and separate Stop receipts with `reign_armed`. Use the beat table for every other harness. Only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -83,30 +68,52 @@ What the loop prompt runs every interval and what you run by hand at any time.
 
 One verb runs the body: `fno agents king checkin`. It gathers every reading below, prints them in a fixed order, diffs the previous canonical beat, and journals the `reign_checkin` row itself from the same numbers it printed. It never decides: no lever fires from it, and the levers stay yours. Refresh the canon doc first, so the verb reads this beat's doc.
 
-Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact.
+A king names its crown at the first beat: `fno agents king checkin --name <name>`. Pick the name yourself, 2 to 24 letters, unique among live crowns. An heir crowned through `--succeed` passes no `--name`. Its first beat binds the carried name to its own session, and the crown line shows the regnal number (Barnaby, Barnaby II). A king re-scoped onto new territory runs `--keep-name-from <old-scope>` once to keep its name. Every later beat needs neither flag. The crown line leads every beat. An unnamed crown prints the `--name` instruction itself.
+
+Run `bash "$PLUGIN_ROOT/hooks/precompact-canon-doc.sh" < /dev/null` to refresh the doc's auto sections on this beat. Resolve `$PLUGIN_ROOT` as `${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null)}}`. The writer resolves the crown's doc itself, so every beat refreshes the same scope-keyed doc. This is what keeps the doc continuously refreshed instead of only at precompact. Past the compaction ceiling (default 3), a doc older than 24 hours blocks the stop gate. The beat refresh is what keeps the reign exitable.
 
 Then run `fno agents king checkin` (bare from the crowned session, or `--scope <scope>` elsewhere). The board read inside it defaults to this crown's manifest, so its rows are your scope. It prints, one line each, and this is the verb's documented output contract:
 
 - `User notes:` the canon doc's user block (read through `fno config paths handoff --scope <scope>`), verbatim. Never summarized or paraphrased. Nothing when the block is empty or placeholder-only.
 - `board:` the open PR count, the PRs with a free claim and no driver, and the blocked rows with what they are blocked on.
+- `blueprint:` the blueprint subagents this session runs against the ceiling. The ceiling is one per king, and a provider subagent budget can only lower it. Then one `start` line per node to plan and one `skip` line per node left, each with its reason. A start prints only while plans ready are fewer than the king's worker slots. Slots is the king's worker share from the spawn gate. The verb journals the same starts and skips in `reign_checkin`.
 - `blocked_child:` a child under this crown emitted `<help>` and nothing answered it inside the grace window - the node, the session, and the age.
-- `scope <scope>:` the scope node counts, then the active rows with worker, PR and session (the `fno agents court -n` join).
-- `territory:` one row per scope : rung, mission, live against `agents.max_live_per_territory` (the same projection the spawn gate's team cap enforces), the blueprinter handle with its liveness, and the kingless mark. A scope reading blind (the reading failed) is a machine-reported blind spot: name it in every escalation about that scope. The blueprinter is machinery-owned; you feed it nothing and reset nothing.
-- `capacity:` the PAIR - `fno doctor footprint`'s verdict and the spawn gate's own reading, with a `DISAGREE` marker when they differ and `unparsed_lines` named when that is the cause. Measured one second apart, the two gave "fleet CPU 26.8 percent, fine" and "fleet CPU attribution unavailable, refusing to spawn". The verdict does not predict whether a lever fires; the gate is the thing that actually refuses.
+ - `held:` this crown's open questions, oldest first, read from the question pages' frontmatter. The crown was frozen at page-write time. A question that names a node carries the `fno backlog decide <node> "<ruling>" --question-id <id>` command. A question with no node carries the `fno inbox outstanding clear <id> --answer "<answer>" --authority crown` command. When this crown has no open question, the line reads `held: none`.
+ - `scope <scope>:` leads with the owned active count. These are the active nodes no deeper live crown holds. Next: the active count in scope and the node total. Then the active rows with worker, PR and session (the `fno agents court -n` join).
+ - `epics:` one line under the scope line. It lists each epic in the scope that holds an open direct child, fullest first, as `open/cap` against `backlog.epic_max_open_children`. `19/15 full` means the next child is refused, and `19/- (cap unset)` means no cap is set. The lead plans the split from this line, before a write bounces.
+- `territory:` one row per scope : rung, mission, live against `agents.max_live_per_territory` (the same projection the spawn gate's team cap enforces), and the kingless mark. A scope reading blind (the reading failed) is a machine-reported blind spot: name it in every escalation about that scope.
+- `capacity:` the PAIR - `fno doctor footprint`'s CPU verdict against the spawn gate's own `cpu-share` reading. When the two CPU readings differ, and only then, the line carries `DISAGREE`. The gate's whole verdict prints beside them with the axis it refused on. A `king_share` refusal reads as a share cap, not an instrument fault. When that is the cause, `unparsed_lines` names it. Measured one second apart, the two gave "fleet CPU 26.8 percent, fine" and "fleet CPU attribution unavailable, refusing to spawn". The verdict does not predict whether a lever fires. The gate is the thing that actually refuses.
 - `workers:` live worker count and oldest worker activity, both read from the `fno agents top --json` payload and from nothing else: live-worker count is `workers | length` only when the payload carries the non-empty positive `predicate` string and a `workers` array; oldest activity is the maximum non-null `workers[].status_age_s`, reported as an age beside that worker's `handle` or `name`, never converted into a timestamp and never invented. When the payload cannot answer, the line reads `worker activity unmeasured` with the reason: neither a zero-worker fleet nor a zero age is ever reported from an unread payload, because an instrument that did not answer is not a fleet that does not exist. The `status` word in `fno agents status` is stored lifecycle state, not this served activity age; the two are different instruments and are never averaged, merged, or substituted for each other.
-- `crown:` liveness including `split`.
+- `crown:` liveness including `split`. When a member of this crown reads done or superseded, drop it in this session. Run `fno agents crown <own handle> --scope <each live member>`. No attended shell is needed, and the grantor stays as recorded.
+- `refusal_rate:` the machine declining, as a percent, over the trailing 200 tool calls in this session's own transcript - the cheapest available proxy for context degradation, no model introspection needed. A rise across two consecutive check-ins (not one noisy tick) prints `RISING (handoff signal)`: treat it as a reason to hand off, the same way a `blocked_child` or `attention:` line is. Reads `unmeasured` on a harness with no per-session transcript file (opencode) or when the transcript cannot be found.
+- `wake_ratio:` machine wakes to typed turns in this session's own transcript, read with the same provenance classifier `fno-agents intel` uses. Relay rows, loop wakeups, stop hooks and keepalives are wakes. Typed and unwitnessed turns are user. Over 3 to 1 prints `OVER 3 to 1` and journals an attention item. Treat it as a reason to shorten the reign. Fails on a harness with no per-session transcript file, the same posture as `refusal_rate`.
+- `subagent_tokens:` subagent token spend carried by task notifications, summed per task id: since the last beat, and the session total. With no previous beat it reads the session total twice.
 - `drain:` undelivered mail as one number.
-- `main ci:` one verdict token, never a count, when a merge decision needs it: reduced from `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and `gh api repos/<owner>/<repo>/commits/<sha>/status`, the REST reads [references/cli-commands.md](references/cli-commands.md) names - `red` when any check-run `conclusion` is `failure`, `timed_out`, `cancelled`, `action_required` or `startup_failure`, or the legacy status `state` is `failure` or `error`; `green` only when at least one check run exists, every run is `completed`, none is red, and the combined `state` is `success`; `pending` otherwise. An empty check-run set is `pending`, never green: no data is CI that has not started, and `check-runs` cannot see legacy statuses, so a failing status beside green runs is red. `total_count` and any per-conclusion tally are never compared: measured 09:11Z to 09:23Z on one push, a count-based reader woke three times on success counts 5, then 16, then 20, with zero failures and one identical verdict. A count moves on every finishing job; the verdict moves when the fleet's merge posture changes, which is the only thing this read exists to answer.
+- `main ci:` one verdict token, never a count, for the merge decision. `fno-agents` reduces the shared check reader. That reader holds every check-run page, the legacy commit statuses, and runs that failed before minting a job. A workflow file GitHub cannot parse completes as `failure` with zero jobs. It mints no check run, so the row names its workflow path. `red` on any `fail` or `cancel` row. `green` on a row set where all rows pass or skip. `pending` on every other row set, including no rows. A failed read is loud, never green: an unreadable status or runs listing names the fault instead of answering. The combined status left the reduce. GitHub answers `pending` for a commit with zero legacy statuses. No green on this repo ever survived it. `total_count` and any per-conclusion tally are never compared. Measured 09:11Z to 09:23Z on one push: a count-based reader woke three times. The success counts ran 5, then 16, then 20, with zero failures and one identical verdict. A count moves on every finishing job. When the fleet's merge posture changes, the verdict moves. That is the only thing this read exists to answer.
 - `escalations:` open and overdue escalation notes in this scope's escalations directory, filtered to the crown fold. Take the recommended option, or wait; irreversible always waits.
-- `control plane:` every arm failing past `[notify] arm_failing_after_s`, every hung verb (a process running far past three times its own `--timeout`), and every `flight:` holder whose pid is gone. A change that starts `attention:` is never a quiet beat. Trace each entry with `fno agents status` and tell the operator in the next report.
+- `control plane:` list overdue arms, hung verbs (over 3× their `--timeout`), and `flight:` holders with dead PIDs. A change that starts `attention:` is never a quiet beat. Trace each entry with `fno agents status`. Tell the user in the next report.
+ - `parked:` open PR parks, each with its reason, age and node, and the `fno-agents pr-park unpark <key>` remedy. When nothing is parked, the line reads `parked: none`.
 
-A failed reader prints `READER FAILED <name>: <reason>` on its own line and the beat continues, so one refused instrument can never blank a line or masquerade as a healthy value on another axis. The `coverage: N of 12 readings ok` line names every failed reader, and a beat with a failed reader can never read as a clean beat. Then a `vs last beat` line diffs the numeric keys against the previous canonical row for this scope, a `change:` line states what moved, and the ready-to-run `fno agents king faq add` command prints when this scope's FAQ store is empty or any reader failed.
+A failed reader prints `READER FAILED <name>: <reason>` on its own line, and the beat continues without it. One refused instrument can never blank a line or masquerade as a healthy value on another axis. The `coverage: N of M readings ok` line counts M as the readings this beat ran and N as the ones that answered. A `failed readers:` line names each one that failed, so a beat with a failed reader can never read as a clean beat. A `vs last beat` line diffs the numeric keys against the previous canonical row. A `change:` line states what moved. When this scope's FAQ store is empty or any reader failed, the ready-to-run `fno agents king faq add` command prints.
 
-Before the levers, the finish line: when `fno do pr status <n>` reads `ready` with no blockers, run `fno do pr merge <n>` yourself - standing law: the team merges green, covered PRs and the operator does not, and this crown is the team. Two guards keep the lever honest: resolve the row's project cwd and run both verbs from there, because a PR number is repository-local and both verbs derive their repo from the ambient cwd, so a portfolio crown can inspect and merge an unrelated same-numbered PR; and require the status payload's `merge_authority.mergeable_autonomously` to be true before merging, because `ready` covers CI and review while the durable grant travels separately, and a child dispatched `--no-merge` stays ready to read while its recorded grant says refused. The open-PR count and the free-claim rows printed above are that read's inputs, not report-only indicators.
+ Before the levers, the finish line. When `fno do pr status <n>` reads `ready: true`, run `fno do pr merge <n>` yourself. Standing law: the team merges green, covered PRs. The user does not. This crown is the team. `ready` IS the merge decision: the authorized-merge preview verdict, the same gate chain the merge verb runs. CI, review coverage, base staleness, the merge slot, and merge authority all fold into it. When it reads false, the payload's `merge_decision.blockers` names what holds. One guard keeps the lever honest: resolve the row's project cwd and run both verbs from there. A PR number is repository-local. Both verbs derive their repo from the ambient cwd, so a portfolio crown can merge an unrelated same-numbered PR. The open-PR count and the free-claim rows printed above are that read's inputs, not report-only indicators.
 
-Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog encounter <node> --evidence "what it cost"` to vote the node up, and `fno backlog update <node> --priority p1` when the evidence contradicts the priority it was filed at (p0 needs `--blocks-everything` and means the fleet is down), then put the node inside an active mission scope, because neither a vote nor a priority dispatches, and a crown over an epic arms that epic's mission by itself, so this lever is for rows no crown covers; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+Apply the first matching lever to each row, in this order:
+1. Mail the stalled worker.
+2. Run `fno backlog encounter <node> --evidence "what it cost"` to vote the node up. When evidence contradicts the filed priority, use `fno backlog update <node> --priority p1`. `p0` needs `--blocks-everything` and means the fleet is down.
+3. If no crown covers a row, start a new small epic. Do not grow a running epic. A vote or priority does not dispatch. See [A finding starts a new epic](#a-finding-starts-a-new-epic).
+4. If the row is the problem, run `fno backlog undefer` or `supersede`.
+5. Keep a blueprint subagent on the territory's top unplanned node. This designs work without a user request.
 
-Rank is not yours. It is the operator's pin, and `fno backlog rank` refuses an agent session. A king who wants a row run next says so with `--priority p0`, which is bounded, receipted, and visible to the operator as a split vote on `fno backlog demand`.
+For each `start` line, run `/fno:blueprint subagent <id>` in check-in order. Do not start nodes the check-in omits. Its list is the ceiling. A `skip` needs no action. The row records it. When a lever needs the user, run `fno inbox outstanding ask`.
+
+To pause or redirect a running worker, use `fno agents ask <name> "<instruction>"` (or mail). Never steer with `fno agents stop`: on claude it ends the session, and the worker reads Done.
+
+### A finding starts a new epic
+
+An epic stays small enough to finish. Its finish line is set at the start. So never parent new work into a running epic. A finding goes one of two ways. It starts a new small epic: `fno backlog idea "EPIC: <theme>" --type epic --difficulty <low|medium|high>`, then `fno backlog update <node> --parent <new-epic-id>`. The king that leads the old epic takes the new one with `fno agents crown <handle> --scope <old-epic-id> --scope <new-epic-id>`. A king runs that for an epic its own session created, naming every epic it holds. Any other epic needs an attended shell or a crown that contains both. Or the finding waits unparented for the lead's next epic. A crowned `fno backlog idea` with no `--parent` is linked into your epic, and its `rollup: crown-linked` receipt prints the undo. When the finding is new work, run it: `fno backlog update <node> --parent null`.
+
+Rank is not yours. It is the user's pin. `fno backlog rank` refuses agent sessions. To put a row next, set `--priority p0`. This is bounded and receipted. It appears as a split vote in `fno backlog demand`.
 
 Then read [the fleet FAQ](../../docs/fleet-faq.md) for one thing only: an entry whose `Graduates to:` line landed since your last check-in. Move it to Retired in a PR, naming the PR that closed it. Retirement normally rides the PR that closes the gap, so it needs no beat. This check is the backstop, for a gap somebody closed without reading that file.
 
@@ -114,7 +121,7 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
-Then read the tenure verdict with `fno agents king verdict` and print its first line: it judges the crown's bounds (iterations, respawns, compactions, block cap) and the inherited-scope delivery trend as one set, naming `converging`, `stalled`, `degraded`, or `unknown` (an absent bound is named absent, never satisfied). When the verdict word moved, say so in the next beat's `--change` sentence. On `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`: it records one deduplicated operator question naming the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor; the handoff is the operator's call.
+Read `fno agents king verdict` and print its first line and its `hygiene:` line. The `hygiene:` line is evidence about this session's own ordering, never a stop. The verdict combines crown bounds (iterations, respawns, compactions, block cap) with inherited-scope delivery. It names `converging`, `stalled`, `degraded`, or `unknown`. An absent bound is absent, never satisfied. If the verdict changes, say so in the next beat's `--change` sentence. When it says `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`. This records one deduplicated user question with the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor. The user decides the handoff.
 
 ## Recording a ruling
 
@@ -125,15 +132,19 @@ A crowned king answers the open questions in its scope, and escalates only what 
 - **Silence has a default.** Past the deadline the check-in names the default: take the recommended option and record it with `fno inbox decide`, or wait when the call is irreversible.
 - **When the superuser answers in chat, record it.** `fno inbox law set` for a law change, else `fno inbox decide <node> "<answer>" --authority crown --rationale "superuser in chat: <their words>"`, and set the note's `status`. A harness with a push notification tool also sends one that names the note.
 
-A crowned king is not an operator: the `operator` authority is refused on an agent session, and law stays superuser tier. The king's channels:
+A crowned king is not the superuser: the `operator` authority is refused on an agent session, and law stays superuser tier. The king's channels:
 
 - `fno backlog note <node> <text>` for a finding or a ruling against a row. It mails the row's live holder and the epic's king, so a ruling reaches the worker without a second call. When nobody bound to the row would be told, it exits 3 and writes nothing; read the refusal, then mail a reader by name or pass `--quiet`. `--quiet` writes the note and mails nobody. A ruling that CONDITIONS A MERGE needs more than a note: a note reaches the worker, but only the hold reaches the merge gate. Set it through the authorized-merge payload field: `printf '{"op":"hold-set","node":"<id>","reason":"<condition>","release_when":"<proof>","set_by":"<crown>"}' | fno-agents authorized-merge`; the worker or the crown lifts it with `printf '{"op":"hold-release","node":"<id>","evidence":"<proof>"}' | fno-agents authorized-merge`.
-- `fno inbox law set <subject> <decision> --rationale "<why>"` for a durable rule the OPERATOR asked for. It records a chat-attested row and can never supersede the operator's own law.
+- `fno inbox law set <subject> <decision> --rationale "<why>"` for a durable rule the user asked for. It records a chat-attested row and can never supersede the superuser's own law.
 - `fno agents king faq add --question "..." --answer "..." --specimen "<node or PR>, <date>" --exit "<the change that retires this>"` for a durable answer a successor king will ask for. It refuses without `--exit`, the change that stops the answer being needed. The three channels divide this way: a FAQ entry answers a question a successor will ask, a note records a finding against one row, and a law records an operator ruling.
+
+Read a ruling back with `fno backlog decisions <subject>` or `fno inbox decisions <subject> --lane law`, newest first. A subject matches exactly, so never mint a near-synonym. Every ruling is machine-local project policy. A rule that a stranger cloning the repository must obey does not reach them from here. Land it in the code, a doc or a gate, in a PR. See [decision-record](../../docs/architecture/decision-record.md).
 
 ## The one dispatch exception
 
-This skill does not dispatch. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
+The tenured reign does not dispatch. A `--once` pass dispatches only through its kickoff and its court, as [the one-wave pass](references/once.md) says. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
+
+Before a crowned king launches a blueprint on a node, write its confirmed scope and known files or verbs into the node: `fno backlog update <node> --dispatch-brief "<scope; known files and verbs>"`. The brief is a starting point, not a fence, and never lists what to ignore. The blueprint prompt remains `$fno:blueprint <node>`; the brief travels on the node so every launcher gets the same scope.
 
 `fno doctor event emit -t reign_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 
@@ -142,18 +153,18 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board exits `NoWork` and the loop re-enters on the next beat. `NoProgress` after three unshrinking fires escalates automatically and the session PARKS; the answer wakes it through the wake arm. Do not fight the hook, and do not `/goal clear` on NoProgress.
+Exit is blocked while actionable rows exist. That is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`. The next beat or mail wakes the reign, and the daemon's settle mail is mail. On Codex, a quiet park pauses the verified provider goal without clearing or replacing its objective. The wake arm resumes it only after a positive provider receipt. `NoProgress` after three unshrinking fires still escalates automatically and parks the session. The answer wakes it through the wake arm. Do not fight the hook or `/goal clear` on quiet or `NoProgress`.
 
 ## The three halts
 
-Three halts, three scopes. `fno agents incident stop --reason "<why>"` arms the fleet breaker: from the next tick, new spawns, new dispatch, and `fno doctor test` admissions refuse fleet-wide until `fno agents incident clear --reason "<why>"` reopens admission. A suite started outside that admission path, a hand-run `pytest`, is not gated. It kills nothing that is already running, and mail stays open so the stop can be announced; `fno agents incident status` prints the state and its generation. `fno agents king cancel --scope <scope>` cancels one scope's walk. `fno agents king done` ends one crown. Arming the fleet breaker is outward-facing, and no standing law grants an agent that authority: a king names the evidence and escalates, and arms only on operator order unless a later law grants it.
+Three halts have three scopes. Run `fno agents incident stop --reason "<why>"` to arm the fleet breaker. From the next tick, fleet admission refuses new spawns, dispatches, and `fno doctor test` runs. Keep admission closed until `fno agents incident clear --reason "<why>"` reopens it. A hand-run `pytest` bypasses admission and is not gated. This does not kill running work. Mail remains open so the stop can be announced. `fno agents incident status` prints the state and generation. `fno agents king cancel --scope <scope>` ends one scope's walk. `fno agents king done` ends one crown. Arming the fleet breaker affects others. No standing law grants this authority to an agent. The king names evidence and escalates. Arm only on user order unless a later law grants the authority.
 
 ## Abdicate
 
-`fno agents king done` on operator order. With `--once`: until the one-wave fold lands, print `for a one-wave pass run /fno:king-for-a-day <scope>` and stop.
+`fno agents king done` on user order. With `--once`, `fno agents king done` is the last act of pass step 5 or of the court's wave boundary.
 
-The minion contract, court operations, and the CLI command map are in [references/](references/): [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md).
+The one-wave pass, the crown model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md).
 
 ## Known Limitations and Deferred Work
 
-- A codex reign has no scheduled beat, `--once` defers to king-for-a-day, and the court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).
+- A Codex reign has no native cron or Monitor beat; its provider goal and Footnote Stop receipts are read independently, and the external wake arm supplies cadence. A `--once` pass does not supervise the workers it spawns. The court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).

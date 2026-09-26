@@ -18,6 +18,28 @@ import fno.doctor_cli  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _reset_project_resolve_cache():
+    """Clear the project-name resolver's cache before and after every test.
+
+    ``fno.projects.resolve`` caches ``~/.fno/config.toml`` in a module-level
+    dict on first use and never invalidates it. Several tests point
+    ``SETTINGS_PATH`` at a tmp fixture and call ``_clear_cache()`` before
+    reading, but not after, so the fixture's project map (e.g. ``etl`` ->
+    some canonical name) survives into whatever test runs next in the same
+    xdist worker. That flaked
+    ``test_project_scope_compiles_to_the_project_union`` in smoke-pytest
+    shard 8: a leaked ``etl`` alias from an unrelated test made a raw
+    ``etl`` project no longer match its own canonicalization. Autouse so a
+    future test with the same shape does not need to remember this itself.
+    """
+    from fno.projects import resolve as proj_resolve
+
+    proj_resolve._clear_cache()
+    yield
+    proj_resolve._clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _quiet_gh_budget(monkeypatch):
     """Keep every test off the real fleet GitHub request ledger.
 
@@ -39,7 +61,7 @@ def _quiet_gh_budget(monkeypatch):
 def _sandbox_decision_index(tmp_path, monkeypatch):
     """Keep the machine-wide decision index out of the developer's ~/.fno.
 
-    ``record_decision`` writes to ``paths.decisions_jsonl()`` on every call, and
+    ``record_decision`` writes to ``fno.decide._decisions_index_path()`` on every call, and
     that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
     so without this every test that records a decision appends to the real
     index and reads back another test's rows. Autouse rather than opt-in
@@ -47,7 +69,7 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     ``fno outstanding clear --answer``, which is not where anyone looks for it.
     """
     sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: sandbox)
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +169,10 @@ _SERIAL_TEST_SUFFIXES = frozenset(
         (
             "tests/agents/test_codex_signal_handling.py::"
             "test_create_sigint_mid_stream_propagates_and_releases_child"
+        ),
+        (
+            "tests/agents/test_spawn_pane.py::"
+            "test_late_codex_identity_composes_across_every_peer_surface"
         ),
     }
 )
@@ -260,6 +286,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.xdist_group(name="serial"))
         if keeper_absent and nodeid.startswith(_NEEDS_STORE_KEEPER):
             item.add_marker(skip_no_keeper)
+        if "native_backlog_door" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.dev_build)
     spec = os.environ.get("FNO_PYTEST_SHARD", "").strip()
     if spec:
         items[:] = [
@@ -355,9 +383,6 @@ def _reap_session_processes(tmp_path_factory):
 
     yield
 
-    from fno.graph.store import reap_spawned_keepers
-
-    survivors = reap_spawned_keepers(timeout=15.0)
     # This session's own pid, not the default: a leak still parented by THIS
     # worker has a readable cwd only when the worker is the named reaper, and
     # a worker-parented child is exactly the leak that never reaches ppid 1.
@@ -375,10 +400,8 @@ def _reap_session_processes(tmp_path_factory):
     while census_rooted([str(basetemp)]) and time.monotonic() < grace_end:
         time.sleep(0.5)
     rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
-    assert not survivors and not rooted, (
-        f"{len(survivors)} store keeper(s) outlived the test session "
-        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "
-        f"zero. {len(rooted)} process tree(s) stayed rooted in this "
+    assert not rooted, (
+        f"{len(rooted)} process tree(s) stayed rooted in this "
         f"session's tmp tree: "
         + "; ".join(
             f"pid {r['pid']} at {r['cwd']} "
@@ -387,25 +410,6 @@ def _reap_session_processes(tmp_path_factory):
         )
     )
 
-
-@pytest.fixture(autouse=True)
-def _drain_exited_keepers():
-    """Reap exited store keepers between tests, not only at session end.
-
-    The session reaper above runs ONCE, at teardown, and an exited child stays
-    in the process table as a zombie until someone collects its status - so
-    every keeper that self-exits mid-run holds a table slot under its xdist
-    worker pid until the whole session ends. Measured 2026-09-03: ~52 zombie
-    keepers per minute under four workers, 549 zombies at 31% of the process
-    table, with two suites running. Draining around every test bounds the
-    corpse window to one test; the session reaper above stays as the SIGTERM
-    backstop for keepers still LIVE at teardown, and its assert stays.
-    """
-    from fno.graph.store import drain_exited_keepers
-
-    drain_exited_keepers()
-    yield
-    drain_exited_keepers()
 
 @pytest.fixture(autouse=True)
 def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
@@ -425,8 +429,8 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     Two layers, because seams differ. One guarded ``Popen`` subclass is set
     on the ``subprocess`` module: ``subprocess.run`` and ``check_output``
     read ``Popen`` from that module global at call time, so one patch covers
-    them plus every direct ``Popen(...)`` call (the bare calls in ``agy``,
-    ``pi`` and ``_acp`` included). The three harness aliases that captured
+    them plus every direct ``Popen(...)`` call (the bare calls in ``agy`` and
+    ``pi`` included). The three harness aliases that captured
     the original class at import time (``claude``, ``codex``,
     ``cursor_agent``) are repointed to the guarded class. A subclass keeps
     ``isinstance`` checks and ``Popen[bytes]`` working.
@@ -476,7 +480,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     # cursor_agent (module constant) / pi.rpc_argv / grok.acp_argv / kimi
     # (inline argv, no constant to import).
     provider_bins = {
-        "claude", "codex", "pi", "grok", "kimi",
+        "claude", "codex", "pi", "grok", "kimi", "dsh",
         _agy.AGY_BINARY, _cursor.CURSOR_AGENT_BINARY,
     }
 
@@ -697,7 +701,7 @@ def _hermetic_authorized_merge(monkeypatch):
 # ---------------------------------------------------------------------------
 # Applied at MODULE LOAD, not as a fixture. The fno.graph package freezes its
 # path constants at IMPORT time - store.py does ``from _constants import
-# GRAPH_JSON`` at module top and ``read_graph(path: Path = GRAPH_JSON)`` as a
+# GRAPH_JSON`` at module top and ``read_graph_strict(path: Path = GRAPH_JSON)`` as a
 # default arg - so the graph/ledger paths bind to ``~/.fno`` before any per-test
 # fixture can redirect them. Under cross-test contamination the graph store's
 # fail-open (``Path.home() / ".fno"``) then leaked test nodes into the
@@ -820,7 +824,9 @@ def _reset_config_state() -> None:
 # The per-test clearer registry is retired: every cached state reader keys on
 # its declared root (test_cached_state_surface enforces a root parameter or a
 # recorded reason), so there is nothing left to clear per test.
-HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = ()
+HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = (
+    ("fno.claims.session_pid", "_session_identity"),
+)
 
 
 MINIMAL_TARGET_STATE = """\
@@ -906,7 +912,9 @@ def native_backlog_door(monkeypatch):
     may be any installed copy. `$FNO_AGENTS_BIN` outranks all of it, so the
     fixture pins the dev build - and skips when this checkout has none (the
     smoke CI shard deletes it on purpose, the same contract
-    ``_store_keeper_absent`` implements for the keeper binary).
+    ``_store_keeper_absent`` implements for the keeper binary). The smoke
+    pytest legs skip these tests by design; tests/test-dev-build-suites.sh
+    runs them after the build step.
     """
     from fno.rust_binary import find_dev_binary
 
@@ -914,6 +922,56 @@ def native_backlog_door(monkeypatch):
     if binary is None:
         pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
+@pytest.fixture(autouse=True)
+def _closure_leg_hermetic(monkeypatch):
+    """Hermetic default for the closure-line forwarders.
+
+    `fno.pr.closure.parse_closure_trailer`/`render_closure_trailer` are thin
+    forwarders to the Rust leg (`fno-agents pr-closure-parse|render`, through
+    `fno.rust_binary.verb_call`). In the test environment that resolver can
+    find an installed binary without the new verb, or none at all, so the
+    default answers from a test-local copy of the shared-corpus grammar;
+    tests that pin the forwarder WIRING re-stub `fno.pr.closure.verb_call`
+    themselves (closure.py binds the transport at module level), and the
+    corpus test runs the real dev binary when one exists (skip otherwise,
+    the same contract as `native_backlog_door`).
+    """
+    from fno.graph._constants import is_wellformed_node_id
+
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        if verb == "pr-closure-render":
+            ids = [
+                t
+                for t in dict.fromkeys(payload.get("ids") or [])
+                if is_wellformed_node_id(t)
+            ]
+            return {"line": f"Fixes {' '.join(ids)}" if ids else ""}
+
+        def _line_ids(line):
+            stripped = line.strip()
+            for kw in ("fixes", "backlog-closure"):
+                if stripped.lower().startswith(kw):
+                    rest = stripped[len(kw):]
+                    if rest.startswith(":"):
+                        rest = rest[1:]
+                    if rest and not rest[0].isspace():
+                        return None  # glued word, not the keyword
+                    toks = [t for t in rest.replace(",", " ").split() if t]
+                    if not toks or not all(is_wellformed_node_id(t) for t in toks):
+                        return None  # one bad token: the line is prose
+                    return list(dict.fromkeys(toks))
+            return None
+
+        best = None
+        for line in (payload.get("body") or "").splitlines():
+            ids = _line_ids(line)
+            if ids is not None:
+                best = ids
+        return {"ids": best or []}
+
+    monkeypatch.setattr("fno.pr.closure.verb_call", _fake_verb_call)
 
 
 @pytest.fixture(autouse=True)
@@ -957,6 +1015,108 @@ def _no_live_evidence_gate(monkeypatch):
     monkeypatch.setattr(decide, "_evidence_gate", _passthrough)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_resume_pin(monkeypatch):
+    """Hermetic default for the resume-pin transport.
+
+    dispatch_spawn's unpinned-claude-resume seam asks the Rust resume-pin
+    owner through `fork_lineage.spawn_axes_call`, and in a dev environment
+    that resolver can find a real installed binary whose answer depends on
+    the machine's registry and transcripts. The default answers from the
+    payload's own row (requested_model, else model; routed answers ride
+    route_model) and refuses a rowless unpinned resume; tests that need a
+    different answer re-stub `fork_lineage.spawn_axes_call` and win.
+    """
+    import fno.agents.fork_lineage as fork_lineage
+
+    real = fork_lineage.spawn_axes_call
+
+    def _answer(payload):
+        pin = payload.get("resume_pin")
+        if pin is None:
+            return real(payload)
+        row = pin.get("row") or {}
+        model = row.get("requested_model") or row.get("model")
+        if model is None:
+            # A routed resume never refuses; the route owns the argv model.
+            if pin.get("routed"):
+                return {
+                    "model": None,
+                    "effort": row.get("effort"),
+                    "route_model": None,
+                    "source": "registry",
+                }
+            return {"refusal": "stubbed: no model on the row"}
+        if pin.get("routed"):
+            return {
+                "model": None,
+                "effort": row.get("effort"),
+                "route_model": model,
+                "source": "registry",
+            }
+        return {
+            "model": model,
+            "effort": row.get("effort"),
+            "route_model": None,
+            "source": "registry",
+        }
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _answer)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_reap_receipt(monkeypatch):
+    """Hermetic default for the removal-receipt transport.
+
+    The registry choke point stages a removal receipt by asking the Rust
+    receipt builder through `fno.agents.spawn_axes_client.spawn_axes_call`,
+    and in a dev environment that resolver can find a real installed binary.
+    The default answers from the payload's own row and refuses a row with no
+    harness session identity; tests that need a different answer re-stub
+    `fno.agents.spawn_axes_client.spawn_axes_call` and win.
+    """
+    from fno.agents.spawn_axes_client import spawn_axes_call as real_call
+
+    def _answer(payload):
+        ask = payload.get("reap_receipt")
+        if ask is None:
+            return real_call(payload)
+        row = ask.get("row") or {}
+        harness = (row.get("harness") or "").strip()
+        sid = (row.get("harness_session_id") or "").strip()
+        if not harness or not sid:
+            return {"refused": "missing harness session identity"}
+        return {
+            "file": f"{harness}-{sid}.json",
+            "receipt": {
+                "row_name": row.get("name"),
+                "harness": harness,
+                "harness_session_id": sid,
+                "resume": f"claude --resume {sid}",
+                "removed_by": ask.get("removed_by"),
+            },
+        }
+
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _answer)
+
+
+@pytest.fixture
+def loop_admission_ready(monkeypatch):
+    """Stub native readiness for CLI tests focused on other spawn behavior."""
+    import fno.rust_binary as rust_binary
+
+    real_call = rust_binary.call_binary_json
+
+    def ready(verb, args, *call_args, **call_kwargs):
+        if verb == "loop" and args and args[0] == "readiness":
+            return None, {"ready": True}
+        return real_call(verb, args, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(rust_binary, "call_binary_json", ready)
+
+
 def checkout_fno_agents_binary():
     """This checkout's own fno-agents binary: $FNO_AGENTS_BIN, else the cargo
     dev build under crates/fno-agents/target. resolve_binary() would prefer a
@@ -973,3 +1133,68 @@ def checkout_fno_agents_binary():
         if p.exists():
             return p
     return None
+
+
+@pytest.fixture(autouse=True)
+def _door_binary_from_this_checkout(monkeypatch):
+    """Door-routed verbs shell out to a resolved ``fno-agents`` binary, and
+    on a dev checkout the installed one lags the worktree source: a store
+    verb then refuses against rows only the worktree build can see. Pin the
+    door to this checkout's build when one exists; an operator override
+    through $FNO_AGENTS_BIN always wins."""
+    import os
+
+    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
+    if pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK):
+        return
+    root = Path(__file__).resolve().parents[2]
+    for profile in ("debug", "release"):
+        candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+            return
+    # No local build: the door silently resolved the installed binary and
+    # store-door tests fail with refusals that look like product bugs.
+    # Measured 2026-09-18: a swept target dir cost a store suite an hour of
+    # false reds. Say so, once, at the point of the decision.
+    global _door_binary_pin_warned
+    if not _door_binary_pin_warned:
+        _door_binary_pin_warned = True
+        print(
+            "WARNING: no fno-agents binary under crates/fno-agents/target; "
+            "door-routed tests run the installed binary and may read stale "
+            "store rows. Build with: cargo build --bin fno-agents",
+            file=__import__("sys").stderr,
+        )
+
+
+_door_binary_pin_warned = False
+
+
+_FACADE_NAMES = (
+    "GRAPH_JSON",
+    "GRAPH_MD",
+    "GRAPH_HTML",
+    "GRAPH_ARCHIVE_JSON",
+    "LEDGER_JSON",
+    "BRIEFS_DIR",
+)
+
+
+@pytest.fixture(autouse=True)
+def _unbake_constants_facade():
+    """Undo the baked-facade trap fno.graph._constants documents.
+
+    ``monkeypatch.setattr(gc, "GRAPH_JSON", g)`` reads the current value
+    through the module ``__getattr__`` (which RESOLVES a real path) and
+    restores that resolved path as a concrete attribute on teardown, so
+    every later test in the process reads a dead tmp graph. The module doc
+    begs for ``setitem(vars(module), ...)``; dozens of sites use setattr
+    anyway. Cleanup runs at SETUP: the previous test's monkeypatch undo is
+    the last writer by then, so the delete cannot race it.
+    """
+    import fno.graph._constants as gc
+
+    for name in _FACADE_NAMES:
+        if name in vars(gc):
+            delattr(gc, name)

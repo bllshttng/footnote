@@ -323,6 +323,8 @@ _salvage_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$toplevel" ]; then
   _fno_salvage_script="$toplevel/hooks/'"$_salvage_marker"'"
   [ -x "$_fno_salvage_script" ] && "$_fno_salvage_script"
+  _fno_corrections_hook="$toplevel/hooks/corrections-git-postcommit.sh"
+  [ -x "$_fno_corrections_hook" ] && "$_fno_corrections_hook"
 fi'
 _common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || _common_hooks_dir=""
 if [[ -n "$_common_hooks_dir" ]]; then
@@ -376,6 +378,80 @@ if [[ -n "$_common_hooks_dir" ]]; then
   fi
 else
   echo "setup-worktree: could not resolve git-common-dir; salvage-ref hook not installed" >&2
+fi
+
+# Session-URL strip commit-msg hook: strips the harness's `Claude-Session:`
+# trailer (and bare claude.ai/code session URLs) from the message before the
+# commit exists - scripts/ci/check-no-session-urls.sh only catches the leak
+# after the commit is pushed, where a force-push does not retract it. Same
+# install contract as the salvage-ref hook above: one shared commit-msg
+# dispatcher in the git-common-dir hooks directory, created or prepended to
+# (never appended after a possible bare `exit`), idempotent across every
+# worktree's setup run, resolving the COMMITTING worktree's own checked-out
+# copy of hooks/strip-claude-session.sh at execution time. Any pre-existing
+# commit-msg hook keeps running: our body falls through, then the original
+# content follows (we are prepended ahead of its shebang-preserved body).
+_strip_marker="strip-claude-session.sh"
+_strip_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$toplevel" ]; then
+  _fno_strip_hook="$toplevel/hooks/'"$_strip_marker"'"
+  # if/fi, not the `[ -x ] && cmd` idiom: on an older worktree whose checkout
+  # predates hooks/strip-claude-session.sh the guard is false, and that
+  # idiom then leaves the shim a nonzero exit - fatal for commit-msg, where
+  # git aborts the commit. The if form exits 0 on the false branch.
+  if [ -x "$_fno_strip_hook" ]; then
+    "$_fno_strip_hook" "$@"
+  fi
+fi'
+_strip_common_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || _strip_common_dir=""
+if [[ -n "$_strip_common_dir" ]]; then
+  [[ "$_strip_common_dir" = /* ]] || _strip_common_dir="$WORKTREE/$_strip_common_dir"
+  _strip_hooks_dir="$_strip_common_dir/hooks"
+  mkdir -p "$_strip_hooks_dir" 2>/dev/null || true
+  _commit_msg="$_strip_hooks_dir/commit-msg"
+  if [[ ! -e "$_commit_msg" ]]; then
+    {
+      echo "#!/usr/bin/env bash"
+      echo "# Installed by scripts/setup/setup-worktree.sh. Dispatches to the"
+      echo "# COMMITTING worktree's own checked-out session-URL strip hook -"
+      echo "# see hooks/strip-claude-session.sh for the real logic."
+      printf '%s\n' "$_strip_dispatcher_body"
+    } > "$_commit_msg"
+    chmod +x "$_commit_msg"
+    echo "setup-worktree: installed shared commit-msg session-strip hook at $_commit_msg"
+  elif ! grep -q "$_strip_marker" "$_commit_msg" 2>/dev/null; then
+    # PREPEND, never append - same bare-`exit` reasoning as the salvage-ref
+    # block above: appended code after an existing hook's own `exit` is
+    # unreachable. Our body never exits early, so the original hook's logic
+    # still runs right after ours.
+    _tmp_commit_msg="$(mktemp "${_commit_msg}.XXXXXX" 2>/dev/null)" || _tmp_commit_msg=""
+    if [[ -n "$_tmp_commit_msg" ]]; then
+      _strip_first_line="$(head -n 1 "$_commit_msg" 2>/dev/null)"
+      if [[ "$_strip_first_line" == "#!"* ]]; then
+        {
+          printf '%s\n' "$_strip_first_line"
+          echo "# Prepended by scripts/setup/setup-worktree.sh."
+          printf '%s\n' "$_strip_dispatcher_body"
+          echo ""
+          tail -n +2 "$_commit_msg"
+        } > "$_tmp_commit_msg"
+      else
+        {
+          echo "# Prepended by scripts/setup/setup-worktree.sh."
+          printf '%s\n' "$_strip_dispatcher_body"
+          echo ""
+          cat "$_commit_msg"
+        } > "$_tmp_commit_msg"
+      fi
+      mv -f "$_tmp_commit_msg" "$_commit_msg"
+      chmod +x "$_commit_msg"
+      echo "setup-worktree: prepended session-strip call to existing commit-msg hook at $_commit_msg"
+    else
+      echo "setup-worktree: could not prepend session-strip call (mktemp failed)" >&2
+    fi
+  fi
+else
+  echo "setup-worktree: could not resolve git-common-dir; session-strip hook not installed" >&2
 fi
 
 # Salvage remote mirror: ON by default for every fno worktree. The

@@ -22,18 +22,24 @@ from fno.backlog import advance
 
 
 def _node_row(
-    node_id: str, difficulty: str | None = "low", verb: str | None = None
+    node_id: str,
+    difficulty: str | None = "low",
+    verb: str | None = None,
+    model: str | None = "glm-5.3-flash[1m]",
 ) -> dict:
     """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
     was deleted. An out-of-family ``verb`` rides the row so the lifecycle
-    table abstains and the explicit verb wins, as the deleted None path did."""
+    table abstains and the explicit verb wins, as the deleted None path did.
+    The default model pin clears the x-8fb2 seam gate; a pin-less node is
+    ``model=None`` and the gate's subject."""
     return {
         "id": node_id,
         "dispatch_verb": verb or "",
         "difficulty": difficulty,
+        "model": model,
     }
 
 _REAL_SUBPROCESS_RUN = advance.subprocess.run
@@ -64,6 +70,9 @@ def _capture(monkeypatch, settings):
         # real binary and keep it out of the capture, which pins the SPAWN argv.
         parts = [str(part) for part in cmd]
         if {"name-mint", "name-codes", "name-parse"} & set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        # Native event commits are infrastructure too: ride the real binary.
+        if {"doctor", "event"} <= set(parts):
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         captured["cmd"] = cmd
         # A full session id, not a head-8: a bare 8-hex aimed at codex is a
@@ -180,7 +189,9 @@ def _resolve(monkeypatch, source):
     # the dispatcher refuses a node with no dict; the env seam under test
     # still has to clear that gate, so hand it minimal verb evidence.
     return resolve_node_spawn(
-        "x-0000", None, "slug", node={"dispatch_verb": "target"}, verb="target",
+        "x-0000", None, "slug",
+        node={"dispatch_verb": "target", "model": "glm-5.3-flash[1m]"},
+        verb="target",
         source=source,
     )
 
@@ -214,16 +225,9 @@ def test_human_and_blueprint_sources_keep_the_ambient_edge(monkeypatch):
 
 
 def _rows(events_path: Path, kind: str) -> list[dict]:
-    if not events_path.exists():
-        return []
-    out = []
-    for line in events_path.read_text().splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("type") == kind:
-            out.append(row)
-    return out
+    from tests._event_rows import event_rows
+
+    return [row for row in event_rows(events_path) if row.get("type") == kind]
 
 
 def test_spawn_emits_one_dispatch_spawned_row(monkeypatch, tmp_path):
@@ -357,7 +361,6 @@ def test_grid_lane_for_pinned_model_takes_its_declared_row(monkeypatch):
     from fno import route_resolve as _rr
 
     monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
-    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
     seen: dict = {}
 
     def fake_resolve_slot(profile_verb, node, capacity, *, inventory=None,
@@ -385,7 +388,6 @@ def test_grid_lane_for_pinned_model_without_a_row_declines(monkeypatch):
     from fno import route_resolve as _rr
 
     monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
-    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
 
     def fake_resolve_slot(*a, **kw):
         return (
@@ -482,7 +484,7 @@ def test_blueprint_dispatch_retasks_a_finished_planner_and_spawns_nothing(
     )
     ev = tmp_path / "events.jsonl"
     got = advance._spawn_worker(
-        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"),
+        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev, node=_node_row("x-bbbb", difficulty="high"),
     )
     assert got == "1a2b3c4d-1111-2222-3333-444455556666"
     assert "cmd" not in captured, "a reuse dispatch must not spawn"
@@ -514,7 +516,7 @@ def test_retask_refused_before_clear_falls_through_to_one_cold_spawn(
         },
     )
     ev = tmp_path / "events.jsonl"
-    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"))
+    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="high"))
     assert "cmd" in captured, "the refusal falls through to one cold spawn"
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert data["retask_fallthrough"] == "ac-bp-x-aaaa-slug: thread_view_unavailable"
@@ -548,7 +550,7 @@ def test_retask_refused_after_clear_reaps_and_falls_through_to_one_cold_spawn(
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
         "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-        node=_node_row("x-bbbb", difficulty="medium"),
+        node=_node_row("x-bbbb", difficulty="high"),
     )
     assert reap_calls == [(candidate.name, str(tmp_path))]
     assert "cmd" in captured
@@ -581,7 +583,7 @@ def test_retask_refused_after_clear_reap_failure_raises_and_spawns_nothing(
     with pytest.raises(advance.SpawnError) as exc:
         advance._spawn_worker(
             "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-            node=_node_row("x-bbbb", difficulty="medium"),
+            node=_node_row("x-bbbb", difficulty="high"),
         )
     message = str(exc.value)
     assert "ac-bp-x-aaaa-slug" in message
@@ -621,7 +623,7 @@ def test_retask_refused_after_clear_reaps_renamed_registry_row(monkeypatch, tmp_
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
         "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
-        node=_node_row("x-bbbb", difficulty="medium"),
+        node=_node_row("x-bbbb", difficulty="high"),
     )
     assert reap_calls == [("ac-bp-x-bbbb-renamed", str(tmp_path))]
     assert "cmd" in captured
@@ -641,7 +643,7 @@ def test_guard_refusal_skips_as_already_running_without_retask(monkeypatch, tmp_
         verdict="already-running",
     )
     with pytest.raises(advance.SpawnAlreadyRunning) as exc:
-        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", node=_node_row("x-bbbb", difficulty="medium"))
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", node=_node_row("x-bbbb", difficulty="high"))
     assert "reservation-held" in str(exc.value)
     assert not seen["retask_calls"]
     assert "cmd" not in captured
@@ -663,3 +665,55 @@ def test_target_dispatch_never_reads_the_registry_for_reuse(monkeypatch, tmp_pat
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert "retask" not in data
     assert "retask_fallthrough" not in data
+
+
+# --- the model pin: a dropped pin refuses, never defaults (x-8fb2) -----------
+
+
+def _unreadable_grid(monkeypatch):
+    """The unreadable decline in the exact terminal format the real
+    _grid_lane_for emits when the capacity read raises (advance.py)."""
+    monkeypatch.setattr(
+        advance,
+        "_grid_lane_for",
+        lambda node, **kw: (None, None, None, None, "grid=unreadable (capacity read down)"),
+    )
+
+
+def test_unreadable_capacity_refuses_the_unpinned_dispatch(monkeypatch):
+    """The leak x-8fb2 prices: an unreadable capacity read used to spawn on
+    the account default (opus here). The seam refuses instead, naming why."""
+    captured = _capture(monkeypatch, _settings())
+    _unreadable_grid(monkeypatch)
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker(
+            "x-0000", None, "slug", node=_node_row("x-0000", model=None)
+        )
+    assert "no model survives resolution" in str(exc.value)
+    assert "grid=unreadable" in str(exc.value)
+    assert "cmd" not in captured, "refused before spawning"
+
+
+def test_a_raw_node_pin_survives_an_unreadable_grid(monkeypatch):
+    """A node whose pin resolves keeps dispatching even when the grid is
+    unreadable: the refusal is for DROPPED pins, not for all dispatches."""
+    captured = _capture(monkeypatch, _settings())
+    _unreadable_grid(monkeypatch)
+    advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
+    assert _flag(captured["cmd"], "--model") == "glm-5.3-flash[1m]"
+
+
+def test_a_declined_lane_refuses_and_names_the_terminal(monkeypatch):
+    """The dispatch_lanes shape: the door resolved the grid, got a terminal
+    refusal, and used to pass it as a receipt string only. Same refusal."""
+    captured = _capture(monkeypatch, _settings())
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker(
+            "x-0000", None, "slug",
+            harness="claude",
+            grid_reason="grid=no lane accepts the pinned provider",
+            node=_node_row("x-0000", model=None),
+        )
+    assert "no model survives resolution" in str(exc.value)
+    assert "grid=no lane accepts the pinned provider" in str(exc.value)
+    assert "cmd" not in captured, "refused before spawning"

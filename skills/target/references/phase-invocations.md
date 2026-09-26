@@ -32,10 +32,10 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | Phase | Condition | Skill |
 |-------|-----------|-------|
 | 1. Plan | idea OR no plan bound yet | `fno:plan` |
-| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`) |
+| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`); load `fno:test-audit` authoring mode beside `fno:tdd` for the execute phase |
 | 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
-| 3. Review | Before `/fno:pr create`, on the final local HEAD | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): bare `fno do target request-self-review` is the default pre-push native review; `--pr <n>` is the post-push form for a round requested after the PR exists |
+| 3. Review | Before `/fno:pr create`, on the final local HEAD | `/fno:review <size> --comment` (Codex `$fno:review`) runs in this session; see [phase-bodies.md](phase-bodies.md). Size: medium under 300 changed lines, high above, xhigh for risky surfaces. Findings hold on branch and HEAD and post when the PR opens |
 | 4. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |
 | 4.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
 | 5. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |
@@ -73,7 +73,7 @@ If the linear plugin is not installed, skip all Linear sync steps.
 
 ## Validate Phase (external-truth gate)
 
-`validate` is a bash command (from `domain_phases.validate`), not a skill invocation. Run it, and on a non-zero exit loop into the validation-failure-recovery flow ([failure-recovery.md](failure-recovery.md)) to either rollback to the pre-execute checkpoint or fix forward. The local run is the work - it is how failures get caught and fixed BEFORE pushing.
+`validate` is a bash command (from `domain_phases.validate`), not a skill invocation. Validate runs the tests that directly cover the files this run changed (`fno doctor test <changed test files>`, or the narrow rust `--lib <module>::` form), never the whole suite. CI runs every suite on every PR, and a missed downstream break is CI's job. When a whole-suite local run is truly needed, start it as a background task: it queues on `test:suite` and the turn never blocks. Run validate, and on a non-zero exit loop into the validation-failure-recovery flow ([failure-recovery.md](failure-recovery.md)) to either rollback to the pre-execute checkpoint or fix forward. The local run is the work - it is how failures get caught and fixed BEFORE pushing.
 
 The `output_validated` GATE, however, reads external truth (control-plane collapse step 1): the stop hook checks `gh pr checks` on the recorded PR at promise time. There is no validate artifact, no provenance requirement, and no verifier to satisfy - CI green on the PR is the gate; CI red or pending blocks the promise regardless of any state boolean. Do not write `.fno/artifacts/validate-*.md`; nothing reads it.
 

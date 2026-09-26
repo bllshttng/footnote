@@ -121,19 +121,19 @@ err="$(cat "$TMP/err")"
 ok   "code-payload exit 0" "$rc" "0"
 has  "code-payload launched" "$out" "result=launched"
 # cwd value is double-quoted in the receipt (a path with spaces must not split fields).
-has  "code-payload cwd in receipt" "$out" "cwd=\"$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo\""
-has  "code-payload worktree note" "$err" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: worktree dir not created"; }
+has  "code-payload cwd in receipt" "$out" "cwd=\"$TMP/conductor/workspaces/myrepo/x-9c4c\""
+has  "code-payload worktree note" "$err" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-9c4c"
+[[ -d "$TMP/conductor/workspaces/myrepo/x-9c4c" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: worktree dir not created"; }
 # branch must be the fresh feature branch, not the protected default.
-br="$(git -C "$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo" branch --show-current)"
-ok   "code-payload on feature branch" "$br" "feature/spawn-x-9c4c-demo"
+br="$(git -C "$TMP/conductor/workspaces/myrepo/x-9c4c" branch --show-current)"
+ok   "code-payload on feature branch" "$br" "feature/x-9c4c"
 
 # 2. re-spawn of the same node -> reuse (ensure is idempotent), no second
 #    worktree. spawn.sh emits the same `auto-worktree: <path>` note either way;
 #    the reuse guarantee is structural (one worktree, not two).
 out2="$(run_spawn "/fix no-merge x-9c4c")"; err2="$(cat "$TMP/err")"
-has  "re-spawn note" "$err2" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"
-cnt="$(git -C "$REPO" worktree list | grep -c "spawn-x-9c4c-demo")"
+has  "re-spawn note" "$err2" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-9c4c"
+cnt="$(git -C "$REPO" worktree list | grep -c "x-9c4c")"
 ok   "re-spawn single worktree" "$cnt" "1"
 
 # 3. /think (non-code passthrough) payload -> NO worktree, launches in repo root.
@@ -147,7 +147,7 @@ no   "think no cwd field" "$out3" "cwd="
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-think-demo" ]] && { FAIL=$((FAIL+1)); echo "FAIL: /think got a worktree"; } || PASS=$((PASS+1))
 
 # 4. already a linked worktree -> not re-isolated (launch in place, no nesting).
-WT="$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"  # the worktree from test 1
+WT="$TMP/conductor/workspaces/myrepo/x-9c4c"  # the node-named worktree from test 1
 out4="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-nested-demo" \
   --provider claude --payload-mode passthrough --message "/execute task 1.1" --node "x-other" \
   --cwd "$WT" 2>"$TMP/err4")"
@@ -158,7 +158,7 @@ no   "linked-wt not re-isolated" "$err4" "auto-worktree:"
 
 # 5. fail-safe: worktree-add blocked (path pre-occupied by a non-worktree dir)
 #    -> launch still succeeds in repo root, never blocked (failure mode 2).
-mkdir -p "$TMP/conductor/workspaces/myrepo/spawn-blocked-demo/decoy"
+mkdir -p "$TMP/conductor/workspaces/myrepo/x-blk/decoy"
 out5="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-blocked-demo" \
   --provider claude --payload-mode passthrough --message "/fix the bug" --node "x-blk" \
   --cwd "$REPO" 2>"$TMP/err5")"; rc5=$?
@@ -178,8 +178,8 @@ out6="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-subdir-dem
   --provider claude --payload-mode passthrough --message "/execute x-sub" --node "x-sub" \
   --cwd "$REPO/src/deep" 2>"$TMP/err6")"
 err6="$(cat "$TMP/err6")"
-has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-subdir-demo"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-subdir-demo" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: subdir cwd not worktree'd"; }
+has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-sub"
+[[ -d "$TMP/conductor/workspaces/myrepo/x-sub" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: subdir cwd not worktree'd"; }
 
 # 7. A BUILD payload isolates regardless of its rendered message shape: worktree
 #    isolation keys on payload_mode=build (a code-writing worker), not on a
@@ -190,8 +190,8 @@ out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-buil
   --message "Implement backlog node x-cdx following AGENTS.md. Commit and open a pull request for review; do not merge it." \
   --cwd "$REPO" 2>"$TMP/err7")"
 err7="$(cat "$TMP/err7")"
-has  "codex-build worktree'd" "$err7" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-codex-build"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-codex-build" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: build payload not worktree'd"; }
+has  "codex-build worktree'd" "$err7" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-cdx"
+[[ -d "$TMP/conductor/workspaces/myrepo/x-cdx" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: build payload not worktree'd"; }
 
 # 8. seed payload (verbatim free-text pane, x-cbb0) -> NOT code-writing, no worktree.
 out8="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-seed-demo" \
@@ -353,7 +353,7 @@ no   "never+delegated no cwd field" "$out17" "cwd="
 # 15b. a claude /target whose cwd is ALREADY a linked worktree: not re-isolated
 #      and not nested. `--show-toplevel` returns that linked root, so the worker
 #      launches there and keeps the worktree it was pointed at.
-WT2="$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"  # created by test 1
+WT2="$TMP/conductor/workspaces/myrepo/x-9c4c"  # the node-named worktree from test 1
 : > "$TMP/spawn-args"
 WT2_PHYS="$(cd "$WT2" && pwd -P)"
 out20="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
@@ -370,7 +370,7 @@ out21="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-prose-bui
   --provider claude --node "x-prose" \
   --message "Implement backlog node x-prose following AGENTS.md." --cwd "$REPO" 2>"$TMP/err21")"
 err21="$(cat "$TMP/err21")"
-has  "prose build pre-created" "$err21" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-prose-build"
+has  "prose build pre-created" "$err21" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-prose"
 no   "prose build not delegated" "$err21" "delegated to the worker cold-start"
 
 # 16. non-claude keeps pre-creation: a codex/opencode worker can run `fno do target
@@ -380,9 +380,9 @@ out18="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-target
   --provider opencode --payload-mode build \
   --message "/fno:target x-oc" --node "x-oc" --cwd "$REPO" 2>"$TMP/err18")"
 err18="$(cat "$TMP/err18")"
-has  "opencode build still pre-created" "$err18" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-oc-target"
+has  "opencode build still pre-created" "$err18" "auto-worktree: $TMP/conductor/workspaces/myrepo/x-oc"
 no   "opencode build not delegated" "$err18" "delegated to the worker cold-start"
-[[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-target" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode build lost its worktree"; }
+[[ -d "$TMP/conductor/workspaces/myrepo/x-oc" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode build lost its worktree"; }
 
 # 17. a FREE-TEXT claude /target (passthrough, no node) keeps pre-creation. The
 #     cold-start that would isolate it is `fno do target start <node>`, and there is

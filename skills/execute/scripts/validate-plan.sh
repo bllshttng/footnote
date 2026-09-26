@@ -10,14 +10,46 @@ ERRORS=0
 WARNINGS=0
 TMPDIR_BASE_VAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
+_DECISION_READS=""
+_DECISION_VERDICT=""
+
+_decision_read() {
+    local id="$1" cached="" out="" rc=0 stderr_line="" verdict=""
+    cached=$(grep -m1 "^${id}"$'\t' <<< "$_DECISION_READS" || true)
+    if [[ -n "$cached" ]]; then
+        _DECISION_VERDICT="${cached#*$'\t'}"
+        return 0
+    fi
+    if out=$(fno backlog decisions "$id" --scope all 2>"$TMPDIR_BASE_VAL/decisions.err"); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if (( rc != 0 )); then
+        stderr_line=$(sed -n '$p' "$TMPDIR_BASE_VAL/decisions.err")
+        verdict="unread exit $rc: ${stderr_line:-no stderr}"
+    elif grep -qE "^LIVE[[:space:]].*$id" <<< "$out"; then
+        verdict="live"
+    else
+        verdict="notlive"
+    fi
+    _DECISION_READS+="${id}"$'\t'"${verdict}"$'\n'
+    _DECISION_VERDICT="$verdict"
+}
 
 # New single-doc plans carry either the canonical Execution Strategy YAML or
 # the explicit quick-plan kind. Their executable contract is validated by the
 # Python authority; the heading-oriented checks below remain only for legacy
 # plans that predate the single-doc shape.
+# grep reads all input into /dev/null, never -q: -q exits at the first match,
+# the writer upstream dies of SIGPIPE, and pipefail reports a failed pipeline.
+_fm_has() {
+    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "${2:-$PLAN_DIR}" 2>/dev/null \
+        | grep -E "$1" >/dev/null
+}
+
 _is_quick_plan() {
-    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" 2>/dev/null \
-        | grep -qE "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
+    _fm_has "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
 }
 
 _has_execution_strategy() {
@@ -159,6 +191,20 @@ _plan_node_id() {
     printf '%s' "$line"
 }
 
+# The node id encoded by the plan's own filename, by the same trailing
+# -<prefix>-<hex>.md rule cli/src/fno/paths.py plan_filename_node_id applies.
+# A name that only mentions an id mid-slug is not a filename-encoded id.
+_plan_filename_node_id() {
+    local base
+    base=$(basename "$1")
+    printf '%s' "$base" | awk '
+        match($0, /-[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\.md$/) {
+            print substr($0, RSTART + 1, RLENGTH - 4)
+            exit
+        }
+    '
+}
+
 # The decision ids the plan's frontmatter acknowledges, one per line. The
 # stage-law check reads the same set the node-decision rows check against.
 _acknowledged_ids() {
@@ -259,7 +305,7 @@ _semantic_validate() {
         echo "fno CLI not found; install or update it before validating executable plans" >&2
         return 2
     fi
-    if ! fno do plan validate --help 2>&1 | grep -q -- '--execution'; then
+    if ! fno do plan validate --help 2>&1 | grep -- '--execution' >/dev/null; then
         echo "installed fno predates semantic plan validation; run 'fno doctor update' or 'fno doctor --fix'" >&2
         return 2
     fi
@@ -350,8 +396,7 @@ except yaml.YAMLError as exc:
             # passing silently, which would read as "the frontmatter is fine".
             warn "frontmatter YAML parse not checked (no python3 with PyYAML)"
         fi
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*project:'; then
+        if _fm_has '^[[:space:]]*project:'; then
             ok "has 'project:' field"
         else
             warn "missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
@@ -360,15 +405,12 @@ except yaml.YAMLError as exc:
         # plan with no done_probes simply has no runtime evidence declared;
         # name the absence and the reason so the omission is a choice on the
         # record, not a default nobody noticed.
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*done_probes:'; then
+        if _fm_has '^[[:space:]]*done_probes:'; then
             ok "declares done_probes (runtime evidence bound at ship)"
-        elif awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*domain:[[:space:]]*code'; then
+        elif _fm_has '^[[:space:]]*domain:[[:space:]]*code'; then
             warn "code plan declares no done_probes; runtime evidence is undeclared (advisory: add a probe or record why not - /fno:review prove-it is the lane)"
         fi
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^dispatch_hold:'; then
+        if _fm_has '^dispatch_hold:'; then
             _hold_out=""
             if _hold_out=$(_dispatch_hold_validate 2>&1); then
                 ok "dispatch_hold has reason, release_when, review_on, and set_by"
@@ -436,11 +478,7 @@ if [[ -f "$PLAN_DIR" ]]; then
     # non-empty `## Why (from epic)` - the transcribed intent grounds its tasks
     # (US4). Only enforced for group children; a normal quick/full plan has no
     # Why section and is not required to grow one.
-    # grep redirected to /dev/null (not -q): under `set -o pipefail`, grep -q can
-    # exit early and SIGPIPE the upstream awk (exit 141), failing the pipeline and
-    # spuriously skipping the check for a real group child.
-    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-            | grep -E '^[[:space:]]*parent_epic:' >/dev/null; then
+    if _fm_has '^[[:space:]]*parent_epic:'; then
         _why_body="$(awk '
             /^##[ \t]+Why \(from epic\)[ \t]*$/{f=1; next}
             f && /^##?[ \t]/{exit}
@@ -519,19 +557,19 @@ else
         task_name="${heading_rest# }"
         block=$(_task_block "$lineno")
 
-        if ! echo "$block" | grep -q "Acceptance Criteria"; then
+        if ! grep -q "Acceptance Criteria" <<< "$block"; then
             warn "$task_name: missing Acceptance Criteria section"
         else
             ok "$task_name: has Acceptance Criteria"
         fi
 
-        if ! echo "$block" | grep -qE "(Steps:|Step 1:)"; then
+        if ! grep -qE "(Steps:|Step 1:)" <<< "$block"; then
             warn "$task_name: missing Steps section"
         else
             ok "$task_name: has Steps"
         fi
 
-        if ! echo "$block" | grep -qiE "^(Files?:|## Files?)"; then
+        if ! grep -qiE "^(Files?:|## Files?)" <<< "$block"; then
             warn "$task_name: missing Files section"
         else
             ok "$task_name: has Files section"
@@ -674,7 +712,7 @@ elif [[ -f "$PLAN_DIR" ]]; then
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
                 ((TOTAL_STUBS++)) || true
-                if ! echo "$line" | grep -qE '\[Task [0-9]+\.[0-9]+\]'; then
+                if ! grep -qE '\[Task [0-9]+\.[0-9]+\]' <<< "$line"; then
                     ((UNRESOLVED++)) || true
                 fi
             done <<< "$STUB_LINES"
@@ -844,12 +882,7 @@ check_consolidation_file() {
 
     # Presence only. Shape is the model's job (see below), but whether a block
     # exists at all is a policy date rather than a shape, so it stays here.
-    # `grep -q` exits at the first match and SIGPIPEs the upstream awk, which
-    # `pipefail` then reports as a failed pipeline - and this one is NEGATED,
-    # so the plan would be told it has no block when it has one. Same trap the
-    # parent_epic check below documents. Read all the input instead.
-    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
-            | grep -E '^consolidation:' >/dev/null; then
+    if ! _fm_has '^consolidation:' "$file"; then
         # Grandfather: the gate governs plans written AFTER it shipped. Every
         # pre-existing plan would otherwise halt /execute and /target on work
         # already in flight, so they WARN until backfilled. The boundary is
@@ -912,6 +945,13 @@ check_consolidation_file() {
     # `ConsolidationBlock` model already pins can only ever diverge from it,
     # so there is now one implementation and bash keeps only what is policy.
     local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
+    # The plan names no node id, so the decisions rows below have no subject
+    # and cannot run. Say NOT CHECKED here, in bash, where the absence is
+    # readable - the delegate's W channel is fail-closed, for a damaged
+    # index, not for a plan that names no node.
+    if [[ -z "$(_plan_node_id "$file")" ]] || [[ ! "$(_plan_node_id "$file")" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+        warn "$label: decisions_acknowledged check NOT CHECKED (no well-formed node:/claims: id in frontmatter) - not a pass"
+    fi
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"
@@ -1091,9 +1131,19 @@ if isinstance(loaded, dict):
         node_id = None
 if isinstance(node_id, str) and node_id.strip():
     try:
-        from fno.decide import list_decisions
+        from fno.decide import _graph_entries, list_decisions
 
-        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None, state="all")
+        entries = _graph_entries(required=True)
+    except Exception as exc:  # noqa: BLE001 - an unread graph is not an empty graph
+        sys.stdout.write(
+            "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
+            % " ".join(str(exc).split())[:160]
+        )
+        raise SystemExit(0)
+    try:
+        _subj, rows, damaged = list_decisions(
+            node_id.strip(), limit=None, state="all", entries=entries, scope="all"
+        )
     except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
@@ -1249,7 +1299,9 @@ PYEOF
     local stage_law_gate_date="2026-09-16"
     local stage_node
     stage_node=$(_plan_node_id "$file")
-    if [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    if [[ -z "$stage_node" ]]; then
+        warn "$label: stage-law check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
+    elif [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
         local stage_bin
         stage_bin=$(resolve_agents_bin)
         if [[ -z "$stage_bin" ]]; then
@@ -1263,27 +1315,38 @@ PYEOF
             else
                 # The block rides one JSON string: cut additionalContext,
                 # split its escaped newlines, read `- <id> (<subject>):`.
+                local stage_context
+                stage_context=$(printf '%s' "$stage_out" \
+                    | sed -n 's/.*"additionalContext":"//p' \
+                    | sed 's/\\n/\n/g')
                 local -a stage_laws=()
                 local s_line
                 while IFS= read -r s_line; do
                     if [[ "$s_line" =~ ^-[[:space:]](d-[0-9a-f]{8})[[:space:]]\((.+)\): ]]; then
                         stage_laws+=("${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}")
                     fi
-                done < <(printf '%s' "$stage_out" \
-                    | sed -n 's/.*"additionalContext":"//p' \
-                    | sed 's/\\n/\n/g')
-                local acked_list="" acked_id
+                done <<< "$stage_context"
+                local stage_unread=0 unread_line
+                while IFS= read -r unread_line; do
+                    [[ "$unread_line" == Unread:\ * ]] || continue
+                    stage_unread=$((stage_unread + 1))
+                    warn "$label: stage-law check NOT CHECKED (${unread_line#Unread: }) - not a pass"
+                done <<< "$stage_context"
+                local acked_list="" acked_lc="" acked_id
                 while IFS= read -r acked_id; do
                     [[ -n "$acked_id" ]] && acked_list+="${acked_id}"$'\n'
                 done < <(_acknowledged_ids "$file")
-                local s_created s_did s_subj stage_missing=0
+                acked_lc=$(printf '%s' "$acked_list" | tr '[:upper:]' '[:lower:]')
+                local s_created s_did s_did_lc s_subj stage_missing=0
                 s_created=$(_plan_created_date "$file")
                 for s_line in ${stage_laws[@]+"${stage_laws[@]}"}; do
                     s_did="${s_line%%$'\t'*}"
                     s_subj="${s_line#*$'\t'}"
-                    if [[ -n "$acked_list" ]] \
-                        && printf '%s' "$acked_list" | grep -qixF "$s_did"; then
-                        continue
+                    if [[ -n "$acked_lc" ]]; then
+                        s_did_lc=$(printf '%s' "$s_did" | tr '[:upper:]' '[:lower:]')
+                        case $'\n'"$acked_lc"$'\n' in
+                            *$'\n'"$s_did_lc"$'\n'*) continue ;;
+                        esac
                     fi
                     stage_missing=$((stage_missing + 1))
                     if [[ ! "$s_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
@@ -1294,6 +1357,10 @@ PYEOF
                         c_error "$label: decisions_acknowledged is missing $s_did ($s_subj) - the blueprint-stage block lists it as a live ruling governing this work"
                     fi
                 done
+                if [[ $c_errors -eq 0 && $stage_unread -eq 0 ]]; then
+                    local stage_acknowledged=$(( ${#stage_laws[@]} - stage_missing ))
+                    ok "$label: stage-law check: ${#stage_laws[@]} law(s) listed, $stage_acknowledged acknowledged"
+                fi
             fi
         fi
     fi
@@ -1326,6 +1393,52 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Plan Node Binding: a filename-encoded id with no frontmatter key
+# -------------------------------------------------------------------
+# The node-seeded save rule and rename-plan-to-node-id.sh both write a
+# trailing -<node-id>.md into the plan's name. A file carrying one but naming
+# no node:/claims: key in its frontmatter was written FOR that node and binds
+# to nothing: plan_path stays unset, the node stays idea, and both id-keyed
+# gates above skip it. The name makes the intent testable, so test it.
+
+check_node_binding_file() {
+    local file="$1" label="$2"
+    # The day this check's PR opens. Plans created before it could not have
+    # read the rule, so they warn; same-day and later plans must key.
+    local binding_gate_date="2026-09-19"
+    local fm_node fn_node created
+    fm_node=$(_plan_node_id "$file")
+    fn_node=$(_plan_filename_node_id "$file")
+    if [[ -z "$fm_node" && -n "$fn_node" ]]; then
+        created=$(_plan_created_date "$file")
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            created=$(_plan_name_date "$file")
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            error "$label: the filename names $fn_node but no node:/claims: key does, and no readable date tells this plan from a pre-gate one - add node: $fn_node to the frontmatter"
+        elif [[ "$created" < "$binding_gate_date" ]]; then
+            warn "$label: the filename names $fn_node but no node:/claims: key does (created $created, before the $binding_gate_date gate) - backfill one before the next blueprint of this node"
+        else
+            error "$label: the filename names $fn_node but no node:/claims: key does - the plan binds to nothing and the node-id gates skip it. Add node: $fn_node to the frontmatter"
+        fi
+    else
+        if [[ -n "$fm_node" && ! "$fm_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+            # A malformed id mutes the id-keyed gates exactly like an absent
+            # one, so it gets the same NOT CHECKED voice, not a clean OK.
+            warn "$label: the node:/claims: id in frontmatter is malformed - the id-keyed gates run NOT CHECKED against it. Use one well-formed id like ${fn_node:-x-abc123}"
+        fi
+        ok "plan node binding: frontmatter id ${fm_node:-<none>}, filename id ${fn_node:-<none>}"
+    fi
+}
+
+echo ""
+echo "--- Plan Node Binding ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_node_binding_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+fi
+
+# -------------------------------------------------------------------
 # Check 6b-quater: Answerer Enumeration block (step 2b-bis gate)
 # -------------------------------------------------------------------
 # A plan that fixes one site of a question asked at several sites ships the
@@ -1355,8 +1468,7 @@ check_surface_file() {
 
     # Presence, graduated. The block only proves the looking happened; whether
     # it must exist is policy, so the date + kind split lives here in bash.
-    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
-            | grep -E '^surface:' >/dev/null; then
+    if ! _fm_has '^surface:' "$file"; then
         if _is_quick_plan; then
             warn "$label: no surface: block (quick plan) - the step 2b-bis enumeration is unwritten; backfill one before this question costs its second PR"
             return 0
@@ -1418,9 +1530,13 @@ check_surface_file() {
 
     # Same receipt discipline as the consolidation gate: the OK lines print
     # only on a clean block, never beside the errors they would outshout.
+    # ${surface_receipts[@]+...}: bash 3.2 under set -u refuses a bare empty
+    # array expansion, and a clean block with no out-of-scope receipts
+    # reaches this loop empty - the unguarded form killed the validator
+    # before every later section could run.
     if [[ $c_errors -eq 0 ]]; then
         local receipt
-        for receipt in "${surface_receipts[@]}"; do
+        for receipt in ${surface_receipts[@]+"${surface_receipts[@]}"}; do
             ok "$label: surface block (step 2b-bis gate): $receipt"
         done
     fi
@@ -1471,6 +1587,22 @@ check_python_rows_file() {
         END { exit(found ? 0 : 1) }' "$file" && has_crates_row=1
 
     local path act word id
+    # One plan is one PR, and the ruling's ceiling is the PR's: every Grant
+    # row declares the added lines it spends as +N, and the rows are summed
+    # against the budget. Missing, empty or non-numeric config answers fall
+    # back to the ruling's starting value, so a checkout without the key
+    # still gates. The budget is read only when a Grant row exists, so the
+    # common Port/Delete plan pays no fno subprocess.
+    local grant_budget=30 declared grant_total=0 grant_config_out="" grant_config_rc=0
+    if grep -qi 'grant' <<< "$rows"; then
+        if grant_config_out=$(fno config get blueprint.python_repair_added_lines 2>"$TMPDIR_BASE_VAL/grant-budget.err"); then
+            grant_budget=$(printf '%s\n' "$grant_config_out" | sed -n 1p)
+        else
+            grant_config_rc=$?
+            warn "$label: grant budget NOT READ (exit $grant_config_rc), using the default 30"
+        fi
+        [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
+    fi
     while IFS=$'\t' read -r path act; do
         [[ -z "$path" ]] && continue
         word=$(printf '%s' "$act" | sed -E 's/^[^A-Za-z]*//; s/[^A-Za-z].*$//' | tr '[:upper:]' '[:lower:]')
@@ -1480,13 +1612,36 @@ check_python_rows_file() {
             delete) ;;
             grant)
                 id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
-                if [[ -z "$id" ]] || ! fno backlog decisions "$id" 2>/dev/null | grep -qE "^LIVE[[:space:]].*$id"; then
+                if [[ -z "$id" ]]; then
                     findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                else
+                    local decision_verdict decision_detail
+                    _decision_read "$id"
+                    decision_verdict="$_DECISION_VERDICT"
+                    case "$decision_verdict" in
+                        live) ;;
+                        notlive)
+                            findings+=("$path is a Grant, but $id reads no LIVE line in fno backlog decisions $id")
+                            ;;
+                        unread\ *)
+                            decision_detail="${decision_verdict#unread }"
+                            findings+=("$path is a Grant, but fno backlog decisions $id could not be read ($decision_detail) - re-run; this is not a verdict on the ruling")
+                            ;;
+                    esac
+                fi
+                declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
+                if [[ -z "$declared" ]]; then
+                    findings+=("$path is a Grant naming $id with no declared size - write the row as Grant $id +N naming the added lines the ruling's budget covers, so the rows can be summed")
+                else
+                    grant_total=$((grant_total + ${declared#+}))
                 fi ;;
             *)
-                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX naming a live operator ruling, or move the change to crates/") ;;
+                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX +N naming a live operator ruling and the added lines it covers, or move the change to crates/") ;;
         esac
     done <<< "$rows"
+    if (( grant_total > grant_budget )); then
+        findings+=("the Grant rows declare +$grant_total added cli/src/fno lines against a budget of $grant_budget (config blueprint.python_repair_added_lines) - port the change to crates/, or cut it under the budget")
+    fi
     local s
     while IFS= read -r s; do
         [[ -z "$s" ]] && continue
@@ -1515,6 +1670,162 @@ if [[ -f "$PLAN_DIR" ]]; then
     check_python_rows_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
     check_python_rows_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
+# Check 6c-ter: Code Index Audit
+# -------------------------------------------------------------------
+# A blueprint that skipped a present code index plans against a premise an
+# index could have falsified in seconds. The gate checks that the planner
+# ASKED: a code_index: block naming the sha read, a provider entry per index
+# detection finds, and an Existence audit table as the plan's first section.
+# It never checks what an index answered. The detection reader is the
+# bundled sibling lib/code-index-detect.sh; a repo with no provider prints
+# nothing and a plan with `providers: []` and the audit section is clean.
+code_index_gate_date="2026-09-17"
+check_code_index_file() {
+    local file="$1" label="$2"
+    local detect_script repo_root detection created block
+    detect_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/code-index-detect.sh"
+    if [[ ! -f "$detect_script" ]]; then
+        warn "$label: code-index-detect.sh not found beside the validator - the Code Index Audit runs NOT CHECKED"
+        return 0
+    fi
+    # A plan saved outside its repo (a notes vault) audits the checkout of
+    # the node it claims, read with one strict `fno backlog get` field call;
+    # a plan with no readable node falls back to the git root of its own
+    # directory. --strict matters: a fuzzy match on a fixture id would audit
+    # some other node's repo.
+    local base node_id node_cwd=""
+    base="$(dirname "$file")"
+    node_id="$(_plan_node_id "$file")"
+    if [[ -n "$node_id" ]] && command -v fno >/dev/null 2>&1 \
+        && node_cwd="$(fno backlog get "$node_id" --strict --field _resolved_cwd 2>/dev/null)"; then
+        if [[ -d "$node_cwd" ]]; then
+            base="$node_cwd"
+        elif [[ -n "$node_cwd" ]]; then
+            warn "$label: node $node_id names cwd $node_cwd, which is not a directory - the Code Index Audit read the plan's own directory instead"
+        fi
+    fi
+    repo_root="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$(cd "$base" && pwd)"
+    detection=$(bash "$detect_script" "$repo_root" 2>/dev/null)
+
+    block=$(awk '
+        /^---/ { c++; next }
+        c == 1 { print }
+    ' "$file" | awk '
+        /^code_index:/ { inblk = 1; print; next }
+        inblk && /^[^[:space:]#-]/ { inblk = 0 }
+        inblk { print }
+    ')
+
+    local findings=()
+    if [[ -z "$block" ]]; then
+        findings+=("frontmatter carries no code_index: block - run the planner's step 2-index, then record main_sha (the origin/main sha you read) and providers (one entry per index, or [])")
+    else
+        if ! grep -Eq '^[[:space:]]*main_sha:[[:space:]]*[0-9a-f]{7,40}[[:space:]]*$' <<< "$block"; then
+            findings+=("code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read, e.g. main_sha: 9817805bf5e8")
+        fi
+        if ! grep -Eq '^[[:space:]]*providers:' <<< "$block"; then
+            findings+=("code_index.providers is missing - list one entry per index asked (with status and fresh), or providers: [] when no index is present")
+        fi
+        local dname dpath
+        while IFS=$'\t' read -r dname _ _ dpath; do
+            [[ -z "$dname" ]] && continue
+            if ! grep -Eq "^[[:space:]]*-[[:space:]]*name:[[:space:]]*$dname[[:space:]]*$" <<< "$block"; then
+                findings+=("code index $dname is present ($dpath) and the plan does not record asking it. Ask it by role and record it under code_index.providers, with status unavailable or error if the ask failed")
+            fi
+        done <<< "$detection"
+
+        local rname entry status fresh
+        rname=""
+        while IFS= read -r rname; do
+            [[ -z "$rname" ]] && continue
+            # The name feeds a dynamic awk regex below, and a metachar would
+            # match another entry's line and steal its status/fresh. The
+            # schema is the manifest name's own, so enforce it here.
+            if [[ ! "$rname" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+                findings+=("provider $rname in code_index.providers is not a valid provider name - write the name exactly as the manifest declares it, lowercase letters, digits and dashes")
+                continue
+            fi
+            entry=$(awk -v n="$rname" '
+                $0 ~ ("^[[:space:]]*-[[:space:]]*name:[[:space:]]*" n "[[:space:]]*$") { f = 1; print; next }
+                f && /^[[:space:]]*-[[:space:]]/ { exit }
+                f { print }
+            ' <<< "$block")
+            status=$(sed -n 's/^[[:space:]]*status:[[:space:]]*//p' <<< "$entry" | head -1)
+            fresh=$(sed -n 's/^[[:space:]]*fresh:[[:space:]]*//p' <<< "$entry" | head -1)
+            # finalize re-serializes YAML, so a bare yes or no comes back as true or false.
+            case "$fresh" in true) fresh=yes ;; false) fresh=no ;; esac
+            if [[ ! "$status" =~ ^(answered|unavailable|error)$ ]]; then
+                findings+=("provider $rname has no readable status: - set status: answered, unavailable or error")
+            fi
+            if [[ ! "$fresh" =~ ^(yes|no|unknown)$ ]]; then
+                findings+=("provider $rname has no readable fresh: - set fresh: yes, no or unknown (unknown when the manifest has no fresh probe)")
+            fi
+        done < <(sed -n 's/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' <<< "$block")
+    fi
+
+    local first_h2 rows row verdict evid
+    first_h2=$(awk '/^##[[:space:]]/ { print; exit }' "$file")
+    if [[ "$first_h2" != "## Existence audit" ]]; then
+        findings+=("the first ## heading is '${first_h2:-none}' - the audit is the plan's first section: ## Existence audit, one row per claim, each with a verdict cell")
+    else
+        rows=$(awk '
+            /^##[[:space:]]+Existence[[:space:]]+audit/ { t = 1; next }
+            /^##/ { t = 0 }
+            t && /^\|/ { print }
+        ' "$file" | grep -Ev '^[[:space:]]*\|[-: |]*\|[[:space:]]*$')
+        rows=$(printf '%s\n' "$rows" | tail -n +2)
+        if [[ -z "${rows//[[:space:]]/}" ]]; then
+            findings+=("the Existence audit table has no rows - one row per claim the plan rests on, each with a verdict cell starting exists, absent, partial or unanswered")
+        else
+            local rn=0
+            while IFS= read -r row; do
+                [[ -z "$row" ]] && continue
+                rn=$((rn+1))
+                verdict=$(printf '%s\n' "$row" | awk -F'|' '
+                    {
+                        for (i = 2; i < NF; i++) {
+                            c = $i; gsub(/^[[:space:]]+|[[:space:]]+$/, "", c)
+                            s = c; sub(/^[^A-Za-z]*/, "", s)
+                            if (s ~ /^(exists|absent|partial|unanswered)/) {
+                                e = $(i+1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", e)
+                                print s "\t" e
+                                exit
+                            }
+                        }
+                        print "\t"
+                    }
+                ')
+                if [[ -z "${verdict%%$'\t'*}" ]]; then
+                    findings+=("Existence audit row $rn has no verdict cell - start one cell with exists, absent, partial or unanswered")
+                elif [[ "${verdict%%$'\t'*}" == "absent" && "${verdict#*$'\t'}" != *after* ]]; then
+                    findings+=("Existence audit row $rn reads absent but its evidence names no confirming search - an index never makes a zero trustworthy, so the evidence cell states 'after <exact command>'")
+                fi
+            done <<< "$rows"
+        fi
+    fi
+
+    created=$(_plan_created_date "$file")
+    local f
+    for f in ${findings[@]+"${findings[@]}"}; do
+        if [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && [[ "$created" > "$code_index_gate_date" ]]; then
+            error "$label: $f"
+        else
+            warn "$label: $f (created ${created:-unknown}, not after the $code_index_gate_date gate)"
+        fi
+    done
+}
+
+echo ""
+echo "--- Code Index Audit ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_code_index_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    check_code_index_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------
@@ -1625,18 +1936,17 @@ validate_wave_section_headers() {
     # being a defined value.
     while IFS= read -r w; do
         [[ -z "$w" ]] && continue
-        # The `! ... | grep -qx` shape is load-bearing under `set -e`:
-        # the `!` converts grep's exit-1-on-no-match into a tested
-        # condition rather than a script abort. Removing the `!` would
-        # silently abort the loop on the first non-matching wave.
-        if ! echo "$header_waves" | grep -qx "$w"; then
+        # The `!` converts grep's exit-1-on-no-match into a tested condition
+        # rather than a script abort. Removing it would silently abort the
+        # loop on the first non-matching wave.
+        if ! grep -qx "$w" <<< "$header_waves"; then
             missing+="$w "
         fi
     done <<< "$yaml_waves"
 
     while IFS= read -r w; do
         [[ -z "$w" ]] && continue
-        if ! echo "$yaml_waves" | grep -qx "$w"; then
+        if ! grep -qx "$w" <<< "$yaml_waves"; then
             orphan+="$w "
         fi
     done <<< "$header_waves"
@@ -1666,7 +1976,7 @@ validate_wave_section_headers() {
         local wave_num
         wave_num=$(echo "$line" | sed -E 's/^## Wave ([0-9]+):.*/\1/')
         # Skip naming check for orphan headers (already warned above).
-        if ! echo "$yaml_waves" | grep -qx "$wave_num"; then
+        if ! grep -qx "$wave_num" <<< "$yaml_waves"; then
             continue
         fi
         local name_part

@@ -6,7 +6,7 @@
 //! instead ONE `kind: "announce"` line on the shared bus, appended under the
 //! same sidecar flock Python uses. Every session reads it through its own
 //! per-session seen-id cursor at its next hook boundary; the sender reads
-//! receipts (`audience / landed / pending / woken / unreachable / late`).
+//! receipts (`audience / landed / pending / woken / unverified / late`).
 //!
 //! Subcommands (all direct dispatch, no daemon RPC):
 //!   - `announce send`   - write the one line (authority + rate limit + supersede)
@@ -27,8 +27,10 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-/// Terminal registry statuses (registry.py::TERMINAL_STATUSES).
-const TERMINAL_STATUSES: &[&str] = &["exited", "orphaned", "failed", "permanent_dead"];
+/// Terminal registry statuses (registry.py::TERMINAL_STATUSES). `pub(crate)`
+/// so other JSON-row readers in this crate (`crown_settle`) share the one
+/// string-matched copy instead of re-declaring it.
+pub(crate) const TERMINAL_STATUSES: &[&str] = &["exited", "orphaned", "failed", "permanent_dead"];
 
 const ANNOUNCE_KIND: &str = "announce";
 const LANDED_KIND: &str = "landed";
@@ -87,32 +89,26 @@ impl AnnouncePaths {
 // Small shared helpers
 // ---------------------------------------------------------------------------
 
-/// harness_identity.py::session_identity_key: UUID-family ids compare
-/// case-insensitively; opencode `ses_` ids do not.
-fn identity_key(session_id: &str) -> String {
-    if session_id.starts_with("ses_") {
-        session_id.to_string()
-    } else {
-        session_id.to_lowercase()
-    }
-}
-
-fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
 }
 
 fn row_session_id(row: &Value) -> Option<String> {
-    let harness = row_str(row, "harness").unwrap_or("");
-    let sid = crate::client_verbs::resume_session_id(row, harness);
+    let sid = row_str(row, "harness_session_id")
+        .filter(|sid| !sid.is_empty())
+        .unwrap_or_else(|| {
+            let harness = row_str(row, "harness").unwrap_or("");
+            crate::client_verbs::resume_session_id(row, harness)
+        });
     (!sid.is_empty()).then(|| sid.to_string())
 }
 
-fn row_terminal(row: &Value) -> bool {
+pub(crate) fn row_terminal(row: &Value) -> bool {
     let status = row_str(row, "status").unwrap_or("live");
     TERMINAL_STATUSES.contains(&status)
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -220,7 +216,7 @@ impl BusLock {
 /// appender.
 // ponytail: Rust never rotates; the next Python append rotates an over-size
 // live segment.
-fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
+pub(crate) fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(obj).map_err(|e| format!("serialize: {e}"))?;
     line.push('\n');
     let _lock = BusLock::acquire(live)?;
@@ -237,32 +233,33 @@ fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 // Scope matching: the exact port of mail/cli.py::_team_recipients
 // ---------------------------------------------------------------------------
 
-/// crown.py::_same_territory: alias-normalized member-set equality, blank
-/// answers false. `project:<p>` rides the same equality (the Python rule this
-/// replaces had no separate project arm).
-fn same_territory(held: Option<&str>, requested: &str, projects: &HashMap<String, String>) -> bool {
-    let members = |scope: &str| -> HashSet<String> {
-        scope
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
-            .collect()
-    };
-    match held {
-        Some(h) if !h.is_empty() => members(h) == members(requested),
-        _ => false,
-    }
+/// Which crown answers to `scope`: one rule shared with the walk, blank
+/// answers false. `project:<p>` rides the same rule. An unreadable project
+/// map answers equality only: without it a portfolio reads as an epic set
+/// and would answer for each of its projects.
+pub(crate) fn crown_answers(
+    held: Option<&str>,
+    requested: &str,
+    projects: Option<&HashMap<String, String>>,
+) -> bool {
+    held.is_some_and(|h| {
+        !h.is_empty()
+            && match projects {
+                Some(map) => crate::loop_king::crown_answers_to(h, requested, map),
+                None => crate::loop_king::same_territory(h, requested, &HashMap::new()),
+            }
+    })
 }
 
 /// Is this session inside the announcement's audience? The SNAPSHOT question
 /// (membership list written at send time).
 fn in_audience(audience: &[Value], session_id: &str) -> bool {
-    let key = identity_key(session_id);
-    audience
-        .iter()
-        .filter_map(Value::as_str)
-        .any(|a| a.eq_ignore_ascii_case(&key))
+    audience.iter().filter_map(Value::as_str).any(|a| {
+        matches!(
+            crate::identity::session_handle_tier(a, session_id),
+            Some(0 | 1)
+        )
+    })
 }
 
 /// Does this session match the scope at READ time (the late-arrival rule)?
@@ -270,18 +267,22 @@ fn matches_scope_now(
     scope: &str,
     session_id: &str,
     registry: &[Value],
-    projects: &HashMap<String, String>,
+    projects: Option<&HashMap<String, String>>,
 ) -> bool {
     if scope == "all" {
         return true;
     }
-    let key = identity_key(session_id);
     registry
         .iter()
         .filter(|row| !row_terminal(row))
         .filter(|row| {
             row_session_id(row)
-                .map(|sid| identity_key(&sid) == key)
+                .map(|sid| {
+                    matches!(
+                        crate::identity::session_handle_tier(session_id, &sid),
+                        Some(0 | 1)
+                    )
+                })
                 .unwrap_or(false)
         })
         .any(|row| match scope {
@@ -289,14 +290,14 @@ fn matches_scope_now(
                 .get("crown_level")
                 .map(|c| !c.is_null())
                 .unwrap_or(false),
-            _ => same_territory(row_str(row, "crown_scope"), scope, projects),
+            _ => crown_answers(row_str(row, "crown_scope"), scope, projects),
         })
 }
 
 fn resolve_audience(
     scope: &str,
     registry: &[Value],
-    projects: &HashMap<String, String>,
+    projects: Option<&HashMap<String, String>>,
 ) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = Vec::new(); // (key, name)
     for row in registry {
@@ -311,7 +312,7 @@ fn resolve_audience(
         }
         if scope != "all" && scope != "kings" {
             let held = row_str(row, "crown_scope");
-            let crown_ok = same_territory(held, scope, projects);
+            let crown_ok = crown_answers(held, scope, projects);
             // project:<p> also matches rows WORKING in that project (their cwd
             // names the repo), so an announcement reaches the team, not only a
             // crown that may not exist.
@@ -323,7 +324,7 @@ fn resolve_audience(
             }
         }
         let name = row_str(row, "name").unwrap_or("").to_string();
-        pairs.push((identity_key(&sid), name));
+        pairs.push((crate::spawn_context::session_identity_key(&sid), name));
     }
     pairs.sort();
     pairs.dedup();
@@ -403,60 +404,66 @@ fn send_usage() -> &'static str {
      --sender-kind <operator|agent> [--from-session <id>] [--json|-J]  (body on stdin)"
 }
 
-fn crown_holder(rows: &[Value], sender: &str) -> bool {
-    let key = identity_key(sender);
-    rows.iter().filter(|row| !row_terminal(row)).any(|row| {
+fn crown_row<'a>(rows: &'a [Value], sender: &str) -> Option<&'a Value> {
+    rows.iter().filter(|row| !row_terminal(row)).find(|row| {
         row.get("crown_level")
             .map(|c| !c.is_null())
             .unwrap_or(false)
             && (row_str(row, "name") == Some(sender)
                 || row_session_id(row)
-                    .map(|sid| identity_key(&sid) == key)
+                    .map(|sid| {
+                        matches!(
+                            crate::identity::session_handle_tier(sender, &sid),
+                            Some(0 | 1)
+                        )
+                    })
                     .unwrap_or(false))
     })
 }
 
-pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
-    let parsed = match parse_send_args(args) {
-        Ok(p) => p,
-        Err(why) => {
-            eprintln!("announce send: {why}\n{}", send_usage());
-            return 2;
-        }
+struct SendReceipt {
+    id: String,
+    scope: String,
+    audience: usize,
+    superseded: Vec<String>,
+}
+
+fn send_announcement(
+    parsed: &SendArgs,
+    body: &str,
+    paths: &AnnouncePaths,
+    projects: Option<&HashMap<String, String>>,
+) -> Result<SendReceipt, (i32, String)> {
+    let registry = crate::client_verbs::load_registry_entries(&paths.registry)
+        .map_err(|e| (12, format!("announce send: {e}")))?;
+    let sender_row = if parsed.sender_kind == "operator" {
+        None
+    } else {
+        crown_row(&registry, &parsed.from)
     };
-    let mut body = String::new();
-    if std::io::stdin().read_to_string(&mut body).is_err() {
-        eprintln!("announce send: could not read the body from stdin");
-        return 2;
-    }
-    let body = body.trim().to_string();
-    if body.is_empty() {
-        eprintln!("announce send: empty body");
-        return 2;
-    }
-
-    let registry = match crate::client_verbs::load_registry_entries(&paths.registry) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("announce send: {e}");
-            return 12;
-        }
-    };
-
-    // Authority: an operator, or a live crowned agent (decision 8).
-    if parsed.sender_kind != "operator" && !crown_holder(&registry, &parsed.from) {
-        eprintln!(
-            "announce: refused: sender {:?} holds no crown; fleet announcements \
-             are operator- or crowned-king-only",
-            parsed.from
-        );
-        return 2;
+    if parsed.sender_kind != "operator" && sender_row.is_none() {
+        return Err((
+            2,
+            format!(
+                "announce: refused: sender {:?} holds no crown; fleet announcements are operator- or crowned-king-only",
+                parsed.from
+            ),
+        ));
     }
 
-    let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_default();
-    let audience = resolve_audience(&parsed.scope, &registry, &projects);
+    let mut audience = resolve_audience(&parsed.scope, &registry, projects);
+    let from_session = parsed
+        .from_session
+        .clone()
+        .or_else(|| sender_row.and_then(row_session_id));
+    if let Some(session_id) = from_session.as_deref() {
+        audience.retain(|key| {
+            !matches!(
+                crate::identity::session_handle_tier(key, session_id),
+                Some(0 | 1)
+            )
+        });
+    }
 
     // One scan serves both the rate limit (decision 8) and the supersede
     // list (decision 7): a newer announcement with the same subject+scope
@@ -489,49 +496,45 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
         }
     }
     if recent >= HOURLY_LIMIT {
-        eprintln!(
-            "announce: refused: rate limit is {HOURLY_LIMIT} announcements per \
-             rolling hour and {:?} already sent {recent}",
-            parsed.from
-        );
-        return 2;
+        return Err((
+            2,
+            format!(
+                "announce: refused: rate limit is {HOURLY_LIMIT} announcements per rolling hour and {:?} already sent {recent}",
+                parsed.from
+            ),
+        ));
     }
 
     let ttl = match parse_expires(&parsed.expires_raw) {
         Ok(t) if t <= MAX_EXPIRES => t,
-        Ok(_) => {
-            eprintln!("announce send: --expires beyond the 7d maximum");
-            return 2;
-        }
-        Err(why) => {
-            eprintln!("announce send: {why}");
-            return 2;
-        }
+        Ok(_) => return Err((2, "announce send: --expires beyond the 7d maximum".into())),
+        Err(why) => return Err((2, format!("announce send: {why}"))),
     };
     let expires_at = (now + chrono::Duration::seconds(ttl.as_secs() as i64))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    // Empty audience never reports fleet-wide success (the old guard's shape).
     if audience.is_empty() {
-        eprintln!(
-            "announce send: no live recipients in scope {:?}",
-            parsed.scope
-        );
-        return 1;
+        return Err((
+            1,
+            format!(
+                "announce send: no live recipients in scope {:?}",
+                parsed.scope
+            ),
+        ));
     }
 
     let id = new_msg_id();
     let word_count = body.split_whitespace().count() as i64;
     let mut obj = Map::new();
     obj.insert("v".into(), json!(ENVELOPE_VERSION));
-    obj.insert("id".into(), json!(id));
+    obj.insert("id".into(), json!(&id));
     obj.insert("ts".into(), json!(now_iso()));
-    obj.insert("thread".into(), json!(id));
-    obj.insert("from".into(), json!(parsed.from));
+    obj.insert("thread".into(), json!(&id));
+    obj.insert("from".into(), json!(&parsed.from));
     obj.insert("to".into(), json!(format!("fleet:{}", parsed.scope)));
     obj.insert("kind".into(), json!(ANNOUNCE_KIND));
-    if let Some(fs) = &parsed.from_session {
+    if let Some(fs) = &from_session {
         obj.insert("from_session".into(), json!(fs));
     }
     obj.insert("to_kind".into(), json!("fleet"));
@@ -549,26 +552,59 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
     );
     obj.insert("body".into(), json!(body));
 
-    if let Err(e) = append_line(&paths.bus_live, &Value::Object(obj)) {
-        eprintln!("announce send: {e}");
-        return 1;
-    }
-    if parsed.json_out {
-        println!(
-            "{}",
-            json!({"id": id, "scope": parsed.scope, "audience": audience.len(), "superseded": supersedes})
-        );
-    } else {
-        println!(
-            "announce {id} scope={} audience={}",
-            parsed.scope,
-            audience.len()
-        );
-    }
-    0
+    append_line(&paths.bus_live, &Value::Object(obj))
+        .map_err(|e| (1, format!("announce send: {e}")))?;
+    Ok(SendReceipt {
+        id,
+        scope: parsed.scope.clone(),
+        audience: audience.len(),
+        superseded: supersedes,
+    })
 }
 
-fn new_msg_id() -> String {
+pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
+    let parsed = match parse_send_args(args) {
+        Ok(p) => p,
+        Err(why) => {
+            eprintln!("announce send: {why}\n{}", send_usage());
+            return 2;
+        }
+    };
+    let mut body = String::new();
+    if std::io::stdin().read_to_string(&mut body).is_err() {
+        eprintln!("announce send: could not read the body from stdin");
+        return 2;
+    }
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        eprintln!("announce send: empty body");
+        return 2;
+    }
+    let projects =
+        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
+    match send_announcement(&parsed, &body, paths, projects.as_ref()) {
+        Ok(receipt) if parsed.json_out => {
+            println!(
+                "{}",
+                json!({"id": receipt.id, "scope": receipt.scope, "audience": receipt.audience, "superseded": receipt.superseded})
+            );
+            0
+        }
+        Ok(receipt) => {
+            println!(
+                "announce {} scope={} audience={}",
+                receipt.id, receipt.scope, receipt.audience
+            );
+            0
+        }
+        Err((code, message)) => {
+            eprintln!("{message}");
+            code
+        }
+    }
+}
+
+pub(crate) fn new_msg_id() -> String {
     // 'msg-XXXXXX', matching bus/log.py::new_msg_id (6 hex chars).
     let mut buf = [0u8; 3];
     if getrandom::fill(&mut buf).is_err() {
@@ -729,8 +765,7 @@ pub(crate) fn read_render(
     }
     let registry = crate::client_verbs::load_registry_entries(&paths.registry)?;
     let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_default();
+        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
     let mut seen = load_cursor(&paths.state_root, session_id);
 
     let mut fresh: Vec<&Value> = Vec::new();
@@ -740,7 +775,10 @@ pub(crate) fn read_render(
         // The sender never reads its own announcement back.
         if m.get("from_session")
             .and_then(Value::as_str)
-            .is_some_and(|fs| identity_key(fs) == identity_key(session_id))
+            .is_some_and(|fs| {
+                crate::spawn_context::session_identity_key(fs)
+                    == crate::spawn_context::session_identity_key(session_id)
+            })
         {
             continue;
         }
@@ -755,7 +793,7 @@ pub(crate) fn read_render(
             .and_then(|meta| row_str(meta, "scope"))
             .unwrap_or("all");
         let mine = in_audience(&audience, session_id)
-            || matches_scope_now(scope, session_id, &registry, &projects);
+            || matches_scope_now(scope, session_id, &registry, projects.as_ref());
         if !mine {
             continue;
         }
@@ -856,7 +894,7 @@ pub(crate) fn run_announce_read(args: &[String], paths: &AnnouncePaths) -> i32 {
 
 /// reply_resolve.py::_transcript_path, mirrored: claude
 /// `<projects>/*/<id>.jsonl`, codex a rollout embedding the id. A key neither
-/// store resolves is `unreachable`, never `pending`.
+/// store resolves is `unverified`, never `pending`.
 fn transcript_path(harness_home: &Path, session_key: &str, codex: bool) -> Option<PathBuf> {
     if codex {
         let root = std::env::var_os("FNO_CODEX_SESSIONS_DIR")
@@ -931,6 +969,103 @@ fn record_landed_row(live: &Path, from: &str, session_key: &str, id: &str) {
     }
 }
 
+fn announce_receipt(
+    rows: &[Value],
+    announcement: &Value,
+    id: &str,
+    paths: &AnnouncePaths,
+    home: &Path,
+) -> Value {
+    let from = row_str(announcement, "from").unwrap_or("unknown");
+    let meta = announcement.get("meta").cloned().unwrap_or(Value::Null);
+    let audience: Vec<String> = meta
+        .get("audience")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut landed_keys: HashSet<String> = HashSet::new();
+    for m in rows {
+        if row_str(m, "kind") != Some(LANDED_KIND) {
+            continue;
+        }
+        let landed = m.get("meta").and_then(|meta| row_str(meta, "landed"));
+        if landed != Some(id) {
+            continue;
+        }
+        if let Some(session) = m.get("meta").and_then(|meta| row_str(meta, "session")) {
+            landed_keys.insert(session.to_string());
+        } else if let Some(to) = row_str(m, "to") {
+            landed_keys.insert(to.to_string());
+        }
+    }
+    let woken = rows
+        .iter()
+        .filter(|m| row_str(m, "kind") == Some(WAKE_KIND))
+        .filter(|m| {
+            m.get("meta").and_then(|meta| row_str(meta, "announce")) == Some(id)
+                && m.get("meta").and_then(|meta| row_str(meta, "result")) == Some("woken")
+        })
+        .count();
+
+    let audience_set: HashSet<&str> = audience.iter().map(String::as_str).collect();
+    let mut per_session: Vec<Value> = Vec::new();
+    let mut landed = 0usize;
+    let mut pending = 0usize;
+    let mut unverified = 0usize;
+    for key in &audience {
+        if landed_keys.contains(key) {
+            landed += 1;
+            per_session.push(json!({"session": key, "state": "landed"}));
+            continue;
+        }
+        let claude_store = transcript_path(home, key, false);
+        let codex_store = if claude_store.is_none() {
+            transcript_path(home, key, true)
+        } else {
+            None
+        };
+        match claude_store.or(codex_store) {
+            None => {
+                unverified += 1;
+                per_session.push(json!({"session": key, "state": "unverified"}));
+            }
+            Some(path) => match transcript_has_id(&path, id) {
+                Ok(true) => {
+                    landed += 1;
+                    record_landed_row(&paths.bus_live, from, key, id);
+                    per_session.push(json!({"session": key, "state": "landed"}));
+                }
+                Ok(false) => {
+                    pending += 1;
+                    per_session.push(json!({"session": key, "state": "pending"}));
+                }
+                Err(_) => {
+                    unverified += 1;
+                    per_session.push(json!({"session": key, "state": "unverified"}));
+                }
+            },
+        }
+    }
+    let late = landed_keys
+        .iter()
+        .filter(|key| !audience_set.contains(key.as_str()))
+        .count();
+    json!({
+        "id": id,
+        "audience": audience.len(),
+        "landed": landed,
+        "pending": pending,
+        "woken": woken,
+        "unverified": unverified,
+        "late": late,
+        "sessions": per_session,
+    })
+}
+
 pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32 {
     let mut id = String::new();
     let mut json_out = false;
@@ -958,111 +1093,22 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
         eprintln!("announce status: no announcement {id:?} on the retained bus");
         return 1;
     };
-    let from = row_str(announcement, "from")
-        .unwrap_or("unknown")
-        .to_string();
-    let meta = announcement.get("meta").cloned().unwrap_or(Value::Null);
-    let audience: Vec<String> = meta
-        .get("audience")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Durable proofs first: (id, session) landed rows, then the transcript
-    // scan. A landed key outside the audience is a LATE reader (decision 3).
-    let mut landed_keys: HashSet<String> = HashSet::new();
-    for m in &rows {
-        if row_str(m, "kind") != Some(LANDED_KIND) {
-            continue;
-        }
-        let landed = m.get("meta").and_then(|meta| row_str(meta, "landed"));
-        if landed != Some(id.as_str()) {
-            continue;
-        }
-        if let Some(session) = m.get("meta").and_then(|meta| row_str(meta, "session")) {
-            landed_keys.insert(session.to_string());
-        } else if let Some(to) = row_str(m, "to") {
-            landed_keys.insert(to.to_string());
-        }
-    }
-    let mut woken = 0usize;
-    for m in &rows {
-        if row_str(m, "kind") != Some(WAKE_KIND) {
-            continue;
-        }
-        let wake_id = m.get("meta").and_then(|meta| row_str(meta, "announce"));
-        let result = m.get("meta").and_then(|meta| row_str(meta, "result"));
-        if wake_id == Some(id.as_str()) && result == Some("woken") {
-            woken += 1;
-        }
-    }
-
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let audience_set: HashSet<&str> = audience.iter().map(String::as_str).collect();
-    let mut per_session: Vec<Value> = Vec::new();
-    let mut landed = 0usize;
-    let mut pending = 0usize;
-    let mut unreachable = 0usize;
-    let mut late = 0usize;
-    for key in &audience {
-        if landed_keys.contains(key) {
-            landed += 1;
-            per_session.push(json!({"session": key, "state": "landed"}));
-            continue;
-        }
-        let claude_store = transcript_path(&home, key, false);
-        let codex_store = if claude_store.is_none() {
-            transcript_path(&home, key, true)
-        } else {
-            None
-        };
-        match claude_store.or(codex_store) {
-            None => {
-                unreachable += 1;
-                per_session.push(json!({"session": key, "state": "unreachable"}));
-            }
-            Some(path) => match transcript_has_id(&path, &id) {
-                Ok(true) => {
-                    landed += 1;
-                    record_landed_row(&paths.bus_live, &from, key, &id);
-                    per_session.push(json!({"session": key, "state": "landed"}));
-                }
-                Ok(false) => {
-                    pending += 1;
-                    per_session.push(json!({"session": key, "state": "pending"}));
-                }
-                Err(_) => {
-                    unreachable += 1;
-                    per_session.push(json!({"session": key, "state": "unreachable"}));
-                }
-            },
-        }
-    }
-    for key in &landed_keys {
-        if !audience_set.contains(key.as_str()) {
-            late += 1;
-        }
-    }
+    let receipt = announce_receipt(&rows, announcement, &id, paths, &home);
 
     if json_out {
-        println!(
-            "{}",
-            json!({
-                "id": id, "audience": audience.len(), "landed": landed,
-                "pending": pending, "woken": woken, "unreachable": unreachable,
-                "late": late, "sessions": per_session,
-            })
-        );
+        println!("{receipt}");
     } else {
         println!(
-            "audience {}, landed {landed}, pending {pending}, woken {woken}, unreachable {unreachable}, late {late}",
-            audience.len()
+            "audience {}, landed {}, pending {}, woken {}, unverified {}, late {}",
+            receipt["audience"],
+            receipt["landed"],
+            receipt["pending"],
+            receipt["woken"],
+            receipt["unverified"],
+            receipt["late"]
         );
     }
     0
@@ -1139,10 +1185,72 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn a_set_king_is_in_the_audience_of_one_member_epic() {
+        let registry = vec![
+            agent_row(
+                "king-set",
+                "sess-set",
+                json!({"crown_level": 2, "crown_scope": "x-bbbb,x-cccc"}),
+            ),
+            agent_row(
+                "king-folio",
+                "sess-folio",
+                json!({"crown_level": 0, "crown_scope": "alpha,beta"}),
+            ),
+        ];
+        let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        assert_eq!(
+            resolve_audience("x-cccc", &registry, Some(&projects)),
+            vec![crate::spawn_context::session_identity_key("sess-set")]
+        );
+        assert!(resolve_audience("alpha", &registry, Some(&projects)).is_empty());
+        // An unreadable project map fails closed to equality.
+        assert!(resolve_audience("x-cccc", &registry, None).is_empty());
+        assert!(resolve_audience("alpha", &registry, None).is_empty());
+    }
+
+    #[test]
+    fn claude_audience_uses_the_full_session_id() {
+        let session = "12345678-1234-1234-1234-123456789abc";
+        let row = agent_row(
+            "king",
+            session,
+            json!({"short_id": "12345678", "crown_level": 1}),
+        );
+
+        assert_eq!(
+            resolve_audience("kings", &[row], Some(&HashMap::new())),
+            vec![session.to_string()]
+        );
+    }
+
+    #[test]
+    fn full_session_id_matches_a_kings_scope_row() {
+        let session = "abcdef12-1234-1234-1234-123456789abc";
+        let row = agent_row(
+            "king",
+            session,
+            json!({"short_id": "abcdef12", "crown_level": 1}),
+        );
+
+        assert!(matches_scope_now(
+            "kings",
+            session,
+            &[row],
+            Some(&HashMap::new())
+        ));
+    }
+
     fn agent_row(name: &str, session: &str, extra: Value) -> Value {
         let mut row = json!({
             "name": name, "harness": "claude", "status": "live",
             "harness_session_id": session,
+            "short_id": session.chars().take(8).collect::<String>(),
             "cwd": format!("/tmp/{name}"),
             "log_path": format!("/tmp/{name}.log"),
         });
@@ -1153,101 +1261,31 @@ mod tests {
         row
     }
 
-    /// The send path without process stdin: writes the body exactly as the
-    /// verb does after its stdin read.
+    fn send_for_test(
+        paths: &AnnouncePaths,
+        args: &[String],
+        body: &str,
+        registry: &[Value],
+    ) -> (i32, String) {
+        write_registry(paths, registry);
+        let parsed = match parse_send_args(args) {
+            Ok(p) => p,
+            Err(why) => return (2, why),
+        };
+        match send_announcement(&parsed, body.trim(), paths, Some(&HashMap::new())) {
+            Ok(receipt) => (0, receipt.id),
+            Err((code, message)) => (code, message),
+        }
+    }
+
     fn send_via(
         paths: &AnnouncePaths,
         flags: &[&str],
         body: &str,
         registry: &[Value],
     ) -> (i32, String) {
-        write_registry(paths, registry);
-        let mut args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-        args.insert(0, "send".into());
-        let parsed = match parse_send_args(&args[1..]) {
-            Ok(p) => p,
-            Err(why) => {
-                return (2, why);
-            }
-        };
-        let body = body.trim().to_string();
-        if body.is_empty() {
-            return (2, "empty body".into());
-        }
-        let registry_rows = crate::client_verbs::load_registry_entries(&paths.registry).unwrap();
-        if parsed.sender_kind != "operator" && !crown_holder(&registry_rows, &parsed.from) {
-            return (2, format!("refused: {}", parsed.from));
-        }
-        let projects = HashMap::new();
-        let audience = resolve_audience(&parsed.scope, &registry_rows, &projects);
-        let now = chrono::Utc::now();
-        let recent = read_bus_segments(&paths.bus_live)
-            .iter()
-            .filter(|m| row_str(m, "kind") == Some(ANNOUNCE_KIND))
-            .filter(|m| row_str(m, "from") == Some(parsed.from.as_str()))
-            .filter(|m| {
-                row_str(m, "ts")
-                    .and_then(parse_iso)
-                    .is_some_and(|t| now.signed_duration_since(t).num_seconds() < 3600)
-            })
-            .count();
-        if recent >= HOURLY_LIMIT {
-            return (2, "rate limit".into());
-        }
-        let mut supersedes: Vec<String> = Vec::new();
-        for m in read_bus_segments(&paths.bus_live) {
-            if row_str(&m, "kind") != Some(ANNOUNCE_KIND) {
-                continue;
-            }
-            if row_str(&m, "to") != Some(format!("fleet:{}", parsed.scope).as_str()) {
-                continue;
-            }
-            let subject = m
-                .get("meta")
-                .and_then(|meta| row_str(meta, "subject"))
-                .unwrap_or("");
-            if subject != parsed.subject || expired(&m, now) {
-                continue;
-            }
-            if let Some(id) = row_str(&m, "id") {
-                supersedes.push(id.to_string());
-            }
-        }
-        let ttl = parse_expires(&parsed.expires_raw).unwrap();
-        let expires_at = (now + chrono::Duration::seconds(ttl.as_secs() as i64))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
-        let id = new_msg_id();
-        let mut obj = Map::new();
-        obj.insert("v".into(), json!(ENVELOPE_VERSION));
-        obj.insert("id".into(), json!(id));
-        obj.insert("ts".into(), json!(now_iso()));
-        obj.insert("thread".into(), json!(id));
-        obj.insert("from".into(), json!(parsed.from));
-        obj.insert("to".into(), json!(format!("fleet:{}", parsed.scope)));
-        obj.insert("kind".into(), json!(ANNOUNCE_KIND));
-        if let Some(fs) = &parsed.from_session {
-            obj.insert("from_session".into(), json!(fs));
-        }
-        obj.insert("to_kind".into(), json!("fleet"));
-        obj.insert(
-            "word_count".into(),
-            json!(body.split_whitespace().count() as i64),
-        );
-        obj.insert(
-            "meta".into(),
-            json!({
-                "scope": parsed.scope,
-                "audience": audience,
-                "subject": parsed.subject,
-                "expires_at": expires_at,
-                "urgent": parsed.urgent,
-                "supersedes": supersedes,
-            }),
-        );
-        obj.insert("body".into(), json!(body));
-        append_line(&paths.bus_live, &Value::Object(obj)).unwrap();
-        (0, id)
+        let args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+        send_for_test(paths, &args, body, registry)
     }
 
     fn send_flags(scope: &'static str) -> Vec<&'static str> {
@@ -1320,17 +1358,75 @@ mod tests {
     fn crowned_agent_sender_is_accepted() {
         let _guard = ENV_LOCK.lock().unwrap();
         let f = fixture("crown");
-        let rows = vec![agent_row(
-            "king",
-            "eeee5555-5555-5555-5555-555555555555",
-            json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
-        )];
+        let rows = vec![
+            agent_row(
+                "king",
+                "eeee5555-5555-5555-5555-555555555555",
+                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+            ),
+            agent_row("other", "ffff5555-5555-5555-5555-555555555555", json!({})),
+        ];
         let mut flags = send_flags("all");
         flags[3] = "king";
         flags[5] = "agent";
         let (code, _) = send_via(&f.paths, &flags, "from the crown", &rows);
         assert_eq!(code, 0);
         assert_eq!(read_bus_segments(&f.paths.bus_live).len(), 1);
+        std::fs::remove_dir_all(&f.root).ok();
+    }
+
+    #[test]
+    fn crowned_agent_sender_is_excluded_and_stamped_with_full_id() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("sender-full-id");
+        let king = "eeee5555-5555-5555-5555-555555555555";
+        let other = "ffff5555-5555-5555-5555-555555555555";
+        let rows = vec![
+            agent_row(
+                "king",
+                king,
+                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+            ),
+            agent_row(
+                "other",
+                other,
+                json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+            ),
+        ];
+        let mut flags = send_flags("kings");
+        flags[3] = "king";
+        flags[5] = "agent";
+        let (code, id) = send_via(&f.paths, &flags, "from the crown", &rows);
+        assert_eq!(code, 0);
+        let message = &read_bus_segments(&f.paths.bus_live)[0];
+        assert_eq!(row_str(message, "from_session"), Some(king));
+        assert_eq!(message["meta"]["audience"], json!([other]));
+        assert!(read_render(&f.paths, king, Boundary::Prompt)
+            .unwrap()
+            .is_none());
+        assert!(read_render(&f.paths, other, Boundary::Prompt)
+            .unwrap()
+            .unwrap()
+            .contains(&id));
+        std::fs::remove_dir_all(&f.root).ok();
+    }
+
+    #[test]
+    fn crowned_agent_sender_alone_is_refused_without_a_bus_line() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("sender-alone");
+        let rows = vec![agent_row(
+            "king",
+            "eeee5555-5555-5555-5555-555555555555",
+            json!({"crown_level": 1, "crown_scope": "epic/x-test"}),
+        )];
+        let mut flags = send_flags("kings");
+        flags[3] = "king";
+        flags[5] = "agent";
+        let (code, message) = send_via(&f.paths, &flags, "no audience", &rows);
+        assert_eq!(code, 1);
+        assert!(message.contains("no live recipients in scope"));
+        assert!(read_bus_segments(&f.paths.bus_live).is_empty());
         std::fs::remove_dir_all(&f.root).ok();
     }
 
@@ -1503,6 +1599,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_short_audience_key_still_reaches_full_session_reader() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("legacy-audience");
+        let session = "cccc9999-9999-9999-9999-999999999999";
+        let rows = vec![agent_row("red", session, json!({}))];
+        let (_, id) = send_via(&f.paths, &send_flags("all"), "legacy news", &rows);
+        let text = std::fs::read_to_string(&f.paths.bus_live).unwrap();
+        let mut message: Value = serde_json::from_str(text.trim()).unwrap();
+        message["meta"]["audience"] = json!(["cccc9999"]);
+        std::fs::write(
+            &f.paths.bus_live,
+            serde_json::to_string(&message).unwrap() + "\n",
+        )
+        .unwrap();
+        let out = read_render(&f.paths, session, Boundary::Prompt)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains(&id));
+        std::fs::remove_dir_all(&f.root).ok();
+    }
+
+    #[test]
     fn compact_re_renders_seen_standing_announcements() {
         let _guard = ENV_LOCK.lock().unwrap();
         let f = fixture("compact");
@@ -1576,60 +1694,14 @@ mod tests {
         let mut args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
         args.push("--from-session".into());
         args.push(king_session.to_string());
-        send_via_parsed(&f.paths, &args, "crown news", &rows, Some(king_session));
+        send_for_test(&f.paths, &args, "crown news", &rows);
         let out = read_render(&f.paths, king_session, Boundary::Prompt).unwrap();
         assert!(out.is_none(), "sender skips its own line: {out:?}");
         std::fs::remove_dir_all(&f.root).ok();
     }
 
-    /// send_via variant that carries --from-session.
-    fn send_via_parsed(
-        paths: &AnnouncePaths,
-        args: &[String],
-        body: &str,
-        registry: &[Value],
-        from_session: Option<&str>,
-    ) -> (i32, String) {
-        write_registry(paths, registry);
-        let parsed = parse_send_args(args).unwrap();
-        let registry_rows = crate::client_verbs::load_registry_entries(&paths.registry).unwrap();
-        if parsed.sender_kind != "operator" && !crown_holder(&registry_rows, &parsed.from) {
-            return (2, "refused".into());
-        }
-        let audience = resolve_audience(&parsed.scope, &registry_rows, &HashMap::new());
-        let id = new_msg_id();
-        let mut obj = Map::new();
-        obj.insert("v".into(), json!(ENVELOPE_VERSION));
-        obj.insert("id".into(), json!(id));
-        obj.insert("ts".into(), json!(now_iso()));
-        obj.insert("thread".into(), json!(id));
-        obj.insert("from".into(), json!(parsed.from));
-        obj.insert("to".into(), json!(format!("fleet:{}", parsed.scope)));
-        obj.insert("kind".into(), json!(ANNOUNCE_KIND));
-        if let Some(fs) = from_session {
-            obj.insert("from_session".into(), json!(fs));
-        }
-        obj.insert("to_kind".into(), json!("fleet"));
-        obj.insert("word_count".into(), json!(3i64));
-        obj.insert(
-            "meta".into(),
-            json!({
-                "scope": parsed.scope,
-                "audience": audience,
-                "subject": parsed.subject,
-                "expires_at": (chrono::Utc::now() + chrono::Duration::hours(24))
-                    .format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                "urgent": false,
-                "supersedes": [],
-            }),
-        );
-        obj.insert("body".into(), json!(body));
-        append_line(&paths.bus_live, &Value::Object(obj)).unwrap();
-        (0, id)
-    }
-
     #[test]
-    fn status_counts_landed_pending_unreachable_and_never_rescans_landed() {
+    fn status_counts_landed_pending_unverified_and_never_rescans_landed() {
         let _guard = ENV_LOCK.lock().unwrap();
         let f = fixture("status");
         let home = std::env::temp_dir().join(format!(
@@ -1672,11 +1744,21 @@ mod tests {
         std::env::set_var("HOME", &home);
         let code1 = run_announce_status(&[id.clone(), "--json".into()], &f.paths);
         let code2 = run_announce_status(&[id.clone()], &f.paths);
+        let rows_on_bus = read_bus_segments(&f.paths.bus_live);
+        let announcement = rows_on_bus
+            .iter()
+            .find(|m| row_str(m, "id") == Some(id.as_str()))
+            .unwrap();
+        let receipt = announce_receipt(&rows_on_bus, announcement, &id, &f.paths, &home);
         if let Some(h) = saved_home {
             std::env::set_var("HOME", h);
         }
         assert_eq!(code1, 0);
         assert_eq!(code2, 0);
+        assert_eq!(receipt["landed"], json!(1));
+        assert_eq!(receipt["pending"], json!(1));
+        assert_eq!(receipt["unverified"], json!(1));
+        assert!(receipt.get("unreachable").is_none());
 
         let bus = std::fs::read_to_string(&f.paths.bus_live).unwrap();
         let landed_rows: usize = bus
@@ -1688,6 +1770,46 @@ mod tests {
             })
             .count();
         assert_eq!(landed_rows, 1, "exactly one landed proof row: {bus}");
+        std::fs::remove_dir_all(&f.root).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn legacy_short_status_key_is_unverified_not_landed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("status-legacy");
+        let session = "cccc5555-5555-5555-5555-555555555555";
+        let rows = vec![agent_row("one", session, json!({}))];
+        let (_, id) = send_via(&f.paths, &send_flags("all"), "legacy receipt", &rows);
+        let text = std::fs::read_to_string(&f.paths.bus_live).unwrap();
+        let mut message: Value = serde_json::from_str(text.trim()).unwrap();
+        message["meta"]["audience"] = json!(["cccc5555"]);
+        std::fs::write(
+            &f.paths.bus_live,
+            serde_json::to_string(&message).unwrap() + "\n",
+        )
+        .unwrap();
+
+        let home = std::env::temp_dir().join(format!(
+            "fno-announce-home-legacy-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = crate::claude_ask::ClaudeHome::at(&home)
+            .projects_dir()
+            .join("-tmp-one");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{session}.jsonl")),
+            format!("{{\"x\":\"<fno_mail id=\\\"{id}\\\">hi</fno_mail>\"}}\n"),
+        )
+        .unwrap();
+        let rows_on_bus = read_bus_segments(&f.paths.bus_live);
+        let announcement = &rows_on_bus[0];
+        let receipt = announce_receipt(&rows_on_bus, announcement, &id, &f.paths, &home);
+        assert_eq!(receipt["unverified"], json!(1));
+        assert_eq!(receipt["landed"], json!(0));
+        assert!(receipt.get("unreachable").is_none());
         std::fs::remove_dir_all(&f.root).ok();
         std::fs::remove_dir_all(&home).ok();
     }

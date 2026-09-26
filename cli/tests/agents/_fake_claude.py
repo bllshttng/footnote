@@ -105,5 +105,5 @@ def stub_codex_sandbox_probe(monkeypatch: object) -> None:
 
     monkeypatch.setattr(
         "fno.agents.sandbox_probe.probe_codex_sandbox",
-        lambda cwd: SandboxProbe("unknown", note="stubbed in test"),
+        lambda cwd, *, mode=None: SandboxProbe("unknown", note="stubbed in test"),
     )

@@ -2,9 +2,14 @@
 //! inputs, the door argv, the bounded shell-out, and the notice mapping.
 //! Lifted out of `server.rs` as its own module named by the question it
 //! answers - "how does a mux dispatch launch a node?" - so the shrink-only
-//! ratchet on `server.rs` is not fed by new code.
+//! ratchet on `server.rs` is not fed by new code. The sideline launcher
+//! extends the same boundaries: a free-form argv builder over the ONE door,
+//! a stdin-capturing shell-out, and one typed outcome decoder shared by
+//! node dispatch and the composer.
 
 use std::time::Duration;
+
+use crate::proto::agent_launch::AgentLaunchRequest;
 
 /// Bounded + fail-open (the digest_overlay idiom): read the board, launch the
 /// door, turn the outcome into the client notice. An empty return says nothing
@@ -25,7 +30,7 @@ pub(crate) fn dispatch_spawn_argv(
     node_id: &str,
     session: &str,
     account: Option<&str>,
-    parent: Option<&str>,
+    _parent: Option<&str>,
 ) -> Vec<String> {
     let mut argv: Vec<String> = [
         fno.to_string(),
@@ -33,8 +38,10 @@ pub(crate) fn dispatch_spawn_argv(
         "spawn".to_string(),
         "--node".to_string(),
         node_id.to_string(),
-        "--substrate".to_string(),
-        "pane".to_string(),
+        // No --substrate pin: the door's thread default decides, so every
+        // new spawn from the mux takes the thread lane where the harness
+        // seats one. A dispatch child therefore shows as its own roster row
+        // rather than opening under its epic's tab.
         "--mux-session".to_string(),
         session.to_string(),
         "--no-wait".to_string(),
@@ -46,12 +53,29 @@ pub(crate) fn dispatch_spawn_argv(
         argv.push("--account".to_string());
         argv.push(a.to_string());
     }
-    // A child node opens under its epic's tab, the same placement the card
-    // click visualized.
-    if let Some(p) = parent {
-        argv.push("--tab".to_string());
-        argv.push(p.to_string());
-    }
+    // The epic-tab parent is retired: a thread has no tab to group under.
+    // (`_parent` stays in the signature so the four call sites do not move.)
+    argv
+}
+
+/// The launch argv for a PLAN spawn (the card menu's Plan entry): pure so a
+/// unit test can pin it, the same rule [`dispatch_spawn_argv`] follows. The
+/// door is the ONE launcher; the spawn is pinned to the architect sub-agent
+/// and carries the blueprint message, and every dispatch flag (substrate,
+/// mux session, account, parent tab, `--no-wait`) rides exactly as a
+/// dispatch - so the door's family-2 guard, spawn gate, and placement lease
+/// all answer unchanged.
+pub(crate) fn plan_spawn_argv(
+    fno: &str,
+    node_id: &str,
+    session: &str,
+    account: Option<&str>,
+    parent: Option<&str>,
+) -> Vec<String> {
+    let mut argv = dispatch_spawn_argv(fno, node_id, session, account, parent);
+    argv.push("--agent".to_string());
+    argv.push("fno:architect".to_string());
+    argv.push(format!("/fno:blueprint {node_id}"));
     argv
 }
 
@@ -109,6 +133,241 @@ pub(crate) async fn run_fno_captured(
     }
 }
 
+/// The launcher's spawn argv: pure and unit-pinned like
+/// [`dispatch_spawn_argv`]. The ONE launch executable stays the configured
+/// `fno` front door with `agents spawn`; cwd, harness and advanced values
+/// ride as separate argv elements, and the message NEVER rides argv - it
+/// arrives through `--prompt-file -` stdin at the shell-out below. No
+/// `--force`, no `--yolo`: normal gates decide, and a refusal is the
+/// product.
+pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &str) -> Vec<String> {
+    let mut argv: Vec<String> = vec![fno.to_string(), "agents".to_string(), "spawn".to_string()];
+    // A model picked from a routing row rides as a MODEL-ONLY pin: with
+    // --harness typed, the door would take --model as a plain override and
+    // launch the row's model id against the WRONG provider. Omitting
+    // --harness lets the door resolve the row's harness, route, account
+    // and effort itself.
+    if !req.model_names_harness {
+        argv.extend(["--harness".to_string(), req.harness.clone()]);
+    }
+    argv.extend(["--cwd".to_string(), req.cwd.clone()]);
+    // A board prefill binds the launch to its node: the roster row joins
+    // it, the card reads live, and the door's dispatch guard judges it.
+    // No prefill, no flag: the argv stays byte-identical to the plain
+    // launcher launch.
+    if let Some(id) = &req.node {
+        argv.extend(["--node".to_string(), id.clone()]);
+    }
+    // An EMPTY substrate means the door's default (thread where the harness
+    // seats one); only an explicit lane rides the argv, in the same
+    // position it always has, so a pane request stays byte-identical.
+    if !req.substrate.is_empty() {
+        argv.extend(["--substrate".to_string(), req.substrate.clone()]);
+    }
+    argv.extend([
+        "--mux-session".to_string(),
+        session.to_string(),
+        // Fail immediately on a full spawn gate rather than queueing: a
+        // popup launch that silently waits reads as a hung button.
+        "--no-wait".to_string(),
+    ]);
+    if let Some(m) = &req.model {
+        argv.extend(["--model".to_string(), m.clone()]);
+    }
+    if let Some(e) = &req.effort {
+        argv.extend(["--effort".to_string(), e.clone()]);
+    }
+    if let Some(p) = &req.permission_mode {
+        argv.extend(["--permission-mode".to_string(), p.clone()]);
+    }
+    if let Some(t) = &req.placement {
+        argv.extend(["--tab".to_string(), t.clone()]);
+    }
+    if let Some(p) = &req.portal {
+        argv.extend(["--portal".to_string(), p.to_string()]);
+    }
+    if let Some(s) = &req.split {
+        argv.extend(["--split".to_string(), s.clone()]);
+    }
+    // The seed rides stdin even when empty: an empty stdin is the honest
+    // "no seed requested", never a fabricated task.
+    argv.push("--prompt-file".to_string());
+    argv.push("-".to_string());
+    argv
+}
+
+/// One bounded `fno` shell-out that also feeds `stdin_bytes` to the child:
+/// the launcher's message reaches `--prompt-file -` exactly,
+/// bytes-for-bytes, with no shell interpolation. `kill_on_drop` + the two
+/// bounds (per-subprocess budget AND the whole attempt's deadline) carry
+/// over from [`run_fno_captured`].
+pub(crate) async fn run_fno_captured_with_stdin(
+    argv: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+    deadline: tokio::time::Instant,
+) -> Option<(bool, String, String)> {
+    let mut command = crate::process_admission::tokio_command(argv[0]);
+    command
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let fut = async move {
+        let mut child = crate::process_admission::tokio_spawn(&mut command).ok()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            // The seed write can lose a race with a door that refuses
+            // without reading stdin: the closed-pipe error is the door's
+            // own answer arriving early, so drain the exit status + stderr
+            // and let the decoder name the refusal. Swallowing the attempt
+            // here would call a decided refusal an ambiguous timeout.
+            let _ = stdin.write_all(stdin_bytes).await;
+            // Drop the handle so the child sees EOF and `--prompt-file -`
+            // terminates; without this the door blocks on its own read.
+            drop(stdin);
+        }
+        child.wait_with_output().await.ok().map(|o| {
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+            )
+        })
+    };
+    match tokio::time::timeout(timeout.min(remaining), fut).await {
+        Err(_) => None,
+        Ok(None) => None,
+        Ok(Some(triple)) => Some(triple),
+    }
+}
+
+/// What one spawn attempt actually produced . The variants state
+/// BIRTH facts, not acknowledgments: `Launched` requires a decoded receipt,
+/// `Refused` requires the door's own no-birth answer, and everything
+/// uncertain - timeout, malformed success, recovery-required receipt, lost
+/// reply - is `Unknown`, never flattened into either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchOutcome {
+    Launched {
+        name: String,
+        pane: Option<u64>,
+        /// Seed fact off the receipt, kept SEPARATE from birth: an
+        /// intentionally empty seed ("unattempted") is not a failed delivery.
+        seed_delivered: Option<bool>,
+    },
+    /// The door refused before any effect. Deliberate retry is safe.
+    Refused(String),
+    /// Whether a worker was born is unresolved.
+    Unknown(String),
+}
+
+/// The LAST parseable JSON object on stdout (a notice line may print first).
+/// Both receipt shapes live here: a pane receipt carries `pane_id`, a bg
+/// thread receipt carries `name` + `short_id`.
+fn spawn_receipt(stdout: &str) -> Option<serde_json::Value> {
+    let mut found = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let pane = v.get("pane_id").is_some();
+            let thread = v.get("name").is_some() && v.get("short_id").is_some();
+            if pane || thread {
+                found = Some(v);
+            }
+        }
+    }
+    found
+}
+
+/// The verdict line's wire marker. Emitted by the spawn gate
+/// (`spawn_gate.rs run_gate`) as the LAST stderr line of a refusal; the
+/// reading contract is docs/architecture/spawn-gate.md#reading-a-refusal.
+const VERDICT_MARKER: &str = "spawn-gate: refused on ";
+
+/// The pass-path note prefix from the same contract: never a refusal.
+const GATE_NOTE_PREFIX: &str = "spawn-gate note:";
+
+/// The door's own error line: the gate's verdict line when one is present,
+/// else the first non-empty stderr line that is not a passing note, else the
+/// first stdout line, cut at 160 chars. Shared by the notice mapping and the
+/// launcher decoder.
+pub(crate) fn refusal_detail(stderr: &str, stdout: &str) -> String {
+    if let Some(verdict) = stderr
+        .lines()
+        .filter(|l| l.starts_with(VERDICT_MARKER))
+        .last()
+    {
+        return cut_160(verdict);
+    }
+    let detail = stderr
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(GATE_NOTE_PREFIX))
+        .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|l| l.trim().to_string())
+        .find(|l| !l.is_empty())
+        .unwrap_or_else(|| crate::server::first_line_or(stdout, ""));
+    cut_160(&detail)
+}
+
+fn cut_160(s: &str) -> String {
+    if s.chars().count() > 160 {
+        s.chars().take(160).collect()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Decode one launcher attempt . A recovery-required receipt is the
+/// load-bearing ambiguity: the transaction's own contract says the child MAY
+/// exist when persistence failed, so it decodes `Unknown`, never `Refused`.
+pub(crate) fn decode_launch_outcome(exit_ok: bool, stdout: &str, stderr: &str) -> LaunchOutcome {
+    if !exit_ok {
+        return match refusal_detail(stderr, stdout) {
+            d if d.is_empty() => LaunchOutcome::Refused("spawn failed".to_string()),
+            d => LaunchOutcome::Refused(d),
+        };
+    }
+    match spawn_receipt(stdout) {
+        Some(v) => {
+            let recovery = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "recovery_required")
+                || v.get("recovered").and_then(|r| r.as_bool()) == Some(true);
+            if recovery {
+                return LaunchOutcome::Unknown(
+                    "spawn reported recovery_required: the child may exist".to_string(),
+                );
+            }
+            let name = v
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pane = v.get("pane_id").and_then(|p| p.as_u64());
+            // seed: "submitted" proves delivery; "unattempted" with an empty
+            // request message is the intentional interactive case. Absent or
+            // other -> unproven.
+            let seed_delivered = v
+                .get("seed")
+                .and_then(|s| s.as_str())
+                .map(|s| s == "submitted");
+            LaunchOutcome::Launched {
+                name,
+                pane,
+                seed_delivered,
+            }
+        }
+        None => LaunchOutcome::Unknown("spawn exited 0 with no readable receipt".to_string()),
+    }
+}
+
 /// Map a dispatch launch to the one-line client notice (change 3,
 /// step 4). Exit 0 with a pane receipt (a JSON line carrying `pane_id`)
 /// renders `dispatched <slug or id>`; the seed / pane_observation doubt text
@@ -141,18 +400,9 @@ pub(crate) fn dispatch_notice(
         // pane-send spawn where nothing was ever typed - and then tells them
         // not to re-seed the one pane that needs it. `submitted` is what makes
         // "delivered" true.
-        let mut receipt: Option<serde_json::Value> = None;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if !line.starts_with('{') {
-                continue;
-            }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if v.get("pane_id").is_some() {
-                    receipt = Some(v);
-                }
-            }
-        }
+        // The dispatch path is pane-substrate: its success decode stays
+        // pane-receipt-only, exactly as before the shared helper existed.
+        let receipt = spawn_receipt(stdout).filter(|v| v.get("pane_id").is_some());
         return match receipt {
             Some(v) => {
                 let seed = v.get("seed").and_then(|s| s.as_str());
@@ -210,13 +460,7 @@ pub(crate) fn dispatch_notice(
             };
         }
     }
-    let mut detail = crate::server::first_line_or(stderr, "");
-    if detail.is_empty() {
-        detail = crate::server::first_line_or(stdout, "");
-    }
-    if detail.chars().count() > 160 {
-        detail = detail.chars().take(160).collect();
-    }
+    let detail = refusal_detail(stderr, stdout);
     if detail.is_empty() {
         "grab work: dispatch failed".to_string()
     } else {
@@ -350,10 +594,44 @@ mod tests {
         );
     }
 
+    /// The reader picks the verdict line, never a passing note: a
+    /// gate refusal whose stderr carries note lines before the verdict still
+    /// renders the verdict, and an admitted spawn that failed after the gate
+    /// renders the real error, never a note.
+    #[test]
+    fn refusal_detail_takes_the_verdict_line_and_skips_notes() {
+        // Verdict line wins over every note and every refusal sentence.
+        let gate_stderr = "spawn-gate note: ram readings: available 35.9GB (floor 2.0GB), \
+             swap 85.5% (cap 90%), swap-in not sampled (under cap)\n\
+             spawn-gate: provider zai, cap 10, current count 10; refusing\n\
+             spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10";
+        assert_eq!(
+            refusal_detail(gate_stderr, ""),
+            "spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10"
+        );
+        assert_eq!(
+            dispatch_notice(false, "", gate_stderr, "x-1", "feat"),
+            "grab work failed: spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10"
+        );
+        // The gate admitted; the real error line follows the note.
+        assert_eq!(
+            dispatch_notice(
+                false,
+                "",
+                "spawn-gate note: ram readings: available 35.9GB (floor 2.0GB), \
+                 swap 85.5% (cap 90%), swap-in not sampled (under cap)\nError: pane launch failed",
+                "x-1",
+                "feat"
+            ),
+            "grab work failed: Error: pane launch failed"
+        );
+    }
+
     #[test]
     fn dispatch_spawn_argv_is_pinned() {
-        // AC4-HP: node + pane + session + no-wait, and nothing else - no
-        // --harness, --model, --route and no message.
+        // Node + session + no-wait, and nothing else: no --substrate pin
+        // (the door's thread default decides), no --tab parent, no
+        // --harness/--model/--route and no message.
         assert_eq!(
             dispatch_spawn_argv("fno", "x-1", "work", None, None),
             vec![
@@ -362,14 +640,13 @@ mod tests {
                 "spawn",
                 "--node",
                 "x-1",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
             ]
         );
-        // The account and the epic tab ride only when present.
+        // The account rides only when present; the epic-tab parent is
+        // retired (a thread has no tab to group under).
         assert_eq!(
             dispatch_spawn_argv("fno", "x-1", "work", Some("acc"), Some("3")),
             vec![
@@ -378,16 +655,42 @@ mod tests {
                 "spawn",
                 "--node",
                 "x-1",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
                 "--account",
                 "acc",
-                "--tab",
-                "3",
             ]
+        );
+    }
+
+    #[test]
+    fn plan_spawn_argv_is_pinned() {
+        // The Plan entry: the dispatch argv plus the architect pin and the
+        // blueprint message - the door, gate and placement machinery shared.
+        assert_eq!(
+            plan_spawn_argv("fno", "x-1", "work", None, None),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--node",
+                "x-1",
+                "--mux-session",
+                "work",
+                "--no-wait",
+                "--agent",
+                "fno:architect",
+                "/fno:blueprint x-1",
+            ]
+        );
+        // The account still rides when present.
+        assert_eq!(
+            plan_spawn_argv("fno", "x-2", "work", Some("acc"), Some("3"))
+                .iter()
+                .filter(|a| *a == "--account" || *a == "acc")
+                .count(),
+            2
         );
     }
 
@@ -395,7 +698,7 @@ mod tests {
     fn node_identity_reads_the_last_json_object() {
         // `fno backlog next` on an empty board prints null: no node.
         assert!(node_identity("null\n").is_none());
-        assert!(node_identity("").is_none());
+        assert!(spawn_receipt("").is_none());
         // The board read carries id/slug/parent.
         assert_eq!(
             node_identity(r#"{"id":"x-1","slug":"feat","parent":null}"#),
@@ -407,6 +710,270 @@ mod tests {
                 .map(|(id, _slug, parent)| (id, parent)),
             Some(("x-2".to_string(), Some("e1".to_string())))
         );
+    }
+
+    #[test]
+    fn launch_spawn_argv_is_pinned() {
+        // Full-featured request: every optional pin rides as its own argv
+        // element; the message NEVER does (it rides stdin at the shell-out).
+        let req = AgentLaunchRequest {
+            request_id: 1,
+            revision: 1,
+            cwd: "/tmp/proj".into(),
+            harness: "codex".into(),
+            substrate: "pane".into(),
+            model: Some("gpt-5.6-luna".into()),
+            model_names_harness: false,
+            effort: Some("high".into()),
+            permission_mode: Some("workspace-write:on-request".into()),
+            placement: Some("name:work".into()),
+            portal: None,
+            split: None,
+            node: None,
+            message: "line one\nline \"two\" $ ` \u{1f600}".into(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "work"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "codex",
+                "--cwd",
+                "/tmp/proj",
+                "--substrate",
+                "pane",
+                "--mux-session",
+                "work",
+                "--no-wait",
+                "--model",
+                "gpt-5.6-luna",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "workspace-write:on-request",
+                "--tab",
+                "name:work",
+                "--prompt-file",
+                "-",
+            ]
+        );
+        // Empty substrate omits the flag so the door's default decides; a
+        // thread placed through a portal carries --portal and its geometry.
+        let thread = AgentLaunchRequest {
+            request_id: 2,
+            revision: 1,
+            cwd: "/tmp/p2".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: Some(1),
+            split: Some("right".into()),
+            node: None,
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &thread, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/p2",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--portal",
+                "1",
+                "--split",
+                "right",
+                "--prompt-file",
+                "-",
+            ]
+        );
+        // AC5-HP: a routing-row pick omits --harness, so the door resolves
+        // the row's harness, route, account and effort from the model alone.
+        let row_pinned = AgentLaunchRequest {
+            request_id: 3,
+            revision: 1,
+            cwd: "/tmp/p3".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: Some("glm-5.3-flash[1m]".into()),
+            model_names_harness: true,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            node: None,
+            message: String::new(),
+        };
+        let argv = launch_spawn_argv("fno", &row_pinned, "s");
+        assert!(
+            !argv.contains(&"--harness".to_string()),
+            "a model-only pin omits --harness: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--model".to_string())
+                && argv.contains(&"glm-5.3-flash[1m]".to_string()),
+            "the model id rides: {argv:?}"
+        );
+        // Thread new tab: the placement rides --tab new through the
+        // request's portal, beside the explicit thread lane.
+        let new_tab = AgentLaunchRequest {
+            request_id: 4,
+            revision: 1,
+            cwd: "/tmp/p4".into(),
+            harness: "claude".into(),
+            substrate: "thread".into(),
+            model: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: Some("new".into()),
+            portal: Some(2),
+            split: None,
+            node: None,
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &new_tab, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/p4",
+                "--substrate",
+                "thread",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--tab",
+                "new",
+                "--portal",
+                "2",
+                "--prompt-file",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_spawn_argv_carries_the_node_after_the_cwd() {
+        // AC1-HP: a board prefill binds the launch to its node; --node
+        // rides right after the --cwd pair and the message never rides
+        // argv (it reaches the door on stdin).
+        let req = AgentLaunchRequest {
+            request_id: 5,
+            revision: 1,
+            cwd: "/tmp/proj".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            node: Some("x-1".into()),
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/proj",
+                "--node",
+                "x-1",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--prompt-file",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_launch_outcome_separates_birth_from_acknowledgment() {
+        // Pane receipt with a delivered seed: a verified birth.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"outcome":"launched","name":"w","pane_id":7,"seed":"submitted","pane_observation":"painted"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w".into(),
+                pane: Some(7),
+                seed_delivered: Some(true)
+            }
+        );
+        // A bg thread receipt (name + short_id) is a birth with no pane.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"name":"w2","short_id":"a1b2","harness":"claude","status":"spawning"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w2".into(),
+                pane: None,
+                seed_delivered: None
+            }
+        );
+        // An intentionally seedless launch: "unattempted" is NOT a failure
+        // when the request carried no message - it stays a birth whose seed
+        // fact reads false.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"name":"w3","pane_id":9,"seed":"unattempted"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w3".into(),
+                pane: Some(9),
+                seed_delivered: Some(false)
+            }
+        );
+        // The door's pre-birth refusal: deliberate retry is safe.
+        assert_eq!(
+            decode_launch_outcome(
+                false,
+                "",
+                "fno agents spawn: capacity refused: no free slot"
+            ),
+            LaunchOutcome::Refused("fno agents spawn: capacity refused: no free slot".into())
+        );
+        // Exit 0 with no readable receipt: never a birth, never a refusal.
+        assert_eq!(
+            decode_launch_outcome(true, "", ""),
+            LaunchOutcome::Unknown("spawn exited 0 with no readable receipt".into())
+        );
+        // A recovery-required receipt leaves birth unresolved: the child may
+        // exist, so this is Unknown, never Refused.
+        assert!(matches!(
+            decode_launch_outcome(true, r#"{"name":"w4","pane_id":3,"recovered":true}"#, ""),
+            LaunchOutcome::Unknown(_)
+        ));
     }
 
     #[test]

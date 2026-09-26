@@ -2,9 +2,11 @@
 //! families. Shared helpers (`tmp_home`, `ask_row`, `rentry`, `civil`, ...)
 //! stay in the parent tests module and resolve through the glob.
 use super::*;
+use crate::daemon::claude_stop::stop_claude_pid_confirmed;
 use crate::daemon::codex_thread_resume::codex_thread_recovery_candidate;
 
 use crate::gc_sweep::{self, GcSummary, GraphRead};
+use crate::quiet_retire::{daemon_exited_payload, no_live_worker};
 
 // ── x-c672: the retirement sweep, keyed by the reverse join ─────────────
 
@@ -253,7 +255,7 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
     );
     assert_eq!(summary.pruned.len(), 1, "{:?}", summary.pruned);
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "rowb".to_string(),
             "N3".to_string(),
@@ -1866,18 +1868,41 @@ fn the_resume_form_comes_from_the_capability_table() {
     let toml: std::collections::BTreeMap<String, toml::Value> =
         toml::from_str(crate::harness_capabilities::CAPABILITY_TOML).unwrap();
     for harness in ["claude", "codex"] {
-        let tokens: Vec<String> = toml["harness"][&harness]["resume_strategy"]["forms"]
-            ["interactive_resume"]["tokens"]
+        let form = &toml["harness"][&harness]["resume_strategy"]["forms"]["interactive_resume"];
+        let tokens: Vec<String> = form["tokens"]
             .as_array()
             .unwrap()
             .iter()
             .map(|t| t.as_str().unwrap().replace("{session_id}", "s-1"))
             .collect();
+        let pre_exec: Vec<String> = form
+            .get("pre_exec")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The declared pre_exec composes the way the resume builder does:
+        // one `sh -c` whose script runs the pre-exec then execs the filled
+        // tokens. claude declares none and renders bare.
+        let expected = if pre_exec.is_empty() {
+            tokens.join(" ")
+        } else {
+            let join = |v: &[String]| {
+                v.iter()
+                    .map(|t| format!("'{t}'"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("sh -c {}; exec {}", join(&pre_exec), join(&tokens))
+        };
         let mut e = ask_row("form", None);
         e.harness = Some(harness.into());
         e.harness_session_id = Some("s-1".into());
-        let receipt = build_reap_receipt(&e, None).unwrap();
-        assert_eq!(receipt.resume, tokens.join(" "), "{harness}");
+        let receipt = build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap();
+        assert_eq!(receipt.resume, expected, "{harness}");
     }
     // A harness with no capability row (hermes hosts real sessions per
     // docs/SETUP-*.md and ships no row) cannot produce a resume command:
@@ -1886,7 +1911,7 @@ fn the_resume_form_comes_from_the_capability_table() {
     let mut e = ask_row("hermes-row", None);
     e.harness = Some("hermes".into());
     e.harness_session_id = Some("h-1".into());
-    let err = build_reap_receipt(&e, None).unwrap_err();
+    let err = build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap_err();
     assert!(err.contains("hermes"), "{err}");
 }
 
@@ -1929,7 +1954,7 @@ fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
 
     let mut e = ask_row("shipped", None);
     e.harness_session_id = Some("s-ledger".into());
-    let receipt = build_reap_receipt(&e, Some(row)).unwrap();
+    let receipt = build_reap_receipt(&e, Some(row), crate::receipt::Writer::GcSweep).unwrap();
     let led = receipt.ledger.expect("ledger enrichment present");
     assert_eq!(led["pr_number"], 1325);
 }
@@ -2035,6 +2060,9 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
             ),
         )
         .unwrap();
+    // Production rotation ingests a generation before the rename; the reader
+    // answers from the store, so the seeded generation must be ingested too.
+    crate::event_store::sync(&done_repo.join(".fno/events.jsonl")).unwrap();
 
     let summary = retire_sweep(
         &home,
@@ -2068,7 +2096,7 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
     assert_eq!(done_reap["data"]["node_id"], "x-b44e");
     assert_eq!(done_reap["data"]["termination_event"], true);
 
-    let global = std::fs::read_to_string(&global_events).unwrap();
+    let global = crate::events::committed_journal_text(&global_events);
     let failures: Vec<Value> = global
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -2156,7 +2184,11 @@ fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
         registry.entries.push(row);
     })
     .unwrap();
+    // The write this test breaks is the STORE commit now: a directory at the
+    // store path refuses to open as SQLite, so the receipt persist fails the
+    // same way a journal append to a directory did pre-cutover.
     std::fs::create_dir_all(global_events_path(&home)).unwrap();
+    std::fs::create_dir_all(global_events_path(&home).with_file_name("events.db")).unwrap();
 
     let summary = retire_sweep(
         &home,
@@ -3125,7 +3157,7 @@ fn recovery_does_not_quarantine_a_temp_held_by_an_active_writer() {
         .unwrap();
     lock.lock().unwrap();
 
-    let found = quarantine_interrupted_write_temps(&home, &emitter);
+    let found = crate::quarantine::quarantine_interrupted_write_temps(&home, &emitter);
 
     assert!(found.is_empty());
     assert!(temp.exists(), "active writer temp must remain in place");
@@ -3297,7 +3329,9 @@ fn reconcile_budget_starts_after_truth_batch() {
     // and once ate the whole 5s budget (24s wall, 0 of 79 rows probed).
     // The budget's position is structural, so pin it where the source
     // cannot silently drift back: the clock line sits AFTER the truth
-    // batch and the roster load inside `run_reconcile_sweep`.
+    // batch and the roster load inside `run_reconcile_sweep`. The roster
+    // load lives in `liveness_sweep::BgRoster::load` since the witness
+    // moved off this file (shrink-only), same position, same invariant.
     let src = include_str!("../../daemon.rs");
     let sweep = src
         .split("fn run_reconcile_sweep(")
@@ -3310,7 +3344,7 @@ fn reconcile_budget_starts_after_truth_batch() {
         .find("batched_row_probes(&entries")
         .expect("truth batch call");
     let roster = sweep
-        .find("ClaudeRoster::load_default()")
+        .find("liveness_sweep::BgRoster::load()")
         .expect("roster load");
     assert!(
         truth < clock && roster < clock,
@@ -3433,11 +3467,13 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
 
 /// Stage a real graph file at the state root.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
+    let graph = dir.join("graph.json");
     std::fs::write(
-        dir.join("graph.json"),
+        &graph,
         serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
     )
     .unwrap();
+    crate::backlog::set_backend(&graph, crate::backlog::Backend::Json).unwrap();
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
@@ -3482,7 +3518,9 @@ fn settle_then_run(
             0,
             true,
             0,
-            &|h| gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned)),
+            &|h| {
+                gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &[]))
+            },
             transcripts,
             &staged_ages(transcripts),
             &|_| true,
@@ -3498,7 +3536,10 @@ fn settle_then_run(
             .collect();
         summary
     } else {
-        let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
+        let mut read = |_path: &str, _cwd: &str| -> Option<gc_sweep::PrState> {
+            panic!("no existing settle_then_run test may reach GitHub");
+        };
+        let (settled, refused) = gc_sweep::settle_stale_do_rows_with(home, &mut read);
         let mut summary = gc_sweep::run(
             home,
             emitter,
@@ -3586,10 +3627,10 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
             "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string()
         )]
     );
-    // THE assertion: the file still holds the row, now closed, never removed.
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let entry = &raw["entries"][0];
+    // THE assertion: the store still holds the row, now closed, never
+    // removed. graph.json is the frozen mirror; graph.db is the record.
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    let entry = &rows[0];
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     let row = &sessions[0];
@@ -3778,9 +3819,8 @@ fn the_live_eighteen_split_fifteen_and_three() {
     for node in ["Nu", "Np1", "Np2"] {
         assert!(held.contains(&&node.to_string()), "held: {held:?}");
     }
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    for entry in raw["entries"].as_array().unwrap() {
+    let rows = crate::graph_store::read_rows(&dir.path().join("graph.json")).unwrap();
+    for entry in rows.iter() {
         let node = entry["id"].as_str().unwrap();
         for row in entry["sessions"].as_array().unwrap() {
             let stamped = row.get("ended_at").is_some();
@@ -4160,7 +4200,8 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     .unwrap();
     let entries = state::load_registry(&home.registry_json()).unwrap();
     let entry = entries.entries.first().unwrap();
-    let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+    let mut receipt =
+        crate::receipt::build_reap_receipt(entry, None, crate::receipt::Writer::GcSweep).unwrap();
     receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
     let mut receipts = std::collections::BTreeMap::new();
     receipts.insert(entry.name.clone(), receipt);
@@ -4266,7 +4307,9 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
     let mut receipts = std::collections::BTreeMap::new();
     let mut to_retire = std::collections::BTreeMap::new();
     for entry in &entries.entries {
-        let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+        let mut receipt =
+            crate::receipt::build_reap_receipt(entry, None, crate::receipt::Writer::GcSweep)
+                .unwrap();
         receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
         receipts.insert(entry.name.clone(), receipt);
         to_retire.insert(
@@ -4345,7 +4388,8 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
     // The record: built through the REAL capability table (resume form
     // rendered, locator staged), then localized to the fixture store the
     // way the harness's own index resolves a live session.
-    let mut receipt = crate::receipt::build_reap_receipt(&e, None).unwrap();
+    let mut receipt =
+        crate::receipt::build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap();
     receipt.native_locator = Some(json!({ "transcripts": [transcript.to_string_lossy()] }));
     receipt.effects = vec![
         crate::gc_native::stop_outcome_effect(true, None),
@@ -4794,10 +4838,64 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// A receipt the sweep stages names its writer. `removed_by` reads
+/// the surface `gc-sweep`, `removal_trigger` reads `unattended`; the 80
+/// unstamped receipts of 2026-09-17 were this sweep declining to sign.
+#[test]
+fn a_sweep_receipt_names_its_writer_and_trigger() {
+    let home = tmp_home("gc-writer-stamp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let a_path = quiet_transcript(transcripts.path(), "a.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut a = ask_row("row-stamp", None);
+        a.short_id = "stamp1".into();
+        a.harness = Some("claude".into());
+        a.harness_session_id = Some("sess-stamp".into());
+        a.origin = Some("spawn".into());
+        r.entries.push(a);
+    })
+    .unwrap();
+
+    let summary = retire_sweep(
+        &home,
+        &emitter,
+        &[("sess-stamp", "N1", "done")],
+        &|e| match e.harness_session_id.as_deref() {
+            Some("sess-stamp") => Some(vec![a_path.clone()]),
+            _ => None,
+        },
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+
+    let receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::receipt::reap_receipt_path_for(
+            &home,
+            "claude",
+            "sess-stamp",
+        ))
+        .expect("the sweep staged its receipt"),
+    )
+    .unwrap();
+    assert_eq!(
+        receipt["removed_by"], "gc-sweep",
+        "the sweep signs the receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["removal_trigger"], "unattended",
+        "a sweep nobody asked for: {receipt}"
+    );
+}
+
 /// The blueprint retirement families, split by the file budget; the
 /// fixtures above are the shared seams.
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
+
+/// The additional-PR settle families (tasks 1.1 and 1.2): the three graph
+/// rules, the one-GitHub-read stamp, and the pass that applies it.
+#[path = "gc_receipts/additional_pr_settle.rs"]
+mod additional_pr_settle;
 
 /// The retirement-removes-the-session families: the production active-surface
 /// seam runs for real against a fake `claude` on PATH.

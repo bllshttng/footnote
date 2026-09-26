@@ -222,3 +222,106 @@ fn keeper_readopt_unlinks_a_socket_with_no_live_keeper_and_names_it() {
         "no pane is minted for a stale socket"
     );
 }
+
+#[test]
+fn take_adopted_for_slot_binds_by_birth_pane_id_once_only() {
+    // The SHELL-slot restart join: the stored leaf's pane id (globally
+    // monotonic, re-adopted at birth) binds the adoptee to its own leaf.
+    // A stranger id never joins, and the join is once-only.
+    let Some(bin) = keeper_test_bin() else {
+        eprintln!(
+            "SKIPPING take_adopted_for_slot_binds_by_birth_pane_id_once_only: \
+                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
+        );
+        return;
+    };
+    let dir = crate::proto::mux_dir().join("panes");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("kt-5.sock");
+    let _ = std::fs::remove_file(&sock);
+    let _keeper = spawn_keeper_for_test(&bin, &sock, &["sleep", "300"]);
+    let bound = Instant::now();
+    while !sock.exists() {
+        assert!(
+            bound.elapsed() < Duration::from_secs(10),
+            "keeper never bound its socket"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let mut core = empty_core();
+    core.session_name = "kt".to_string();
+    core.keeper_readopt();
+    assert_eq!(core.keeper_adopted.len(), 1, "the keeper pane is staged");
+    assert_eq!(core.keeper_adopted[0].pane, 5, "adopted at the birth id");
+
+    assert_eq!(
+        core.take_adopted_for_slot(9),
+        None,
+        "a stranger birth id never joins"
+    );
+    assert_eq!(
+        core.take_adopted_for_slot(5),
+        Some(5),
+        "the stored leaf's birth id joins the adoptee"
+    );
+    assert_eq!(core.take_adopted_for_slot(5), None, "the join is once-only");
+}
+
+#[test]
+fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
+    // The contract the future sigwait reaper must keep: a shutdown-shaped
+    // sweep kills plain pane children and leaves keeper-hosted panes for
+    // the next server to re-adopt. Deliberate close (reap_pane) is the
+    // only path that kills a keeper pane.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/sh".into()];
+    let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
+
+    let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+    let keeper_pane = {
+        let id = core.reserve_pane_id().unwrap();
+        core.register_pane(
+            id,
+            PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
+            24,
+            80,
+            None,
+            None,
+            "/tmp".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        id
+    };
+
+    core.kill_all_panes();
+
+    // The plain child is dead (poll: SIGKILL is fast but not instant).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while core.panes[&plain].pty.is_child_alive() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the plain pane's child must die in the shutdown sweep"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // The keeper pane got NO kill: nothing arrives on its wire inside a
+    // window far longer than the Local kill takes.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut probe = a;
+    use std::io::Read as _;
+    probe
+        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .unwrap();
+    let mut byte = [0u8; 1];
+    assert!(
+        probe.read(&mut byte).is_err(),
+        "the shutdown sweep must never send a Kill frame to a keeper pane"
+    );
+    assert!(core.panes.contains_key(&keeper_pane));
+}

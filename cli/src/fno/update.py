@@ -1,12 +1,5 @@
 """fno doctor update: reinstall the fno CLI from its source path.
 
-Discovers the source via (in priority order):
-
-1. ``--source`` flag override
-2. ``FNO_SOURCE`` env var
-3. ``~/.fno/source-path`` cache (written on prior successful install)
-4. Well-known candidate paths (plugin install, common dev locations)
-
 Then execs ``uv tool install --reinstall-package fno --refresh-package fno
 <source>`` (or ``pip install --user --force-reinstall <source>`` if uv is
 unavailable). Only the ``fno`` package is reinstalled: the wide ``--reinstall``
@@ -306,44 +299,20 @@ def _cargo_installed_bin() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _installed_bin_crates_rev(binary: Path, *, timeout: float = 20.0) -> Optional[str]:
-    """The clean crates/ subtree rev the installed binary self-reports, or None.
+def _install_exec_dead(verdict_bin: Path, *, prefix: str = "fno doctor update") -> str:
+    """The one refusal for a bindir whose probe cannot run at all.
 
-    Runs ``<binary> version --json`` (the build.rs embed) and returns its
-    ``crates_rev`` only when the binary answered cleanly AND the build is not
-    dirty. Returns None - which the gate treats as STALE, forcing a rebuild -
-    for every failure mode: a missing/hung/crashing binary (bounded by
-    ``timeout``), a non-zero exit, unparseable or non-dict JSON, a "unknown"
-    rev (non-git build), or a dirty tree. Fail toward rebuild, never toward a
-    false-fresh skip (the stale-marker gate's exact lie).
+    The exec probe lives inside the deployed fno-agents binary, so a client
+    whose own path is poisoned (the kernel signature cache reads a stale inode
+    as a kill-on-exec) cannot repair anything, including itself. Name the path
+    and the literal three-command repair - a fresh inode - and let the leg
+    fail. Never a silent "treating as NOT converged".
     """
-    try:
-        result = subprocess.run(
-            [str(binary), "version", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    stdout = getattr(result, "stdout", None)
-    if not stdout:
-        return None
-    try:
-        data = json.loads(stdout)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict) or data.get("dirty") is True:
-        return None
-    rev = data.get("crates_rev")
-    if not isinstance(rev, str) or rev in ("", "unknown"):
-        return None
-    return rev
-
-
+    p = str(verdict_bin)
+    return (
+        f"{prefix}: ERROR: install-exec-dead {p}; repair with: "
+        f"cp {p} {p}.fix && mv {p}.fix {p} && chmod 755 {p}"
+    )
 
 
 def _component_verdict(
@@ -386,11 +355,15 @@ def _component_verdict(
 
 
 def _component_lines(report: Optional[dict], *, prefix: str = "fno doctor update") -> list[str]:
-    """Non-fresh rows with their native one-liner; None = cannot answer."""
+    """Non-fresh rows with their native one-liner.
+
+    A None report carries no rows here: the verdict-would-not-run refusal
+    names the path at the call site (``_install_exec_dead``), because a
+    generic "unavailable; treating as NOT converged" line names no path and
+    fails nothing - the exact silence that let three PRs land red.
+    """
     if report is None:
-        return [
-            f"{prefix}: component verdict unavailable (the deployed fno-agents"
-            " could not answer); treating as NOT converged"]
+        return []
     return [
         f"{prefix}: {c['line']}"
         for c in report.get("components", [])
@@ -851,7 +824,40 @@ def _triad_install_dirs() -> list[Path]:
     return dirs
 
 
-def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
+def _verify_bindir_strict(source: Path, subtree: str, dest: Path) -> None:
+    """One component verdict against a bindir that was just written, loud on
+    every non-fresh row.
+
+    A verdict that cannot run at all prints the install-exec-dead refusal and
+    fails the leg: the probe lives inside the deployed binary, so a dead
+    client path is the one case the native repair cannot cover (AC2-BOOT). A
+    row still unanswerable after the native repair attempt - or stale in a
+    location that just received fresh bytes - names the location and its path
+    and fails the leg too (AC2-ERR): never a converged-looking update over a
+    dead write.
+    """
+    report = _component_verdict(source, subtree, dest, dest / _triad_names()[0])
+    if report is None:
+        typer.echo(_install_exec_dead(dest / _triad_names()[0]), err=True)
+        raise typer.Exit(1)
+    if not report.get("converged"):
+        for line in _component_lines(report):
+            typer.echo(line, err=True)
+        typer.echo(
+            f"fno doctor update: ERROR: the triad just written to {dest} did not"
+            " prove current; this location may hold a dead or mixed install.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+def _sync_triad(
+    cargo_bin_dir: Path,
+    *,
+    dry_run: bool = False,
+    source: Optional[Path] = None,
+    subtree: Optional[str] = None,
+) -> None:
     """Propagate the freshly-built triad from ``cargo_bin_dir`` into every OTHER
     live install location that already hosts one of the three bins, so client,
     daemon, and worker stay a coherent same-build set wherever the resolver might
@@ -865,6 +871,11 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
     cannot take the full triad HALTS update loud (``typer.Exit``) naming the
     location and the bins left inconsistent - a mixed-version pair is the worse
     bug, never left silently half-copied (AC2-ERR).
+
+    With ``source`` and ``subtree`` set, each completed destination is verified
+    by one component verdict against exactly the bindir just written, and a
+    destination that cannot answer after the native repair fails the leg
+    (AC2-HP/AC2-ERR).
     """
     names = _triad_names()
     sources = {n: cargo_bin_dir / n for n in names}
@@ -917,6 +928,8 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
             )
             raise typer.Exit(1)
         typer.echo(f"fno doctor update: synced fno-agents triad -> {dest}")
+        if source is not None and subtree is not None:
+            _verify_bindir_strict(source, subtree, dest)
 
 
 def _chained_restart_if_drifted(binary: Path, *, dry_run: bool = False) -> None:
@@ -970,24 +983,29 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # When force=True but subtree is None, we continue but remember we cannot write a marker.
 
     # Freshness is proven by the binaries themselves via one native probe:
-    # an absent, stale or unanswerable component falls through to cargo.
-    installed_rev = None if installed_bin is None else _installed_bin_crates_rev(installed_bin)
+    # an absent, stale or unanswerable component falls through to cargo. One
+    # exec answers liveness AND revision: the verdict report carries each
+    # component's observed_rev, so no second Python exec-probe runs (AC2-PORT).
+    pre = (
+        _component_verdict(
+            source, subtree, installed_bin.parent, installed_bin, include_mux=True
+        )
+        if (not force and installed_bin is not None and subtree is not None)
+        else None
+    )
+    rows = {c.get("component"): c for c in (pre or {}).get("components", [])}
+    installed_rev = rows.get("fno-agents", {}).get("observed_rev")
     if (
-        not force
-        and installed_bin is not None
+        installed_bin is not None
         and subtree is not None
-        and (pre := _component_verdict(
-            source, subtree, installed_bin.parent, installed_bin, include_mux=False
-        )) is not None
-        and pre.get("converged")
+        and all(rows.get(n, {}).get("status") in ("fresh", "updated") for n in _triad_names())
     ):
         typer.echo(
             f"fno doctor update: rust bins fresh (rev {(installed_rev or subtree or 'unknown')[:12]} from binary);"
             " skipping cargo install"
         )
         # The mux front door can be absent or stale at a fresh triad; reinstall then.
-        mux = _cargo_installed_mux()
-        if mux is None or _installed_bin_crates_rev(mux) != subtree:
+        if rows.get("fno", {}).get("status") not in ("fresh", "updated"):
             _install_mux_front_door(source, installed_bin.parent.parent, dry_run=dry_run)
         # The post-repair verdict decides "fresh", never the gate above.
         # A dry run executed no effect, so it may not claim one attempted.
@@ -995,14 +1013,17 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             source, subtree, installed_bin.parent, installed_bin,
             attempted=not dry_run,
         )
-        converged = bool(report and report.get("converged"))
+        if report is None:
+            typer.echo(_install_exec_dead(installed_bin), err=True)
+            raise typer.Exit(1)
+        converged = bool(report.get("converged"))
         if not converged:
             for line in _component_lines(report):
                 typer.echo(line)
         # Sync even on the fresh path: an interrupted prior run may have left the
         # other install locations behind (AC2-FR). The gate's fresh verdict must
         # NOT short-circuit convergence.
-        _sync_triad(installed_bin.parent, dry_run=dry_run)
+        _sync_triad(installed_bin.parent, dry_run=dry_run, source=source, subtree=subtree)
         _chained_restart_if_drifted(installed_bin, dry_run=dry_run)
         return "fresh" if converged else "partial"
 
@@ -1020,12 +1041,16 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         """Name what did not converge; the Python update still proceeds."""
         if subtree is None:
             return
+        verdict_bin = _cargo_installed_bin() or install_root / "bin" / _triad_names()[0]
         report = _component_verdict(
             source,
             subtree,
             install_root / "bin",
-            _cargo_installed_bin() or install_root / "bin" / _triad_names()[0],
+            verdict_bin,
         )
+        if report is None:
+            typer.echo(_install_exec_dead(verdict_bin), err=True)
+            return
         for line in _component_lines(report):
             typer.echo(line, err=True)
 
@@ -1078,10 +1103,13 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         if subtree is not None and verdict_bin.is_file()
         else None
     )
+    if subtree is not None and post_report is None:
+        typer.echo(_install_exec_dead(verdict_bin), err=True)
+        raise typer.Exit(1)
     rows = {c.get("component"): c for c in (post_report or {}).get("components", [])}
     client = rows.get("fno-agents")
     if subtree is not None and (
-        post_report is None or client is None or client.get("status") not in ("fresh", "updated")
+        client is None or client.get("status") not in ("fresh", "updated")
     ):
         for line in _component_lines(post_report):
             typer.echo(line, err=True)
@@ -1101,7 +1129,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # Propagate the freshly-built triad to every other live install location so
     # client/daemon/worker stay a coherent set (the same-dir sibling contract).
     # After a successful cargo install the triad lives at <install_root>/bin.
-    _sync_triad(install_root / "bin", dry_run=False)
+    _sync_triad(install_root / "bin", dry_run=False, source=source, subtree=subtree)
     _chained_restart_if_drifted(install_root / "bin" / "fno-agents", dry_run=False)
 
     # Final proof: re-probe as finally deployed; an attempted build alone is
@@ -1113,6 +1141,9 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         if subtree is not None and verdict_bin.is_file()
         else None
     )
+    if subtree is not None and post_report is None:
+        typer.echo(_install_exec_dead(verdict_bin), err=True)
+        raise typer.Exit(1)
     post_converged = bool(post_report and post_report.get("converged"))
     if not post_converged:
         for line in _component_lines(post_report):
@@ -1321,7 +1352,7 @@ def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optiona
     binary a slow post-install step may await. Each verb self-gates. The
     plugin-stage restage rides last: live sessions exec hooks straight from
     the stage, so a restage IS the deploy; gated on the cargo binary because
-    a machine without fno-agents has no stage builder.
+    a machine without fno-agents has no stage builder; the codex refresh follows the restage.
     """
     refresh_cmds: list[list[str]] = []
     try:
@@ -1342,6 +1373,14 @@ def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optiona
         refresh_cmds.append(
             [str(agents_bin), "plugin-install", "--restage", "--source", str(resolved)]
         )
+        try:  # a restage keeps the version; codex re-copies its cache only on a forced converge
+            from fno.setup.codex_plugin import _marker_bytes, resolve_codex_home
+
+            marker = json.loads(_marker_bytes(resolve_codex_home()) or b"")
+        except (OSError, ValueError):
+            marker = {}
+        if await_bin and isinstance(marker, dict) and marker.get("channel") == "dev":
+            refresh_cmds.append([await_bin, "config", "plugin", "install", "codex", "--force"])
     return refresh_cmds, await_bin
 
 
@@ -1529,7 +1568,11 @@ def update_command(
             root=claims_root_for(_UPDATE_CLAIM_KEY),
         )
     except CLAIM_UNAVAILABLE as exc:
-        holder = getattr(exc, "holder", "another session")
+        # Only ClaimHeldByOther carries .holder (the CLAIM_UNAVAILABLE
+        # contract). A holder-less member is a door/sweep failure, not a
+        # live peer: name the class and detail instead of inventing
+        # "another session".
+        holder = getattr(exc, "holder", None) or f"unavailable: {type(exc).__name__}: {exc}"
         try:
             from fno import doctor
 

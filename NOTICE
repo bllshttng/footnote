@@ -15,8 +15,8 @@ limitations under the License.
 
 ## Third-party material
 
-- `skills/pm-plan-review/` and `plugins/fno-pm/skills/pm-plan-review/` distill MIT-licensed pm-skills material (pm-product-strategy/product-strategy, pm-product-strategy/product-vision, pm-market-research/user-personas, pm-ai-shipping/intended-vs-implemented). The lens files carry no copied sentences.
-- `skills/pm-plan-draft/` and `plugins/fno-pm/skills/pm-plan-draft/` distill MIT-licensed material from pm-skills (pm-execution create-prd, job-stories, user-stories, test-scenarios, outcome-roadmap; pm-product-strategy product-strategy, product-vision; pm-ai-shipping intended-vs-implemented), compound-engineering-plugin (ce-plan architecture-strategist and agent-native-planning-strategist) and strategic-partner (references/cognitive-patterns.md), and carry no copied sentences.
+- `skills/blueprint/lenses/judge/` distills MIT-licensed pm-skills material (pm-product-strategy/product-strategy, pm-product-strategy/product-vision, pm-market-research/user-personas, pm-market-research/competitor-analysis, pm-ai-shipping/intended-vs-implemented, pm-ai-shipping/shipping-artifacts) and strategic-partner material (references/cognitive-patterns.md). The lens files carry no copied sentences.
+- `skills/blueprint/references/lenses/draft/` (premise lenses) and the code lenses in `skills/blueprint/references/lenses/code/`, also shipped as bundled copies at `skills/target/references/lenses/`, distill MIT-licensed material from pm-skills (pm-execution create-prd, job-stories, user-stories, test-scenarios, outcome-roadmap; pm-product-strategy product-strategy, product-vision; pm-ai-shipping intended-vs-implemented), compound-engineering-plugin (ce-plan architecture-strategist and agent-native-planning-strategist) and strategic-partner (references/cognitive-patterns.md), and carry no copied sentences.
 
 The adapted material is MIT-licensed:
 

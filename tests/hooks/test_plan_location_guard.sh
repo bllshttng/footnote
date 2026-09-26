@@ -59,6 +59,20 @@ EOF
 write_fake_fno "$PLANS"
 FAKE_PATH="$FAKEBIN:$PATH"
 
+# A no-op `fno-agents` keeps the suite hermetic: without it, a developer
+# machine's real binary would answer the plans-dirs verb and the accepted set
+# would depend on the operator's config. Exit 60 names it loudly if a guard
+# ever starts treating a failing verb as data. The K-series swaps this stub
+# for per-case doubles and restores it after.
+write_fake_agents() {
+    cat > "$FAKEBIN/fno-agents" <<EOF
+#!/usr/bin/env bash
+exit 60
+EOF
+    chmod +x "$FAKEBIN/fno-agents"
+}
+write_fake_agents
+
 PLAN_FM='---\nnode: x-5349\nslug: some-plan\ntype: feature\nstatus: ready\n---\n\n# Plan\n'
 
 # decision_of GUARD PATH_ENV PAYLOAD -> "block" | "approve" | "MISSING"
@@ -370,6 +384,51 @@ STUBEOF
     expect_wp "I2: carve-out resolves from the payload cwd" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/fno/plans/p.md\"}}"
 
+    # ── K. the accepted set spans registered projects ────────────────────────
+    # A blueprint run anchored OUTSIDE a project still targets that project,
+    # so a target under ANY registered project's plans dir is accepted; only a
+    # target outside every known dir is refused. The verb answers one dir per
+    # line; the stub answers with a foreign project's plans dir, and the
+    # session dir from the fake `fno` stays in the set beside it.
+    K_FOREIGN="$TMP/other-project/plans"
+    mkdir -p "$K_FOREIGN"
+    write_fake_agents_multi() {
+        cat > "$FAKEBIN/fno-agents" <<EOF
+#!/usr/bin/env bash
+[[ "\${1:-} \${2:-}" == "state plans-dirs" ]] || exit 61
+if [[ -n "$1" ]]; then printf '%s\n' '$1'; fi
+exit 0
+EOF
+        chmod +x "$FAKEBIN/fno-agents"
+    }
+    write_fake_agents_multi "$K_FOREIGN"
+
+    # The reported bug, pinned: the foreign project's plans dir is accepted
+    # from a session anchored anywhere.
+    expect "K1: a registered project's plans dir is accepted from a foreign session" approve \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$K_FOREIGN/20260922-my-plan.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect "K2: the session plans dir stays accepted beside the verb's dirs" approve \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/vault\",\"tool_input\":{\"file_path\":\"fno/plans/rel.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect "K3: a target outside every known dir is still blocked" block \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/plans/thing.md\",\"content\":\"# no frontmatter\\n\"}}"
+
+    # A verb that answers garbage or nothing degrades to the session dir only:
+    # the old single-dir behavior, never a broader refusal.
+    write_fake_agents_multi "plans/relative/not-a-dir"
+    expect "K4: a relative verb line is ignored" block \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$K_FOREIGN/20260922-my-plan.md\",\"content\":\"$PLAN_FM\"}}"
+
+    write_fake_agents_multi ""
+    expect "K5: an empty verb answer leaves the session dir accepted" approve \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/vault\",\"tool_input\":{\"file_path\":\"fno/plans/rel.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect "K6: an empty verb answer keeps outside targets blocked" block \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/plans/thing.md\",\"content\":\"# no frontmatter\\n\"}}"
+
+    write_fake_agents
+
     # ── J. a half-sourced helper degrades, never opens ───────────────────────
     # bash defines functions as it parses, so a truncated helper leaves the
     # first defined and the rest missing. The guard must fall back to the blunt
@@ -414,6 +473,23 @@ STUBEOF
     fi
 
     write_fake_fno "$PLANS"
+fi
+
+# An empty caller PATH must not leak noise into the guard's stderr: a preflight
+# once read a dirname error there as a red push. Plain `env -i` does not
+# reproduce: bash applies a default PATH, so PATH is pinned empty instead.
+# FNO_TEST_HERMETIC survives the wipe on purpose: the smoke runner's state
+# canary plants the checkout's .fno, and without the pin this bare-guard run
+# appends a guard_decision row into it, failing the whole shard.
+EMPTY_PATH_ERR="$TMP/empty-path-stderr"
+EMPTY_PATH_OUT="$(printf '{}' | env -i PATH= FNO_TEST_HERMETIC=1 /bin/bash "$GUARD" 2>"$EMPTY_PATH_ERR")"
+EMPTY_PATH_RC=$?
+if [[ $EMPTY_PATH_RC -eq 0 ]] \
+    && [[ ! -s "$EMPTY_PATH_ERR" ]] \
+    && [[ "$EMPTY_PATH_OUT" == "{}" ]]; then
+    pass "empty PATH allows with clean stderr"
+else
+    fail "empty PATH run broke: rc=$EMPTY_PATH_RC stderr=$(cat "$EMPTY_PATH_ERR") out=$EMPTY_PATH_OUT"
 fi
 
 printf '\n[plg] %d passed, %d failed\n' "$PASS" "$FAIL"

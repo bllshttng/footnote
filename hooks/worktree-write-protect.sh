@@ -2,6 +2,12 @@
 
 set -uo pipefail
 
+# Guards must survive a caller env with no usable PATH: a push preflight once
+# went red on "dirname: command not found". Caller dirs keep precedence;
+# system dirs supply the fallback.
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # shellcheck source=lib/guard-mark.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/guard-mark.sh" 2>/dev/null || true
 
@@ -89,25 +95,23 @@ _absolute() {
     esac
 }
 
-# Collect every path this call writes: a file_path payload contributes one, an
-# apply_patch command contributes its header paths.
+# shellcheck source=lib/write-targets.sh
+source "$HOOK_DIR/lib/write-targets.sh" 2>/dev/null || true
+# Without the lib the payload's objects are unknown, not absent: the per-target
+# check below treats that as an unsafe target once the root is named.
 TARGETS=()
-[[ -n "$FILE_PATH" ]] && TARGETS+=("$FILE_PATH")
-if [[ -n "$PATCH_COMMAND" ]]; then
-    while IFS= read -r line; do
-        case "$line" in
-            "*** Add File: "*|"*** Update File: "*|"*** Delete File: "*|"*** Move to: "*)
-                path="${line#*: }"
-                path="${path%$'\r'}"
-                [[ -n "$path" ]] && TARGETS+=("$path")
-                ;;
-        esac
-    done <<< "$PATCH_COMMAND"
+TARGETS_UNKNOWN=0
+if declare -F write_targets >/dev/null 2>&1; then
+    while IFS= read -r t; do
+        TARGETS+=("$t")
+    done < <(write_targets "$FILE_PATH" "$PATCH_COMMAND")
+elif [[ -n "$FILE_PATH" || -n "$PATCH_COMMAND" ]]; then
+    TARGETS_UNKNOWN=1
 fi
 
 # A payload that names no object cannot be judged by object: the session cwd is
 # the only thing left, and a protected one fails closed exactly as before.
-if [[ ${#TARGETS[@]} -eq 0 ]]; then
+if [[ ${#TARGETS[@]} -eq 0 && $TARGETS_UNKNOWN -eq 0 ]]; then
     _block_if_canonical "$CWD"
     _approve
 fi
@@ -206,6 +210,7 @@ _target_safe() {
 # including when the shared resolver failed to source, which leaves the guard
 # with no way to see through a symlink.
 declare -F fno_physical_path >/dev/null 2>&1 || _unsafe_target
+[[ $TARGETS_UNKNOWN -eq 0 ]] || _unsafe_target
 for t in "${TARGETS[@]}"; do
     phys="$(fno_physical_path "$(_absolute "$t")")" || _unsafe_target
     [[ -n "$phys" ]] || _unsafe_target

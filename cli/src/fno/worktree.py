@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno._subprocess_util import run_bounded
-from fno.cargo_build_dir import remove_build_dir_for_worktree
+from fno import rust_binary
 
 # 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
 _SETUP_HOOK_TIMEOUT_S = 120
@@ -386,7 +386,11 @@ class WorktreeManager:
         if worktree.path.exists():
             # Reclaim the cargo build hash dir while the manifest can still
             # answer; best-effort, the sweep reaps what resolution misses.
-            remove_build_dir_for_worktree(worktree.path)
+            # The Rust lane owns the answer (crates/fno-agents
+            # cargo_build_dirs.rs); failure is swallowed by contract.
+            rust_binary.call_binary_json(
+                "reclaim", ["remove-for", str(worktree.path), "--json"], timeout=120
+            )
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree.path)],
                 cwd=self.repo_root,

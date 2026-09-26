@@ -39,24 +39,8 @@ _RUNNER_DONE = re.compile(r"^smoke: (?:pass|fail)\s+\d+(?:\.\d+)?s\s+(.+?)\s*$")
 # The full-mode prologue, one line per planned step (comma-free by design:
 # three registry step names contain a comma of their own).
 _RUNNER_PLANNED = re.compile(r"^smoke: planned:\s*(.+?)\s*$")
-# CI wraps each step in a workflow-command group; locally it is a banner line.
-_GROUP = re.compile(r"^::group::\s*(.+?)\s*$")
-_BANNER = re.compile(r"^===\s*(.+?)\s*===$")
 # GitHub's raw job logs prefix every line with an ISO timestamp.
 _TS = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z?\s*")
-# First-error detectors, most specific signal first per LINE (the earliest
-# matching line in the block wins, not the strongest pattern). `::` lines are
-# workflow commands, never content.
-_ERROR_PATTERNS = (
-    re.compile(r"\bFAILED\b"),
-    re.compile(r"^E\s{2,}"),  # pytest assertion detail
-    re.compile(r"\b[EFNW]\d{3}\b"),  # ruff/flake8 code: file.py:52:1: E402 ...
-    re.compile(r"\bTraceback \(most recent call last\)"),
-    re.compile(r"\berror:", re.IGNORECASE),  # mypy: file.py:12: error: ...
-    re.compile(r"\bERROR\b"),
-    re.compile(r"\bAssertionError\b"),
-)
-_ERROR_LINE_CAP = 240
 
 # Cap on failing checks detailed per status read: the rollup of a very red PR
 # can carry dozens; five covers every observed incident shape, and the
@@ -83,35 +67,15 @@ def failing_step(log: str) -> Optional[str]:
     return None
 
 
-def first_error(log: str, step: Optional[str]) -> Optional[str]:
-    """The first error-looking line of the failing step's own output block.
-
-    The runner prints the step-failed line AFTER the child exits, so the error
-    lives BEFORE it, inside the step's `::group::` / `=== name ===` block. A
-    log without the marker lines falls back to the whole log before the
-    step-failed line: the block boundary is an optimization, never a
-    precondition. Nothing matched degrades to the block's last non-empty line
-    (the tail is where shells leave the actual error); `None` only when there
-    is no output at all.
-    """
-    lines = [_content(ln) for ln in log.splitlines()]
-    end = next((i for i, ln in enumerate(lines) if _STEP_FAILED.search(ln)), len(lines))
-    start = 0
-    if step:
-        for i in range(end - 1, -1, -1):
-            g = _GROUP.match(lines[i]) or _BANNER.match(lines[i])
-            if g and g.group(1) == step:
-                start = i + 1
-                break
-    block = [
-        ln
-        for ln in lines[start:end]
-        if ln and not ln.startswith("::") and not ln.startswith("smoke: ")
-    ]
-    for line in block:
-        if any(p.search(line) for p in _ERROR_PATTERNS):
-            return line[:_ERROR_LINE_CAP]
-    return block[-1][:_ERROR_LINE_CAP] if block else None
+def first_error(log: str, step: Optional[str], window=None) -> Optional[str]:
+    """The failing step's cause; the Rust `status-failure-cause` op owns the logic."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+    try:
+        op = {"op": "status-failure-cause", "log": log, "step": step, "window": window}
+        out = verb_call("authorized-merge", op, timeout=120)
+    except VerbUnavailable as exc:
+        return f"failure cause unreadable: {exc}"
+    return out.get("cause")
 
 
 def unreached_runner_steps(log: str) -> Optional[list[str]]:
@@ -213,7 +177,10 @@ def collect_failures(
     """
     out: list[dict] = []
     for check in list(failing)[:MAX_DETAILED_FAILURES]:
-        entry: dict = {"check": _check_name(check)}
+        entry: dict = {
+            "check": _check_name(check),
+            **({"first_error": check["timeout"]} if check.get("timeout") else {}),
+        }
         ref = _job_ref(check)
         if ref is None:
             entry["detail"] = "not an Actions job (commit status); no job log to read"
@@ -236,7 +203,7 @@ def collect_failures(
                 entry["step"] = step
                 err = first_error(log_text, step)
                 if err:
-                    entry["first_error"] = err
+                    entry.setdefault("first_error", err)
             runner_unreached = unreached_runner_steps(log_text)
             if runner_unreached:
                 entry["unreached_steps"] = runner_unreached
@@ -255,10 +222,7 @@ def collect_failures(
                     if failed_job_step:
                         entry.setdefault("step", failed_job_step)
                         if "first_error" not in entry:
-                            # Same block scan as the runner path, against the
-                            # failed JOB step's group: a plain Actions job's
-                            # error also lives before the failure, in-output.
-                            err = first_error(log_text, failed_job_step)
+                            err = first_error(log_text, failed_job_step, window=steps)
                             if err:
                                 entry["first_error"] = err
         else:

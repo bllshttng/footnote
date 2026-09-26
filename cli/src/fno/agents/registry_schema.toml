@@ -54,4 +54,30 @@
 # readers that cannot link fno-agents render the edge without re-deriving
 # it. Absent on rows with no spawn edge. Rationale lives beside the column
 # in state.rs / registry.py.
-version = 34
+# v35: additive `requested_permission_mode` and `turn_policy_source` on the
+# codex thread posture record. `requested_permission_mode` is the operator's
+# exact permission_mode string, which a resume replays; `sandbox_posture`
+# alone could not tell `read-only:on-request` from `read-only:never`.
+# `turn_policy_source` names where the current turn's sandboxPolicy came
+# from - "resolved" (echoed server posture) or "requested" (replayed row
+# request) - so requested, resolved and current-turn stay three
+# distinguishable readings. Same additive-optional writer-protection
+# rationale as v22 through v34: a pre-v35 writer accepts the unknown keys
+# through serde and erases them on its next read-modify-write, so the bump
+# turns a silent erasure into a loud refusal. Rationale lives beside the
+# columns in state.rs / registry.py.
+# v36: additive `node_reason`, the receipt for a named-but-unresolvable node; rationale in state.rs.
+#
+# `fields` pins the sorted serde (wire) names of every RegistryEntry field at
+# this version. The equal-version trap this closes: PR 2090 minted v33 for
+# lineage_reason and PR 2091 then added spawn_id/spawn_provenance AT v33
+# without a bump, so an fno built between the two merges called itself v33,
+# read v33-with-spawn_id rows as its own version, and Python's strict reader
+# refused the whole registry ("row N has malformed shape"), taking down every
+# crowned king's checkin. The Rust unit test `registry_schema_fields` (state
+# tests) and scripts/ci/check-registry-schema-bump.sh both read this array:
+# any field-set change without a monotonic version bump is refused at test
+# time and at PR time. Add the field, add its name here, bump `version` - in
+# that order, in one PR.
+fields = ["account_record_id", "adopted_by_session", "aliases", "cc_session_id", "claude_session_uuid", "claude_short_id", "codex_session_id", "created_at", "crown_grantor", "crown_level", "crown_scope", "cwd", "delivery_policy", "effort", "exited_at", "fno_id", "forked_from_session_id", "gemini_session_id", "git_grant", "granted_writable_roots", "harness", "harness_args", "harness_session_id", "harness_title", "host_mode", "inside_leg", "keeper_child_pid", "last_message_at", "last_reconciled_at", "launch_account", "launch_account_source", "legacy_provider", "lineage_kind", "lineage_reason", "liveness", "liveness_measured_at", "log_path", "mcp_channel_id", "messaging_socket_path", "model", "model_basis", "model_name", "mux", "name", "node", "node_reason", "origin", "pending_session_row", "pid", "pid_start_time", "predecessor_session_ids", "project_root", "provider", "related_session_id", "requested_effort", "requested_model", "requested_permission_mode", "requested_provider", "resolved_sandbox", "route_provider_id", "route_settings_path", "sandbox_posture", "screen_state", "session_id", "short_id", "spawn_id", "spawn_provenance", "spawn_trigger", "spawned_by_cwd", "spawned_by_harness", "spawned_by_session", "status", "stop", "substrate", "turn_policy_source"]
+version = 36

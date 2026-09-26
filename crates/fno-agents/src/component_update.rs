@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const PYTHON_TOOL: &str = "python-tool";
 pub const MUX_FRONT_DOOR: &str = "fno";
@@ -65,6 +65,11 @@ pub struct ComponentProbe {
     pub effect_attempted: bool,
     #[serde(default)]
     pub effect_ok: Option<bool>,
+    /// Positive evidence that a probe answered only after the inode repair:
+    /// names the classification that triggered it. Rendered even on a fresh
+    /// row so a repair is never invisible in the update output.
+    #[serde(default)]
+    pub repair_evidence: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +243,16 @@ pub fn classify(probe: &ComponentProbe, req: &VerdictRequest) -> ComponentVerdic
             v.line = Some(render_line(&v));
         }
     }
+    // AC1-RECEIPT: a probe that answered only after the inode repair renders
+    // its evidence even when the re-probe made the row fresh.
+    if let Some(ev) = &probe.repair_evidence {
+        let note = format!("path repaired after {ev}");
+        v.detail = Some(match v.detail.take() {
+            Some(d) => format!("path repaired after {ev}; {d}"),
+            None => note,
+        });
+        v.line = Some(render_line(&v));
+    }
     v
 }
 
@@ -256,109 +271,30 @@ pub fn verdict(req: &VerdictRequest) -> VerdictReport {
     }
 }
 
-/// One bounded `version --json` probe of a deployed executable. Returns
-/// (rev, python_script, instrument_error): the error names the instrument so
-/// an unanswerable probe lands at the classifier as Unknown (never collapsed
-/// into fresh or missing).
+/// One probe of a deployed executable through the shared exec-prover: it
+/// classifies the exec, repairs a poisoned path at most once (the kill-shaped
+/// classifications), and re-probes. Returns (rev, python_script,
+/// instrument_error, repair_evidence): the error names the instrument so an
+/// unanswerable probe lands at the classifier as Unknown (never collapsed into
+/// fresh or missing), and the evidence names the classification that triggered
+/// a repair so a healed path is visible in the verdict.
 fn probe_binary(
     path: &std::path::Path,
     timeout: Duration,
-) -> (Option<String>, Option<String>, Option<String>) {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    if !path.is_file() {
-        return (None, None, None);
-    }
-    let mut child = match Command::new(path)
-        .args(["version", "--json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return (None, None, Some(format!("could not be executed ({e})"))),
-    };
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    return (
-                        None,
-                        None,
-                        Some(format!("hung on `version --json` (>{:?})", timeout)),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return (None, None, Some(format!("could not be executed ({e})"))),
-        }
-    };
-    if !status.map_or(false, |s| s.success()) {
-        return (
-            None,
-            None,
-            Some(format!(
-                "exited {} on `version --json`",
-                status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)
-            )),
-        );
-    }
-    let mut out = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut out);
-    }
-    if out.trim().is_empty() {
-        return (
-            None,
-            None,
-            Some("emitted no `version --json` output".to_string()),
-        );
-    }
-    let data: serde_json::Value = match serde_json::from_str(&out) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                None,
-                None,
-                Some("emitted unparseable `version --json` output".to_string()),
-            )
-        }
-    };
-    if !data.is_object() {
-        return (
-            None,
-            None,
-            Some("emitted unexpected `version --json` output".to_string()),
-        );
-    }
-    if data.get("dirty").and_then(|d| d.as_bool()) == Some(true) {
-        return (
-            None,
-            None,
-            Some("was built from a dirty crates/ tree".to_string()),
-        );
-    }
-    let rev = data
-        .get("crates_rev")
-        .and_then(|r| r.as_str())
-        .filter(|r| !r.is_empty() && *r != "unknown")
-        .map(|r| r.to_string());
-    if rev.is_none() {
-        return (
-            None,
-            None,
-            Some("carries no rev stamp (built outside a git checkout?)".to_string()),
-        );
-    }
-    let script = data
-        .get("python_script")
-        .and_then(|s| s.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    (rev, script, None)
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let outcome =
+        crate::install_verify::verify_and_repair(path, timeout, crate::install_verify::probe_exec);
+    (
+        outcome.rev,
+        outcome.script,
+        outcome.instrument_error,
+        outcome.repaired_after,
+    )
 }
 
 struct ProbeArgs {
@@ -435,10 +371,10 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
     ] {
         let path = p.bindir.join(&name);
         let present = path.is_file();
-        let (rev, _script, err) = if present {
+        let (rev, _script, err, evidence) = if present {
             probe_binary(&path, probe_timeout)
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         components.push(ComponentProbe {
             component: stem.to_string(),
@@ -454,15 +390,16 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: None,
             effect_attempted: p.attempted,
             effect_ok: None,
+            repair_evidence: evidence,
         });
     }
     if p.include_mux {
         let path = p.bindir.join(format!("fno{exe}"));
         let present = path.is_file();
-        let (rev, script, err) = if present {
+        let (rev, script, err, evidence) = if present {
             probe_binary(&path, probe_timeout)
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         python_exec = script;
         components.push(ComponentProbe {
@@ -479,6 +416,7 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: None,
             effect_attempted: p.attempted,
             effect_ok: None,
+            repair_evidence: evidence,
         });
     }
     if p.python_rev.is_some() || p.python_error.is_some() {
@@ -495,6 +433,7 @@ fn verdict_from_probe(p: &ProbeArgs) -> VerdictReport {
             contradicting_evidence: p.python_evidence.clone(),
             effect_attempted: p.attempted,
             effect_ok: None,
+            repair_evidence: None,
         });
     }
     let req = VerdictRequest {
@@ -561,6 +500,7 @@ mod tests {
             contradicting_evidence: None,
             effect_attempted: false,
             effect_ok: None,
+            repair_evidence: None,
         }
     }
 
@@ -651,6 +591,20 @@ mod tests {
     }
 
     #[test]
+    fn repaired_row_renders_evidence_even_when_fresh() {
+        let mut p = probe(AGENTS_CLIENT, Some("abc123"));
+        p.repair_evidence = Some("signal(9)".to_string());
+        let r = verdict(&req(vec![p]));
+        assert!(r.converged);
+        let v = &r.components[0];
+        assert_eq!(v.status, Status::Fresh);
+        assert_eq!(v.detail.as_deref(), Some("path repaired after signal(9)"));
+        let line = v.line.as_deref().unwrap();
+        assert!(line.contains("repaired after signal(9)"));
+        assert!(line.contains("fresh"));
+    }
+
+    #[test]
     fn missing_component_names_install_repair() {
         let mut p = probe(AGENTS_WORKER, None);
         p.executable = None;
@@ -711,22 +665,7 @@ mod tests {
 
     // ---- probe mode (POSIX: the fixtures are sh scripts) ----
 
-    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        // Published atomically (temp sibling + rename, same fix as
-        // tests/common/mod.rs): a direct write onto the exec'd path leaves a
-        // write-open fd that a sibling thread's fork window turns into a
-        // CI-only ETXTBSY.
-        let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let p = dir.join(name);
-        std::fs::rename(&tmp, &p).unwrap();
-        p
-    }
+    use crate::write_exec_stub as write_script;
 
     fn version_script(rev: &str, extra: &str) -> String {
         format!("#!/bin/sh\necho '{{\"crates_rev\": \"{rev}\", \"dirty\": false{extra}}}'\n")

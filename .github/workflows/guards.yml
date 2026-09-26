@@ -61,13 +61,48 @@ on:
     branches: [main]
 
 concurrency:
-  group: guards-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: guards-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # The OpenCode plugin suites: the repo-local orchestration plugin and the
+  # shipped stop bridge. Both files speak two OpenCode contracts (the 1.x
+  # function entrypoint and the 2.x `{ id, setup }` entrypoint), so a
+  # regression that breaks either arm must fail CI rather than surface on a
+  # user's upgraded OpenCode.
+  extension-suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Bun
+        if: ${{ !cancelled() }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to the bun that authored .opencode/bun.lock, so a future
+          # bun release cannot redden --frozen-lockfile with no code change.
+          bun-version: 1.3.10
+
+      - name: Orchestration plugin suite (.opencode)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        working-directory: .opencode
+        run: |
+          bun install --frozen-lockfile
+          bun test
+
+      - name: Stop bridge suite (cli/tests/opencode)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bun test cli/tests/opencode/footnote.plugin.test.js
+
   main-python-static:
     name: Python static correctness (495 sources)
     runs-on: ubuntu-latest
@@ -98,6 +133,15 @@ jobs:
           set -euo pipefail
           uv run fno-py doctor harness-matrix --write
           git diff --exit-code -- ../docs/harnesses/verb-matrix.md
+
+      # hooks/generated-write-guard.sh refuses edits only to generated copies
+      # that generated-artifacts.tsv or skill-bundles.yaml names. The census
+      # fails on a dead row and on a marked generated file no list covers.
+      - name: Generated-copy manifest complete (selftest, then check)
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/tests/check-generated-manifest-selftest.sh
+          bash scripts/ci/check-generated-manifest.sh
 
       # x-3d21 R4/R5: a state path built by hand consults nothing, so no env
       # pin, guard or refusal can reach it. The ratchet fails in BOTH
@@ -189,6 +233,11 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_oos_tracked.sh
 
+      - name: S2 ingest reads the intel report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/tests/test_corrections_insights_tag.sh
+
       - name: PR-create out-of-scope tracking contract
         if: ${{ !cancelled() }}
         timeout-minutes: 5
@@ -217,6 +266,9 @@ jobs:
   guards:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -283,6 +335,14 @@ jobs:
         run: |
           bash scripts/ci/check-disposable-rm.sh
           bash tests/ci/test-check-disposable-rm.sh
+
+      # The commit-msg session-URL strip: the CI gate (check-no-session-urls)
+      # only catches the trailer after a push, where a force-push does not
+      # retract it, so the strip has to happen at commit time.
+      - name: Session-URL strip commit-msg hook test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/test-strip-claude-session.sh
 
       # The state canary's own positive control. `verify` is not run here: it
       # needs a planted HOME with a suite run between plant and verify, and the
@@ -358,19 +418,19 @@ jobs:
         run: bash scripts/ci/check-preamble-budget.sh
 
       # A tracked source file over 5,000 lines is shrink-only relative to the
-      # merge base; the refusal names the module-per-question remedy. On a
-      # push to main the merge base IS HEAD, so the gate would diff nothing;
-      # FILE_BUDGET_BASE_SHA pins the diff to the previous tip and turns a
-      # growth that slipped past a pre-gate PR head into a red alarm.
+      # merge base; the refusal names the module-per-question remedy. The
+      # waiver is read live from the PR that owns the checked commit, so push,
+      # pull_request, and re-run events all see the operator's current label.
       - name: Oversized files are shrink-only
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         env:
           PR_BASE_REF: ${{ github.base_ref || 'main' }}
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-          # Operator-applied only; an agent never sets it. It waives the
-          # Python tree allowance alone, never a per-file grow.
-          FILE_BUDGET_EXCEPTION_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'file-budget-exception') && 'file-budget-exception' || '' }}
+          # The PR that owns this commit carries the operator's waiver, read
+          # live: the head on a PR run, the merge commit on a push.
+          FILE_BUDGET_LABEL_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/check-file-budget.sh
 
       - name: File budget gate selftest
@@ -409,6 +469,12 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
 
+      # Keep the human address in skills aligned with the shared vocabulary.
+      - name: Skill operator-address check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-operator-address.sh
+
       # A command form named by a live law must reach the skill that teaches it.
       - name: Law command-form check
         if: ${{ !cancelled() }}
@@ -443,11 +509,6 @@ jobs:
         run: |
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
-
-      - name: Graph store parity guard
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-graph-parity.sh --self-test
 
       # From the installed-tree import crash: parents[N]/scripts joins in
       # cli/src/fno escape the package root and the wheel never ships them.

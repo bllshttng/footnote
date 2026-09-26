@@ -23,7 +23,6 @@ agents court-orphans	T1	agents court-orphans	0
 agents court-fold	T1	agents court-fold	0
 agents route-slot	T1	agents route-slot	0
 agents spawn-gate	T1	agents spawn-gate	0
-agents blueprint-feed	T1	agents blueprint-feed	0
 agents spawn-overlay	T1	agents spawn-overlay	0
 agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
@@ -88,12 +87,12 @@ agents mail withdraw	T1	agents mail withdraw	2
 agents mcp send	T1	agents mcp send	10
 agents name	T1	agents name	5
 agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
-agents nudge-peek	T1	agents nudge-peek	6
 agents orphans	T1	agents orphans	10
 agents pane-identity	T1	agents pane-identity	0
 agents newest-assistant-text	T1	agents newest-assistant-text	6
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
+agents permission-tokens	T1	agents permission-tokens	0
 agents probe-run	T1	agents probe-run	3
 agents provider-cap	T1	agents provider-cap	3
 agents reap	T1	agents reap	15
@@ -109,6 +108,7 @@ agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
 agents retask	T1	agents retask	2
 agents review-coverage	T1	agents review-coverage	34
+agents sandbox-probe	T1	agents sandbox-probe	0
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents roles context	T1	agents roles context	2
 agents roles ls	T1	agents roles ls	1
@@ -162,7 +162,6 @@ backlog annotate add	T1	backlog annotate add	7
 backlog annotate list	T1	backlog annotate list	0	
 backlog annotate resolve	T1	backlog annotate resolve	5	
 backlog archive	T1	backlog archive	2
-backlog archive-dedupe-ids	T1	backlog archive-dedupe-ids	0
 backlog bases	T1	backlog bases	0
 backlog backfill-deferred-kind	T1	backlog backfill-deferred-kind	1
 backlog batch join	T1	backlog batch join	1
@@ -238,6 +237,7 @@ backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7
 backlog roadmap	T1	backlog roadmap	1
 backlog stuck-epics	T1	backlog stuck-epics	1
 backlog session add	T1	backlog session add	4
+backlog session backfill	T1	backlog session backfill	1
 backlog session close	T1	backlog session close	3
 backlog session open	T1	backlog session open	1
 backlog session reap-open	T1	backlog session reap-open	3
@@ -342,6 +342,7 @@ do pr merge	T1	do pr merge	55
 do pr merge-result-check	T1	do pr merge-result-check	0
 do pr next-receipt-generation	T1	do pr next-receipt-generation	0
 do pr publish-review	T1	do pr publish-review	0
+do pr push	T1	do pr push	7
 do pr rebase	T1	do pr rebase	21
 do pr review-hold	T1	do pr review-hold	0
 do pr ritual	T1	do pr ritual	24
@@ -460,35 +461,6 @@ mail unread	T1	mail unread	16
 mail view	T1	mail view	2
 mail withdraw	T1	mail withdraw	2
 mcp send	KEEP	mcp send	10	single-leaf group
-mux attach	T1	mux attach	11
-mux block annotate	T1	mux block annotate	4
-mux block pipe	T1	mux block pipe	6
-mux doctor	T1	mux doctor	7
-mux kill-server	T1	mux kill-server	9
-mux layout apply	T1	mux layout apply	14
-mux layout get	T1	mux layout get	2
-mux layout graft	T1	mux layout graft	15
-mux ls	T1	mux ls	15
-mux pane break	T1	mux pane break	1
-mux pane claim	T1	mux pane claim	2
-mux pane focus	T1	mux pane focus	2
-mux pane kill	T1	mux pane kill	11
-mux pane ls	T1	mux pane ls	10
-mux pane read	T1	mux pane read	12
-mux pane release	T1	mux pane release	1
-mux pane run	T1	mux pane run	26
-mux pane send	T1	mux pane send	13
-mux pane split	T1	mux pane split	1
-mux pane wait	T1	mux pane wait	7
-mux serve	T1	mux serve	15
-mux server	T1	mux server	5
-mux shell-init	T1	mux shell-init	13
-mux tab create	T1	mux tab create	2
-mux tab join	T1	mux tab join	3
-mux tab ls	T1	mux tab ls	2
-mux tab rename	T1	mux tab rename	3
-mux where	T1	mux where	16
-mux workspace prune	T1	mux workspace prune	14
 notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
@@ -536,6 +508,7 @@ pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distin
 pr merge-result-check	T1	pr merge-result-check	0
 pr next-receipt-generation	T1	pr next-receipt-generation	0
 pr publish-review	T1	pr publish-review	4
+pr push	T1	pr push	7
 pr rebase	T1	pr rebase	21
 pr review-hold	T1	pr review-hold	0
 pr ritual	T1	pr ritual	24
@@ -635,3 +608,5 @@ backlog version	T1	backlog version	19
 agents prove-it-verdicts	T1	agents prove-it-verdicts	1	
 agents honesty-sweep	T1	agents honesty-sweep	0
 doctor graph backend	T1	doctor graph backend	0
+doctor intel	T1	doctor intel	0
+agents select-read	T1	agents select-read	1	

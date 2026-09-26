@@ -9,7 +9,10 @@ logs with no smoke-runner lines, and the review, coverage, hold and lane
 probes stubbed):
 
 - a cache miss spends at most 15 spawns (2 PR reads, 1 check-runs page, 1
-  runs listing, 1 combined status, 5 logs, 5 job objects);
+  runs listing, 1 combined status, 5 logs, 5 job objects), plus 5
+  fno-agents cause reads that are counted as their own class (the binary is
+  a subprocess spawn, never a gh one, and its internal gh reads ride the
+  op's own bounds);
 - a second read inside the TTL spends exactly 1, the head read;
 - a same-head refresh past the TTL spends at most 5 with 0 log and 0
   job-object reads - failure detail reused by job id;
@@ -46,6 +49,11 @@ class _FakeGh:
     def __call__(self, cmd, **kwargs):
         argv = [str(a) for a in cmd]
         self.argvs.append(argv)
+        # The fno-agents binary is a subprocess spawn but not a gh spawn:
+        # answer its op receipts so the read behaves as it would against the
+        # real binary, and let the classifier count the class separately.
+        if argv[0].endswith("fno-agents"):
+            return self._agents_answer(argv, kwargs)
         path = next((a for a in argv[2:] if not a.startswith("-")), "")
         if re.search(r"/pulls/\d+$", path):
             return self._json(self.world["pr"])
@@ -74,6 +82,46 @@ class _FakeGh:
     def _json(self, payload) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
+    def _agents_answer(self, argv, kwargs) -> SimpleNamespace:
+        if argv[-1] != "authorized-merge":
+            return SimpleNamespace(returncode=1, stdout="", stderr=f"unexpected verb: {argv}")
+        try:
+            payload = json.loads(kwargs.get("input") or "{}")
+        except json.JSONDecodeError:
+            return SimpleNamespace(returncode=2, stdout="", stderr="bad payload")
+        op = payload.get("op")
+        if op == "status-cache-key":
+            # The mint hashes live machine state; this world has no hold, no
+            # slots, and no review evidence, so the honest answer is the
+            # head-only key the row helpers below address.
+            return self._json(
+                {
+                    "key": (
+                        f"owner--repo-{payload.get('pr')}-"
+                        f"{str(payload.get('head_sha'))[:12]}"
+                    )
+                }
+            )
+        if payload.get("effect") == "preview":
+            # The one merge decision: a red supplied verdict holds; anything
+            # else clears, exactly the wire shape the status read renders.
+            held = payload.get("verdict") not in (None, "green")
+            blockers = (
+                [{"code": "ci_red", "class": "refused", "detail": "fake"}]
+                if held
+                else []
+            )
+            return self._json(
+                {"outcome": "held" if held else "authorized", "blockers": blockers}
+            )
+        if op == "status-failure-cause":
+            return self._json({"items": [{"cause": None}] * len(payload.get("items") or [])})
+        if op == "status-merge-blocker":
+            return self._json(
+                {"state": None, "blockers": [], "missing_required_checks": None, "source": "fake"}
+            )
+        return SimpleNamespace(returncode=2, stdout="", stderr=f"unexpected op: {op}")
+
     def since(self, index: int) -> list[list[str]]:
         return self.argvs[index:]
 
@@ -88,9 +136,17 @@ def _classes(argvs: list[list[str]]) -> dict:
         "jobs": [],
         "attempts": 0,
         "attempt_jobs": 0,
+        "agents": [],
         "other": [],
     }
     for cmd in argvs:
+        # The fno-agents binary: a subprocess spawn, never a gh one. Its
+        # internal gh reads ride the op's own bounds and are invisible here -
+        # the class exists so a binary spawn can never masquerade as
+        # unclassified gh spend.
+        if cmd[0].endswith("fno-agents"):
+            c["agents"].append(cmd[-1] if cmd[1:] else "")
+            continue
         path = next((a for a in cmd[2:] if not a.startswith("-")), "")
         if re.search(r"/pulls/\d+$", path):
             c["pulls"] += 1
@@ -342,9 +398,15 @@ def test_f6_miss_sends_at_most_15_spawns(gh, capsys):
     gh.world = _f6_world("c" * 40)
     assert _cache.cached_status("42") == 1
     c = _classes(gh.argvs)
-    assert c["pulls"] == 2 and c["checks"] == 1 and c["runs"] == 1 and c["status"] == 1
+    # runs == 0: the listing is the zero-job op's own read (an fno-agents
+    # spawn, invisible to this gh-spend ledger), never a gh spawn here.
+    assert c["pulls"] == 2 and c["checks"] == 1 and c["runs"] == 0 and c["status"] == 1
     assert len(c["logs"]) == 5 and len(c["jobs"]) == 5
     assert not c["other"]
+    # One fno-agents cause read per detailed failure (MAX_DETAILED_FAILURES),
+    # plus the preview ask and the row-key mint, not a gh spawn: the class is
+    # bounded, never unclassified.
+    assert len(c["agents"]) == 7
     assert json.loads(capsys.readouterr().out)["verdict"] == "red"
 
 
@@ -355,8 +417,11 @@ def test_f6_second_read_inside_ttl_spends_exactly_one(gh, capsys):
     before = len(gh.argvs)
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
-    assert len(gh.since(before)) == 1, "the head read is the only spawn"
-    assert calls["pulls"] == 1
+    # The row key is minted on every call, hit or miss: one cheap local
+    # fno-agents spawn beside the single gh head read. No other read reruns.
+    assert calls["pulls"] == 1, "the head read is the only gh spawn"
+    assert len(calls["agents"]) == 1, "the mint is the one local spawn"
+    assert not calls["logs"] and not calls["jobs"] and not calls["checks"]
     capsys.readouterr()
 
 
@@ -369,7 +434,10 @@ def test_f6_same_head_refresh_reuses_failure_detail_by_job_id(gh, capsys):
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
     assert len(calls["logs"]) == 0 and len(calls["jobs"]) == 0
-    assert len(gh.since(before)) <= 5
+    # The re-read budget: the same gh reads as before (pulls, status for the
+    # rerun facts), plus the two sanctioned local spawns the port added (the
+    # row-key mint and the preview ask). Logs and jobs stay at zero above.
+    assert len(gh.since(before)) <= 6
     second = json.loads(capsys.readouterr().out)
     assert second["failures"] == first["failures"]
 
@@ -412,18 +480,35 @@ def test_f6_pushed_head_reuses_nothing(gh, capsys):
 # --- green head (change 3) ---------------------------------------------------
 
 
-def test_green_miss_reads_the_runs_listing_once(gh, capsys):
-    gh.world = _green_world("e" * 40)
+def test_green_miss_reads_the_runs_listing_once(gh, capsys, monkeypatch):
+    world = _green_world("e" * 40)
+    gh.world = world
+    # The listing is the zero-job op's answer now; serve it at the seam.
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "_zero_job_rows",
+        lambda slug, cwd, sha, check_runs: ([], world["runs"], ""),
+    )
     assert _cache.cached_status("42") == 0
     calls = _classes(gh.argvs)
-    assert calls["runs"] == 1, "rerun_recovery reuses the listing fetch_pr_rest read"
+    assert calls["runs"] == 0, "rerun_recovery reuses the listing the op returned"
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "green"
     assert payload["rerun_recovered"] is True
 
 
-def test_green_refresh_reuses_the_rerun_facts(gh, capsys):
-    gh.world = _green_world("e" * 40)
+def test_green_refresh_reuses_the_rerun_facts(gh, capsys, monkeypatch):
+    world = _green_world("e" * 40)
+    gh.world = world
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "_zero_job_rows",
+        lambda slug, cwd, sha, check_runs: ([], world["runs"], ""),
+    )
     assert _cache.cached_status("42") == 0
     first = json.loads(capsys.readouterr().out)
     _age_row("e" * 40)

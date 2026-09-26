@@ -872,6 +872,8 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
+    # v36: additive `node_reason` - why the row works no node WHEN the
+    # spawn NAMED one; absent when the node resolved or none was named.
     # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
     # v24 (x-2019): additive `requested_model`/`requested_provider`/
     # `requested_effort` - the spawn request verbatim beside the effect.
@@ -893,7 +895,7 @@ def test_us2_schema_version_is_three() -> None:
     # attempt id and validated birth record).
     # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 36
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2386,7 +2388,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 36
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2452,7 +2454,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 36
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",
@@ -2553,11 +2555,9 @@ def _seed_rows(registry_path: Path, rows: list) -> None:
 
 
 def _removal_events(events_path: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in events_path.read_text(encoding="utf-8").splitlines()
-        if json.loads(line)["type"] == "registry_row_removed"
-    ]
+    from tests._event_rows import event_rows
+
+    return [e for e in event_rows(events_path) if e["type"] == "registry_row_removed"]
 
 
 def test_update_registry_accounts_for_a_removed_row(
@@ -2570,7 +2570,6 @@ def test_update_registry_accounts_for_a_removed_row(
     same ``reap-receipts/`` directory the Rust and watchdog writers use.
     """
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.harness_map import render_session_argv
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -2595,6 +2594,15 @@ def test_update_registry_accounts_for_a_removed_row(
         ],
     )
 
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    answered = spawn_axes_client_module.spawn_axes_call(
+        {"reap_receipt": {
+            "row": {"name": "dropped", "harness": "claude",
+                    "harness_session_id": "dropped-s"},
+            "removed_by": "probe-remover",
+        }}
+    )
     update_registry(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
@@ -2614,11 +2622,10 @@ def test_update_registry_accounts_for_a_removed_row(
         tmp_path / ".fno" / "agents" / "reap-receipts" / "claude-dropped-s.json"
     )
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["row_name"] == "dropped"
-    assert receipt["removed_by"] == data["remover"]
-    assert receipt["resume"] == " ".join(
-        render_session_argv("claude", "interactive_resume", "dropped-s")
-    )
+    expected = dict(answered["receipt"])
+    # the ask rides the real remover
+    expected["removed_by"] = data["remover"]
+    assert receipt == expected, "the file holds what the spawn-axes ask answered"
 
 
 def test_update_registry_emits_nothing_when_nothing_is_removed(
@@ -2683,10 +2690,9 @@ def test_update_registry_journals_rows_lost_naming_the_writer(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
 
-    lines = [
-        json.loads(line)
-        for line in events_path.read_text(encoding="utf-8").splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    lines = event_rows(events_path)
     lost = [e for e in lines if e["type"] == "registry_rows_lost"]
     assert len(lost) == 1, f"exactly one grouped loss event: {lines}"
     data = lost[0]["data"]
@@ -2769,10 +2775,10 @@ def test_write_registry_has_exactly_one_production_caller() -> None:
 def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The watchdog staged the receipt before dropping rows through update_registry.
+    """The sweep or watchdog staged the receipt before the rows were dropped.
 
-    Rewriting it would stamp removed_by onto a pure reap receipt and change
-    the shape the Rust and Python writers share.
+    Rewriting it would re-sign a record another door already made. The
+    assertion is byte-identity: the file must not change at all.
     """
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, update_registry
@@ -2799,23 +2805,34 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
         json.dumps({"row_name": "swept", "resume": "claude --resume swept-s"}),
         encoding="utf-8",
     )
+    before = receipt_path.read_bytes()
 
     update_registry(
         lambda es: [e for e in es if e.name != "swept"], path=registry_path
     )
 
-    on_disk = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert "removed_by" not in on_disk, f"the sweep's receipt was rewritten: {on_disk}"
+    assert (
+        receipt_path.read_bytes() == before
+    ), "the sweep's receipt was rewritten by the choke point"
     removals = _removal_events(events_path)
     assert len(removals) == 1
     assert removals[0]["data"]["receipt_staged"] is True
     assert removals[0]["data"]["name"] == "swept"
 
 
-def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
-    """A rename keeps the session; the accounting must not announce one."""
+def test_update_registry_reports_a_stale_binary_and_writes_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A spawn-axes answer with no receipt reads as a binary that predates
+    the field: no file is written, and the event names the update verb."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, rename_agent
+
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    monkeypatch.setattr(
+        spawn_axes_client_module, "spawn_axes_call", lambda payload: {}
+    )
+    from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
@@ -2823,18 +2840,28 @@ def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
         registry_path,
         [
             AgentEntry(
-                name="before-rename",
-                harness="claude",
-                harness_session_id="rn-s",
-                cwd="/tmp",
-                log_path="/tmp/r.log",
-            )
+                name="kept", harness="claude", harness_session_id="kept-s",
+                cwd="/tmp", log_path="/tmp/k.log",
+            ),
+            AgentEntry(
+                name="dropped", harness="claude", harness_session_id="dropped-s",
+                cwd="/tmp", log_path="/tmp/d.log",
+            ),
         ],
     )
 
-    rename_agent("before-rename", "after-rename", registry_path=registry_path)
+    update_registry(
+        lambda es: [e for e in es if e.name != "dropped"], path=registry_path
+    )
 
-    assert not events_path.exists(), "a rename must not read as a removal"
+    removals = _removal_events(events_path)
+    assert len(removals) == 1
+    assert removals[0]["data"]["receipt_staged"] is False
+    assert "fno doctor update --rust" in removals[0]["data"]["reason"], (
+        removals[0]["data"]["reason"]
+    )
+    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
+
 
 
 def test_a_failed_write_announces_nothing(tmp_path: Path, monkeypatch) -> None:

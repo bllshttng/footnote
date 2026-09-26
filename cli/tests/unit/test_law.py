@@ -49,6 +49,12 @@ def real_sweep(request, monkeypatch):
 
 
 
+def _rows(index):
+    from tests._event_rows import event_rows
+
+    return event_rows(index)
+
+
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
@@ -58,7 +64,24 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     index = tmp_path / "state" / "decisions.jsonl"
     index.parent.mkdir()
     index.touch()
-    monkeypatch.setattr(paths, "decisions_jsonl", lambda: index)
+    import fno.decide
+
+    monkeypatch.setattr(fno.decide, "_decisions_index_path", lambda: index)
+    # The law door stamps the recording project and refuses an unmapped one,
+    # so the fixture provisiones a hermetic work map naming the pytest cwd
+    # itself (a direct match, layout-independent). The project is fno so the
+    # seeded legacy rows (no scope, read as project:fno) stay visible.
+    map_file = tmp_path / "settings.yaml"
+    map_file.write_text(
+        "work:\n"
+        "  workspaces:\n"
+        "    main:\n"
+        "      projects:\n"
+        "        - name: fno\n"
+        f"          path: {Path.cwd()}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(map_file))
     return index
 
 
@@ -114,7 +137,7 @@ def test_one_call_records_and_prints_a_decision_id(
     decision_id = result.output.strip().splitlines()[-1]
     assert decision_id.startswith("d-"), result.output
 
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert len(rows) == 1
     data = rows[0]["data"]
     assert data["decision_id"] == decision_id
@@ -164,7 +187,7 @@ def test_coordination_statement_is_refused_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "coordination" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_missing_rationale_is_refused_with_exit_3(
@@ -177,7 +200,23 @@ def test_missing_rationale_is_refused_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "rationale is required" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
+
+
+def test_a_placeholder_statement_is_refused_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard against the 2026-08-29 junk law: a smoke call of this verb
+    with x/y/z reached the live index and only the operator could clear it.
+    The placeholder shape now fails wherever the verb is invoked from."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(["set", "x", "y", "--rationale", "z"])
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "more than one character" in result.output
+    assert _rows(index) == []
 
 
 def test_durable_law_probe_records_where_the_refused_shapes_did_not(
@@ -197,7 +236,7 @@ def test_durable_law_probe_records_where_the_refused_shapes_did_not(
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
     assert result.output.strip().splitlines()[-1].startswith("d-")
-    assert index.read_text().strip()
+    assert _rows(index)
 
 
 # ── refusal 2: nothing marks a decider ────────────────────────────────────────
@@ -230,7 +269,7 @@ def test_unmarked_process_is_refused_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "nothing here marks a decider" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_library_refuses_chat_attested_from_an_unmarked_process(
@@ -253,7 +292,7 @@ def test_library_refuses_chat_attested_from_an_unmarked_process(
             rationale="why",
             authority_source="chat_attested",
         )
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_library_refuses_a_coordination_statement_in_the_law_lane(
@@ -273,7 +312,7 @@ def test_library_refuses_a_coordination_statement_in_the_law_lane(
             rationale="why",
             authority_source="chat_attested",
         )
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
@@ -298,7 +337,7 @@ def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert rows[0]["data"]["authority_source"] == "operator"
 
 
@@ -306,24 +345,23 @@ def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
 
 
 def _seed_law_row(index: Path, decision_id: str, authority: str) -> None:
-    """Write one live law-lane row straight into the index the reader uses."""
-    index.write_text(
-        index.read_text()
-        + json.dumps(
-            {
-                "type": "operator_decision",
-                "ts": "2026-08-29T19:00:00+00:00",
-                "data": {
-                    "decision_id": decision_id,
-                    "subject": "merge-authority",
-                    "decision": "Merges belong to the operator",
-                    "authority_source": authority,
-                    "decided_by": "operator" if authority == "operator" else "9ede2d7b",
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+    """Commit one live law-lane row into the index the reader uses."""
+    from fno.events.store_client import emit_envelope
+
+    emit_envelope(
+        {
+            "type": "operator_decision",
+            "ts": "2026-08-29T19:00:00+00:00",
+            "source": "test",
+            "data": {
+                "decision_id": decision_id,
+                "subject": "merge-authority",
+                "decision": "Merges belong to the operator",
+                "authority_source": authority,
+                "decided_by": "operator" if authority == "operator" else "9ede2d7b",
+            },
+        },
+        index,
     )
 
 
@@ -338,7 +376,7 @@ def test_chat_recording_cannot_supersede_an_operator_law_row(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
     _seed_law_row(index, "d-0ad0ad0a", "operator")
-    before = index.read_text()
+    before = _rows(index)
 
     result = _run(
         [
@@ -353,7 +391,7 @@ def test_chat_recording_cannot_supersede_an_operator_law_row(
     )
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
-    assert index.read_text() == before
+    assert _rows(index) == before
 
 
 def test_chat_recording_can_supersede_another_chat_row(
@@ -441,7 +479,7 @@ def test_supersedes_naming_no_recoverable_decision_refuses_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "not recoverable" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_supersedes_must_be_a_decision_id(
@@ -464,7 +502,7 @@ def test_supersedes_must_be_a_decision_id(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "supersedes must be a decision id" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 # ── the waiver-subject carve-out ──────────────────────────────────────────────
@@ -498,7 +536,7 @@ def test_waiver_subject_refuses_a_chat_session_with_exit_3(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "coverage-waive" in result.output, result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_waiver_refusal_is_the_subject_not_the_statement(
@@ -521,7 +559,7 @@ def test_waiver_refusal_is_the_subject_not_the_statement(
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
     assert result.output.strip().splitlines()[-1].startswith("d-")
-    assert index.read_text() != ""
+    assert _rows(index)
 
 
 def test_operator_authority_still_records_at_a_waiver_subject(
@@ -554,7 +592,7 @@ def test_operator_authority_still_records_at_a_waiver_subject(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert len(rows) == 1
     assert rows[0]["data"]["authority_source"] == "operator"
 
@@ -586,7 +624,7 @@ def test_library_refuses_chat_attested_at_both_waiver_subject_shapes(
         # The subclass keeps the parent's contract, so existing handlers that
         # catch RefusedAuthorityError keep working.
         assert issubclass(WaiverAuthorityRefusedError, RefusedAuthorityError)
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_a_lookalike_subject_is_ordinary_law(
@@ -610,7 +648,7 @@ def test_a_lookalike_subject_is_ordinary_law(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert len(rows) == 1
     assert rows[0]["data"]["subject"] == "review-coverage-waiver-policy"
     assert rows[0]["data"]["authority_source"] == "chat_attested"
@@ -695,7 +733,7 @@ def test_code_fact_with_no_read_is_refused_with_exit_3(
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "Nothing was recorded." in result.output
     assert "advance.py:167" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
     assert calls[0]["reads"] is None
     assert "advance.py:167" in calls[0]["text"]
 
@@ -724,7 +762,7 @@ def test_code_fact_with_a_read_records_the_executed_row(
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
     assert calls[0]["reads"] == ["head -5 advance.py"]
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     reads = rows[0]["data"]["reads"]
     assert reads[0]["cmd"] == "head -5 advance.py"
     assert reads[0]["exit"] == 0
@@ -762,7 +800,7 @@ def test_contradicted_citation_is_refused_even_with_a_read(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "99999" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
     assert calls[0]["reads"] == ["head -5 advance.py"]
 
 
@@ -796,7 +834,7 @@ def test_attended_operator_records_an_unmeasured_body_untouched(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert rows[0]["data"]["authority_source"] == "operator"
     assert "reads" not in rows[0]["data"]
 
@@ -820,7 +858,7 @@ def test_body_with_no_code_fact_records_with_no_reads_row(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    rows = _rows(index)
     assert "reads" not in rows[0]["data"]
     assert calls[0]["text"] == (
         "Merges belong to the operator\nThe operator owns durable policy."
@@ -862,6 +900,8 @@ class TestLawSetSweep:
 
         def fake_verb(verb, payload, *a, **k):
             assert verb == "law-match"
+            if payload["mode"] == "record-scope":
+                return {"ok": True, "scope": "project:fno"}
             if payload["mode"] == "validate":
                 return {"ok": True, "refusal": None}
             assert payload["mode"] == "law"
@@ -893,9 +933,7 @@ class TestLawSetSweep:
         decision_id = result.stdout.strip()
         assert decision_id.startswith("d-")
         assert "may answer open q-470f40d2" in result.stderr
-        rows = [
-            json.loads(line) for line in index.read_text().splitlines() if line.strip()
-        ]
+        rows = _rows(index)
         assert rows[0]["data"]["decision_id"] == decision_id
 
     def test_a_failed_sweep_keeps_exit_0_and_stdout(
@@ -908,8 +946,12 @@ class TestLawSetSweep:
         monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
 
         def broken(*a, **k):
-            if len(a) > 1 and isinstance(a[1], dict) and a[1].get("mode") == "validate":
-                return {"ok": True, "refusal": None}
+            if len(a) > 1 and isinstance(a[1], dict):
+                mode = a[1].get("mode")
+                if mode == "validate":
+                    return {"ok": True, "refusal": None}
+                if mode == "record-scope":
+                    return {"ok": True, "scope": "project:fno"}
             raise RuntimeError("matcher exploded")
 
         monkeypatch.setattr("fno.rust_binary.verb_call", broken)
@@ -927,9 +969,7 @@ class TestLawSetSweep:
         assert result.exit_code == 0, result.output
         assert result.stdout.strip().startswith("d-")
         assert "open-question sweep failed" in result.stderr
-        rows = [
-            json.loads(line) for line in index.read_text().splitlines() if line.strip()
-        ]
+        rows = _rows(index)
         assert len(rows) == 1, "the law itself is recorded"
 
 
@@ -947,7 +987,7 @@ def test_a_node_or_pr_id_is_refused_as_a_law_subject(
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "a node or PR id is not a law subject" in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []
 
 
 def test_a_topic_subject_citing_a_node_id_records(
@@ -969,7 +1009,7 @@ def test_a_topic_subject_citing_a_node_id_records(
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
-    assert index.read_text().strip()
+    assert _rows(index)
 
 
 def test_an_unavailable_validator_refuses_the_recording(
@@ -993,4 +1033,4 @@ def test_an_unavailable_validator_refuses_the_recording(
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "law validation is unavailable" in result.output
     assert "Nothing was recorded." in result.output
-    assert index.read_text() == ""
+    assert _rows(index) == []

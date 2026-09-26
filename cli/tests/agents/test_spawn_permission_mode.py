@@ -41,7 +41,7 @@ CWD = Path("/tmp")
             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
         ),
         ("opencode", "auto", ["--auto"]),
-        ("agy", "skip", []),  # argv already carries --dangerously-skip-permissions
+        ("agy", "skip", ["--dangerously-skip-permissions"]),
     ],
 )
 def test_mapping_accepts_provider_native_values(provider, mode, expected):
@@ -52,7 +52,7 @@ def test_mapping_accepts_provider_native_values(provider, mode, expected):
     "provider,mode",
     [
         ("opencode", "acceptEdits"),  # AC3-ERR: only 'auto' maps
-        ("agy", "plan"),  # only 'skip' maps
+        ("agy", "yolo-please"),  # not in agy's own vocabulary
         ("codex", "bogus"),  # not a shortcut or colon form
         ("codex", "workspace-write"),  # colon form needs both axes
         ("claude", ""),  # empty value required
@@ -62,6 +62,42 @@ def test_mapping_fail_closed_on_unmappable(provider, mode):
     with pytest.raises(DispatchAskError) as exc:
         permission_pane_tokens(provider, mode)
     assert exc.value.exit_code == 2
+
+
+# --- agy pane posture: default bypass, explicit mode replaces it -------------
+
+
+@pytest.fixture
+def rust_door(monkeypatch):
+    """Pin the posture door to THIS checkout's fno-agents build; skip where
+    the checkout has none (the same contract conftest.native_backlog_door
+    implements). A stale installed binary must not answer for this tree."""
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
+def test_agy_pane_default_keeps_bypass(rust_door, capsys):
+    argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, None)
+    assert "--dangerously-skip-permissions" in argv
+    # The launch names the posture it ran with, once, on stderr.
+    captured = capsys.readouterr().err
+    assert "agy posture: bypass (lane-default)" in captured
+
+
+def test_agy_pane_mode_replaces_bypass(rust_door):
+    argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, "plan")
+    assert "--mode" in argv and "plan" in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_agy_pane_yolo_plus_mode_refuses(rust_door):
+    # AC13-ERR flavor: one knob at a time, before any spawn.
+    with pytest.raises(DispatchAskError):
+        build_pane_argv("agy", "hi", CWD, True, "uuid", None, "plan")
 
 
 # --- build_pane_argv integration -------------------------------------------
@@ -312,6 +348,51 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
     assert "permission_mode" not in receipt
 
 
+def test_codex_yolo_receipt_names_yolo_via_python(runner, monkeypatch):
+    """--yolo on a codex spawn names yolo (codex's own spelling) in the
+    receipt, never claude's bypassPermissions (x-6c8a)."""
+    from fno import rust_binary
+    from fno.agents import dispatch, spawn_gate
+
+    # Force the Python fallback so the receipt under test is this module's.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+
+    class _Gate:
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="codex", short_id="abcd1234"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "yolo"
+    assert "permission_mode" not in receipt
+
+    # The env-resolved harness counts too: no --harness, the invoking-harness
+    # marker names codex, and the receipt still reads yolo.
+    monkeypatch.setenv("CODEX_THREAD_ID", "t-env-codex")
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w2", "hi", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "yolo"
+    assert "permission_mode" not in receipt
+
+
 def test_claude_python_build_argv_threads_permission_mode():
     """The Python claude bg argv builder mirrors Rust: --permission-mode rides
     between --name and --model; unset is byte-identical."""
@@ -341,6 +422,9 @@ def _capture_spawn(monkeypatch, module):
         # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
         # real binary and keep it out of the capture, which pins the SPAWN argv.
         if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return real_run(cmd, **kwargs)
+        # Native event commits are infrastructure: ride the real binary too.
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
             return real_run(cmd, **kwargs)
         captured["cmd"] = cmd
         return SimpleNamespace(
@@ -506,18 +590,24 @@ import subprocess as _sp  # noqa: E402
 
 
 def _node_row(
-    node_id: str, difficulty: str | None = "low", verb: str | None = None
+    node_id: str,
+    difficulty: str | None = "low",
+    verb: str | None = None,
+    model: str | None = "glm-5.3-flash[1m]",
 ) -> dict:
     """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
     was deleted. An out-of-family ``verb`` rides the row so the lifecycle
-    table abstains and the explicit verb wins, as the deleted None path did."""
+    table abstains and the explicit verb wins, as the deleted None path did.
+    The default model pin clears the seam gate (x-8fb2): CI runs with no
+    routing config, so the grid declines and an unpinned spawn would refuse."""
     return {
         "id": node_id,
         "dispatch_verb": verb or "",
         "difficulty": difficulty,
+        "model": model,
     }
 
 
@@ -558,3 +648,73 @@ def test_spawn_sh_forwards_permission_mode(tmp_path):
     assert "--permission-mode" in forwarded
     i = forwarded.index("--permission-mode")
     assert forwarded[i + 1] == "acceptEdits"
+
+
+# --- x-6863: one vocabulary, in Rust; the Python holds no second table ------
+
+
+def _rust_answer(provider: str, mode: str, substrate: str | None) -> dict:
+    from fno.rust_binary import verb_call
+
+    payload = {"provider": provider, "mode": mode}
+    if substrate:
+        payload["substrate"] = substrate
+    return verb_call("permission-tokens", payload, Exception)
+
+
+@pytest.mark.parametrize(
+    "provider,mode,substrate,expected",
+    [
+        # AC4-HP: the codex thread lane carries the axis, declared by
+        # harness.codex.thread.carries, resolved in codex's own words.
+        ("codex", "workspace-write:on-request", "thread", True),
+        ("codex", "full-auto", "thread", True),
+        ("codex", "yolo", "bg", True),
+        ("claude", "bypassPermissions", "thread", True),
+        ("claude", "bypassPermissions", "headless", True),
+        # Undeclared or unmappable lanes answer false, named, not guessed.
+        ("opencode", "auto", "thread", False),
+        ("pi", "yolo", "thread", False),
+        ("codex", "acceptEdits", "thread", False),
+        ("codex", "yolo", "headless", False),
+    ],
+)
+def test_mappability_matches_the_rust_owner(provider, mode, substrate, expected):
+    from fno.agents.spawn_defaults import _permission_mappable
+
+    assert _permission_mappable(provider, mode, substrate) is expected
+
+
+@pytest.mark.parametrize(
+    "provider,mode",
+    [
+        ("claude", "bypassPermissions"),
+        ("codex", "full-auto"),
+        ("codex", "workspace-write:on-request"),
+        ("gemini", "yolo"),
+        ("opencode", "auto"),
+        ("agy", "skip"),
+        ("cursor-agent", "force"),
+        ("grok", "dontAsk"),
+    ],
+)
+def test_python_bridge_matches_the_rust_vocabulary(provider, mode):
+    """AC4-EDGE: the bridge and the owner answer identically, so the tree
+    holds ONE table. The refusal messages compare byte-for-byte too."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    py_refusal = None
+    py_tokens = None
+    try:
+        py_tokens = permission_pane_tokens(provider, mode)
+    except DispatchAskError as exc:
+        py_refusal = str(exc)
+    rust = _rust_answer(provider, mode, None)
+    if rust.get("refusal"):
+        assert py_refusal is not None, f"python accepted what rust refused: {rust}"
+        assert py_refusal == rust["refusal"]
+        with pytest.raises(DispatchAskError):
+            permission_pane_tokens(provider, mode)
+    else:
+        assert py_refusal is None
+        assert py_tokens == [str(t) for t in rust["tokens"]]

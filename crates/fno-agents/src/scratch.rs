@@ -465,12 +465,14 @@ pub fn blob_hashes(repo_root: &Path, paths: &[&Path]) -> HashMap<PathBuf, String
 // Journal + graph reads (the dedupe index)
 // ---------------------------------------------------------------------------
 
-/// Tolerant per-line parse of a JSONL events journal.
+/// The committed rows of an events journal, tolerant per-line parse kept for
+/// the folded shapes the consolidation decisions read.
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(lines) = crate::loopcheck::event_lines(path) else {
         return Vec::new();
     };
-    text.lines()
+    lines
+        .iter()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect()
 }
@@ -543,24 +545,17 @@ fn newest_filed(events: &[serde_json::Value]) -> HashMap<String, FiledRow> {
     map
 }
 
-/// id -> (status, completed_at) for every node in graph.json. Read-only; the
+/// id -> (status, completed_at) for every node in the graph store. Read-only; the
 /// sweep never mutates the graph (node birth goes through `fno backlog idea`,
-/// the one seam crossing).
+/// the one seam crossing). Through the backend switch: under sqlite the file
+/// is a frozen mirror whose misses refile closed work. Unreadable reads as
+/// the empty map, the same soft failure as before.
 fn node_statuses(graph: &Path) -> HashMap<String, (String, Option<String>)> {
     let mut map = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(graph) else {
+    let Ok(rows) = crate::graph_store::read_rows(graph) else {
         return map;
     };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return map;
-    };
-    let entries = v.get("entries").unwrap_or(&v);
-    let list: Vec<&serde_json::Value> = match entries {
-        serde_json::Value::Array(items) => items.iter().collect(),
-        serde_json::Value::Object(obj) => obj.values().collect(),
-        _ => return map,
-    };
-    for node in list {
+    for node in &rows {
         let (Some(id), Some(status)) = (
             node.get("id").and_then(|v| v.as_str()),
             node.get("status").and_then(|v| v.as_str()),
@@ -1425,9 +1420,14 @@ mod tests {
     }
 
     fn journal_count(journal: &Path, needle: &str) -> usize {
-        std::fs::read_to_string(journal)
-            .map(|t| t.lines().filter(|l| l.contains(needle)).count())
-            .unwrap_or(0)
+        // Committed rows, not journal bytes: the store cutover commits
+        // sweep rows in the store beside the journal.
+        let _ = crate::event_store::import_all(journal);
+        crate::event_store::query_events(journal, &crate::event_store::EventQuery::default())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.line.contains(needle))
+            .count()
     }
 
     fn now_ts() -> String {
@@ -2043,5 +2043,43 @@ mod tests {
         let json = run_report(&journal, 28, true);
         assert!(json.contains("\"jobs\": 3"), "got {json}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn node_statuses_follows_the_backend_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        // A row the import can represent: from_json requires slug, type and
+        // priority, and a row it refuses is skipped, so the flip drops it.
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"}]}"#,
+        )
+        .unwrap();
+        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        let store = crate::backlog::api::Store::new(&graph);
+        crate::backlog::api::node_create(
+            &store,
+            crate::backlog::api::NodeCreateInput {
+                id: "x-new".into(),
+                title: "post-flip".into(),
+                status: Some("ready".into()),
+                priority: Some("p2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let statuses = node_statuses(&graph);
+        assert_eq!(
+            statuses.get("x-new").map(|(s, _)| s.as_str()),
+            Some("ready"),
+            "the store-only node must resolve"
+        );
+        assert_eq!(
+            statuses.get("x-old").map(|(s, _)| s.as_str()),
+            Some("ready"),
+            "the pre-flip node must survive the flip"
+        );
     }
 }

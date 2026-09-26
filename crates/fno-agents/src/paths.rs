@@ -94,23 +94,26 @@ pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
 ///
 /// Both raw and canonical forms of the temp dir are compared: macOS reports it
 /// as `/var/folders/...` while `canonicalize` yields `/private/var/...`.
-fn fence_declared_root(claimed: bool, root: &Path) {
-    if !cfg!(test) || !claimed {
-        return;
-    }
+pub(crate) fn under_temp_dir(path: &Path) -> bool {
     let tmp = std::env::temp_dir();
     let tmp_forms = [
         std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone()),
         tmp,
     ];
     let root_forms = [
-        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-        root.to_path_buf(),
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        path.to_path_buf(),
     ];
-    if root_forms
+    root_forms
         .iter()
         .any(|r| tmp_forms.iter().any(|t| r.starts_with(t)))
-    {
+}
+
+fn fence_declared_root(claimed: bool, root: &Path) {
+    if !cfg!(test) || !claimed {
+        return;
+    }
+    if under_temp_dir(root) {
         return;
     }
     panic!(
@@ -128,23 +131,43 @@ pub struct AgentsHome {
 }
 
 impl AgentsHome {
-    /// Resolve from the environment: `FNO_AGENTS_HOME` if set, else
-    /// `$HOME/.fno/agents`. Falls back to `./.fno/agents` if `$HOME`
-    /// is somehow unset (CI containers), so the daemon never panics on a missing
-    /// home — it degrades to a relative tree.
-    pub fn from_env() -> Self {
-        if let Some(v) = std::env::var_os(HOME_ENV) {
-            let root = PathBuf::from(v);
-            fence_declared_root(test_sandbox_claimed(), &root);
-            return AgentsHome { root };
-        }
-        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
-        let base = std::env::var_os("HOME")
+    /// Builds the declared-root case from an already-read value. Shared by
+    /// `from_env` and `from_env_opt` so the fence runs in one place and
+    /// neither caller re-reads `HOME_ENV` to get it.
+    fn from_value(v: Option<std::ffi::OsString>) -> Option<Self> {
+        let root = PathBuf::from(v?);
+        fence_declared_root(test_sandbox_claimed(), &root);
+        Some(AgentsHome { root })
+    }
+
+    /// Joins the ambient tree onto an already-read `$HOME` value. Split out
+    /// of `home_fallback` so the path-joining is testable without an env
+    /// read.
+    fn home_fallback_from(home: Option<std::ffi::OsString>) -> Self {
+        let base = home
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let root = base.join(".fno").join("agents");
         fence_declared_root(test_sandbox_claimed(), &root);
         AgentsHome { root }
+    }
+
+    /// The ambient `$HOME/.fno/agents` fallback. Never reads `HOME_ENV` -
+    /// callers already know it was absent.
+    fn home_fallback() -> Self {
+        Self::home_fallback_from(std::env::var_os("HOME"))
+    }
+
+    /// Resolve from the environment: `FNO_AGENTS_HOME` if set, else
+    /// `$HOME/.fno/agents`. Falls back to `./.fno/agents` if `$HOME`
+    /// is somehow unset (CI containers), so the daemon never panics on a missing
+    /// home — it degrades to a relative tree.
+    pub fn from_env() -> Self {
+        if let Some(home) = Self::from_value(std::env::var_os(HOME_ENV)) {
+            return home;
+        }
+        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
+        Self::home_fallback()
     }
 
     /// The resolved root, or `None` when a test process declared none.
@@ -158,11 +181,20 @@ impl AgentsHome {
     /// `None` covers the UNDECLARED case only. A process that declared a
     /// sandbox it does not have still panics through [`fence_declared_root`];
     /// that refusal is the point, not a hole in this degrade.
+    ///
+    /// Reads `HOME_ENV` once and reuses that value. Calling `from_env` in
+    /// the declared-ambient branch would read it again, and a sibling
+    /// setting its own temp home in that gap would leak through silently.
     pub fn from_env_opt() -> Option<Self> {
-        if cfg!(test) && std::env::var_os(HOME_ENV).is_none() && !test_root_declared() {
+        let declared = std::env::var_os(HOME_ENV);
+        if declared.is_some() {
+            return Self::from_value(declared);
+        }
+        if cfg!(test) && !test_root_declared() {
             return None;
         }
-        Some(Self::from_env())
+        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
+        Some(Self::home_fallback())
     }
 
     /// Construct rooted at an explicit directory (tests).
@@ -183,12 +215,33 @@ impl AgentsHome {
         if let Some(v) = std::env::var_os(HOME_ENV) {
             return PathBuf::from(v).join("registry.json");
         }
+        Self::ambient_shared_root().join("registry.json")
+    }
+
+    /// The ambient `$HOME/.fno/agents` - the one root every real session
+    /// shares. Deliberately NOT [`HOME_ENV`]-aware: `HOME_ENV` names a
+    /// declared root, and the question [`Self::is_sandbox`] answers is
+    /// whether the declared root IS this ambient one. [`HOME_ENV`]-aware
+    /// callers want [`Self::shared_registry_json`].
+    fn ambient_shared_root() -> PathBuf {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".fno")
             .join("agents")
-            .join("registry.json")
+    }
+
+    /// Whether this home is a throwaway one (a test tempdir, a probe scratch
+    /// dir) rather than the shared `$HOME/.fno/agents` every real session
+    /// uses.
+    ///
+    /// A throwaway home gets a daemon on purpose: tests and repro scripts ask
+    /// for one. What it must not get is fleet work, because every fleet arm
+    /// resolves its targets from the real cwd and the real graph, not from
+    /// this home. Compared canonicalized, so a symlinked `$HOME` is not a
+    /// sandbox.
+    pub fn is_sandbox(&self) -> bool {
+        !same_path(&self.root, &Self::ambient_shared_root())
     }
 
     /// The agents root directory.
@@ -205,6 +258,12 @@ impl AgentsHome {
 
     pub fn registry_json(&self) -> PathBuf {
         self.root.join("registry.json")
+    }
+
+    /// The crown name store (`crown_names.json`), beside `registry.json`.
+    /// The mux reads this file as a contract - see [`crate::crown_names`].
+    pub fn crown_names_json(&self) -> PathBuf {
+        self.root.join("crown_names.json")
     }
 
     /// Per-provider injection gate record (`injection-gate.json`), stored next
@@ -529,6 +588,13 @@ fn durable_spaces_root() -> PathBuf {
     root
 }
 
+/// The spaces ROOT (the directory holding one space dir per repository):
+/// the same resolution `space_dir`'s parent logic uses. Public for the
+/// `fno-agents` bin client, whose dead-crown sweep walks it.
+pub fn spaces_root() -> PathBuf {
+    spaces_root_dir()
+}
+
 /// The nearest ancestor of `path` that is a checkout root, or None. A pure
 /// walk: no env, no cwd, no subprocess, so the answer about `old` cannot be
 /// bent by whoever is resolving state in this call.
@@ -636,6 +702,24 @@ pub fn worktree_space_dir(cwd: &Path) -> PathBuf {
     }
 }
 
+/// [`worktree_space_dir`] for best-effort readers, over [`space_dir_opt`]:
+/// `None` when no state root is declared (a hermetic test), the durable
+/// answer everywhere else. A read-only gate skips on `None` instead of
+/// tripping the undeclared-root guard.
+pub fn worktree_space_dir_opt(cwd: &Path) -> Option<PathBuf> {
+    let root = worktree_repo_root(cwd);
+    match canonical_repo_root(cwd) {
+        Some(canonical) if canonical != root => space_dir_opt(cwd).map(|dir| {
+            dir.join("worktrees").join(
+                root.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        }),
+        _ => space_dir_opt(cwd),
+    }
+}
+
 /// The project event journal on the space. Migrates the legacy
 /// `<checkout>/.fno/events.jsonl` once on first resolve so appenders never
 /// split the file across the two locations; one contract for every reader
@@ -719,6 +803,14 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
         }
     }
     true
+}
+
+/// Whether two paths name the same directory, compared canonicalized on
+/// both sides so a symlinked parent never breaks the comparison. A path
+/// that cannot be canonicalized compares as written.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 /// One test's declared state root: `FNO_SPACES_DIR` and `FNO_AGENTS_HOME`
@@ -901,6 +993,91 @@ mod tests {
         let home = AgentsHome::from_env();
         assert_eq!(home.root(), root.as_path());
         std::env::remove_var(HOME_ENV);
+    }
+
+    /// `from_value` is the seam `from_env` and `from_env_opt` share: given
+    /// the value up front, it never re-reads the environment to get it.
+    #[test]
+    fn from_value_builds_the_declared_root_from_the_given_value() {
+        let root = tmp("from-value");
+        let home = AgentsHome::from_value(Some(root.clone().into_os_string()))
+            .expect("a declared value builds a home");
+        assert_eq!(home.root(), root.as_path());
+    }
+
+    #[test]
+    fn from_value_is_none_when_nothing_is_declared() {
+        assert!(AgentsHome::from_value(None).is_none());
+    }
+
+    /// `home_fallback_from` is the same seam for the ambient case: given
+    /// `$HOME`'s value up front, it never reads the environment itself.
+    #[test]
+    fn home_fallback_from_joins_the_agents_tree_onto_the_given_home() {
+        let home = AgentsHome::home_fallback_from(Some(std::ffi::OsString::from("/tmp/eg-home")));
+        assert_eq!(
+            home.root(),
+            Path::new("/tmp/eg-home").join(".fno").join("agents")
+        );
+    }
+
+    #[test]
+    fn home_fallback_from_defaults_to_dot_when_home_is_absent() {
+        let home = AgentsHome::home_fallback_from(None);
+        assert_eq!(home.root(), Path::new(".").join(".fno").join("agents"));
+    }
+
+    // ── is_sandbox ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_sandbox_true_for_a_tempdir_home() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-true");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var(HOME_ENV, &root);
+        assert!(AgentsHome::from_env().is_sandbox());
+        std::env::remove_var(HOME_ENV);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_sandbox_false_for_the_ambient_shared_home() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-shared");
+        let agents = root.join(".fno").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let held_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        assert!(!AgentsHome::at(&agents).is_sandbox());
+        match held_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_sandbox_false_through_a_symlink_to_the_shared_root() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-symlink");
+        let agents = root.join(".fno").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&agents, &link).unwrap();
+        let held_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        assert!(!AgentsHome::at(&link).is_sandbox());
+        match held_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── supervisor_lock_holder ─────────────────────────────────────

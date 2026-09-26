@@ -191,10 +191,6 @@ pub(super) fn no_pane_notice(a: &AgentRow) -> String {
             "fno agents peek {} --follow — worker {} is live but has no pane; resume refused because it would create a second writer",
             a.name, a.name
         ),
-        Some(AgentNoPaneReason::BackendNotLive) => format!(
-            "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
-            a.name
-        ),
         Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
             "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live{}); run fno agents peek {} to see before resuming",
             a.name,

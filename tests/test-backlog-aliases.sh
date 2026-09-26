@@ -167,17 +167,14 @@ else
 fi
 
 # --- Scenario 5: backlog done marks node complete ---------------------------
-# Extract the last adopted ID from graph.json (one of the two we just added)
-node_id=$(python3 -c "
-import json, sys
-data = json.load(open('$GRAPH_JSON'))
-entries = data.get('entries', [])
-print(entries[-1]['id'] if entries else '')
-")
+# The id comes from the intake receipt. The store owns the rows, and an
+# installed `fno` is no Python interpreter to read them with.
+node_id=$(printf '%s\n' "$intake_out" | sed -n 's/.*intake \(ab-[0-9a-z]*\).*/\1/p' | head -1)
 
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
+    run_fno backlog update "$node_id" --completion-note "smoke alias fixture" > /dev/null 2>&1
     done_out=$(run_fno backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
@@ -185,16 +182,8 @@ else
         fail "done did not report completion: $done_out"
     fi
 
-    # Verify completed_at is set in the json
-    has_completed=$(python3 -c "
-import json
-data = json.load(open('$GRAPH_JSON'))
-for e in data.get('entries', []):
-    if e.get('id') == '$node_id':
-        print('yes' if e.get('completed_at') else 'no')
-        break
-")
-    if [[ "$has_completed" == "yes" ]]; then
+    # Verify completed_at landed on the store row
+    if run_fno backlog get "$node_id" 2>/dev/null | grep -q '"completed_at": "'; then
         pass "done sets completed_at timestamp"
     else
         fail "done did not set completed_at on the node"

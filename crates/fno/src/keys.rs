@@ -381,6 +381,12 @@ pub enum Event {
     /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
     /// by the client's view layer, not here (like OpenAnswers).
     OpenYard,
+    /// Open the experimental backlog board (prefix+O). Whether the board
+    /// actually opens is the client's call: the sideline menu's
+    /// `experimental: backlog view` pref gates it, and the chord degrades to
+    /// a notice while the pref is off.
+    OpenBacklogBoard,
+    CycleSidelineView,
     /// (redefined by) Toggle the court block on the left
     /// sideline between its three-line glance and the full reading: load
     /// against the cap, what saturates the box, the working/idle/dead
@@ -398,6 +404,15 @@ pub enum Event {
     FocusFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
+    /// Toggle the new-agent composer at the sideline's bottom (prefix+i).
+    /// Opening a retained draft reveals it untouched; opening with the
+    /// sideline hidden shows the sideline first, so the composer is never
+    /// open and unpainted.
+    ToggleComposer,
+    /// Toggle the full-screen sideline (prefix+F): the agent table takes the
+    /// terminal width with the composer at the bottom and the panes do not
+    /// paint. Client-local paint: no `Resize` travels in either direction.
+    ToggleFullSideline,
     /// Cycle the sideline density slim -> regular -> extended
     /// (prefix+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
     /// each row shows, that changes whether the panel renders at all.
@@ -434,6 +449,17 @@ pub enum Event {
     /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
+    /// Open the settings modal (prefix+S). The same surface the sideline
+    /// menu's `settings` row opens, reached from the keyboard. Case pair
+    /// with `s` (toggle-status), the h/H focus/resize convention.
+    OpenSettings,
+    /// Open the connections modal (prefix+A): provider accounts and combo
+    /// routing. Case pair with `a` (answers).
+    OpenConnections,
+    /// Open the thread-sweep counts modal (prefix+T): the sideline menu's
+    /// `sweep threads` row, on the keyboard. The modal still asks before
+    /// anything is reaped.
+    OpenSweepThreads,
     /// Open the rename-tab name overlay for the active tab (prefix+,, tmux
     /// `rename-window` convention). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
@@ -517,6 +543,18 @@ impl Default for Scanner {
 /// tail matches after consuming `b`. The only self-overlap in either marker
 /// is a fresh ESC, so the KMP fallback table collapses to "mismatch: retry
 /// as position 0, i.e. matched-1 iff b is ESC".
+/// A carry holding exactly one ESC is a bare Esc press once input has gone
+/// quiet: a whole CSI arrives in one write, so nothing legitimately follows
+/// a lone `0x1b` after the flush window. Clears the carry and answers true;
+/// any other carry (a partial sequence) is left untouched.
+pub fn take_lone_esc(esc: &mut Vec<u8>) -> bool {
+    let lone = esc.as_slice() == [0x1b];
+    if lone {
+        esc.clear();
+    }
+    lone
+}
+
 fn roll(idx: usize, b: u8, marker: &[u8]) -> usize {
     if b == marker[idx] {
         idx + 1
@@ -878,6 +916,12 @@ fn paste_state(idx: usize) -> State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySection {
     Global,
+    /// Hard-coded chords the scanner dispatches OUTSIDE the rebindable
+    /// keymap (`esc_chord` and the global sideline chord). They carry no
+    /// [`KeyBinding`] and cannot rebind; the modal lists them through
+    /// [`meta_rows`] as reference, the same channel [`KeySection::SidelineRows`]
+    /// uses for bare keys.
+    GlobalNoPrefix,
     Navigation,
     WorkspacesTabs,
     Panes,
@@ -893,6 +937,7 @@ impl KeySection {
     pub fn title(self) -> &'static str {
         match self {
             KeySection::Global => "global",
+            KeySection::GlobalNoPrefix => "global (no prefix)",
             KeySection::Navigation => "navigation",
             KeySection::WorkspacesTabs => "workspaces & tabs",
             KeySection::Panes => "panes",
@@ -1116,6 +1161,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sideline row selector",
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(
+            b'A',
+            "connections",
+            OpenConnections,
+            Global,
+            "connections (accounts, combos)",
+        ),
         b(b'e', "feed", OpenFeed, Global, "activity feed"),
         b(
             b'E',
@@ -1139,11 +1191,39 @@ fn default_bindings() -> Vec<KeyBinding> {
             "the court (load, census, lanes)", // minimize/expand, sideline
         ),
         b(
+            b'O',
+            "open-backlog-board",
+            OpenBacklogBoard,
+            Global,
+            "open the backlog board (experimental pref)",
+        ),
+        b(
+            b'V',
+            "cycle-sideline-view",
+            CycleSidelineView,
+            Global,
+            "cycle sideline view (agents, backlog)",
+        ),
+        b(
             b'b',
             "toggle-sideline",
             TogglePanel,
             Global,
             "toggle sideline",
+        ),
+        b(
+            b'i',
+            "toggle-composer",
+            ToggleComposer,
+            Global,
+            "new-agent composer",
+        ),
+        b(
+            b'F',
+            "full-sideline",
+            ToggleFullSideline,
+            Global,
+            "full-screen sideline",
         ),
         b(
             b'B',
@@ -1160,6 +1240,20 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sort table columns",
         ),
         b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
+        b(
+            b'S',
+            "settings",
+            OpenSettings,
+            Global,
+            "settings (theme, toggles, prefix)",
+        ),
+        b(
+            b'T',
+            "sweep-threads",
+            OpenSweepThreads,
+            Global,
+            "sweep threads (close, reap)",
+        ),
         b(
             b'\\',
             "show-pane-ids",
@@ -1241,6 +1335,10 @@ pub struct MenuKeyBinding {
 /// at build time and per offered action on every in-menu keypress.
 pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
     MenuKeyBinding {
+        action: "open-in-portal",
+        key: b'P',
+    },
+    MenuKeyBinding {
         action: "rename-tab",
         key: b'r',
     },
@@ -1310,6 +1408,12 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "rename-agent",
         key: b'l',
     },
+    // `c` closes the portal seat only - the viewer, never the row it
+    // shows; `x` stays the destructive row verb.
+    MenuKeyBinding {
+        action: "close-portal",
+        key: b'c',
+    },
 ];
 
 /// The one resolver both menu-scope projections read: the binding registered
@@ -1345,55 +1449,40 @@ pub fn menu_byte_for(action_id: &str) -> Option<u8> {
 /// table, and a rebind has to reach every one of them or the feature reads as
 /// broken from whichever surface was missed.
 ///
-/// A teaser, not the key list: it names one action per group and sends the
-/// reader to `?` for the rest. An action missing from the table drops silently
-/// rather than printing a gap.
+/// A teaser, not the key list: the short bar a pending prefix paints at
+/// once. Each key comes off the LIVE
+/// key table via [`key_for`], so a rebind shows the real key; an action
+/// missing from the table drops silently rather than printing a gap. The
+/// full table stays in `?`.
 pub fn prefix_hint() -> String {
-    // (actions, how their keys join, the phrase that follows). No actions means
-    // a literal entry: the digit range is structural, not a binding.
-    const GROUPS: &[(&[&str], &str, &str)] = &[
-        (&["split-h", "split-v"], " ", "split"),
-        (
-            &["focus-left", "focus-down", "focus-up", "focus-right"],
-            "",
-            "focus",
-        ),
-        (
-            &["resize-left", "resize-down", "resize-up", "resize-right"],
-            "",
-            "resize",
-        ),
-        (&["close-pane"], "", "close"),
-        (&["new-tab"], "", "tab"),
-        (&["next-tab", "prev-tab"], "/", "cycle"),
-        (&[], "", "<n> tab"),
-        (&["close-tab"], "", "close-tab"),
-        (&["selector"], "", "select"),
-        (&["toggle-sideline"], "", "sideline"),
-        (&["grab-work"], "", "grab"),
-        (&["find"], "", "find"),
-        (&["search"], "", "search"),
-        (&["toggle-status"], "", "status"),
-        (&["detach"], "", "detach"),
-        (&["show-keys"], "", "all keys"),
+    // (action id, the phrase that follows). `esc cancel` is literal: esc
+    // cancels a pending prefix structurally, before any binding lookup.
+    const BAR: &[(&str, &str)] = &[
+        ("selector", "workspaces"),
+        ("toggle-composer", "new agent"),
+        ("find", "find"),
+        ("show-keys", "all keys"),
     ];
     let rows = key_bindings();
-    let mut parts: Vec<String> = Vec::new();
-    for (actions, sep, phrase) in GROUPS {
-        if actions.is_empty() {
-            parts.push(phrase.to_string());
-            continue;
-        }
-        let keys: Vec<String> = actions
+    let mut parts: Vec<String> = vec!["esc cancel".to_string()];
+    for (action, phrase) in BAR {
+        let Some(key) = rows
             .iter()
-            .filter_map(|a| rows.iter().find(|kb| kb.action == *a))
+            .find(|kb| kb.action == *action)
             .map(|kb| kb.disp.clone())
-            .collect();
-        if !keys.is_empty() {
-            parts.push(format!("{} {phrase}", keys.join(sep)));
-        }
+        else {
+            continue;
+        };
+        parts.push(format!("{key} {phrase}"));
     }
-    format!(" {}", parts.join(" \u{b7} "))
+    format!(" {} ", parts.join(" \u{b7} "))
+}
+
+/// The one-line key hint the sideline paints while the row selector is open,
+/// so the keys the selector answers never need discovering by accident. The
+/// words name what the selector's own handlers run (client `selector_keys`).
+pub fn selector_hint() -> &'static str {
+    " selector: arrows/hjkl move \u{b7} enter open \u{b7} space peek \u{b7} x stop/remove \u{b7} P portal \u{b7} esc close "
 }
 
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
@@ -1420,14 +1509,31 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             format!("literal {p}"),
             KeySection::Global,
         ),
-        // The global sideline chord: a multi-byte CSI, so it lives
-        // HERE with the other display-only rows rather than in the single-byte
-        // key_bindings table the modal executes from - the scanner's ChordEsc
-        // branch dispatches it, not chord().
+        // The hard-coded, non-rebindable chords: the global sideline chord
+        // (a multi-byte CSI the scanner's ChordEsc branch dispatches, not
+        // chord()) and the prefix-gated arrow ladder. The guard test
+        // (`every_hardcoded_chord_scans_to_a_listed_event`) fails when a
+        // scanner chord has no row here, so this table cannot lag the
+        // dispatch path.
         (
             "Ctrl+Opt+Left".into(),
-            "sideline (global, no prefix)".into(),
-            KeySection::Global,
+            "open the sideline row selector".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            format!("{p} arrows"),
+            "focus the pane in that direction".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            format!("{p} Ctrl+arrows"),
+            "resize the pane".into(),
+            KeySection::GlobalNoPrefix,
+        ),
+        (
+            format!("{p} Shift+arrows"),
+            "move the pane".into(),
+            KeySection::GlobalNoPrefix,
         ),
         // The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
@@ -1470,18 +1576,8 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         // them instead of leaving an operator to discover them by accident,
         // or not at all.
         (
-            format!("{p} w then r"),
-            "rename the focused workspace row".into(),
-            KeySection::SidelineRows,
-        ),
-        (
-            format!("{p} w then J/K"),
-            "move the focused workspace row down/up".into(),
-            KeySection::SidelineRows,
-        ),
-        (
-            format!("{p} w then x"),
-            "remove the focused workspace (confirm)".into(),
+            format!("{p} w then r/J/K/x"),
+            "rename · move · remove (confirm) the workspace row".into(),
             KeySection::SidelineRows,
         ),
     ]
@@ -1612,6 +1708,61 @@ fn esc_chord(seq: &[u8]) -> EscScan {
     EscScan::Invalid
 }
 
+/// The chords the scanner dispatches OUTSIDE the rebindable keymap, as
+/// (display, event) pairs: the global sideline chord (truly prefix-free) and
+/// the PREFIX-GATED arrow ladder (`prefix` + arrows focuses, `prefix` +
+/// Ctrl+arrows resizes, `prefix` + Shift+arrows moves). One source for the
+/// which-key modal's "global (no prefix)" rows and for the guard test that
+/// fails when a hard-coded chord this list never names completes - the exact
+/// gap that hid Ctrl+Opt+Left from every help surface.
+pub fn hardcoded_chords() -> Vec<(&'static str, Event)> {
+    use Command as C;
+    use Event::*;
+    vec![
+        ("Ctrl+Opt+Left", OpenSelector),
+        ("Up", Cmd(C::FocusDir(Dir::Up))),
+        ("Down", Cmd(C::FocusDir(Dir::Down))),
+        ("Left", Cmd(C::FocusDir(Dir::Left))),
+        ("Right", Cmd(C::FocusDir(Dir::Right))),
+        ("Ctrl+Up", Cmd(C::ResizeDir(Dir::Up))),
+        ("Ctrl+Down", Cmd(C::ResizeDir(Dir::Down))),
+        ("Ctrl+Left", Cmd(C::ResizeDir(Dir::Left))),
+        ("Ctrl+Right", Cmd(C::ResizeDir(Dir::Right))),
+        (
+            "Shift+Up",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Up,
+            }),
+        ),
+        (
+            "Shift+Down",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Down,
+            }),
+        ),
+        (
+            "Shift+Left",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Left,
+            }),
+        ),
+        (
+            "Shift+Right",
+            Cmd(C::MovePane {
+                mover: None,
+                target: None,
+                dir: Dir::Right,
+            }),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1694,6 +1845,10 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
+        assert_eq!(scan_all(&[b"\x02i"]), vec![Event::ToggleComposer]);
+        // prefix+O opens the experimental backlog board (pref-gated client-side).
+        assert_eq!(scan_all(&[b"\x02O"]), vec![Event::OpenBacklogBoard]);
+        assert_eq!(scan_all(&[b"\x02F"]), vec![Event::ToggleFullSideline]);
         assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
@@ -1719,6 +1874,18 @@ mod tests {
             ]
         );
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+    }
+
+    #[test]
+    fn sideline_menu_rows_open_from_the_keyboard() {
+        // The menu-only surfaces got chords: S settings, A connections,
+        // T sweep threads - case pairs with s/a, per the h/H convention.
+        assert_eq!(scan_all(&[b"\x02S"]), vec![Event::OpenSettings]);
+        assert_eq!(scan_all(&[b"\x02A"]), vec![Event::OpenConnections]);
+        assert_eq!(scan_all(&[b"\x02T"]), vec![Event::OpenSweepThreads]);
+        // ... and the lowercase halves still mean what they meant.
+        assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
+        assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
     }
 
     #[test]
@@ -1922,14 +2089,11 @@ mod tests {
         // one contains a particular character.
         let rows = key_bindings();
         let hint = prefix_hint();
-        // Byte-identical to the string this generator replaced. Generating it
-        // was meant to change nothing an operator sees until they rebind
-        // something, so the shipped rendering is worth pinning.
+        // Byte-identical to the shipped short bar: esc cancel plus
+        // one key per line, every glyph read from the live table.
         assert_eq!(
             hint,
-            " % \" split · hjkl focus · HJKL resize · x close · c tab · n/p cycle \
-             · <n> tab · & close-tab · w select · b sideline · g grab · f find \
-             · / search · s status · d detach · ? all keys"
+            " esc cancel · w workspaces · i new agent · f find · ? all keys "
         );
         let disp = |action: &str| {
             rows.iter()
@@ -1937,7 +2101,7 @@ mod tests {
                 .map(|kb| kb.disp.clone())
                 .expect("action is in the shipped table")
         };
-        for action in ["detach", "find", "search", "show-keys", "new-tab"] {
+        for action in ["selector", "toggle-composer", "find", "show-keys"] {
             assert!(
                 hint.contains(&disp(action)),
                 "the hint must name {action} on the key it actually answers on \
@@ -1945,11 +2109,11 @@ mod tests {
                 disp(action)
             );
         }
-        // A rebind moves the hint with it. Resolved locally rather than
-        // installed, since `install` is a process-global OnceLock.
-        let (map, warn) = resolve_keymap(None, &[("detach".into(), "Q".into())]);
+        // A rebind moves the glyph the bar reads. Resolved locally rather
+        // than installed, since `install` is a process-global OnceLock.
+        let (map, warn) = resolve_keymap(None, &[("find".into(), "Q".into())]);
         assert!(warn.is_empty(), "Q is free: {warn:?}");
-        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+        assert_eq!(map.rebinds, vec![("find".to_string(), b'Q')]);
         let rebound: Vec<KeyBinding> = {
             let mut rows = default_bindings();
             for (action, byte) in &map.rebinds {
@@ -1963,7 +2127,7 @@ mod tests {
         assert_eq!(
             rebound
                 .iter()
-                .find(|kb| kb.action == "detach")
+                .find(|kb| kb.action == "find")
                 .map(|kb| kb.disp.as_str()),
             Some("Q"),
             "the table moved, so the hint built from it moves too"
@@ -2162,6 +2326,32 @@ mod tests {
     }
 
     #[test]
+    fn default_keys_never_collide_or_land_on_a_special() {
+        // Two defaults on one byte would fail SILENTLY: `chord_for` keeps the
+        // first row and `resolve_keymap`'s no-proposal branch breaks out of the
+        // duplicate loop without a warning, so one action would dispatch while
+        // the modal still advertised both. The prefix byte and every digit are
+        // structural specials that route before the table (the literal-prefix
+        // forward and the tab-ordinal buffer), so a binding parked there is
+        // unreachable while the help still shows it.
+        let mut seen = std::collections::HashSet::new();
+        for kb in default_bindings() {
+            assert!(
+                seen.insert(kb.key),
+                "key {} bound twice (second: {:?})",
+                kb.disp,
+                kb.action
+            );
+            assert_ne!(kb.key, DEFAULT_PREFIX, "{} sits on the prefix", kb.action);
+            assert!(
+                !kb.key.is_ascii_digit(),
+                "{} sits on the tab-ordinal digits",
+                kb.action
+            );
+        }
+    }
+
+    #[test]
     fn client_keys_prefix_unmapped_swallows_with_bell() {
         // The 'q' must NOT be forwarded - swallow + BEL.
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
@@ -2325,6 +2515,63 @@ mod tests {
         let mut s = Scanner::default();
         assert_eq!(s.scan(b"\x1b[1;", now), Vec::<Event>::new());
         assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b[1;".to_vec())));
+    }
+
+    #[test]
+    fn every_hardcoded_chord_scans_to_a_listed_event() {
+        // The guard the key table lacked: EVERY chord the hard-coded scanner
+        // paths can complete must appear in [`hardcoded_chords`] - and so in
+        // the modal's "global (no prefix)" rows. A new hard-coded chord added
+        // without a table row fails here, which is exactly how Ctrl+Opt+Left
+        // went missing from every help surface.
+        let listed = hardcoded_chords();
+        let dir_seq = [
+            (b'A', Dir::Up),
+            (b'B', Dir::Down),
+            (b'C', Dir::Right),
+            (b'D', Dir::Left),
+        ];
+        // The ladder rungs are PREFIX-GATED (the global chord is the only
+        // prefix-free one), so every ladder sequence carries the default
+        // prefix byte the Scanner::default binds.
+        let mut sequences: Vec<(Vec<u8>, &str)> = vec![(b"\x1b[1;7D".to_vec(), "Ctrl+Opt+Left")];
+        for (final_byte, _dir) in dir_seq {
+            let f = final_byte as char;
+            sequences.push((format!("\x02\x1b[{f}").into_bytes(), "arrows"));
+            sequences.push((format!("\x02\x1b[1;5{f}").into_bytes(), "Ctrl+arrows"));
+            sequences.push((format!("\x02\x1b[1;2{f}").into_bytes(), "Shift+arrows"));
+        }
+        assert_eq!(
+            listed.len(),
+            sequences.len(),
+            "a chord joined or left the hard-coded set"
+        );
+        for (seq, display) in sequences {
+            let events = scan_all(&[&seq]);
+            assert_eq!(events.len(), 1, "{display}: one chord, one event");
+            let produced = &events[0];
+            assert!(
+                listed.iter().any(|(_, e)| e == produced),
+                "{display} scans to {produced:?}, which the key table never lists"
+            );
+        }
+        // And the modal's rows name the section: the global chord and the
+        // three ladder rungs are documented, non-empty, the ladder rows
+        // displaying the live prefix.
+        let rows = meta_rows();
+        let p = key_disp(prefix());
+        for display in [
+            "Ctrl+Opt+Left".to_string(),
+            format!("{p} arrows"),
+            format!("{p} Ctrl+arrows"),
+            format!("{p} Shift+arrows"),
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|(d, _, s)| *d == display && *s == KeySection::GlobalNoPrefix),
+                "the key table never lists {display}"
+            );
+        }
     }
 
     #[test]

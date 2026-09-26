@@ -152,14 +152,6 @@ def _validate_explicit_provenance(origin: dict, owner: dict, cause: Optional[str
             raise ValueError(f"cause {declared!r} is not in the naming-codes vocabulary")
 
 
-# The prompt lane opens a row only for a message whose verb labels review
-# (infer_phase, the spawn_phase.toml table): the complaint shape is a
-# review worker spawned with the node id in its prompt. A do worker whose
-# prompt mentions a SIBLING id must not get a reviewer row stamped on that
-# sibling, so prose and other verbs arm nothing.
-from fno.agents.spawn_phase import infer_phase as _infer_phase  # noqa: E402
-
-
 def _resolve_spawn_merge_grant(message: str) -> dict:
     """The spawner's OWN merge-grant verdict for a do-phase worker.
 
@@ -208,7 +200,7 @@ def _stamp_spawned_session_row(
 ) -> None:
     """Open the node's sessions row for a spawned contributor.
 
-    A spawned reviewer never holds the claim, so it crosses none of the
+    A spawned worker never holds the claim, so it crosses none of the
     mechanical stamping chokepoints (claim acquire/release, plan-bind, PR-link)
     and its work lands in no sessions array. This stamp runs spawn-side, where
     the receipt already knows the node and the worker's identity, and is
@@ -217,10 +209,6 @@ def _stamp_spawned_session_row(
 
     ``node`` is the ALREADY-RESOLVED node id from the ``--node`` lane
     (cmd_spawn's own ``resolve_provenance`` pass, reused rather than repeated).
-    Without it, the prompt lane fires only for a message leading with a review
-    verb that names exactly ONE node id - conservative by design, because a
-    bare id in prose names a sibling more often than a target.
-
     The row's identity is the WORKER's harness-native session id (the registry
     row's harness_session_id; the receipt's session uuid as fallback), never
     the spawning session's id and never a prefix-shaped short id: the
@@ -231,24 +219,13 @@ def _stamp_spawned_session_row(
     """
     from datetime import datetime, timezone
 
-    from fno.agents.mux_spawn import resolve_provenance
-    from fno.graph._constants import extract_node_ids
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
     node_id = node
     who = node
     if node_id is None:
-        msg = (message or "").lstrip()
-        ids = extract_node_ids(message or "")
-        if _infer_phase(msg) != "review" or len(ids) != 1:
-            return  # not a single-node review prompt: no row, nothing to say
-        who = ids[0]
-        try:
-            node_id = resolve_provenance(who, None, None).get("FNO_NODE")
-        except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
-            print(f"spawn: session row open skipped for {who}: {exc}", file=sys.stderr)
-            return
+        return
     if not node_id:
         print(
             f"spawn: session row open skipped for {who} "
@@ -277,6 +254,17 @@ def _stamp_spawned_session_row(
         harness = worker_harness
         session_id = worker_session_uuid
     if not harness or not session_id:
+        if worker_name:
+            from fno.paths import agents_registry_path
+            from fno.rust_binary import verb_call
+            try:
+                grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
+                verb_call("pending-session-row", {"action": "park", "name": worker_name,
+                         "phase": phase, "merge_grant": grant,
+                         "registry": str(agents_registry_path())})
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
+                print(f"spawn: park skipped for {node_id}: {exc}", file=sys.stderr)
+            return
         print(
             f"spawn: session row open skipped for {node_id} "
             f"(no harness session id at spawn); the row was not written. Skipped.",
@@ -356,5 +344,4 @@ def _stamp_launch_edge(node: "str | None") -> None:
         commit_rows_via_store(graph_json(), mutator)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
-
 

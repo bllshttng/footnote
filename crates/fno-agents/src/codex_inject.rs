@@ -69,6 +69,7 @@ pub fn codex_app_server_socket_path() -> PathBuf {
 /// positive liveness signal.
 pub struct CodexDaemonAdapter {
     provider_state_path: PathBuf,
+    provider_state_fallback_path: Option<PathBuf>,
     state_path: PathBuf,
     lock_path: PathBuf,
     socket_path: PathBuf,
@@ -82,10 +83,22 @@ impl CodexDaemonAdapter {
             .unwrap_or_else(|| PathBuf::from("fno-harness-daemon.json"));
         Self {
             provider_state_path,
+            provider_state_fallback_path: None,
             state_path,
             lock_path,
             socket_path,
         }
+    }
+
+    fn with_provider_state_fallback(
+        provider_state_path: PathBuf,
+        fallback_path: PathBuf,
+        lock_path: PathBuf,
+        socket_path: PathBuf,
+    ) -> Self {
+        let mut adapter = Self::new(provider_state_path, lock_path, socket_path);
+        adapter.provider_state_fallback_path = Some(fallback_path);
+        adapter
     }
 
     pub fn from_environment() -> Self {
@@ -93,8 +106,10 @@ impl CodexDaemonAdapter {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
             .unwrap_or_else(|| PathBuf::from(".codex"));
-        Self::new(
-            home.join("app-server-daemon").join("app-server.pid"),
+        let daemon_dir = home.join("app-server-daemon");
+        Self::with_provider_state_fallback(
+            daemon_dir.join("daemon.pid"),
+            daemon_dir.join("app-server.pid"),
             home.join("app-server-daemon")
                 .join("fno-harness-daemon.lock"),
             home.join("app-server-control")
@@ -102,9 +117,38 @@ impl CodexDaemonAdapter {
         )
     }
 
+    /// The managed daemon's (pid, start token) from the provider-owned
+    /// state file. `None` = the state is absent or unreadable: readiness
+    /// degrades to unknown, never to a guessed pid.
+    pub fn provider_pid_start(&self) -> Option<(u32, u64)> {
+        let state = self.provider_state().ok()?;
+        Some((state.pid?, state.process_start_time?))
+    }
+
+    /// The control socket path this adapter resolves.
+    pub fn control_socket(&self) -> PathBuf {
+        self.socket_path.clone()
+    }
+
+    /// Socket-level reachability plus the initialize handshake: the
+    /// process/socket/initialize predicate, without the state wrapper.
+    pub fn socket_up(&self) -> bool {
+        self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    }
+
     fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
-        let raw = std::fs::read_to_string(&self.provider_state_path)
-            .map_err(|error| format!("read Codex daemon state: {error}"))?;
+        let raw = match std::fs::read_to_string(&self.provider_state_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(fallback) = &self.provider_state_fallback_path else {
+                    return Err(format!("read Codex daemon state: {error}"));
+                };
+                std::fs::read_to_string(fallback).map_err(|fallback_error| {
+                    format!("read Codex daemon state: {fallback_error}")
+                })?
+            }
+            Err(error) => return Err(format!("read Codex daemon state: {error}")),
+        };
         <Self as crate::harness_daemon::HarnessDaemonAdapter>::parse_state(self, &raw)
     }
 }
@@ -346,6 +390,51 @@ async fn connect_app_server_unbounded(
 
 async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
     connect_app_server(socket_path).await.map(|_| ())
+}
+
+/// Read the initialize response's serverInfo (the server's own name +
+/// version user-agent) WITHOUT retaining the connection: a second
+/// initialize on the same connection is a protocol error, so this helper
+/// owns its whole lifecycle. `None` = the daemon never answered. This is
+/// the live-version reader the readiness verdict needs - the handshake
+/// used to discard exactly this response.
+pub fn initialize_server_info() -> Option<serde_json::Value> {
+    let socket_path = CodexDaemonAdapter::from_environment().control_socket();
+    // Same guard as `probe_codex_app_server`: block_on from inside a running
+    // runtime panics, and the census reads this from the async daemon loop.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::spawn(move || initialize_server_info_inner(&socket_path))
+            .join()
+            .ok()
+            .flatten();
+    }
+    initialize_server_info_inner(&socket_path)
+}
+
+fn initialize_server_info_inner(socket_path: &Path) -> Option<serde_json::Value> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let conn = UnixStream::connect(&socket_path).await.ok()?;
+        let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
+            .await
+            .ok()?
+            .0;
+        let (mut sink, mut stream) = ws.split();
+        use futures_util::SinkExt;
+        sink.send(Message::Text(initialize_request_json().into()))
+            .await
+            .ok()?;
+        let response = read_until_id(&mut stream, &serde_json::json!("init"))
+            .await
+            .ok()?;
+        drop(sink);
+        drop(stream);
+        let frame: serde_json::Value = serde_json::from_str(&response).ok()?;
+        frame.pointer("/result/serverInfo").cloned()
+    })
 }
 
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the
@@ -1211,6 +1300,17 @@ pub fn parse_loaded_list_response(
     Ok((ids, next_cursor))
 }
 
+/// The runtime `status.type` a `thread/read` answer carries: `notLoaded`,
+/// `idle`, `systemError`, or `active`. `None` = the answer named no status,
+/// which the upgrade transaction treats as unreadable.
+pub fn parse_thread_read_status(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .pointer("/result/thread/status/type")
+        .and_then(|status| status.as_str())
+        .map(str::to_string)
+}
+
 pub fn parse_thread_read_cwd(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     v.pointer("/result/thread/cwd")
@@ -1269,7 +1369,39 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
 /// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
 /// daemon listening -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
+const CODEX_NATIVE_COMMAND_REFUSAL: &str =
+    "native-command: use fno mux command <selector> --text <verb> --proof <compact|goal-active|screen>";
+
+fn codex_native_command_refusal(text: &str) -> Result<Option<&'static str>, String> {
+    let Some(verb) = text.trim().split_whitespace().next() else {
+        return Ok(None);
+    };
+    if !verb.starts_with('/') && !verb.starts_with('$') {
+        return Ok(None);
+    }
+    let contract = crate::harness_capabilities::HarnessContract::packaged()
+        .map_err(|error| format!("capability contract unreadable: {error}"))?;
+    let capabilities = contract
+        .capabilities("codex")
+        .map_err(|error| format!("Codex capability row unreadable: {error}"))?;
+    let native = capabilities
+        .native_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    let review = capabilities
+        .review_verbs
+        .iter()
+        .any(|candidate| candidate == verb);
+    Ok((native && !review).then_some(CODEX_NATIVE_COMMAND_REFUSAL))
+}
+
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    match codex_native_command_refusal(text).map_err(|error| {
+        ReviewStartError::Server(format!("native-command policy unreadable: {error}"))
+    })? {
+        Some(reason) => return Err(ReviewStartError::Reason(reason)),
+        None => {}
+    }
     let sock = codex_app_server_socket_path();
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
         Ok(r) => r,
@@ -1709,6 +1841,28 @@ async fn round_trip(
     read_until_id(stream, &serde_json::json!(id)).await
 }
 
+/// Whether `thread_id`'s registry row records a full-access posture. A `None`
+/// home (tests, stray callers), an unreadable registry, and a row miss all
+/// read `false`, so every miss keeps today's probe frame. The read is
+/// offloaded: `load_registry` takes the registry flock, and a blocking wait
+/// does not belong on the async delivery path.
+async fn recorded_posture_is_full_access(thread_id: &str) -> bool {
+    let thread_id = thread_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+            return false;
+        };
+        let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
+            return false;
+        };
+        registry
+            .find_name_or_full_session_id(&thread_id)
+            .is_some_and(crate::codex_posture::entry_posture_is_full_access)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// The connect + initialize handshake + the posture read + `turn/start`.
 /// Split out so [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 ///
@@ -1718,40 +1872,54 @@ async fn round_trip(
 /// this lane never narrows a thread. A failed read is NOT a delivery failure:
 /// the turn still goes out, policy-less. Measured 2026-09-14 on codex 0.154.0:
 /// resume on a loaded thread answers Ok carrying `sandbox`, and the rollout
-/// does not grow.
+/// does not grow. A registry row recording full access re-asserts it instead:
+/// the turn carries `{"type":"dangerFullAccess"}` and the probe is skipped,
+/// so an out-of-band narrowing is healed by the next delivered turn.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    let reassert = recorded_posture_is_full_access(thread_id).await;
     let (mut sink, mut stream) = connect_app_server(sock)
         .await
         .map_err(ReviewStartError::Reason)?;
 
-    let cwd = match round_trip(
-        &mut sink,
-        &mut stream,
-        THREAD_READ_ID,
-        thread_read_request_json(THREAD_READ_ID, thread_id),
-    )
-    .await
-    {
-        Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
-        Err(_) => String::new(),
-    };
     let mut policy = None;
-    if !cwd.is_empty() {
-        let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
-        if !roots.is_empty() {
-            if let Ok(raw) = round_trip(
-                &mut sink,
-                &mut stream,
-                THREAD_RESUME_ID,
-                thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
-            )
-            .await
-            {
-                if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
-                    policy = Some(crate::codex_thread::sandbox_policy_with_roots(
-                        Some(&sandbox),
-                        &roots,
-                    ));
+    if reassert {
+        policy = Some(json!({"type": "dangerFullAccess"}));
+    } else {
+        let cwd = match round_trip(
+            &mut sink,
+            &mut stream,
+            THREAD_READ_ID,
+            thread_read_request_json(THREAD_READ_ID, thread_id),
+        )
+        .await
+        {
+            Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        if !cwd.is_empty() {
+            let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
+            if !roots.is_empty() {
+                if let Ok(raw) = round_trip(
+                    &mut sink,
+                    &mut stream,
+                    THREAD_RESUME_ID,
+                    thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
+                )
+                .await
+                {
+                    if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
+                        // This lane never narrows: only a resolved workspaceWrite
+                        // posture is widened. A dangerFullAccess or readOnly
+                        // posture goes policy-less, which leaves the thread on
+                        // whatever the server already had.
+                        if sandbox.get("type").and_then(serde_json::Value::as_str)
+                            == Some("workspaceWrite")
+                        {
+                            policy = Some(crate::codex_thread::sandbox_policy_with_roots(
+                                &sandbox, &roots,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1822,7 +1990,10 @@ async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
 /// Read Text frames until one whose `id` equals `want`, returning its raw text.
 /// Skips notifications (no `id`) and frames for other ids; ignores non-Text
 /// frames. Bounded by [`MAX_FRAMES`]; a read error / closed stream is `"io-error"`.
-async fn read_until_id<S>(stream: &mut S, want: &serde_json::Value) -> Result<String, &'static str>
+pub(crate) async fn read_until_id<S>(
+    stream: &mut S,
+    want: &serde_json::Value,
+) -> Result<String, &'static str>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -1867,6 +2038,33 @@ mod tests {
     async fn next_request(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
         let raw = ws.next().await.unwrap().unwrap().into_text().unwrap();
         serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn mail_inject_refuses_declared_codex_native_commands_before_connecting() {
+        let result = deliver_via_codex_daemon("thread-1", "/compact").await;
+        assert_eq!(
+            result,
+            Err(ReviewStartError::Reason(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
+        assert_eq!(
+            codex_native_command_refusal("/goal status"),
+            Ok(Some(CODEX_NATIVE_COMMAND_REFUSAL))
+        );
+    }
+
+    #[test]
+    fn codex_review_verbs_are_not_classified_as_native_non_review_commands() {
+        assert_eq!(codex_native_command_refusal("/review"), Ok(None));
+        assert_eq!(codex_native_command_refusal("/code-review"), Ok(None));
+    }
+
+    #[test]
+    fn codex_native_command_gate_leaves_ordinary_text_alone() {
+        assert_eq!(
+            codex_native_command_refusal("continue the review"),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -2096,7 +2294,7 @@ mod tests {
             &crate::events::EventEmitter::new(temp.path().join("events.jsonl"), "daemon"),
             fields,
         );
-        let raw = std::fs::read_to_string(temp.path().join("events.jsonl")).unwrap();
+        let raw = crate::events::committed_journal_text(&temp.path().join("events.jsonl"));
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "review_invocation");
         assert_eq!(
@@ -2122,7 +2320,7 @@ mod tests {
         crate::events::EventEmitter::new(&path, "daemon")
             .emit_fields("agent_raw_inject", fields)
             .unwrap();
-        let raw = std::fs::read_to_string(path).unwrap();
+        let raw = crate::events::committed_journal_text(&path);
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "agent_raw_inject");
         assert_eq!(event["data"]["target_session"], "thread-1");
@@ -2151,7 +2349,7 @@ mod tests {
         crate::events::EventEmitter::new(&path, "daemon")
             .emit_fields("agent_raw_inject", fields)
             .unwrap();
-        let raw = std::fs::read_to_string(path).unwrap();
+        let raw = crate::events::committed_journal_text(&path);
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "agent_raw_inject");
         assert_eq!(event["data"]["payload_truncated"], true);
@@ -2562,6 +2760,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_daemon_state_reads_legacy_provider_file_when_current_file_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("daemon.pid");
+        let legacy = temp.path().join("app-server.pid");
+        std::fs::write(&legacy, r#"{"pid":123,"processStartTime":456}"#).unwrap();
+        let adapter = CodexDaemonAdapter::with_provider_state_fallback(
+            current,
+            legacy,
+            temp.path().join("fno.lock"),
+            temp.path().join("codex.sock"),
+        );
+
+        assert_eq!(adapter.provider_pid_start(), Some((123, 456)));
+    }
+
+    #[test]
     fn codex_daemon_state_accepts_provider_date_string() {
         let adapter = CodexDaemonAdapter::new(
             PathBuf::from("/tmp/codex.pid"),
@@ -2873,6 +3087,49 @@ mod tests {
         assert!(result.is_ok());
         let turn = daemon.first_params("turn/start").expect("turn ran");
         assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// A registry row recording full access re-asserts it: the turn carries
+    /// `{"type":"dangerFullAccess"}` and no `thread/resume` probe runs, even
+    /// when the live posture reads workspaceWrite.
+    #[tokio::test]
+    async fn deliver_reasserts_a_recorded_full_access_posture_without_the_probe() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::update_registry(
+            &crate::paths::AgentsHome::at(temp.path()).registry_json(),
+            |registry| {
+                let mut entry = crate::state::RegistryEntry::default();
+                entry.name = "t-yolo".to_string();
+                entry.cwd = "/repo".to_string();
+                entry.harness = Some("codex".to_string());
+                entry.harness_session_id = Some("thread-t".to_string());
+                entry.sandbox_posture = Some("danger-full-access".to_string());
+                registry.entries.push(entry);
+            },
+        )
+        .unwrap();
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", temp.path());
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
+                "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t13-own"]
+            })),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello REASSERT").await;
+        assert!(result.is_ok(), "delivery must succeed: {result:?}");
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        let turn = daemon.first_params("turn/start").expect("turn ran");
+        assert_eq!(turn["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
+        assert!(
+            daemon.received().iter().all(|frame| {
+                frame.get("method").and_then(serde_json::Value::as_str) != Some("thread/resume")
+            }),
+            "no resume probe may run when the row records full access"
+        );
     }
 
     /// A reply with no posture key sends no policy either.

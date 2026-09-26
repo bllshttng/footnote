@@ -36,10 +36,6 @@ _WINDOW = re.compile(r"^(\d+)([smhd]?)$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 1}
 
 
-class KingLoopDisabled(RuntimeError):
-    """`config.king.enabled` is false, so no manifest is written."""
-
-
 def king_loop_enabled() -> bool:
     """Resolve ``config.king.enabled``, fail-safe to OFF like every gate here."""
     try:
@@ -110,7 +106,9 @@ def resolve_king_manifest_path(
             "the row is unstamped, so no crown proves this session's authority"
         )
     try:
-        path = king_manifest_path(scope, state_root=state_root)
+        # The read keys on the crown row's cwd, the same key the writer arms under.
+        root = state_root or _owner_state_root(getattr(row, "cwd", None))
+        path = king_manifest_path(scope, state_root=root)
     except ValueError as exc:
         return None, str(exc)
     if not path.is_file():
@@ -136,22 +134,24 @@ def arm_king_manifest(
     harness_session_id: str,
     *,
     state_root: Optional[Path] = None,
-    owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
+    model: Optional[str] = None,
     row: Any = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
     if row is not None:
-        owner_pid = owner_pid or getattr(row, "pid", None)
         owner_cwd = owner_cwd or getattr(row, "cwd", None)
         crown_level = crown_level if crown_level is not None else getattr(row, "crown_level", None)
         crown_scope = crown_scope if crown_scope is not None else getattr(row, "crown_scope", None)
         crown_grantor = (
             crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
         )
+        # The crowned row's own request is the pin the wake must repeat; a
+        # manifest without it wakes the king on the account default model.
+        model = model or getattr(row, "requested_model", None)
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -174,11 +174,11 @@ def arm_king_manifest(
             scope=scope,
             harness_session_id=harness_session_id,
             force=True,
-            owner_pid=owner_pid,
             owner_cwd=owner_cwd,
             crown_level=crown_level,
             crown_scope=crown_scope,
             crown_grantor=crown_grantor,
+            model=model,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -242,12 +242,12 @@ def write_manifest(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     respawn_ceiling: int = DEFAULT_RESPAWN_CEILING,
     force: bool = False,
-    owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     shape: str = "pass",
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once; raises KingManifestExists if it is there.
 
@@ -267,7 +267,7 @@ def write_manifest(
         "shape": shape if shape in ("pass", "court") else "pass",
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
-        "owner_pid": str(owner_pid or os.getpid()),
+        "model": (model or "").strip(),
         "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),
         "respawn_count": "0",
@@ -456,12 +456,19 @@ def last_run_is_fresh(
     now = _parse_ts(now_iso) if now_iso else datetime.now(timezone.utc).timestamp()
     if now is None:
         return False
-    try:
-        text = Path(events_path).read_text(encoding="utf-8")
-    except OSError:
-        return False
+    # The store commit is the write boundary: committed rows carry the
+    # history, raw bytes are only the pre-store fallback.
+    from fno.events.store_client import native_rows
+
+    lines = native_rows(Path(events_path), types=list(_TERMINAL_TYPES))
+    if lines is None:
+        try:
+            text = Path(events_path).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        lines = text.splitlines()
     newest: Optional[float] = None
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line or not any(t in line for t in _TERMINAL_TYPES):
             continue

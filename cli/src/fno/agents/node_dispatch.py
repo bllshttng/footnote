@@ -115,13 +115,18 @@ def resolve_node_spawn(
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
     )
+    declared_verb = str(node.get("dispatch_verb") or "").strip()
     # the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
-    effective_verb: Optional[str] = None
-    if not is_reconcile:
-        effective_verb = node_effective_verb(node)
+    lifecycle = None if is_reconcile else _verb_answer(node)
+    effective_verb: Optional[str] = lifecycle[0] if lifecycle else None
     # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
-    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb or declared_verb)
+    # A node's own raw pin is a sanctioned source (route_resolve reads the same
+    # field), so fold it in before the grid consult: the gate below must see
+    # every pin the node carries, whatever its door passed.
+    if not (model or "").strip():
+        model = (node.get("model") or "").strip() or None
     # --provider selects the account/record (or a bare kind like "claude"),
     # layer-separate from `harness` (the record's cli). NOT the launch harness:
     # defaulting it here once launched claude carrying codex syntax.
@@ -145,6 +150,17 @@ def resolve_node_spawn(
             harness = grid_harness
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
+    # An unpinned spawn bills the account's default model (measured 2026-09-17:
+    # opus on this fleet), the silent substitution a routing law can never
+    # survive. A dropped pin REFUSES; grid_why carries the resolver's terminal
+    # verbatim when one exists.
+    if not (model or "").strip():
+        decline = f"; {grid_why}" if grid_why else ""
+        raise SpawnError(
+            f"refusing to dispatch {node_id}: no model survives resolution "
+            f"(unpinned = the account default model){decline}; pin the node's "
+            "model or repair the routing config, then retry."
+        )
     # x-aaaa/ the name mints ONCE here - after the lane/model consult,
     # before spawn - so it carries the model tag, riding the receipt.
     agent_name = _worker_agent_name(
@@ -186,7 +202,7 @@ def resolve_node_spawn(
     launch_axis = _launch_harness_axis(launch, node_cwd)
     # The receipt names the RESOLVED verb; verb_source keeps the
     # RAW state, canonicalized so receipt and command agree on the spelling.
-    receipt_verb = effective_verb or node_verb or "builtin"
+    receipt_verb = effective_verb or node_verb or declared_verb or "builtin"
     if parse_verb_token(receipt_verb):
         receipt_verb = canonical_verb_key(receipt_verb)
     resolve_kwargs: dict = {
@@ -205,14 +221,8 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # the node's lifecycle context rides so the resolver derives
         if isinstance(node, dict):
-            from fno.graph.ladder import plan_rung as _node_plan_rung
-
-            resolve_kwargs["difficulty"] = node.get("difficulty")
-            resolve_kwargs["plan_rung"] = _node_plan_rung(node).value
-        if node_verb:
-            resolve_kwargs["verb"] = node_verb
+            resolve_kwargs.update(lifecycle=lifecycle, verb=node_verb or declared_verb or None)
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
@@ -375,73 +385,6 @@ def node_spawn_argv(
     return cmd
 
 
-def _worktree_ensure_for_launch(
-    recorded_cwd: Path, agent_name: str, harness: str
-) -> Optional[str]:
-    """Resolve the launch cwd through the worktree verb (W5, change 5).
-
-    The node's recorded cwd is the canonical checkout for every organically
-    filed node, and launching there puts a code worker on the protected branch
-    that sibling terminals share. ``fno agents workspace worktree ensure`` owns the
-    policy resolution (per-project policy > global > harness-native); it
-    prints the resolved root and exits 0, or prints nothing and exits non-zero
-    on a refusal/misconfig - the caller HOLDS on that answer rather than
-    falling back to canonical main. Returns the path to launch in (the repo
-    root itself is the legal ``policy = never`` in-place answer), or None.
-    """
-    import subprocess
-
-    from fno.agents.mux_spawn import _fno_bin
-
-    try:
-        repo = subprocess.run(
-            ["git", "-C", str(recorded_cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not recorded_cwd.is_dir():
-        # A missing recorded cwd is the spawn's own error to surface (the old
-        # behavior passed it through verbatim); it is not a worktree-policy
-        # refusal, and holding here would break every scratch-cwd fixture.
-        return str(recorded_cwd)
-    if repo.returncode != 0:
-        # ONLY a genuine "not a repository" answer means launch-in-place (a
-        # vault project, worktree.policy=never by design). Any other git
-        # failure - dubious ownership, a corrupted .git, a missing cwd - must
-        # HOLD, not silently fall back to the canonical checkout this change
-        # exists to keep workers off (review finding).
-        if "not a git repository" in (repo.stderr or ""):
-            return str(recorded_cwd)
-        return None
-    canonical = repo.stdout.strip()
-    try:
-        ensured = subprocess.run(
-            [
-                _fno_bin(),
-                "workspace",
-                "worktree",
-                "ensure",
-                "--repo",
-                canonical,
-                "--name",
-                agent_name,
-                "--harness",
-                harness,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if ensured.returncode != 0:
-        return None
-    return ensured.stdout.strip() or None
-
-
 @dataclasses.dataclass
 class NodeSeed:
     """The rendered seed for a node-driven spawn (change 1), plus the
@@ -455,13 +398,13 @@ class NodeSeed:
     receipt: dict
     recorded_cwd: Optional[str]
 
-    def ensure_launch_workdir(self, agent_name: str, harness: str) -> Optional[Path]:
+    def ensure_launch_workdir(self, harness: str) -> Optional[Path]:
         """The launch workdir for a node-seeded spawn with no explicit cwd
         source: the worktree ensure's answer, never the node's recorded cwd
         (the canonical checkout for every organically filed node). A ``None``
         answer already printed its hold line - the caller exits 2 and the node
         stays claimable rather than launching on canonical main."""
-        return ensure_launch_workdir(self.recorded_cwd, self.node_id, agent_name, harness)
+        return ensure_launch_workdir(self.recorded_cwd, self.node_id, harness)
 
 
 def find_node_row(node: str) -> Optional[dict]:
@@ -478,22 +421,39 @@ def find_node_row(node: str) -> Optional[dict]:
     return None
 
 
+def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple:
+    from fno.agents.harness_map import DispatchResolveError
+    from fno.graph.store import GRAPH_JSON, _client_for
+    payload = dict(row or {}, id=(row or {}).get("id") or node_id)
+    params: dict = {"entries": [payload]}
+    # The blueprint floor rides with the row so the lifecycle table answers
+    # from config; an unreadable config leaves the lean default in force.
+    try:
+        from pathlib import Path as _Path
+
+        from fno.config import load_settings, load_settings_for_repo
+
+        node_cwd = (row or {}).get("cwd")
+        settings_obj = (
+            load_settings_for_repo(_Path(node_cwd)) if node_cwd else load_settings()
+        )
+        params["blueprint_floor"] = settings_obj.dispatch.blueprint_floor
+    except Exception:  # noqa: BLE001 - unreadable config -> the lean default
+        pass
+    try:
+        answer = _client_for(GRAPH_JSON).request("effective_verb", params)
+        return answer["verb"], answer["note"]
+    except RuntimeError as exc:
+        raise DispatchResolveError(str(exc).replace("store error (invalid): ", "")) from exc
+
+
 def node_effective_verb(
     row: Optional[dict], *, node_id: Optional[str] = None
 ) -> Optional[str]:
     """The lifecycle table's answer for a node row, or None on abstain:
     one answer per node, shared by every door. Accepts a None row; raises
     DispatchResolveError on an unanswerable node."""
-    from fno.agents import harness_map
-    from fno.graph.ladder import plan_rung
-
-    verb, _note = harness_map.resolve_effective_verb(
-        verb=((row or {}).get("dispatch_verb") or "").strip() or None,
-        difficulty=(row or {}).get("difficulty"),
-        plan_rung=plan_rung(row).value,
-        node_id=node_id if node_id is not None else (row or {}).get("id"),
-    )
-    return verb
+    return _verb_answer(row, node_id=node_id)[0]
 
 
 def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
@@ -504,7 +464,6 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
     or an over-budget brief) - a truncated brief is never seeded.
     """
     from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
-    from fno.graph.ladder import plan_rung as _node_plan_rung
     from fno.provenance.autobrief import resolve_dispatch_brief
 
     seed_rec: Optional[dict] = find_node_row(node)
@@ -524,8 +483,7 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
             harness=harness,
             node_id=str(seed_node_id),
             verb=str(seed_rec.get("dispatch_verb")).strip(),
-            difficulty=seed_rec.get("difficulty"),
-            plan_rung=_node_plan_rung(seed_rec).value,
+            lifecycle=_verb_answer(seed_rec),
             brief=node_brief,
             trigger="autonomous",
         )
@@ -550,14 +508,28 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
 
 
 def ensure_launch_workdir(
-    recorded_cwd: Optional[str], node_id: str, agent_name: str, harness: str
+    recorded_cwd: Optional[str], node_id: str, harness: str
 ) -> Optional[Path]:
-    """Resolve the launch workdir through the worktree ensure verb, printing
-    the hold line on a refusal (change 1)."""
-    ensured = _worktree_ensure_for_launch(
-        Path(recorded_cwd) if recorded_cwd else Path.cwd(), agent_name, harness
-    )
-    if ensured is None:
+    """Resolve the launch workdir through the launch-workdir seam verb (Rust);
+    the hold line on any refusal, the node id keys the resumed tree."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    payload = {
+        "recorded_cwd": str(Path(recorded_cwd) if recorded_cwd else Path.cwd()),
+        "node": node_id,
+        "harness": harness,
+    }
+    try:
+        answer = verb_call(
+            "launch-workdir",
+            payload,
+            VerbUnavailable,
+            timeout=150,
+            passthrough_stderr=True,
+        )
+    except VerbUnavailable:
+        answer = None
+    if answer is None or "hold" in answer:
         print(
             f"fno agents spawn: worktree ensure refused or misconfigured for "
             f"{node_id}; holding the node rather than launching on canonical "
@@ -565,4 +537,4 @@ def ensure_launch_workdir(
             file=sys.stderr,
         )
         return None
-    return Path(ensured)
+    return Path(answer["workdir"])

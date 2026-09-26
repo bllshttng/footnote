@@ -74,7 +74,7 @@ path = "hatch_build.py"
 "../NOTICE" = "_license_vendor/NOTICE"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-cov>=5", "pytest-xdist>=3", "mypy==2.1.0", "types-PyYAML>=6", "types-psutil>=6", "ruff>=0.4"]
+dev = ["pytest>=8", "pytest-cov>=5", "pytest-xdist>=3", "pytest-timeout>=2.3", "mypy==2.1.0", "types-PyYAML>=6", "types-psutil>=6", "ruff>=0.4"]
 
 [tool.ruff]
 line-length = 100
@@ -133,4 +133,12 @@ markers = [
     "serial: known parallel racer; grouped onto one xdist worker and still executed",
     "real_plan_projection: opt a test out of a fixture that stubs plan projection, so the real write path is exercised",
     "real_flight: opt a test out of the fake-flight fixture, so the real native gate is exercised",
+    "dev_build: needs this checkout's fno-agents build; tests/test-dev-build-suites.sh runs these with the build present",
 ]
+# A hung test must name itself. Measured 2026-09-17: six smoke-pytest shards
+# were killed by the job cap at 914-918s with no failing assertion and no test
+# name anywhere in the log, while 1121 passing shards topped out at 778s. The
+# value is earned, not picked: across six passing shards the widest gap between
+# two progress lines was 101.6s, and that line covers 72 tests across four
+# xdist workers, so no single test comes near half of this.
+timeout = 300

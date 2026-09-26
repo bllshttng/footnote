@@ -120,7 +120,7 @@ can actually deliver it. Pass the bound node's size and any named risk surfaces:
 fno do review --assess-assurance --policy-size "$NODE_SIZE" ${RISK_SURFACES}
 ```
 
-The verdict is JSON (`policy`, `satisfied`, `effective`, `reason`). Exit `3` means an unsatisfied **high-assurance** policy. The change touches a high-risk surface (a merge/review gate, auth, secrets, a migration, money) but no different-family reviewer can be established. Exit 3 means the change needs a reviewer this session cannot produce. Report it to the operator (`<help reason="assurance" ...>` in a target run, mail otherwise) with the verdict JSON. Never spawn a reviewer session or thread. Standing law: review runs in the session that did the work, and crossing a harness earns no lane. The remedies are the operator's: a ruling that reopens a lane, an external bot in `config.review.required_bots`, or a corrected risk surface on the node. The portable / diverse-preferred / full-sigma policies always exit `0`: one subscription reviews via same-family fresh-context and different-family capacity is a preference, never a paywall.
+The verdict is JSON (`policy`, `satisfied`, `effective`, `reason`). Exit `3` means an unsatisfied **high-assurance** policy. The change touches a high-risk surface (a merge/review gate, auth, secrets, a migration, money) but no different-family reviewer can be established. Exit 3 means the change needs a reviewer this session cannot produce. Report it to the user (`<help reason="assurance" ...>` in a target run, mail otherwise) with the verdict JSON. Never spawn a reviewer session or thread. Standing law: review runs in the session that did the work, and crossing a harness earns no lane. The remedies are the user's: a ruling that reopens a lane, an external bot in `config.review.required_bots`, or a corrected risk surface on the node. The portable / diverse-preferred / full-sigma policies always exit `0`: one subscription reviews via same-family fresh-context and different-family capacity is a preference, never a paywall.
 
 ## Philosophy
 
@@ -329,9 +329,11 @@ git commit -m "fix(review): address feedback"
 ### 7. Push Updates
 
 ```bash
-# Push all fixes
-git push
+# Fetch, bring in origin/main (rebase, or merge when the branch holds merges), preflight, push once
+fno do pr push
 ```
+
+The push is refused with exit 2 while CI still runs on the previous head. It names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. A branch that already merges origin/main uses merge, not rebase. If that merge conflicts, abort it. Merge origin/main by hand, commit, then re-run the push. Exit 1 means preflight is red, do not ship the updates. Exit 3 can also name commits that exist only on the remote branch: integrate them with `git pull --rebase origin <branch>`, then re-run the push.
 
 ### 8. Reply Per-Thread, Then Post the Consolidated Summary
 

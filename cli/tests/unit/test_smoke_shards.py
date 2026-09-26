@@ -88,8 +88,8 @@ def test_the_workflow_actually_shards_the_gate() -> None:
     assert selectors, "the smoke gate needs no shard jobs carrying --only/--skip"
     counts = {job: sum(1 for candidate, *_rest in selectors if candidate == job)
               for job, *_rest in selectors}
-    assert counts == {"smoke-pytest": 8, "smoke-rest": 4}, (
-        f"expected eight pytest legs and four rest legs, found {counts}"
+    assert counts == {"smoke-pytest": 10, "smoke-rest": 4}, (
+        f"expected ten pytest legs and four rest legs, found {counts}"
     )
 
 
@@ -118,12 +118,40 @@ def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
     assert checked == 2, "both full-gate lanes must declare shard matrices"
 
 
-def test_full_gate_shards_cover_main_changed_packet_is_pr_only() -> None:
+def test_every_pr_affected_job_overrides_the_implicit_success_gate() -> None:
+    """changed-packet-size is PR-only, so on a push it skips and GitHub's
+    implicit success() would skip every transitive dependent with it: main
+    then runs no tests at all. Each job gated on pr-affected must override
+    the implicit gate with !cancelled(); pr-affected itself already does.
+    """
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     jobs = workflow["jobs"]
 
-    assert jobs["smoke-pytest"].get("if") is None
-    assert jobs["smoke-rest"].get("if") is None
+    for name, job in jobs.items():
+        job_if = job.get("if") or ""
+        if "needs.pr-affected" not in job_if:
+            continue
+        assert "!cancelled()" in job_if, (
+            f"{name} is gated on pr-affected without !cancelled(); a push "
+            "run skips it and main runs no tests"
+        )
+
+    # Guard the guard: a shard whose if stops referencing pr-affected would
+    # silently drop out of the loop above.
+    for name in (
+        "smoke-pytest",
+        "smoke-rest",
+        "hook-latency",
+        "test-agents",
+        "test-agents-integration",
+        "test-mux",
+    ):
+        assert "needs.pr-affected" in (jobs[name].get("if") or ""), (
+            f"{name} stopped being gated on pr-affected; update this guard"
+        )
+
+    assert "pr-affected" in jobs["smoke"].get("needs", [])
+    assert jobs["pr-affected"].get("if") == "${{ !cancelled() }}"
     assert jobs["changed-smoke"].get("if") == "github.event_name == 'pull_request'"
 
 
@@ -146,7 +174,7 @@ def test_the_shards_cover_every_step() -> None:
 
 
 def test_pytest_runs_in_every_pytest_shard() -> None:
-    """The expensive half runs once in each of the eight pytest legs."""
+    """The expensive half runs once in each of the ten pytest legs."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
@@ -155,7 +183,7 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
         for job, shard, total, flag, globs in _shard_selectors()
         if step in _selected(names, flag, globs, shard, total)
     ]
-    assert carriers == [("smoke-pytest", shard) for shard in range(1, 9)]
+    assert carriers == [("smoke-pytest", shard) for shard in range(1, 11)]
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
@@ -177,6 +205,23 @@ def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
             assert build not in selected, (
                 f"{job} runs pytest and the rust build together; pytest deletes "
                 "the binary that build produces")
+
+
+def test_the_dev_build_harness_runs_after_the_build_in_one_rest_leg() -> None:
+    """The door tests skip in every pytest leg; this harness is where they run."""
+    names = _names()
+    harness = "tests/test-dev-build-suites.sh"
+    assert harness in names, "the dev-build harness left the registry, so the door tests run nowhere"
+    assert names.index(harness) > names.index(_RUST_BUILD_STEP)
+    legs = [
+        (job, set(_selected(names, flag, globs, shard, total)))
+        for job, shard, total, flag, globs in _shard_selectors()
+    ]
+    carriers = [(job, picked) for job, picked in legs if harness in picked]
+    assert len(carriers) == 1, carriers
+    job, picked = carriers[0]
+    assert job == "smoke-rest"
+    assert _RUST_BUILD_STEP in picked
 
 
 def test_only_prerequisites_run_in_more_than_one_shard() -> None:
@@ -215,47 +260,92 @@ def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
             "clears the binary and its pre-build steps run with it present")
 
 
-def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> None:
+def test_smoke_setup_cleans_fno_agents_and_fno_before_building_cached_artifacts() -> None:
+    """The cache above keys on the Cargo.lock hash alone, not on .rs source.
+
+    A commit that changes only source - the common case - leaves the key
+    unchanged, so a cache hit can restore a binary built from an OLDER
+    commit. A smoke test that lazily builds crates/fno/target/debug/fno only
+    when the path is missing (tests/mux-restart-spares-live-panes.sh) then
+    runs that stale binary instead of rebuilding it. Both packages this
+    action provisions a binary for must be cleaned and rebuilt every run.
+    """
     action = yaml.safe_load(_SMOKE_SETUP.read_text())
     run = "\n".join(step.get("run", "") for step in action["runs"]["steps"])
     lines = _command_lines(run)
 
-    for package in ("fno", "fno-agents"):
+    for package in ("fno-agents", "fno"):
         clean = lines.index(
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
         )
-        # The build pins CARGO_BUILD_BUILD_DIR (the repo build-dir config would
-        # otherwise put the final binary in the cargo-home build base, where
-        # the FRONT export never reads).
-        build = lines.index(
-            f'CARGO_BUILD_BUILD_DIR="$PWD/crates/{package}/target" '
-            f"cargo build --manifest-path crates/{package}/Cargo.toml"
+        # The build pins CARGO_BUILD_BUILD_DIR (the repo build-dir config
+        # would otherwise put the final binary in the cargo-home build
+        # base, where a path-based lookup never reads).
+        build = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith(f'CARGO_BUILD_BUILD_DIR="$PWD/crates/{package}/target" ')
+            and f"--manifest-path crates/{package}/Cargo.toml" in line
         )
-
         assert clean < build, f"smoke setup can execute a stale cached {package} binary"
 
 
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
     # The heavy cargo job moved to cli-ci.yml (x-861c): the shards must gate
-    # it, so the clean-before-test order is asserted there.
+    # it, so the clean-before-test order is asserted there. The job is now
+    # split by crate, and each crate's order lives in its own shard job; the
+    # fno-agents integration shard carries the same invariant against its
+    # own --test '*' leg.
     workflow = yaml.safe_load(_CLI_WORKFLOW.read_text())
-    steps = workflow["jobs"]["test"]["steps"]
-    names = [step.get("name", "") for step in steps]
-    clean = names.index("Clean cached Rust package artifacts")
-    clean_lines = _command_lines(steps[clean].get("run", ""))
+    jobs = workflow["jobs"]
 
-    for package in ("fno", "fno-agents"):
+    for job_name, package, test_step in (
+        ("test-agents", "fno-agents", "cargo test --lib --bins (fno-agents)"),
+        (
+            "test-agents-integration",
+            "fno-agents",
+            "cargo test --test '*' --test-threads=1 (fno-agents real-process integration)",
+        ),
+        ("test-mux", "fno", "cargo test --lib --bins (fno mux)"),
+    ):
+        steps = jobs[job_name]["steps"]
+        names = [step.get("name", "") for step in steps]
+        clean = names.index("Clean cached Rust package artifacts")
+        clean_lines = _command_lines(steps[clean].get("run", ""))
+
         assert (
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
             in clean_lines
         )
-        unit = names.index(f"cargo test --lib --bins ({'fno mux' if package == 'fno' else package})")
+        unit = names.index(test_step)
         assert clean < unit, f"rust-ci can test a stale cached {package} harness"
 
 
 def test_rust_stress_cleans_both_packages_before_building() -> None:
     workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
-    steps = workflow["jobs"]["stress"]["steps"]
+    stress_job = workflow["jobs"]["stress"]
+    steps = stress_job["steps"]
+    stress_env_step = next(
+        (
+            step
+            for step in steps
+            if step.get("name") == "Stress the process-backed e2e binaries"
+        ),
+        None,
+    )
+    assert stress_env_step is not None
+    assert stress_env_step["env"]["STRESS_SKIP_SLOW"] == "1"
+    cli_workflow = yaml.safe_load(_WORKFLOW.read_text())
+    changed_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["changed-smoke"]["steps"]
+            if step.get("name") == "Changed packet (CHANGED SUBSET)"
+        ),
+        None,
+    )
+    assert changed_step is not None
+    assert changed_step["env"]["STRESS_SKIP_SLOW"] == "1"
     run = "\n".join(step.get("run", "") for step in steps)
     lines = _command_lines(run)
     stress = lines.index("bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?")
@@ -265,3 +355,14 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
         )
         assert clean < stress, f"stress can execute a stale cached {package} harness"
+
+    smoke_env_step = next(
+        (
+            step
+            for step in cli_workflow["jobs"]["smoke-rest"]["steps"]
+            if step.get("name", "").startswith("Smoke shard: everything except pytest")
+        ),
+        None,
+    )
+    assert smoke_env_step is not None
+    assert smoke_env_step["env"]["STRESS_SKIP_SLOW"] == "1"

@@ -840,7 +840,8 @@ def _roster_verdict_line(info: dict) -> str:
     Each string is produced by exactly one outcome, so a caller asserts a
     positive marker instead of grepping for the absence of the word free - an
     absence has two explanations and cannot tell them apart, which is the
-    defect this whole cross-check exists to remove.
+    defect this whole cross-check exists to remove. One rider: the
+    finished-session clause rides any outcome it can coexist with.
 
     Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
@@ -889,11 +890,21 @@ def _roster_verdict_line(info: dict) -> str:
             f"unmeasured, never live: {rendered}. "
             f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
         )
+    # Two ways a row reads finished: the predicate said so (it is still in
+    # `workers`), or the session closed its own phase row on this node and the
+    # display field dropped it. The clause is built HERE, above the unresolved
+    # branch, because that branch returns and used to leave it unreachable: a
+    # node whose only row was a closed session read "no row resolved to this
+    # node" over a payload naming that row under `roster_closed_workers`.
+    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
+    tail = ""
+    if finished:
+        tail = f"; {len(finished)} finished session(s) resolved to it: {', '.join(finished)}"
     unresolved = info.get("roster_rows_unresolved", 0)
     if unresolved:
         scanned = (
             f"{state}, no row resolved to this node "
-            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved)"
+            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved){tail}"
         )
         candidates = info.get("roster_unresolved_candidates") or []
         if candidates:
@@ -907,15 +918,7 @@ def _roster_verdict_line(info: dict) -> str:
         # the roster was complete", which both used to render as plain free.
         return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
-    # Two ways a row reads finished: the predicate said so (it is still in
-    # `workers`), or the session closed its own phase row on this node and the
-    # display field dropped it. Both are named, so a node whose only row closed
-    # says so instead of reporting nothing at all.
-    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
-    if finished:
-        rendered = ", ".join(finished)
-        return f"{scanned}; {len(finished)} finished session(s) resolved to it: {rendered}"
-    return scanned
+    return f"{scanned}{tail}"
 
 
 def _expiry_clause(info: dict) -> str:
@@ -1475,10 +1478,9 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
     disaster): the pane's ``fno_id`` is the SESSION uuid, not the worker
     name (mux_spawn stamps ``fno_id=stored_session_uuid or name``), the OSC
     ``title`` is whatever the pane's shell set, and the load-bearing join is
-    the worktree: dispatch names the worker's worktree after the worker
-    (``workspace worktree ensure --name <agent_name>``), so
-    ``basename(pane.cwd) == worker`` is the normal live-launch marker, with
-    the node id covering the ``target start`` naming. Follows
+    the worktree: dispatch names the worker's worktree after the NODE id, so
+    ``basename(pane.cwd) == node_id`` is the normal live-launch marker, with
+    a worker-named tree still possible from older spawns. Follows
     ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
     prints ``[]`` both for a session with no panes and for an unreachable
     socket, so only a NON-EMPTY listing somewhere proves the instrument ran
@@ -1815,19 +1817,49 @@ def session_pid(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Resolve the durable session pid (nearest harness ancestor:
-    claude/codex/gemini/opencode/agy) for the hybrid liveness pid-arm. Prints the
+    """Resolve the durable session pid (nearest harness ancestor that is not
+    Claude Code pool machinery) for the hybrid liveness pid-arm. Prints the
     pid on stdout, or nothing when uncapturable (plain-shell / no harness
-    ancestor; the caller degrades to TTL-only liveness). Always exit 0 - a
-    missing pid is a safe degrade, not an error."""
-    from .session_pid import resolve_session_pid
+    ancestor / a pooled bg-spare; the caller degrades to TTL-only liveness).
+    Always exit 0 - a missing pid is a safe degrade, not an error.
 
-    pid = resolve_session_pid(from_pid=from_pid)
+    The walk is native: this command fronts the fno-agents binary, which owns
+    the one implementation (`spawn_context::session_identity_ambient`). The
+    Python module `session_pid` is a SHIM over this very verb, so importing it
+    here would recurse.
+    """
+    import subprocess as _subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        # Uncapturable: empty stdout, exit 0 (the shim's degrade shape).
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    cmd = [str(binary), "claim", "session-pid"]
+    if from_pid is not None:
+        cmd += ["--from-pid", str(from_pid)]
     if json_output:
-        typer.echo(json.dumps({"session_pid": pid}))
-    elif pid is not None:
-        typer.echo(str(pid))
-    # else: emit nothing on stdout so `$(fno agents claim session-pid)` is empty.
+        cmd.append("--json")
+    try:
+        result = _subprocess.run(  # noqa: S603 - resolved binary, fixed verb
+            cmd, capture_output=True, text=True, check=False
+        )
+    except OSError:
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    if json_output:
+        try:
+            payload = json.loads(result.stdout)
+        except ValueError:
+            payload = {"session_pid": None, "harness": None}
+        typer.echo(json.dumps(payload))
+    elif result.stdout.strip():
+        typer.echo(result.stdout.strip())
+    # Always exit 0 - this command always exits 0.
 
 
 def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> None:

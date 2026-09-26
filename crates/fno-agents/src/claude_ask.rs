@@ -275,11 +275,36 @@ pub(crate) fn claude_cwd_slug(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-").replace('.', "-")
 }
 
-/// Mirrors `_claude_session_registry._sessions_dir` / `_jobs_dir_for`.
-/// HOME is read from the environment so tests can pin it.
+/// Mirrors `_claude_session_registry._claude_roots` / `session_dirs` /
+/// `_jobs_dir_for`. HOME is read from the environment so tests can pin it.
+/// A reader never replaces HOME's root: an ambient `CLAUDE_CONFIG_DIR` or a
+/// registered account root only ADDS one, so a reader that inherited a
+/// picked config dir still sees every ambient worker.
 #[derive(Debug, Clone)]
 pub struct ClaudeHome {
     home: PathBuf,
+    extra_roots: Vec<PathBuf>,
+    /// A fixed `claude agents --json --all` answer. `None` reads the real
+    /// listing.
+    listing: Option<crate::claude_roster::ClaudeAgentsSnapshot>,
+}
+
+/// One job's line in `claude agents --json --all`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobListing {
+    /// Listed, with the state it reports.
+    Listed(Option<String>),
+    Unlisted,
+    /// The listing could not be read, or parsed only in part.
+    Unread,
+}
+
+impl JobListing {
+    /// Listed in a state that is not done, stopped or failed.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Listed(Some(state))
+            if !crate::claude_roster::is_terminal_roster_state(state))
+    }
 }
 
 impl ClaudeHome {
@@ -287,11 +312,58 @@ impl ClaudeHome {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        Self { home }
+        let mut this = Self::at(home);
+        if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+            let dir = PathBuf::from(dir);
+            if !dir.as_os_str().is_empty() {
+                this.extra_roots.push(dir);
+            }
+        }
+        let accounts = crate::claude_roster::isolated_account_dirs()
+            .into_iter()
+            .map(|(_, dir)| dir);
+        this.extra_roots.extend(accounts);
+        this
     }
 
     pub fn at(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self {
+            home: home.into(),
+            extra_roots: Vec::new(),
+            listing: None,
+        }
+    }
+
+    /// Pin what `claude agents --json --all` answers, for a test that
+    /// stages one.
+    pub fn with_listing(mut self, listing: crate::claude_roster::ClaudeAgentsSnapshot) -> Self {
+        self.listing = Some(listing);
+        self
+    }
+
+    /// What `claude agents --json --all`, read under `config_dir`, says
+    /// about one job. The listing is the only source of job state; the files
+    /// under `jobs/` are Claude's own.
+    pub fn listed_job(&self, short_id: &str, config_dir: Option<&Path>) -> JobListing {
+        let snapshot = match &self.listing {
+            Some(listing) => listing.clone(),
+            None => crate::claude_roster::read_all_agents_in(config_dir),
+        };
+        if let Some(row) = snapshot.find(short_id) {
+            return JobListing::Listed(row.state.clone());
+        }
+        if snapshot.is_known() && snapshot.warning_text().is_empty() {
+            JobListing::Unlisted
+        } else {
+            JobListing::Unread
+        }
+    }
+
+    /// Add account roots AFTER `at`. HOME's root stays first and is never
+    /// replaced.
+    pub fn with_extra_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.extra_roots.extend(roots);
+        self
     }
 
     /// The HOME-style root this resolver reads `.claude` under.
@@ -303,6 +375,42 @@ impl ClaudeHome {
         self.home.join(".claude").join("sessions")
     }
 
+    /// Every root's `sessions` dir, `<home>/.claude` first, each read once:
+    /// an account's `sessions` can be a symlink onto the ambient store.
+    pub fn sessions_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.sessions_dir()];
+        dirs.extend(self.extra_roots.iter().map(|root| root.join("sessions")));
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut out = Vec::new();
+        for dir in dirs {
+            let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(dir);
+        }
+        out
+    }
+
+    /// Every `*.json` record under [`Self::sessions_dirs`], each dir sorted.
+    /// A missing dir is an account with no sessions yet, never an error.
+    pub fn session_records(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for dir in self.sessions_dirs() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut entries: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect();
+            entries.sort();
+            out.extend(entries);
+        }
+        out
+    }
+
     /// `<home>/.claude/projects` - where claude keys a transcript dir by the
     /// session cwd slug. Used to recover the real (post-EnterWorktree) cwd of a
     /// resumed session, which the recorded registration cwd may predate.
@@ -310,8 +418,20 @@ impl ClaudeHome {
         self.home.join(".claude").join("projects")
     }
 
+    /// `jobs/<short_id>` under the first root where it is a dir, else under
+    /// `<home>/.claude`: a worker on an account writes its job there.
     pub fn jobs_dir_for(&self, short_id: &str) -> PathBuf {
-        self.home.join(".claude").join("jobs").join(short_id)
+        let primary = self.home.join(".claude").join("jobs").join(short_id);
+        if primary.is_dir() {
+            return primary;
+        }
+        for root in &self.extra_roots {
+            let dir = root.join("jobs").join(short_id);
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+        primary
     }
 
     /// The daemon roster path. Honors `FNO_CLAUDE_DAEMON_DIR` FIRST (a supported
@@ -610,7 +730,7 @@ fn match_short_id(line: &str) -> Option<String> {
 /// control bytes are all single-byte ASCII, so iterating by `char` keeps
 /// multi-byte scalars (e.g. the `·` separator) intact. The common case (no
 /// `ESC` at all) borrows the input without allocating.
-fn strip_ansi_csi(s: &str) -> Cow<'_, str> {
+pub(crate) fn strip_ansi_csi(s: &str) -> Cow<'_, str> {
     if !s.contains('\u{1b}') {
         return Cow::Borrowed(s);
     }
@@ -952,22 +1072,9 @@ pub fn liveness_probe(sock_path: &str) -> bool {
 /// spirit (a respawn can leave a dead pid's file with a null socket): we scan
 /// sorted entries and return the first live match; null-socket entries are
 /// skipped. Corrupt JSON files are skipped silently. Returns `None` when no
-/// live match exists or the sessions dir is absent.
+/// live match exists or no session store exists.
 pub fn locate_session(home: &ClaudeHome, short_id: &str) -> Option<SessionLocator> {
-    let sessions = home.sessions_dir();
-    if !sessions.exists() {
-        return None;
-    }
-    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&sessions) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-            .collect(),
-        Err(_) => return None,
-    };
-    entries.sort();
-
-    for entry_path in entries {
+    for entry_path in home.session_records() {
         let raw = match std::fs::read_to_string(&entry_path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -1021,21 +1128,8 @@ pub fn locate_session(home: &ClaudeHome, short_id: &str) -> Option<SessionLocato
 /// falls back to any `kind == "bg"` match carrying a non-empty `sessionId`.
 /// Returns `None` when no such match exists or the sessions dir is absent.
 pub fn resolve_session_uuid(home: &ClaudeHome, short_id: &str) -> Option<String> {
-    let sessions = home.sessions_dir();
-    if !sessions.exists() {
-        return None;
-    }
-    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&sessions) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-            .collect(),
-        Err(_) => return None,
-    };
-    entries.sort();
-
     let mut fallback: Option<String> = None;
-    for entry_path in entries {
+    for entry_path in home.session_records() {
         let raw = match std::fs::read_to_string(&entry_path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -1083,19 +1177,7 @@ pub fn resolve_session_uuids(
     if short_ids.is_empty() {
         return live;
     }
-    let sessions = home.sessions_dir();
-    if !sessions.exists() {
-        return live;
-    }
-    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&sessions) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-            .collect(),
-        Err(_) => return live,
-    };
-    entries.sort();
-    for entry_path in entries {
+    for entry_path in home.session_records() {
         let raw = match std::fs::read_to_string(&entry_path) {
             Ok(t) => t,
             Err(_) => continue,
@@ -1165,28 +1247,21 @@ pub fn resolve_session_uuid_at_spawn(home: &ClaudeHome, short_id: &str) -> Optio
 /// re-walk the sessions dir; if a bg entry with this jobId exists but its
 /// socket is null → `SocketNull`, otherwise `NotFound`.
 pub fn classify_orphan_reason(home: &ClaudeHome, short_id: &str) -> OrphanReason {
-    let sessions = home.sessions_dir();
-    if let Ok(rd) = std::fs::read_dir(&sessions) {
-        for entry in rd.filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if p.extension().map(|x| x != "json").unwrap_or(true) {
-                continue;
-            }
-            let raw = match std::fs::read_to_string(&p) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let v: serde_json::Value = match serde_json::from_str(&raw) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if v.get("jobId").and_then(|x| x.as_str()) == Some(short_id)
-                && v.get("kind").and_then(|x| x.as_str()) == Some("bg")
-            {
-                let sock = v.get("messagingSocketPath").and_then(|x| x.as_str());
-                if sock.map(|s| s.is_empty()).unwrap_or(true) {
-                    return OrphanReason::SocketNull;
-                }
+    for p in home.session_records() {
+        let raw = match std::fs::read_to_string(&p) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("jobId").and_then(|x| x.as_str()) == Some(short_id)
+            && v.get("kind").and_then(|x| x.as_str()) == Some("bg")
+        {
+            let sock = v.get("messagingSocketPath").and_then(|x| x.as_str());
+            if sock.map(|s| s.is_empty()).unwrap_or(true) {
+                return OrphanReason::SocketNull;
             }
         }
     }
@@ -1459,6 +1534,22 @@ pub fn bg_create(
                 }
             }
         }
+        // The provider stamp floors to "" for the same reason: the serving
+        // session is forked with the supervisor's env, so the front-end env
+        // scrub never reaches it, and an inherited stamp reads as the
+        // session's own route (review_level, review_capability).
+        if let Ok(value) = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV) {
+            if !value.trim().is_empty()
+                && !floor
+                    .iter()
+                    .any(|(fk, _)| fk == crate::codex_route::ROUTE_PROVIDER_ENV)
+            {
+                floor.push((
+                    crate::codex_route::ROUTE_PROVIDER_ENV.to_string(),
+                    String::new(),
+                ));
+            }
+        }
     }
     if !floor.is_empty() {
         match crate::model_env_scrub::write_scrub_settings(&floor) {
@@ -1494,6 +1585,11 @@ pub fn bg_create(
     } else {
         Stdio::null()
     });
+
+    // This client can lazily birth the claude supervisor; a supervisor born
+    // dirty poisons every session it forks for its whole life, so
+    // make sure a clean one is up first. The client command is never touched.
+    crate::claude_supervisor::guard_birth(extra_env.iter().copied());
 
     let start = std::time::Instant::now();
     let mut child = match cmd.spawn() {
@@ -3782,6 +3878,195 @@ mod tests {
         assert_eq!(
             loc.jobs_dir,
             home.join(".claude").join("jobs").join("7c5dcf5d")
+        );
+    }
+
+    // --- every config root: HOME's first, then ambient, then accounts ---
+
+    #[test]
+    fn locate_session_finds_a_record_under_an_account_root() {
+        // A config-dir account worker writes its record under the account
+        // root; locate_session must see it, and its jobs_dir must be the
+        // account's once that job dir exists there.
+        let home = tmpdir();
+        let acct = tmpdir();
+        let sessions = acct.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "4242", "feedc0de", "bg", Some("/tmp/acct.sock"));
+        let ch = ClaudeHome::at(&home).with_extra_roots([acct.clone()]);
+        // jobs_dir_for picks the first root whose job dir EXISTS, so the
+        // account's dir must exist before the call.
+        fs::create_dir_all(acct.join("jobs").join("feedc0de")).unwrap();
+        let loc = locate_session(&ch, "feedc0de").unwrap();
+        assert_eq!(loc.pid, 4242);
+        assert_eq!(loc.messaging_socket_path, "/tmp/acct.sock");
+        assert_eq!(loc.session_id.as_deref(), Some("sess-feedc0de"));
+        assert_eq!(loc.jobs_dir, acct.join("jobs").join("feedc0de"));
+    }
+
+    #[test]
+    fn resolve_session_uuid_reads_account_roots() {
+        let home = tmpdir();
+        let acct = tmpdir();
+        let sessions = acct.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "4242", "feedc0de", "bg", None);
+        let ch = ClaudeHome::at(&home).with_extra_roots([acct.clone()]);
+        assert_eq!(
+            resolve_session_uuid(&ch, "feedc0de").as_deref(),
+            Some("sess-feedc0de")
+        );
+        let both = resolve_session_uuids(&ch, &["feedc0de"]);
+        assert_eq!(
+            both.get("feedc0de").map(String::as_str),
+            Some("sess-feedc0de")
+        );
+    }
+
+    #[test]
+    fn sessions_dirs_dedupes_a_symlinked_account_store() {
+        // An account's sessions dir can be a symlink onto the ambient store
+        // (the operator's stopgap): each record is read once, not twice.
+        let home = tmpdir();
+        let acct = tmpdir();
+        let sessions = home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "1", "aaaa1111", "bg", Some("/tmp/s1"));
+        write_session(&sessions, "2", "bbbb2222", "bg", Some("/tmp/s2"));
+        fs::create_dir_all(acct.join("sessions").parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sessions, acct.join("sessions")).unwrap();
+        let ch = ClaudeHome::at(&home).with_extra_roots([acct]);
+        let dirs = ch.sessions_dirs();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], sessions);
+        let records = ch.session_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].file_name().unwrap(), "1.json");
+    }
+
+    #[test]
+    fn from_env_keeps_home_first_when_ambient_config_dir_is_set() {
+        // A reader that inherited a picked CLAUDE_CONFIG_DIR (a spawned codex
+        // child, say) must not lose the ambient workers: HOME's root stays
+        // first and the override only adds one.
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir();
+        let ambient = tmpdir();
+        let previous_home = std::env::var_os("HOME");
+        let previous_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let previous_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("CLAUDE_CONFIG_DIR", &ambient);
+        std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+        let dirs = ClaudeHome::from_env().sessions_dirs();
+        match previous_dir {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match previous_global {
+            Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            dirs,
+            vec![
+                home.join(".claude").join("sessions"),
+                ambient.join("sessions"),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_env_enumerates_registered_account_roots() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir();
+        let acct = tmpdir();
+        let settings = home.join("settings.toml");
+        fs::write(
+            home.join("config.toml"),
+            format!(
+                "[[accounts.records]]\nid = \"makers\"\nconfig_dir = \"{}\"\n",
+                acct.display()
+            ),
+        )
+        .unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let previous_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &settings);
+        let dirs = ClaudeHome::from_env().sessions_dirs();
+        match previous_dir {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match previous_global {
+            Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            dirs,
+            vec![home.join(".claude").join("sessions"), acct.join("sessions")]
+        );
+    }
+
+    #[test]
+    fn jobs_dir_for_prefers_the_root_holding_the_job() {
+        let home = tmpdir();
+        let acct = tmpdir();
+        let ch = ClaudeHome::at(&home).with_extra_roots([acct.clone()]);
+        // No root has the job: HOME's path is the answer (a worker about to
+        // create it writes there... on its own root), never a panic.
+        assert_eq!(
+            ch.jobs_dir_for("feedc0de"),
+            home.join(".claude").join("jobs").join("feedc0de")
+        );
+        fs::create_dir_all(acct.join("jobs").join("feedc0de")).unwrap();
+        assert_eq!(
+            ch.jobs_dir_for("feedc0de"),
+            acct.join("jobs").join("feedc0de")
+        );
+    }
+
+    #[test]
+    fn session_records_tolerate_a_missing_account_root() {
+        // A registered account with no sessions yet (or a root that vanished)
+        // is an empty read, never an error or a panic.
+        let home = tmpdir();
+        let sessions = home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "1", "aaaa1111", "bg", Some("/tmp/s1"));
+        let ch = ClaudeHome::at(&home).with_extra_roots([tmpdir().join("absent")]);
+        let records = ch.session_records();
+        assert_eq!(records.len(), 1);
+        assert!(locate_session(&ch, "aaaa1111").is_some());
+    }
+
+    #[test]
+    fn classify_orphan_reason_reads_account_roots() {
+        let home = tmpdir();
+        let acct = tmpdir();
+        let sessions = acct.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "4242", "feedc0de", "bg", None);
+        let ch = ClaudeHome::at(&home).with_extra_roots([acct]);
+        assert_eq!(
+            classify_orphan_reason(&ch, "feedc0de"),
+            OrphanReason::SocketNull
         );
     }
 

@@ -13,6 +13,7 @@ round, verdict measured from the classified findings, never typed.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -51,7 +52,11 @@ def runner() -> CliRunner:
 def journal(tmp_path: Path) -> Path:
     events = tmp_path / ".fno" / "events.jsonl"
     events.parent.mkdir(parents=True)
-    events.write_text(_pass_line() + "\n")
+    # Seed through the store: the reader answers committed rows, so a raw
+    # journal write never reaches the history the verb asserts on.
+    from fno.events import append_event
+
+    append_event(json.loads(_pass_line()), events)
     return events
 
 
@@ -84,9 +89,11 @@ def test_retract_revokes_the_named_pair_and_records_the_retractor(
     result = _invoke(runner, journal)
     assert result.exit_code == 0, result.stderr
 
-    lines = journal.read_text().splitlines()
-    assert len(lines) == 2
-    data = json.loads(lines[1])["data"]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(journal)
+    assert len(rows) == 2
+    data = next(r["data"] for r in rows if "retracts_attester" in r["data"])
     assert data["verdict"] == "fail"
     assert data["retracts_attester"] == "sess-A"
     assert data["attester_session_id"] == "sess-operator"
@@ -134,7 +141,10 @@ def test_retract_refuses_the_identity_override_shape(
     result = _invoke(runner, journal)
     assert result.exit_code == 1
     assert "sess-true" in result.stderr and "sess-forged" in result.stderr
-    assert len(journal.read_text().splitlines()) == 1
+    # The refusal emits nothing: the store keeps exactly the seeded pass.
+    from tests._event_rows import event_rows
+
+    assert len(event_rows(journal)) == 1
 
 
 def test_retract_mirrors_the_revocation_to_the_global_log(
@@ -230,7 +240,9 @@ def test_retract_reaches_a_pass_that_lives_only_in_the_global_log(
     )
     capsys.readouterr()
     assert rc == 0, "a mirrored-only pass must be retractable, not refused"
-    assert "retracts_attester" in project.read_text(encoding="utf-8")
+    from tests._event_rows import event_rows
+
+    assert any("retracts_attester" in r["data"] for r in event_rows(project))
 
 
 # --- classify --attest: the review verb records its own round ----------------
@@ -257,6 +269,146 @@ def _temp_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "a.py"], cwd=sub, check=True)
     subprocess.run(["git", "commit", "-qm", "feature"], cwd=sub, check=True)
     return sub
+
+
+def test_attestation_pr_resolver_from_canonical_selects_branch_worktree(tmp_path: Path):
+    canonical = tmp_path / "canonical"
+    feature = tmp_path / "feature-worktree"
+    canonical.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=canonical, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=canonical, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=canonical, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "base"], cwd=canonical, check=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "feature/pr-42", str(feature)],
+        cwd=canonical,
+        check=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    requests = tmp_path / "requests.jsonl"
+    fake_agents = fake_bin / "fno-agents"
+    fake_agents.write_text(
+        "#!/bin/sh\ncat >> \"$FNO_REQUESTS\"\n"
+        "printf '{\"worktree\":\"%s\"}\\n' \"$FNO_WORKTREE\"\n",
+        encoding="utf-8",
+    )
+    fake_agents.chmod(0o755)
+
+    script = Path(__file__).parents[3] / "skills/review/scripts/resolve-pr-worktree.sh"
+    result = subprocess.run(
+        ["bash", str(script), "42"],
+        cwd=canonical,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
+            "FNO_REQUESTS": str(requests),
+            "FNO_WORKTREE": str(feature),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(feature)
+    branch_result = subprocess.run(
+        ["bash", str(script), "feature/pr-42"],
+        cwd=canonical,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
+            "FNO_REQUESTS": str(requests),
+            "FNO_WORKTREE": str(feature),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert branch_result.returncode == 0, branch_result.stderr
+    assert branch_result.stdout.strip() == str(feature)
+    payloads = [json.loads(line) for line in requests.read_text().splitlines()]
+    assert payloads[0]["pr"] == 42
+    assert payloads[1]["branch"] == "feature/pr-42"
+
+
+def test_attestation_from_canonical_emits_in_the_pr_worktree(tmp_path: Path):
+    canonical = tmp_path / "canonical"
+    feature = tmp_path / "feature-worktree"
+    canonical.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=canonical, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=canonical, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=canonical, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "base"], cwd=canonical, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=canonical, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base], cwd=canonical, check=True
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "feature/pr-42", str(feature)],
+        cwd=canonical,
+        check=True,
+    )
+    (feature / "reviewed.py").write_text("answer = 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "reviewed.py"], cwd=feature, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "reviewed change"], cwd=feature, check=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agents = fake_bin / "fno-agents"
+    fake_agents.write_text(
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"worktree\":\"%s\"}\\n' \"$FNO_WORKTREE\"\n",
+        encoding="utf-8",
+    )
+    fake_agents.chmod(0o755)
+    resolver = Path(__file__).parents[3] / "skills/review/scripts/resolve-pr-worktree.sh"
+    resolved = subprocess.run(
+        ["bash", str(resolver), "42"],
+        cwd=canonical,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO_AGENTS_BIN": str(fake_agents),
+            "FNO_WORKTREE": str(feature),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    assert resolved.stdout.strip() == str(feature)
+    fno_capture = tmp_path / "fno-calls.txt"
+    fake_fno = fake_bin / "fno"
+    fake_fno.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >> \"$FNO_CAPTURE\"\n"
+        "case \"$*\" in 'do pr review-hold metadata'*) printf '{}\\n' ;; esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_fno.chmod(0o755)
+    script = Path(__file__).parents[3] / "skills/review/scripts/emit-attestation.sh"
+    result = subprocess.run(
+        ["bash", str(script), "code-review"],
+        cwd=feature,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FNO": str(fake_fno),
+            "FNO_CAPTURE": str(fno_capture),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "branch=feature/pr-42" in result.stderr
+    assert fno_capture.read_text(encoding="utf-8").splitlines()
+    assert set(fno_capture.read_text(encoding="utf-8").splitlines()) == {str(feature)}
 
 
 def _findings_payload(blocking: int) -> str:
@@ -323,10 +475,12 @@ def test_attest_measures_fail_on_blocking_findings(
 
     from fno.paths import project_log
 
+    from tests._event_rows import event_rows
+
     journal = project_log("events.jsonl", project_root=attest_env)
-    lines = [ln for ln in journal.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1, "the classify call is the whole emit; no second command"
-    event = json.loads(lines[0])
+    rows = event_rows(journal)
+    assert len(rows) == 1, "the classify call is the whole emit; no second command"
+    event = rows[0]
     assert event["type"] == "review_attestation"
     data = event["data"]
     assert data["verdict"] == "fail"
@@ -359,8 +513,10 @@ def test_attest_measures_pass_on_zero_blocking_findings(
 
     from fno.paths import project_log
 
+    from tests._event_rows import event_rows
+
     journal = project_log("events.jsonl", project_root=attest_env)
-    data = json.loads(journal.read_text().splitlines()[-1])["data"]
+    data = event_rows(journal)[-1]["data"]
     assert data["verdict"] == "pass"
     assert data["reviewer"] == "code-review"
     assert data["findings_blocking"] == 0

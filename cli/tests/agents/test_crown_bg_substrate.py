@@ -36,11 +36,12 @@ def _clear_parent_markers(monkeypatch):
 
 
 @pytest.fixture
-def bg_home(tmp_path, monkeypatch):
+def bg_home(tmp_path, monkeypatch, native_backlog_door):
     """Isolated fno home with a fake claude, a graph holding two epics, and one
     configured project. The territory has to exist because the rung is DERIVED
     from it: a scope naming nothing is refused, so a fixture without a graph
-    would test the refusal path in every case."""
+    would test the refusal path in every case. Pins the crown-settle occupancy
+    call to this checkout's dev build (crown-settle runs through Rust now)."""
     import json
 
     from tests.agents._fake_claude import install_fake_claude
@@ -167,12 +168,10 @@ def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> 
 # --- one live crown per scope, enforced on bg too ----------------------------
 
 
-def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
-    bg_home, monkeypatch
-) -> None:
-    """A second crown over one scope is the unrecoverable failure; an uncrowned
-    worker can still be crowned later by spawning again. So the spawn SUCCEEDS and the
-    crown is declined, matching the pane path rather than refusing the launch."""
+def test_bg_spawn_refuses_a_duplicate_crown_before_launch(bg_home, monkeypatch) -> None:
+    """A second crown over one scope would launch an heir with no crown, so the
+    spawn refuses BEFORE launch rather than succeeding uncrowned: nothing
+    should exist that never held authority to. --succeed transfers instead."""
     update_registry(
         lambda rows: rows
         + [
@@ -194,13 +193,46 @@ def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
         "--substrate", "bg", "--crown", "epic-x",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2
 
-    row = _row("pretender")
-    assert row.crown_level is None, "a duplicate crown must not be stamped"
-    assert row.crown_scope is None
-    assert row.crown_grantor is None
-    assert "crown declined" in result.output
+    assert not [e for e in load_registry() if e.name == "pretender"], (
+        "a refused crown must launch nothing"
+    )
+    assert "--succeed" in result.output
+
+
+def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeypatch) -> None:
+    """A live epic-set crown rules each member, so a spawn crowned over ONE
+    member refuses before launch the way `fno agents crown` does: the rivalry
+    rule is ladder-aware, not an exact scope string."""
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="sitting-king",
+                cwd=str(bg_home),
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-sitting-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="epic-x,epic-y",
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    result = _spawn(
+        "spawn", "--name", "pretender", "-H", "claude", "reign",
+        "--substrate", "bg", "--crown", "epic-x",
+    )
+    assert result.exit_code == 2
+
+    assert not [e for e in load_registry() if e.name == "pretender"], (
+        "a refused crown must launch nothing"
+    )
+    assert "sitting-king" in result.output
+    assert "epic-x,epic-y" in result.output
 
 
 def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatch) -> None:
@@ -378,6 +410,50 @@ def test_dispatch_spawn_pane_refuses_invalid_crown_values(
             crown_scope="epic-x",
         )
     assert exc.value.exit_code == 2
+
+
+def test_dispatch_spawn_pane_refuses_a_duplicate_crown_before_launch(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """Same guard as the bg door: a live holder over the requested scope means
+    the runner must never be reached, whether the launch was refused for a bad
+    value or for a scope another live row already holds."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="sitting-king",
+                cwd=str(tmp_path),
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-sitting-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    def _explode(*a, **k):
+        raise AssertionError("a refused crown must not reach the pane runner")
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="pretender",
+            message="reign",
+            provider="claude",
+            cwd=tmp_path,
+            runner=_explode,
+            crown_level=2,
+            crown_scope="epic-x",
+        )
+    assert exc.value.exit_code == 2
+    assert "--succeed" in str(exc.value)
 
 
 def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:

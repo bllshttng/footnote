@@ -193,7 +193,7 @@ def find_presiding_crown(
     return None
 
 
-def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
+def gather_court(rows: Optional[list] = None, *, agree: Optional[bool] = True) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
     ``rows`` overrides the live registry read for callers that already hold
@@ -224,7 +224,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
     # One graph parse for every rung; ``None`` (unreadable) is not "nothing here".
-    by_id = _graph_index()
+    by_id = _graph_index() if agree else None
     crowns: list[dict[str, Any]] = []
     held_scopes: list[str] = []
     for row in live_rows:

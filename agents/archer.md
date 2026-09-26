@@ -3,10 +3,8 @@ name: archer
 description: TDD-disciplined task executor. The worker agent that implements individual tasks with test-first methodology. Returns structured SUCCESS/FAILED/BLOCKED results.
 model: sonnet
 color: cyan
-tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+tools: ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "Skill"]
 disallowedTools: ["Task", "WebSearch", "WebFetch", "NotebookEdit"]
-skills:
-  - fno:tdd
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
@@ -98,11 +96,13 @@ You are running in a **subagent context** with limited resources. Be efficient:
 
 ## TDD Execution Flow (MANDATORY)
 
+Before the first task, load `fno:tdd` and `fno:test-audit` authoring mode with the Skill tool (on codex, `$fno:tdd` and `$fno:test-audit`). No launch path preloads them: a spawned main thread ignores a `skills:` list. For every new or changed test, record the four authoring-gate answers in the task result. Do not add a test until each answer is complete.
+
 For EVERY task, follow this exact sequence:
 
 ### Step 1: Write the Test First
 
-Write a failing test that captures the acceptance criteria:
+Prefer extending the owning test or a table-driven case. Add a new test file only with a named reason the existing owner cannot cover the contract. Before writing a test, record its four test-audit answers: observable behavior, credible regression, uncovered risk, and whether it needs a test-only production seam. Then write one failing test that captures the acceptance criteria:
 
 ```
 test('AC1-HP: [behavior description]', async () => {

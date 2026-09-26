@@ -2,7 +2,7 @@
 
 use crate::loopcheck::TerminationReason;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default)]
 pub(crate) struct KingManifest {
@@ -100,10 +100,7 @@ pub(crate) fn stand_down_gate(
         .harness_session_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())?;
-    let capture_dir = std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))?;
+    let capture_dir = crate::operator_turns::capture_dir(cwd)?;
     let pending = match crate::operator_turns::pending_stand_down(
         session,
         transcript,
@@ -133,6 +130,8 @@ pub(crate) struct KingBoard {
     /// trusting a count that cannot see the blind queues.
     pub(crate) unreadable_sources: bool,
     pub(crate) actionable_ids: Vec<String>,
+    pub(crate) spawn_held_ids: Vec<String>,
+    pub(crate) blind_queues: Vec<String>,
     pub(crate) operator_question_sessions: Vec<String>,
     pub(crate) operator_questions_unreadable: bool,
 }
@@ -151,6 +150,8 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     let actionable = value.get("actionable")?.as_i64()?;
     let mut top_row = None;
     let mut actionable_ids: Vec<String> = Vec::new();
+    let mut spawn_held_ids: Vec<String> = Vec::new();
+    let mut blind_queues: Vec<String> = Vec::new();
     let mut operator_question_sessions: Vec<String> = Vec::new();
     let mut operator_questions_unreadable = false;
     let mut unreadable_sources = false;
@@ -165,14 +166,12 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
                 operator_questions_unreadable = true;
             }
             if crate::king_board::not_read_status(status) {
-                if top_row.is_none() {
-                    let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                    top_row = Some(if status == "over_budget" {
-                        format!("{name} not read: {err}")
-                    } else {
-                        format!("{name} is unreadable: {err}")
-                    });
-                }
+                let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                blind_queues.push(if status == "over_budget" {
+                    format!("{name} not read: {err}")
+                } else {
+                    format!("{name} is unreadable: {err}")
+                });
                 continue;
             }
             if name == "operator_question" {
@@ -189,6 +188,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
             if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
                 continue;
             }
+            let spawn_held = queue.get("verb").and_then(|v| v.as_str()) == Some("/fno:target");
             for row in queue
                 .get("rows")
                 .and_then(|v| v.as_array())
@@ -204,6 +204,9 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
                 if top_row.is_none() {
                     top_row = Some(identity.clone());
                 }
+                if spawn_held {
+                    spawn_held_ids.push(identity.clone());
+                }
                 actionable_ids.push(identity);
             }
         }
@@ -213,6 +216,8 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         top_row,
         unreadable_sources,
         actionable_ids,
+        spawn_held_ids,
+        blind_queues,
         operator_question_sessions,
         operator_questions_unreadable,
     })
@@ -303,6 +308,12 @@ pub(crate) fn read_king_board(
     state_path: &Path,
 ) -> Result<KingBoard, String> {
     let _ = fno_bin;
+    // Past the reserve line the board refuses instead of reading at the 1ms
+    // bound: a board that never answered is the readable, bounded outcome a
+    // spent fire owes the king, and the drain's reserve stays untouched.
+    if crate::loopcheck::stopgate_pre_drain_spent() {
+        return Err("king board not read: the fire budget was spent before the board".to_string());
+    }
     let opts = crate::king_board::BoardOpts {
         budget_ms: crate::loopcheck::stopgate_read_timeout().as_millis() as u64,
         max_pr_reads: crate::king_board::DEFAULT_MAX_PR_READS,
@@ -349,6 +360,21 @@ impl GateProbe {
             .or_else(|| self.reason.clone())
             .unwrap_or_else(|| "dispatch capacity exhausted".to_string())
     }
+
+    pub(crate) fn owner(&self) -> String {
+        match self.reason.as_deref() {
+            Some("fleet-stop" | "fleet-stop-unavailable") => {
+                "fno agents incident status; fno agents incident clear --reason <text>".into()
+            }
+            Some("max_live" | "king_share") => {
+                "live workers exiting (`fno agents gate-status` slot_rows)".into()
+            }
+            Some("provider_cap" | "provider_quota_lock") => {
+                "provider lanes (`fno-agents provider-cap status`)".into()
+            }
+            _ => "fno agents gate-status".into(),
+        }
+    }
 }
 
 /// Ask the gate the dispatch would ask. Any failure here is `Err`: the caller
@@ -371,16 +397,19 @@ pub(crate) fn probe_dispatch_capacity(fno_bin: &str, cwd: &Path) -> Result<GateP
     parse_gate_probe(&payload).ok_or_else(|| "spawn gate status payload unparseable".to_string())
 }
 
-/// The saturation decision for one board fire: a fire where the top
-/// actionable row is undispatched and the gate refuses means every candidate
-/// dispatch would be refused, so the stop is legitimate. `probe: None` (not
-/// asked, or asked and failed) and an accepted probe both return `None` - a
-/// broken probe must never convert a block into an allow.
+/// The saturation decision for one board fire: a refused gate blocks rows
+/// from queues with `/fno:target` (currently `undispatched`, `unheld_progress`,
+/// and `undriven_pr`). A readable non-spawn row keeps the block pointed at it.
+/// `probe: None` (not asked, or asked and failed) and an accepted probe return
+/// `None` - a broken probe must never convert a block into an allow.
 #[derive(Debug)]
 pub(crate) enum SaturationOutcome {
-    /// Every actionable row is undispatched: nothing on the board is reachable
-    /// without a dispatch.
+    /// Every readable actionable row uses `/fno:target` and needs dispatch
+    /// capacity. Current kinds are `undispatched`, `unheld_progress`, and
+    /// `undriven_pr`.
     Saturated { blocked: i64 },
+    /// Every readable row needs dispatch, and at least one queue was not read.
+    SaturatedBlind { blocked: i64 },
     /// Capacity-blocked rows exist but a non-dispatch row is still actionable,
     /// so the block survives - pointed at that row instead.
     BlockedWithNext { next: String, blocked: i64 },
@@ -390,46 +419,44 @@ pub(crate) fn saturation_verdict(
     board: &KingBoard,
     probe: Option<&GateProbe>,
 ) -> Option<SaturationOutcome> {
-    let top = board.top_row.as_deref()?;
-    if !top.starts_with("undispatched:") {
-        return None;
-    }
     let parsed = probe?;
     if parsed.verdict != "refused" {
         return None;
     }
-    let blocked = board
-        .actionable_ids
-        .iter()
-        .filter(|id| id.starts_with("undispatched:"))
-        .count() as i64;
+    let blocked = board.spawn_held_ids.len() as i64;
     if blocked == 0 {
-        // The top row names an undispatched node but no actionable id agrees;
-        // trust neither and let the normal block stand.
         return None;
     }
     let next = board
         .actionable_ids
         .iter()
-        .find(|id| !id.starts_with("undispatched:"));
-    next.map(|next| SaturationOutcome::BlockedWithNext {
-        next: next.clone(),
-        blocked,
-    })
-    .or(Some(SaturationOutcome::Saturated { blocked }))
+        .find(|id| !board.spawn_held_ids.contains(id));
+    if let Some(next) = next {
+        return Some(SaturationOutcome::BlockedWithNext {
+            next: next.clone(),
+            blocked,
+        });
+    }
+    if !board.blind_queues.is_empty() {
+        return Some(SaturationOutcome::SaturatedBlind { blocked });
+    }
+    Some(SaturationOutcome::Saturated { blocked })
 }
 
 /// What the capacity gate decided for this fire, rendered and ready for the
 /// caller's two verdicts. Composition of the probe read, the pure
 /// saturation verdict, and the two messages the king block carries.
 pub(crate) enum CapacityGate {
-    /// Every actionable row is undispatched and the gate refuses: the stop is
-    /// legitimate, so the caller terminates NoWork with this message.
+    /// Every readable actionable row uses `/fno:target` (`undispatched`,
+    /// `unheld_progress`, or `undriven_pr`) and the gate refuses. With no blind
+    /// queues, the caller may terminate NoWork with this message.
     Saturated {
         message: String,
         blocked: i64,
         fires: u64,
     },
+    /// Every readable row waits on dispatch while at least one queue is blind.
+    SaturatedBlind { message: String, actionable: i64 },
     /// Keep the block, pointed at a non-dispatch row, with the honest split.
     Split {
         message: String,
@@ -447,26 +474,24 @@ pub(crate) fn capacity_gate(
     dry: u64,
     _emit: &dyn Fn(&str, Value),
 ) -> Option<CapacityGate> {
-    let probe = match board.top_row.as_deref() {
-        Some(top) if top.starts_with("undispatched:") => {
-            match probe_dispatch_capacity(fno_bin, cwd) {
-                Ok(p) => Some(p),
-                // A failed probe keeps today's block, never reads as saturation.
-                Err(_) => None,
-            }
+    let probe = if board.spawn_held_ids.is_empty() {
+        None
+    } else {
+        match probe_dispatch_capacity(fno_bin, cwd) {
+            Ok(p) => Some(p),
+            // A failed probe keeps today's block, never reads as saturation.
+            Err(_) => None,
         }
-        _ => None,
     };
     let verdict = saturation_verdict(board, probe.as_ref())?;
-    let constraint = probe
-        .as_ref()
-        .map(|p| p.constraint())
-        .unwrap_or_else(|| "dispatch capacity exhausted".to_string());
+    let probe = probe.as_ref()?;
+    let constraint = probe.constraint();
+    let owner = probe.owner();
     match verdict {
         SaturationOutcome::Saturated { blocked } => {
             let message = format!(
                 "fleet saturated: {constraint}; \
-                 {blocked} actionable rows all blocked on dispatch capacity"
+                 {blocked} actionable rows all blocked on dispatch capacity; owner: {owner}"
             );
             Some(CapacityGate::Saturated {
                 message,
@@ -474,17 +499,32 @@ pub(crate) fn capacity_gate(
                 fires: dry + 1,
             })
         }
+        SaturationOutcome::SaturatedBlind { blocked } => {
+            let blind = board.blind_queues.join(", ");
+            Some(CapacityGate::SaturatedBlind {
+                message: format!(
+                    "{blocked} rows waiting on dispatch capacity ({constraint}; owner: {owner}); not read: {blind}"
+                ),
+                actionable: board.actionable,
+            })
+        }
         SaturationOutcome::BlockedWithNext { next, blocked } => {
+            let blind = if board.blind_queues.is_empty() {
+                String::new()
+            } else {
+                format!("; not read: {}", board.blind_queues.join(", "))
+            };
             let message = format!(
                 "{} actionable now; next: {next}; \
-                 {blocked} blocked on dispatch capacity ({constraint})",
-                board.actionable - blocked
+                 {blocked} waiting on dispatch capacity ({constraint}; owner: {owner}){blind}",
+                board.actionable - blocked,
             );
             let journal = serde_json::json!({
                 "session_id": session_id,
                 "actionable": board.actionable,
                 "actionable_now": board.actionable - blocked,
                 "blocked_on_capacity": blocked,
+                "waiting_owner": owner,
                 "actionable_ids": board.actionable_ids,
                 "cleared": false,
             });
@@ -542,6 +582,7 @@ pub(crate) fn bound_breached(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn a_null_harness_session_is_treated_as_legacy_missing_identity() {
@@ -558,27 +599,76 @@ mod tests {
     }
 
     #[test]
-    fn an_over_budget_top_row_says_not_read_never_unreadable() {
+    fn an_over_budget_queue_stays_blind_without_becoming_the_next_action() {
         let board = board_with_queues(json!([
             {"name": "undispatched", "status": "over_budget",
              "error": "killed at its 28.5s slice of the board budget; the source did not fail",
              "actionable": true, "rows": []},
         ]));
         let parsed = parse_king_board_value(&board).unwrap();
-        let top = parsed.top_row.unwrap();
-        assert!(top.starts_with("undispatched not read:"), "{top}");
-        assert!(!top.contains("unreadable"), "{top}");
+        assert!(parsed.top_row.is_none());
+        assert_eq!(
+            parsed.blind_queues,
+            vec!["undispatched not read: killed at its 28.5s slice of the board budget; the source did not fail".to_string()]
+        );
     }
 
     #[test]
-    fn an_unreadable_top_row_still_says_unreadable() {
+    fn an_unreadable_queue_never_becomes_the_next_action() {
         let board = board_with_queues(json!([
             {"name": "claims", "status": "unreadable", "error": "exit 1: boom",
              "actionable": true, "rows": []},
         ]));
         let parsed = parse_king_board_value(&board).unwrap();
-        let top = parsed.top_row.unwrap();
-        assert!(top.contains("is unreadable: exit 1"), "{top}");
+        assert!(parsed.top_row.is_none());
+        assert_eq!(
+            parsed.blind_queues,
+            vec!["claims is unreadable: exit 1: boom".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_readable_action_is_next_behind_a_blind_queue() {
+        let board = board_with_queues(json!([
+            {"name": "unplanned", "status": "over_budget", "error": "truth probe timed out",
+             "actionable": true, "rows": []},
+            {"name": "mergeable_pr", "status": "ok", "actionable": true,
+             "rows": [{"number": 2398}]},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert_eq!(parsed.top_row.as_deref(), Some("mergeable_pr:2398"));
+        assert_eq!(
+            parsed.blind_queues,
+            vec!["unplanned not read: truth probe timed out".to_string()]
+        );
+    }
+
+    #[test]
+    fn queue_verb_marks_unheld_progress_and_undriven_pr_as_spawn_held() {
+        let board = board_with_queues(json!([
+            {"name": "unheld_progress", "status": "ok", "actionable": true,
+             "verb": "/fno:target", "rows": [{"id": "x-1"}]},
+            {"name": "undriven_pr", "status": "ok", "actionable": true,
+             "verb": "/fno:target", "rows": [{"number": 2398}]},
+            {"name": "unplanned", "status": "ok", "actionable": true,
+             "verb": "/fno:blueprint", "rows": [{"id": "x-2"}]},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert_eq!(
+            parsed.spawn_held_ids,
+            vec![
+                "unheld_progress:x-1".to_string(),
+                "undriven_pr:2398".to_string()
+            ]
+        );
+        assert_eq!(
+            parsed.actionable_ids,
+            vec![
+                "unheld_progress:x-1".to_string(),
+                "undriven_pr:2398".to_string(),
+                "unplanned:x-2".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -659,7 +749,7 @@ mod tests {
     fn board_undispatched_only() -> KingBoard {
         parse_king_board_value(&board_with_queues(json!([
             {"name": "undispatched", "status": "ok", "actionable": true,
-             "rows": [{"id": "x-1"}, {"id": "x-2"}]},
+             "verb": "/fno:target", "rows": [{"id": "x-1"}, {"id": "x-2"}]},
         ])))
         .unwrap()
     }
@@ -670,6 +760,19 @@ mod tests {
             reason: Some("provider_cap".to_string()),
             message: Some("every dispatch lane at cap: zai 10/10".to_string()),
         }
+    }
+
+    fn gate_status_stub(dir: &Path) -> PathBuf {
+        let payload = json!({
+            "verdict": "refused",
+            "reason": "max_live",
+            "message": "15 live worker slots >= max_live 15",
+        });
+        crate::write_exec_stub(
+            dir,
+            "fno",
+            &format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
+        )
     }
 
     fn accepted_probe() -> GateProbe {
@@ -694,8 +797,9 @@ mod tests {
     fn a_refused_probe_with_a_non_dispatch_row_points_the_block_at_it() {
         let board = parse_king_board_value(&board_with_queues(json!([
             {"name": "undispatched", "status": "ok", "actionable": true,
-             "rows": [{"id": "x-1"}, {"id": "x-2"}]},
-            {"name": "claims", "status": "ok", "actionable": true,
+             "verb": "/fno:target", "rows": [{"id": "x-1"}, {"id": "x-2"}]},
+            {"name": "unplanned", "status": "ok", "actionable": true,
+             "verb": "/fno:blueprint",
              "rows": [{"id": "x-3"}]},
         ])))
         .unwrap();
@@ -703,11 +807,95 @@ mod tests {
             saturation_verdict(&board, Some(&refused_probe())).expect("blocked with next");
         match verdict {
             SaturationOutcome::BlockedWithNext { next, blocked } => {
-                assert_eq!(next, "claims:x-3");
+                assert_eq!(next, "unplanned:x-3");
                 assert_eq!(blocked, 2);
             }
             other => panic!("expected BlockedWithNext, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn refused_probe_saturates_unheld_progress_and_undriven_pr() {
+        let board = parse_king_board_value(&json!({
+            "actionable": 2,
+            "queues": [
+                {"name": "unheld_progress", "status": "ok", "actionable": true,
+                 "verb": "/fno:target", "rows": [{"id": "x-1"}]},
+                {"name": "undriven_pr", "status": "ok", "actionable": true,
+                 "verb": "/fno:target", "rows": [{"number": 2398}]},
+            ],
+        }))
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = gate_status_stub(tmp.path());
+        let emit = |_: &str, _: Value| {};
+
+        let gate = capacity_gate(&board, fno.to_str().unwrap(), tmp.path(), "king", 0, &emit)
+            .expect("a refused probe must classify the spawn-held queues");
+        match gate {
+            CapacityGate::Saturated {
+                blocked, message, ..
+            } => {
+                assert_eq!(blocked, 2);
+                assert!(message.contains("live workers exiting"), "{message}");
+            }
+            _ => panic!("expected all spawn-held rows to be saturated"),
+        }
+    }
+
+    #[test]
+    fn a_blind_board_with_only_spawn_held_rows_is_saturated_blind() {
+        let board = parse_king_board_value(&json!({
+            "actionable": 2,
+            "queues": [
+                {"name": "unheld_progress", "status": "ok", "actionable": true,
+                 "verb": "/fno:target", "rows": [{"id": "x-1"}]},
+                {"name": "undriven_pr", "status": "ok", "actionable": true,
+                 "verb": "/fno:target", "rows": [{"number": 2398}]},
+                {"name": "unplanned", "status": "unreadable", "actionable": true,
+                 "error": "truth probe timed out", "rows": []},
+            ],
+        }))
+        .unwrap();
+        let verdict = saturation_verdict(&board, Some(&refused_probe())).expect("saturated blind");
+        match verdict {
+            SaturationOutcome::SaturatedBlind { blocked } => assert_eq!(blocked, 2),
+            _ => panic!("expected a blind saturation verdict"),
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = gate_status_stub(tmp.path());
+        let emit = |_: &str, _: Value| {};
+        let gate = capacity_gate(&board, fno.to_str().unwrap(), tmp.path(), "king", 0, &emit)
+            .expect("the blind saturation remains a gate result");
+        match gate {
+            CapacityGate::SaturatedBlind {
+                message,
+                actionable,
+            } => {
+                assert_eq!(actionable, 2);
+                assert!(
+                    message.contains("not read: unplanned is unreadable"),
+                    "{message}"
+                );
+                assert!(message.contains("live workers exiting"), "{message}");
+            }
+            _ => panic!("expected blind saturation to stay distinct from NoWork"),
+        }
+    }
+
+    #[test]
+    fn a_fleet_stop_probe_names_the_incident_owner() {
+        let probe = GateProbe {
+            verdict: "refused".into(),
+            reason: Some("fleet-stop".into()),
+            message: None,
+        };
+        let owner = probe.owner();
+        assert!(owner.contains("fno agents incident status"), "{owner}");
+        assert!(
+            owner.contains("fno agents incident clear --reason"),
+            "{owner}"
+        );
     }
 
     #[test]

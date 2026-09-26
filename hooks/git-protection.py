@@ -9,7 +9,7 @@ Blocks:
 
 Allowed without gate:
 - gh pr create, EXCEPT from a node-bearing branch with no sign the exact
-  `Backlog-Closure:` trailer was composed (see _closure_trailer_refusal).
+  `Fixes` closure line was composed (see _closure_trailer_refusal).
   Ad-hoc development stays legitimate: `FNO_PR_CLOSURE_OK=1` clears it, and a
   branch naming no node is never gated.
 
@@ -69,9 +69,10 @@ OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.
 PUSH_STAMP_DIR = FNO_HOME / "push-stamps"
-# The one debounce instrument: a push within this window of the last one
-# waits, because GitHub may not have registered the previous run yet.
+# The stamp covers the registration window; the probe covers a run that is
+# already visible after the stamp expires.
 PUSH_DEBOUNCE_SECONDS = 120
+_PUSH_PROBE_TIMEOUT = 15
 
 # Substitution forms that run a command without being a separate segment. Any of
 # them disqualifies an authorization: a command substitution IS a second
@@ -119,7 +120,7 @@ NO_VERIFY_PATTERNS = [
 # regex form was a bypass in one direction and a false refusal in the other.
 ALLOWED_GIT_SUBCOMMANDS = {
     "status", "log", "diff", "branch", "checkout", "fetch", "pull", "add",
-    "commit", "stash", "show", "config", "remote", "tag",
+    "commit", "stash", "show", "config", "remote", "tag", "grep",
 }
 
 def _default_state():
@@ -260,12 +261,15 @@ def _push_stamp_path(branch):
 def push_debounce_refusal(command, branch):
     """Refusal text when this push should wait, or None to allow.
 
-    One instrument, the stamp of the last allowed push: a push within
-    PUSH_DEBOUNCE_SECONDS of the previous one waits, because GitHub may not
-    have registered that run yet and pushing again only cancels it and starts
-    the wait over. Every failure path allows. `FNO_PUSH_NOW=1` allows and
-    leaves an event row, so a bypass is recoverable from the journal rather
-    than invisible.
+    The stamp handles the first 120 seconds, then the guarded verb asks
+    GitHub whether a registered check is still running. Every probe failure
+    allows. `FNO_PUSH_NOW=1` allows and leaves an event row, so a bypass is
+    recoverable from the journal rather than invisible.
+
+    The verb's own internal push never re-enters this hook: the hook reads
+    the Bash command string, and `fno do pr push` is not a `git push` at
+    position 0, so the verb is the one door that is never double-gated. A
+    rename to anything starting `git push` would silently deadlock it.
     """
     if os.environ.get("FNO_PUSH_NOW") == "1":
         _emit_push_bypass_event(branch)
@@ -276,13 +280,51 @@ def push_debounce_refusal(command, branch):
         if 0 <= age < PUSH_DEBOUNCE_SECONDS:
             return (
                 f"[fno push debounce] this branch was pushed {int(age)}s ago and "
-                f"GitHub may not have registered its run yet. Wait with "
-                f"`fno do pr wait <n> --until settled`, then push once. "
-                f"FNO_PUSH_NOW=1 bypasses and records the bypass."
+                f"GitHub may not have registered its run yet. Run "
+                f"`fno do pr push` - it reads the real check state and pushes "
+                f"once the branch is safe. FNO_PUSH_NOW=1 bypasses and records "
+                f"the bypass."
             )
     except OSError:
         pass
 
+    probe = _read_in_flight(branch)
+    if isinstance(probe, dict) and probe.get("in_flight") is True:
+        check = str(probe.get("check") or "?")
+        job = str(probe.get("job") or "?")
+        head = str(probe.get("head") or "?")
+        return (
+            f"[fno push debounce] check {check!r} (job {job}, head {head}) is still "
+            "running. A push now cancels that run and restarts the wait. Run "
+            "`fno do pr wait <n> --until settled` then `fno do pr push`, or "
+            "supersede on purpose with `fno do pr push --force-ci-cancel` or "
+            "FNO_PUSH_NOW=1."
+        )
+
+    return None
+
+
+def _read_in_flight(branch):
+    """Ask the guarded push verb whether this branch's remote head is live.
+
+    The hook runs before the push, so a missing binary, usage error, malformed
+    output, or timeout must allow the command rather than turn diagnostics into
+    a new push gate.
+    """
+    try:
+        result = subprocess.run(
+            ["fno", "do", "pr", "push", "--in-flight", branch],
+            capture_output=True,
+            text=True,
+            timeout=_PUSH_PROBE_TIMEOUT,
+            check=False,
+        )
+        for line in reversed(result.stdout.splitlines()):
+            if line.lstrip().startswith("{"):
+                value = json.loads(line)
+                return value if isinstance(value, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
     return None
 
 
@@ -448,6 +490,37 @@ def _candidate_repo_roots():
     return roots
 
 
+_PR_WORKTREE_CACHE = {}
+
+
+def _pr_worktree_root(pr_number):
+    """Resolve the PR worktree through the Rust-owned branch selector."""
+    if not str(pr_number).isdigit():
+        return None
+    key = (os.getcwd(), str(pr_number))
+    if key in _PR_WORKTREE_CACHE:
+        return _PR_WORKTREE_CACHE[key]
+    try:
+        proc = subprocess.run(
+            [os.environ.get("FNO_AGENTS_BIN", "fno-agents"), "pr-worktree"],
+            input=json.dumps(
+                {"cwd": os.getcwd(), "pr": int(pr_number), "timeout_secs": 1}
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if proc.returncode != 0:
+            _PR_WORKTREE_CACHE[key] = None
+        else:
+            value = json.loads(proc.stdout)
+            worktree = Path(value["worktree"])
+            _PR_WORKTREE_CACHE[key] = worktree.resolve() if worktree.is_dir() else None
+    except Exception:
+        _PR_WORKTREE_CACHE[key] = None
+    return _PR_WORKTREE_CACHE[key]
+
+
 def _parse_active_state(state_file, freshness_limit=3600):
     """Return the frontmatter dict for an active target session at state_file,
     else None. Active means: file exists, mtime within freshness_limit, and
@@ -510,10 +583,8 @@ def _get_active_target_session(prefer_pr=None):
     - state file mtime is within the last hour
     - frontmatter status is IN_PROGRESS
 
-    Candidate repo roots are the hook's own root plus every git worktree (see
-    _candidate_repo_roots), so a session running in a worktree is found even
-    when the hook's cwd is the canonical checkout. The cwd root is checked
-    first.
+    A numbered PR binds authorization to the exact worktree on its head
+    branch. An unnumbered merge keeps the fail-closed scan across worktrees.
 
     Selection FAILS CLOSED on ambiguity - widening discovery across worktrees
     must never let one session's auto_merge_approved + artifact authorize an
@@ -534,7 +605,12 @@ def _get_active_target_session(prefer_pr=None):
     ungated except for _closure_trailer_refusal.)
     """
     matches = []
-    for repo_root in _candidate_repo_roots():
+    if prefer_pr is not None:
+        pr_root = _pr_worktree_root(prefer_pr)
+        repo_roots = [pr_root] if pr_root is not None else []
+    else:
+        repo_roots = _candidate_repo_roots()
+    for repo_root in repo_roots:
         state_file = repo_root / ".fno" / "target-state.md"
         fm = _parse_active_state(state_file)
         if fm is not None:
@@ -705,7 +781,7 @@ def _stacked_base_refusal(command=""):
 # one PreToolUse hook with a 60s budget; the coverage veto's comment states the
 # pair arithmetic. Split literals can drift apart, and the drift test pins this
 # definition against the doc's per-invocation ceiling.
-_VETO_PROBE_TIMEOUT = 25
+_VETO_PROBE_TIMEOUT = 24
 _HOLD_PROBE_TIMEOUT = 5
 
 
@@ -726,7 +802,10 @@ def _inprocess_dispatch_hold_reason(pr_number):
         # only route to a slower reader, never a weaker verdict.
         return False, None
     try:
-        return True, merge_hold_reason(int(pr_number), os.getcwd())
+        repo = _pr_worktree_root(pr_number)
+        if repo is None:
+            return True, "PR worktree lookup unavailable; refusing to assume no dispatch hold"
+        return True, merge_hold_reason(int(pr_number), str(repo))
     except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
         return True, (
             f"dispatch hold check unavailable ({type(exc).__name__}); "
@@ -807,8 +886,8 @@ def _coverage_refusal(command=""):
         # 15s of verify waits before the CLI's own coverage read starts (see
         # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout kills
         # exactly that probe mid-wait and fails open in the storm state, so
-        # this carries the shared 25s: over the shim's ceiling. The worst case
-        # counts the git probes ahead of the vetoes too (1s + 1s + 2s): 54s
+        # this carries the shared 24s: over the shim's ceiling. The worst case
+        # counts the git probes and PR lookup too (1s + 1s + 2s + 2s): 54s
         # plus process startup of the 60s hook budget, margin under 6s.
         timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
@@ -872,8 +951,9 @@ def _review_hold_refusal(command=""):
     produced none. ``fno do pr merge`` consults the precise per-branch predicate;
     this hook cannot.
 
-    NOT a third `fno` subprocess. The two vetoes above already spend 25s each
-    against a 60s harness budget with under 6s of margin, and a hook that gets
+    NOT a third `fno` subprocess. The two vetoes above already spend 24s each
+    against a 60s harness budget with under 6s of margin; PR lookup is bounded
+    to two more seconds so a hook that gets
     killed emits no verdict at all - so a third probe would let an unauthorized
     merge through on the very storm state the guard exists for. A claim lockfile
     is a file, so this reads the directory instead: microseconds, no budget.
@@ -933,7 +1013,7 @@ def _live_merge_switch_armed(repo_root, fm):
     how the hook drifts from every other reader. In-process first (the hook
     interpreter often carries the package); the resolver CLI as the fallback
     when it does not, budgeted at 5s because the lineage and coverage probes
-    elsewhere in this hook can each approach 25s of the 60s PreToolUse
+    elsewhere in this hook can each approach 24s of the 60s PreToolUse
     budget - a fresh independent wait here can push the hook past it, and a
     hook killed mid-run emits NO verdict, letting the raw merge proceed.
     Either resolver unavailable, slow, or unreadable ->
@@ -1614,6 +1694,13 @@ def _find_pr_create_segments(segments):
 # branch_node_ids so the three cannot drift apart in silence.
 _HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
 _HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+_CLOSURE_MARKER_RE = re.compile(
+    # Composition evidence in the command itself: the generator variable, the
+    # retired `Backlog-Closure:` spelling, or the new `Fixes <id>` line.
+    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}",
+    re.IGNORECASE,
+)
+_BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large
 
 
 def _branch_node_ids(head_ref):
@@ -1625,30 +1712,26 @@ def _branch_node_ids(head_ref):
     return ids
 
 
-def _body_file_is_unjudgeable(path):
-    """A `--body-file` path this hook cannot judge, which is all of them.
-
-    This used to read the file and deny when its last trailer did not claim
-    every id. That is unsound, because a PreToolUse hook runs BEFORE the
-    command. Two spellings broke on it, both of them the flow
-    skills/pr/references/create.md now prescribes:
-
-      printf '%s\\n' "$BODY" > .fno/pr-body.md && gh pr create --body-file .fno/pr-body.md
-
-    On a first run the path does not exist yet, and reading that as "no claim"
-    denied a body composed correctly one line later. On a LATER run a stale
-    .fno/pr-body.md from a previous PR sits at that fixed, never-cleaned path,
-    and the hook judged the old contents of a file the very same command is
-    about to overwrite. Same defect, opposite symptom.
-
-    The hook cannot distinguish a stale file from a final one, so it never had
-    a sound DENY here. Its contract already names the tradeoff: the only
-    failure mode is a false ALLOW, which CI still catches, and a composed body
-    is never denied. Returning True for every body-file is that contract said
-    plainly, rather than a read that is right only when the file happens to be
-    current. `path` is unused and kept for the caller's readability.
+def _body_file_is_unjudgeable(path, touched_elsewhere=frozenset()):
+    """Decide a `--body-file` this hook CAN judge: True (allow) unless the
+    file exists, reads under a 1 MiB cap, and carries no closure marker.
+    The rest allow, fail-open: a false ALLOW is CI's to catch, a false
+    DENY is the defect. A path another same-command segment names allows
+    (case-folded normpath match), because PreToolUse runs BEFORE the
+    write-then-create flow and would judge the stale occupant of that
+    never-cleaned path; so do a file the hook cannot shape-check
+    (missing, directory, OSError, oversized, unexpanded $VAR) and a
+    segment that merely names the path: a token set, not a writer table.
     """
-    return True
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_BODY_FILE_CAP).replace("\x00", "")
+    except OSError:
+        return True
+    if (os.path.normpath(path).casefold() in touched_elsewhere
+            or not os.path.isfile(path) or os.path.getsize(path) > _BODY_FILE_CAP):
+        return True
+    return bool(_CLOSURE_MARKER_RE.search(text))
 
 
 def _pr_create_signals(seg):
@@ -1694,7 +1777,8 @@ def _pr_create_signals(seg):
     return hatch, head, body_files
 
 
-def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
+def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
+                             touched_elsewhere=frozenset()):
     """Deny reason for a `gh pr create` that shows no composed closure trailer.
 
     Measured 2026-08-19: five PRs in one evening red on
@@ -1703,20 +1787,16 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
     this covers the prose path, where an agent types the command.
 
-    The ceiling, stated because it decides what this can promise. A `--body`
-    reaches gh as an unexpanded `"$BODY"`, so on that spelling the hook cannot
-    read the string that will be sent; it asserts a POSITIVE marker that the
-    composition STEP ran - a literal trailer key, or the CLOSURE_TRAILER
-    variable skills/pr/references/create.md sets - and never an absence. A
-    `--body-file` names a real path, so that spelling is judged on the file's
-    own trailer instead of on a marker. Either way the only failure mode is a
-    false ALLOW, which CI still catches; a composed body is never denied.
+    The ceiling, stated because it bounds the promise. A `--body` reaches gh
+    as an unexpanded `"$BODY"`, so the hook cannot read the string that will
+    be sent; it asserts a POSITIVE marker that the composition STEP ran, and
+    never an absence. A `--body-file` is judged on the file's own trailer
+    instead (see _body_file_is_unjudgeable). Either way the only failure mode
+    is a false ALLOW, which CI still catches; a composed body is never denied.
 
-    The ids come from `--head` when the command names one, and only otherwise
-    from the checkout. The PR closes the node its HEAD ref names, which is what
-    the CI gate reads; judging `gh pr create --head chore/docs` against a
-    node-bearing local branch denied a PR that closes nothing, and told the
-    author to claim a node the PR does not ship.
+    The ids come from `--head` when named, else the checkout: the PR closes
+    the node its HEAD ref names, which the CI gate reads; `--head chore/docs`
+    once denied a PR that closes nothing.
     """
     # Both spellings, because only one of them is the one people type. A
     # PreToolUse hook is a SEPARATE PROCESS, so an inline
@@ -1736,11 +1816,13 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     # "$BODY", so a marker in prose costs a false ALLOW that CI still catches.
     # The three POSITION-read signals above are what a false allow would have
     # bypassed silently.
-    if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
+    if _CLOSURE_MARKER_RE.search(command):
         return None
-    for path in body_files:
-        if _body_file_is_unjudgeable(path):
-            return None
+    judged = [p for p in body_files if not _body_file_is_unjudgeable(p, touched_elsewhere)]
+    if body_files and not judged:
+        return None
+    detail = "" if not judged else (f"the body file {judged[0]} exists and carries "
+        f"no Fixes line; or open the whole-path door /fno:pr create.\n")
     # This message NAMES candidates and never prescribes a trailer to paste.
     # A refusal is the highest-trust text a blocked agent reads, so advice here
     # is a PRODUCER of claims, and this producer has no graph to check against.
@@ -1754,9 +1836,11 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     return (
         f"[fno closure trailer] branch segments that fit the node-id grammar: "
         f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
-        f"claims at least one REAL node.\n"
-        f"Generate the line (graph-checked, with contained_in descendants) via "
-        f"`fno do pr closure-trailer <node-id>` and paste its output.\n"
+        f"claims at least one REAL node.\n{detail}"
+        f"Generate the ONE line (graph-checked, with contained_in descendants) "
+        f"via `fno do pr closure-trailer <node-id> --extra <id> [...]` and "
+        f"paste its output; the gate reads only the last closure "
+        f"line, so replace every line in the body with this one.\n"
         f"Do NOT paste a candidate from this message: a segment can match the "
         f"grammar without being a node, and one unknown id voids the whole "
         f"binding at merge.\n"
@@ -2299,14 +2383,16 @@ def main():
         # Judge each create segment on ITS OWN tokens. The legacy fallback
         # below has no tokens at all, so it reads none of the three signals -
         # deny-leaning there, matching that path's stated posture.
+        touched_elsewhere = {os.path.normpath(t).casefold() for seg in segments or ()
+                             for t in seg if seg not in pr_create_segs}
         for seg in pr_create_segs:
             if segments is not None:
                 seg_hatch, seg_head, seg_body_files = _pr_create_signals(seg)
             else:
                 seg_hatch, seg_head, seg_body_files = False, None, []
             closure_reason = _closure_trailer_refusal(
-                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files
-            )
+                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files,
+                touched_elsewhere=touched_elsewhere)
             if closure_reason:
                 _emit("deny", closure_reason)
                 _exit_allow()

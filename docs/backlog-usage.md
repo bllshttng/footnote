@@ -91,6 +91,8 @@ When a PR opens outside the Footnote PR path, repair its node with `fno backlog 
 
 Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno king escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
 
+A repeat `fno backlog note` on a node with no encounter from the same session ends its receipt with the encounter command. A note is prose nothing ranks. An encounter is the row `fno backlog demand` reads.
+
 ```bash
 fno backlog encounter <id> --evidence "cost two wrong diagnoses before I found the real seam."
 fno backlog encounter <id> --operator --evidence "the operator hit the same seam."
@@ -108,7 +110,7 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
-The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
+The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write the graph store. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
 `demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
 
@@ -122,7 +124,11 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 `fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
-Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+Pass `--quiet` to note without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
+
+### Blocking findings hold the gate
+
+`fno backlog note <id> "<finding>" --blocking` records the body as a review finding instead of a progress note. An open finding denies the session's terminal-allow until someone runs `fno backlog note --resolve <finding-id>`. With no live reader the finding still writes: the receipt says it gates the next worker. `fno backlog notes findings [<id>] [--open]` reads them back: one count line first, then one line per finding, and a store read error exits 1 instead of printing zero. The retired `fno backlog annotate` spellings refuse with one line naming these replacements.
 
 ## Moving cards
 
@@ -172,6 +178,8 @@ fno backlog update <id> --priority p1                        # the proposal
 Priority is bounded to four values, so two agents disagreeing about a node produce a visible split on `fno backlog demand` instead of a silent stack. The pin stays with the operator, and it outranks every vote.
 
 ## Lifecycle
+
+`fno backlog ready` accepts `--created-before`, `--created-after`, `--touched-before`, and `--touched-after` with values such as `30d` or an ISO date, plus `--sort created|touched` (oldest first); touched uses `touched_at`, falling back to `created_at`. Preview the 60-day stale-idea sweep with `fno backlog ready --ideas --touched-before 60d --sort touched --json`.
 
 `intake -> triage -> ready/next -> done`, with two reversible side states:
 
@@ -233,9 +241,25 @@ Two hidden verbs serve the migration and the operator:
 - `fno backlog stuck-epics` lists epics whose only incomplete children are deferred or superseded, each with a `closable` verdict and its holders. Read-only: closing one is always an operator ruling.
 - `fno backlog reopen <child> --reason ...` against a done-on-its-own-evidence parent stamps a `reopen_warning` on that parent, alongside the stderr warning. The marker names the child and the time, so the fact stays findable after the terminal with the warning is gone. When the parent is reopened directly, or the named child closes again, the marker clears.
 
+### Epic child cap
+
+`backlog.epic_max_open_children` bounds how many open direct children one epic can hold. The graph store reads it from the config.toml beside graph.json, which is the global config on a default install. Unset means no cap.
+
+A child is open: not done, not superseded, not deferred. Children are direct. A sub-epic counts as one child of its parent and carries its own cap.
+
+Every write that sets a parent meets the refusal: `update --parent`, `idea --parent`, `contain`, `decompose`, the rollup crown auto-link, and the api node_create. A hand-up is exempt. That write moves the live children of a closing node to the nearest live ancestor. It moves existing work and adds none. If the crown's single epic is full, a crowned `idea` with no `--parent` meets the same refusal. The auto-link sets the parent in the same write. The filer re-runs with `--parent <new epic>`.
+
+The refusal names the epic, its open count, the cap, and the next step. Run `fno backlog idea "EPIC: <theme>" --type epic` to start a new small epic, then point the write at the new epic id. If a king leads the full epic, it adds the new epic to its own crown: `fno agents crown <its handle> --scope <each epic it holds> --scope <new-epic-id>`. That works for an epic the king's own session created. Any other epic needs an attended shell or a crown that contains both.
+
+The same count reads before any write, on the `epics:` line of `fno agents king checkin`. `19/15 full` means the next open child is refused at the current cap. `19/- (cap unset)` means no cap is configured, which is the OSS default. `fno agents court --nodes --json` carries the list per crown as `epics` and `epic_cap`.
+
+### Unplanned idea cap
+
+Machine-filed, unplanned idea rows use `backlog.max_open_ideas` in each nearest-epic scope. Rows without an epic use `project:<project>`. The default is 25. Every measured epic scope held nine or fewer ideas. A fresh install can accept a readable first batch. `0` turns the cap off. Rows with a plan, epic type, decompose group, or `source_kind = operator_request` are not capped. A refusal reports the count, cap, oldest rows, and fold path (`--wave-of`). It suggests an epic parent or closing stale ideas. Setting this key prints the Python loader's unknown-key warning until the config model carries it. Rust still reads the key at the publication seams.
+
 ## Finding work by meaning: find --fts
 
-`fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
+`fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is an FTS5 table inside the graph.db store, never a second source of truth. It is rebuilt from scratch whenever the store moves under it, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
 
 ## Reviewing duplicate and expired work
 
@@ -249,7 +273,7 @@ The pass reads `deferred_kind` as a field. It does not parse reason text. Decide
 
 Each row reports `duplicate`, `satisfied`, `still_real`, or `undecided`. Evidence names a candidate node, merged PR, existing file, or the reason for uncertainty.
 
-The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes `graph.json`. An empty result includes a positive control. An all-match result is refused as a failed instrument.
+The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes the graph store. An empty result includes a positive control. An all-match result is refused as a failed instrument.
 
 ## Node-to-node edges
 
@@ -302,7 +326,7 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
 
-- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `operator_request`: a human asked, via `--source-kind operator_request`. Birth requires an unacked operator turn in the filing session (`fno inbox operator status` above 0). File the ask before you ack the turn.
 - `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
 - `automated_followup`: a machine follow-up. Retro landings and decomposed children.
 - `unknown`: everything else.
@@ -375,7 +399,7 @@ fno backlog reconcile              # close nodes whose PR merged outside the gat
 
 ### Abandoned do rows
 
-An open do row wedges its node `in_progress`. The in-progress status hides the row from the Rust settle's done+merged gate. A session that died mid-do strands its node forever. `fno backlog maintain` carries the leg that watches this population. Read mode reports every candidate with its verdict (`gone` or `held`) and the reason. `--apply` reaps a `gone` row only after the transcript prover proves the session quiet. The bar is `config.backlog.maintain.abandoned_do_row_hours` (default 24) with a non-engaged tail. A live claim holds the row. A live roster worker holds the row. A transcript the prover cannot read holds the row and names the reason. Opencode rows always hold, because no file-backed transcript exists to prove against. A held row can still be reaped by hand. Run `fno backlog session reap-open` after you have proven the session dead yourself.
+An open do row wedges its node `in_progress`. The in-progress status hides the row from the Rust settle's done+merged gate. A session that died mid-do strands its node forever. `fno backlog maintain` carries the leg that watches this population. Read mode reports every candidate with its verdict (`gone` or `held`) and the reason. `--apply` reaps a `gone` row. The row's own idle clock decides, never the liveness of its session. A live session proves only that it lives, and a dead session's row goes idle too. Idle counts from the row's `started_at` or the newest progress note its own session wrote. A row idle past `config.backlog.maintain.abandoned_do_row_hours` (default 24) is `gone`. A live claim holds the row. A reachable roster worker on the node holds the row at any age. An unread roster reaps nothing. `fno backlog requeue` asks the same question for a session that still reads reachable. A held row can still be reaped by hand. Run `fno backlog session reap-open` after you have proven the session dead yourself.
 
 ### The daily pass
 

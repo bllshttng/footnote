@@ -174,3 +174,46 @@ def test_no_decisions_result_is_not_a_shared_mutable_list(monkeypatch, tmp_path:
     )
 
     assert second["graph"]["decisions"] == []
+
+
+def test_receipt_preserves_decision_lifecycle(monkeypatch, tmp_path: Path) -> None:
+    def fake(subject, limit=None, lane=None, state=None):
+        return subject, [
+            {
+                "decision_id": "d-live",
+                "lane": "coord",
+                "subject": subject,
+                "decision": "readable ruling",
+                "lifecycle": "live",
+            }
+        ], 0
+
+    receipt = _receipt(monkeypatch, tmp_path, "x-38d3", fake)
+
+    assert receipt["graph"]["decisions_status"] == "ok"
+    assert receipt["graph"]["decisions"][0]["lifecycle"] == "live"
+
+
+def test_receipt_reports_unknown_lifecycle_as_error(monkeypatch, tmp_path: Path) -> None:
+    reason = "the graph could not be read (database is locked)"
+
+    def fake(subject, limit=None, lane=None, state=None):
+        return subject, [
+            {
+                "decision_id": "d-unknown",
+                "lane": "coord",
+                "subject": subject,
+                "decision": "coord ruling",
+                "lifecycle": "unknown",
+                "lifecycle_reason": reason,
+            }
+        ], 0
+
+    receipt = _receipt(monkeypatch, tmp_path, "x-38d3", fake)
+    graph = receipt["graph"]
+
+    assert graph["decisions_status"] == "error"
+    assert graph["decisions"][0]["lifecycle"] == "unknown"
+    assert graph["decisions_detail"] == (
+        f"{reason}; 1 coord ruling(s) listed with an unknown lifecycle"
+    )

@@ -359,13 +359,7 @@ and clears `yolo`, so the yolo caveat alone would go silent - the helper instead
 caveats on the effective `bypassPermissions` mode (whether it came from `--yolo` or
 an explicit `--permission-mode`).
 
-It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line,
-and `reason`. `config.agents.confirm` (`always|auto|never`, model default `auto`)
-is repurposed to an **opt-in** "confirm even the free lanes" for a cautious
-operator: only `always` confirms; `auto` (default) and `never` skip. A
-failed/invalid read degrades to the no-confirm default (the free lane has nothing
-to gate) with an `fno doctor update` hint - do not re-derive this; it lives in the
-helper. The table it implements:
+It emits `confirm_required` (0|1), `caveat` (0|1), `caveat_text`, a `warn` line, and `reason`. `config.agents.confirm` (`always|auto|never`, default `auto`) is repurposed as an opt-in to confirm free lanes for cautious users. Only `always` confirms. `auto` (default) and `never` skip. Failed or invalid reads use the no-confirm default because free lanes have nothing to gate. The helper prints an `fno doctor update` hint. Do not re-derive this. The logic lives in the helper. The table it implements:
 
 | Condition | Result |
 |---|---|
@@ -516,8 +510,7 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
   `fno agents reconcile`. The `short_id` on this line is the requested **name**,
   not a session handle, so do NOT present it as one and do NOT offer `resume`
   or a session-keyed peek until it is bound.
-- `result=already-running ...` -> a worker already exists for this node/name; no
-  second loop was created. Point at its logs.
+- `result=already-running ...` -> a worker already exists for this node/name and no second loop was created. Point at its logs. To replace a stuck worker, run `fno agents stop <worker>`. Then spawn again with `--node <node>` (add `--resume <old session id>` on claude to carry the old transcript). The stop frees the node at once, so neither step needs `rm --force`.
 - `result=self-handoff name=<n> reason="<...>"` -> **you** already hold the claim on
   that node, so `/fno:agent` cannot reassign it from here and nothing was launched.
   Relay the reason and the two real exits it names: hand off via `/fno:target`
@@ -701,8 +694,7 @@ A final body word such as `question`, `heads-up`, or `fyi` remains body text.
 6. On a CLI refusal, relay its stderr unchanged so the user sees the live-agent and project-note alternatives instead of a skill-layer paraphrase.
 7. On success, relay the real message id and routing receipt exactly as printed.
 
-`delivered (hosted)` confirms that the message landed in the recipient session.
-`queued (durable)` is not delivered; it is durable fallback awaiting the recipient's next active boundary or recovery.
+`delivered (hosted)` confirms the inject was accepted. It does not prove the recipient read the message. `queued (durable)` is not delivered. It is durable fallback awaiting the recipient's next active boundary or recovery. Use `fno agents mail sent` to check whether the message `landed` in the recipient's transcript.
 Never upgrade queued mail to delivered, and never invent a receipt when the CLI printed none.
 An unknown agent heads-up exits 16 and writes nothing, so report that exact failure without guessing another recipient.
 `send` is free and never confirms because it is not a billed launch.

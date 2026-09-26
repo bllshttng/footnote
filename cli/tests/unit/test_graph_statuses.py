@@ -9,6 +9,7 @@ import pytest
 from fno.claims.core import acquire_claim, claim_status, release_claim
 from fno.claims.io import global_claims_root
 from fno.graph.statuses import (
+    is_terminal_entry,
     is_stale_lock,
     lock_timestamp_quality,
     live_claimed_node_ids,
@@ -32,6 +33,24 @@ def _entry(eid: str, **kwargs) -> dict:
     }
     base.update(kwargs)
     return base
+
+
+@pytest.mark.parametrize("kind", ["wont_do", "retracted"])
+def test_is_terminal_entry_closes_decision_deferrals(kind):
+    assert is_terminal_entry(_entry("ab-terminal", status="deferred", deferred_kind=kind))
+
+
+@pytest.mark.parametrize("kind", [None, "later", "contingent"])
+def test_is_terminal_entry_keeps_other_deferrals_open(kind):
+    assert not is_terminal_entry(
+        _entry("ab-open", status="deferred", deferred_kind=kind)
+    )
+
+
+def test_is_terminal_entry_ignores_stale_deferred_kind_on_non_deferred_row():
+    assert not is_terminal_entry(
+        _entry("ab-stale", status="ready", deferred_kind="wont_do")
+    )
 
 
 # -- is_stale_lock --
@@ -565,7 +584,7 @@ def test_in_review_survives_stale_claim():
 def test_in_review_reachable_through_typed_entry():
     """The Entry.status computed field must also derive in_review, so a typed
     round-trip (model_dump) does not silently emit ready/idea/blocked."""
-    from fno.graph.types import Entry
+    from fno.graph.types import Node as Entry
 
     entry = Entry(id="ab-prreview5", title="t", pr_number=358)
     assert entry.status == "in_review"

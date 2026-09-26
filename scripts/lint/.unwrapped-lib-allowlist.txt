@@ -19,7 +19,6 @@ corrections-lock.sh
 phase-handoff.sh
 target-guard.sh
 spawn-subagent.sh
-hook-events.sh
 blocked-taxonomy.sh
 checkpoint.sh
 graph-resolve.sh
@@ -143,13 +142,6 @@ blocked-handler.sh
 # checks. No standalone CLI of its own.
 verified-merge.sh
 
-# Phase 12 of stop-hook refactor: budget-display computation. Reads
-# total_cost_usd + budget_cap_usd from STATE_FILE; sets COST_DISPLAY for
-# the resume system message. Pure display logic; the actual budget
-# enforcement (cap trip) lives in crates/fno-agents/src/loopcheck.rs.
-# Sourced by the hook; not a user-facing entry point.
-budget-display.sh
-
 # Advisory body-length lint for gate artifacts. Soft warning only;
 # called from gates-satisfied.sh::gate_satisfied to surface bloat in
 # LLM-authored artifact bodies. Never blocks; emits a single stderr WARN
@@ -217,9 +209,9 @@ assert-absent.sh
 
 # The shared "is removing this worktree safe?" answer. Sourced by
 # scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
-# exposes wt_reapable. It is the bash ADAPTER for the wrapped entry point
-# `fno workspace worktree reapable` (cli/src/fno/worktree_reapable.py), which is where the
-# classifier actually lives, so a second wrapper would be a third opinion on a
+# exposes wt_reapable. It is the bash ADAPTER for the gate binary
+# (crates/fno-agents/src/worktree_reapable.rs), where the classifier
+# actually lives, so a second wrapper would be a third opinion on a
 # question that must have exactly one. Pure sourcing library; no CLI of its own.
 worktree-reapable.sh
 
@@ -299,3 +291,16 @@ rooted-writers.sh
 # an fno wrapper would invert the dependency; the bash scripts are the entry
 # points. Pure library + standalone CLI of its own; no fno verb wraps it.
 skill_discovery.py
+cargo-build-dir.sh
+
+# The code-index provider detector. Invoked via `bash <path>` by
+# scripts/validate-plan.sh's Code Index Audit (the validator and its bundled
+# copies are the entry points) and by tests/test-code-index-detect.sh; an fno
+# verb would be a second path around the same detection. Standalone tool; no
+# CLI of its own.
+code-index-detect.sh
+
+# The shared mux-test keeper reaper. Sourced by the test proof scripts
+# (tests/mux-portal-restore-server-kill.sh, tests/mux-workspace-standalone.sh)
+# from their EXIT cleanup; a pure library with no fno surface of its own.
+keeper-reap.sh

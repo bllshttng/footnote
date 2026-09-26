@@ -45,39 +45,61 @@
 // the macro expansion since `spawned_by_session` joined the contract.
 
 pub mod acceptance_evidence;
+pub mod acp_stdio;
 pub mod active_backlog;
+pub mod additional_prs;
 mod agent_lock;
 pub mod agents_config;
+pub(crate) mod agents_event;
 pub mod agy_ask;
+pub mod agy_hooks;
+pub mod agy_launch;
 pub mod announce;
+pub mod arm_repair;
 pub mod arm_watch;
 pub mod attach;
+pub mod attention;
+pub mod attention_arm;
+pub mod attention_file;
+pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
+#[cfg(test)]
+#[path = "birth_guard_tests.rs"]
+mod birth_guard_tests;
 pub mod blueprint_judge;
+mod boot_revival;
 mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;
 pub mod canonical_check;
 pub mod capability_leaves;
+pub mod cargo_build_dirs;
 pub mod census;
 pub mod check_supersession;
+pub mod claim_queue;
 pub mod claim_store;
 pub mod claim_verbs;
 pub mod claims;
+pub mod claims_root;
 pub mod claude_adopt;
 pub mod claude_ask;
 pub mod claude_attach;
 pub mod claude_drive;
+pub mod claude_login;
 pub mod claude_roster;
 pub mod claude_sessions;
 pub mod claude_stream_entry;
+pub mod claude_supervisor;
+pub mod claude_vault;
 pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
+pub mod codex_daemon_readiness;
+pub mod codex_daemon_upgrade;
 /// Test support: a fake shared codex app-server daemon. Public because the
 /// in-crate daemon tests and the integration tests both need one fake, and
 /// only a library item reaches both.
@@ -86,6 +108,7 @@ pub mod codex_fake_daemon;
 pub mod codex_inject;
 /// Public because `codex_resume` (pub, exercised by the parity test) names
 /// [`CodexRoute`] in its signature.
+pub mod codex_posture;
 pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
@@ -94,21 +117,33 @@ pub mod compaction;
 mod completion_output;
 pub mod component_update;
 pub mod context_run;
+pub mod context_window;
+pub mod convert;
+pub mod corrections_verify;
 pub mod court_fold;
+pub mod crown_alarm;
+pub mod crown_names;
+pub mod crown_reap;
+pub mod crown_settle;
+pub mod crown_split;
+pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod day;
 pub mod decision_index;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
 pub mod distress;
 pub mod drift;
+pub mod duration;
 pub mod envelope;
 pub mod escalation;
 pub mod eval_attempt;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_trend;
+pub mod event_store;
 pub mod events;
 pub mod events_limits;
 pub mod events_store;
@@ -116,9 +151,14 @@ pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod finalize_run_summary;
 pub mod fleet_incident;
+pub mod fleet_load;
+pub mod fleet_page;
+pub mod fleet_task;
 pub mod flight_gate;
 pub mod gc;
+pub mod gc_adopt;
 pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
@@ -131,40 +171,57 @@ mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
+pub mod grok_ask;
+pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
 pub mod honesty_sweep;
+pub mod hook;
 mod identity;
+pub mod install_verify;
+pub mod intel;
+pub mod intel_html;
+pub mod intel_insights;
 pub mod interrupt_classify;
 pub mod json_output;
+pub(crate) mod keeper_revival;
 pub mod kill_criteria;
+pub mod king_answers;
 pub mod king_board;
 pub mod king_checkin;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
+pub mod king_mail;
+pub mod king_settle;
 pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
+pub mod launch_workdir;
 pub mod law_match;
 mod lifecycle_child;
+pub mod live_store_fence;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
 pub mod loop_king;
+pub mod loop_readiness;
 pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
+pub mod machine_mail;
+pub mod machine_sample;
 pub mod machine_watch;
 pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_close;
+pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;
 pub mod merge_posture;
@@ -173,59 +230,98 @@ pub mod merge_reap;
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
 pub mod model_env_scrub;
+pub mod model_family;
 pub mod naming;
 pub mod needs;
 pub mod node_origin;
+pub mod node_reading;
 pub mod node_route;
 pub mod node_seed;
 pub mod nudge;
+pub mod occupancy_login;
 pub mod opencode_ask;
+pub mod opencode_install;
 pub mod opencode_serve;
+pub mod opencode_transcript;
 pub mod operator_notice;
 pub mod operator_turns;
+pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
+pub mod pending_session_row;
+pub mod phase_close;
 pub mod pi;
+pub mod planning_lane;
+pub mod plans_dirs;
 pub mod plugin_install;
+pub mod pr_body_check;
 pub mod pr_nudge;
+pub mod pr_park;
+pub mod pr_push;
+pub mod pr_rebase;
+pub mod pr_status_facts;
+pub mod pr_worktree;
 pub mod protocol;
 pub mod prove_it_verdicts;
+pub mod provenance;
 pub mod provider;
 pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
+pub mod quarantine;
+pub mod question_clear;
+pub mod question_intake;
+pub mod question_sweep;
+pub mod quiet_retire;
 pub mod readiness;
+pub mod real_session;
 pub mod reap_release;
 pub mod reap_render;
 pub mod receipt;
 pub mod reclaim;
 pub mod reentry;
+pub mod refusal_rate;
 pub mod registry_json;
+pub mod reign_goal;
+pub mod reign_hygiene;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
+pub mod resume_gate;
+pub mod resume_pin;
 pub mod resume_receipt;
+pub(crate) mod resume_route;
 pub mod resume_wake;
+pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
+pub mod route_capacity;
+pub mod route_inventory;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
+pub mod sandbox_probe;
 pub mod scoreboard;
 pub mod scrape;
 pub mod scratch;
 pub mod screen;
+pub mod select_read;
 pub(crate) mod served_liveness;
+pub mod session_activity;
+pub mod session_backfill;
+pub mod session_cost;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod slot_cutover;
 pub mod source_pin;
 pub mod spawn;
 pub mod spawn_axes;
@@ -235,29 +331,38 @@ pub mod spawn_contract;
 pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
+pub mod spawn_gate_reservations;
 pub mod spawn_gate_verb;
 pub mod spawn_lineage;
 pub mod spawn_overlay;
 pub mod spawn_payload;
+pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
+pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
+pub mod sync_canonical;
 pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
+pub mod test_delta;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod tracker;
+pub mod transcript_activity;
 pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod wake_meter;
+pub mod worktree_reapable;
 pub mod write_queue;
 
 use serde::{Deserialize, Serialize};
@@ -538,9 +643,88 @@ pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
     value
 }
 
+/// Write `body` to `dir/name` as a 0755 executable and return the path.
+///
+/// A child /bin/sh writes the bytes, never this process. A write fd held
+/// here is copied into the child of any sibling test thread that forks in
+/// that window, and an exec of the stub then fails with ETXTBSY until that
+/// child execs. A temp name plus rename does not help: the copied fd follows
+/// the inode. The writer has exited before this returns.
+#[cfg(test)]
+pub(crate) fn write_exec_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.join(name);
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"cat > "$1.tmp.$$" && chmod 755 "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1""#,
+            "sh",
+        ])
+        .arg(&path)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn /bin/sh to write an exec stub");
+    // A writer that fails early (a missing dir) closes its stdin first, so
+    // this write can see a broken pipe. The exit status below names the
+    // real failure, so the write error is not the one to report.
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(body.as_bytes());
+    let status = child.wait().expect("wait for the stub writer");
+    assert!(
+        status.success(),
+        "could not write exec stub {}: {status}",
+        path.display()
+    );
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC2-HP: the host boot reading is a real past instant, and on macOS its
+    // second count matches what `sysctl -n kern.boottime` prints.
+    #[test]
+    fn host_boot_epoch_ms_reads_a_past_boot() {
+        let boot = host_boot_epoch_ms().expect("this host exposes a boot time");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(boot > 0, "boot must be positive: {boot}");
+        assert!(boot < now_ms, "boot must predate now: {boot} vs {now_ms}");
+        let sysctl = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output();
+        if let Ok(out) = sysctl {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(sec) = text
+                .split("sec = ")
+                .nth(1)
+                .and_then(|rest| rest.split([',', ' ', '}']).next())
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                let window_start = sec * 1000;
+                assert!(
+                    boot >= window_start && boot < window_start + 1000,
+                    "boot ms {boot} outside boot second {sec}"
+                );
+            }
+        }
+    }
+
+    // AC2-ERR: a non-positive boot second count is a failed reading.
+    #[test]
+    fn boot_ms_from_refuses_a_non_positive_second() {
+        assert_eq!(boot_ms_from(0, 0), None);
+        assert_eq!(boot_ms_from(-5, 0), None);
+        assert_eq!(boot_ms_from(1, 0), Some(1000));
+        assert_eq!(boot_ms_from(1789997638, 500_000), Some(1789997638500));
+    }
 
     #[test]
     fn short_id_rejects_empty() {
@@ -860,6 +1044,29 @@ mod tests {
     /// kind is dynamic and not statically checkable. The line number (1-based)
     /// is reported so a drift failure points straight at the offending call.
     fn scan_emit_kinds(src: &str) -> Vec<(String, usize)> {
+        // Comment lines are blanked (offsets preserved) first: a doc comment
+        // may SHOW an emit shape (`.emit("...")` in prose) and the scan reads
+        // bytes, not syntax.
+        let bytes = src.as_bytes();
+        let mut blanked = bytes.to_vec();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let line_end = bytes[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map(|p| i + p)
+                .unwrap_or(bytes.len());
+            let first = bytes[i..line_end]
+                .iter()
+                .find(|&&c| c != b' ' && c != b'\t');
+            if first == Some(&b'/') {
+                for b in &mut blanked[i..line_end] {
+                    *b = b' ';
+                }
+            }
+            i = line_end + 1;
+        }
+        let src = std::str::from_utf8(&blanked).unwrap_or(src);
         let bytes = src.as_bytes();
         let mut kinds = Vec::new();
         for needle in [".emit", ".emit_fields"] {
@@ -900,11 +1107,171 @@ mod tests {
         kinds
     }
 
+    // The exec-stub guard: a lib test that writes an executable stub
+    // in-process holds a write fd, and a sibling test thread's fork copies it
+    // into a child; an exec of the stub then fails with ETXTBSY until that
+    // child reaches its own exec. The one writer is `write_exec_stub`, whose
+    // child /bin/sh exits before returning. ponytail: the regex matches only
+    // the literal-mode idiom; a mode built in a variable not named `mode`
+    // evades it.
+    #[test]
+    fn every_exec_stub_goes_through_write_exec_stub() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(!files.is_empty(), "found no .rs files under {src_root:?}");
+
+        // Byte-level scan, like the emit-kind guard: no regex crate here.
+        // Matches the plan regex `(from_mode|set_mode|\.mode)\((0o7[0-7]{2}|mode)\)`
+        // per line: after the needle, trimmed whitespace, either a 0o7xx octal
+        // literal closed by `)`, or the variable form `mode)`.
+        const NEEDLES: [&str; 3] = ["from_mode(", "set_mode(", ".mode("];
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read source file");
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let mut hit = false;
+                for needle in NEEDLES {
+                    let mut from = 0;
+                    while let Some(pos) = line[from..].find(needle) {
+                        let rest = line[from + pos + needle.len()..].trim_start();
+                        let octal = rest.as_bytes();
+                        let matched = (octal.len() >= 6
+                            && octal[..3] == *b"0o7"
+                            && (b'0'..=b'7').contains(&octal[3])
+                            && (b'0'..=b'7').contains(&octal[4])
+                            && octal[5] == b')')
+                            || rest.starts_with("mode)");
+                        if matched {
+                            hit = true;
+                            break;
+                        }
+                        from += pos + needle.len();
+                    }
+                    if hit {
+                        break;
+                    }
+                }
+                if hit {
+                    let name = file.strip_prefix(&src_root).unwrap_or(file);
+                    offenders.push(format!("{}:{}", name.display(), idx + 1));
+                }
+            }
+        }
+
+        // The five allowed files: production binary repair (install_verify),
+        // a production dir mode (paths), two dir-mode restores in tests
+        // (claims, operator_turns), and the bin test target that cannot see a
+        // cfg(test) lib fn (client_tests).
+        const ALLOWED: &[(&str, usize)] = &[
+            ("install_verify.rs", 1),
+            ("paths.rs", 1),
+            ("king_board/claims.rs", 1),
+            ("operator_turns.rs", 1),
+            ("client_tests.rs", 2),
+        ];
+        let allowed_counts: std::collections::HashMap<&str, usize> =
+            ALLOWED.iter().copied().collect();
+        let mut by_file: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for o in &offenders {
+            let file = o.rsplit_once(':').map(|(f, _)| f.to_string()).unwrap();
+            *by_file.entry(file).or_insert(0) += 1;
+        }
+        for (file, count) in &by_file {
+            let allowed = allowed_counts.get(file.as_str()).copied().unwrap_or(0);
+            assert!(
+                *count <= allowed,
+                "this test writes an executable stub from inside the test \
+                 process, where a sibling test's fork can hold the write fd \
+                 open and the exec fails with Text file busy. Write it with \
+                 crate::write_exec_stub. Offenders: {offenders:?}"
+            );
+        }
+        for (file, allowed) in ALLOWED {
+            let actual = by_file.get(*file).copied().unwrap_or(0);
+            assert!(
+                actual <= *allowed,
+                "{file} now matches {actual} times (allowance {allowed}); \
+                 the extra site must go through crate::write_exec_stub. {offenders:?}"
+            );
+        }
+    }
+
     fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         if needle.is_empty() || haystack.len() < needle.len() {
             return None;
         }
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    // AC1-HP / AC1-EDGE: the stub writer never holds the write fd in this
+    // process, so execs of its output survive sibling threads forking in a
+    // loop (darwin has no /bin/true, so the forking threads use
+    // /usr/bin/true). Each stub prints its own name and the exec asserts it.
+    #[test]
+    fn write_exec_stub_survives_sibling_forks() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut forkers = Vec::new();
+        for _ in 0..4 {
+            let stop = Arc::clone(&stop);
+            forkers.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/usr/bin/true").status();
+                }
+            }));
+        }
+        let mut writers = Vec::new();
+        for t in 0..4u32 {
+            let dir = dir.path().to_path_buf();
+            writers.push(std::thread::spawn(move || {
+                for i in 0..25u32 {
+                    let body = format!("#!/bin/sh\nprintf '%s' '{t}-{i}'\n");
+                    let stub = crate::write_exec_stub(&dir, &format!("s{t}-{i}"), &body);
+                    let out = std::process::Command::new(&stub)
+                        .output()
+                        .expect("exec stub");
+                    assert!(
+                        out.status.success(),
+                        "exec of {} failed: {out:?}",
+                        stub.display()
+                    );
+                    let mut text = String::new();
+                    std::io::Cursor::new(&out.stdout)
+                        .read_to_string(&mut text)
+                        .expect("stdout is utf-8");
+                    assert_eq!(text, format!("{t}-{i}"));
+                }
+            }));
+        }
+        for w in writers {
+            w.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for f in forkers {
+            f.join().expect("forker thread");
+        }
+        let mode = std::fs::metadata(dir.path().join("s0-0"))
+            .expect("stub exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "stub mode must be 0755");
+    }
+
+    // AC1-ERR: a missing destination dir surfaces as the writer's exit
+    // status, naming the path.
+    #[test]
+    #[should_panic(expected = "could not write exec stub")]
+    fn write_exec_stub_refuses_a_missing_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = crate::write_exec_stub(&dir.path().join("absent"), "fno", "#!/bin/sh\n");
     }
 }
 
@@ -932,6 +1299,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The question intake's journal write (the ask port): the durable half
+    // of `fno inbox outstanding ask`.
+    "operator_question",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE
@@ -940,6 +1310,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
+    // Pane-to-thread conversion: one per phase of the agent.convert
+    // transaction (classified, claims-held, pane-stopped, hand-off,
+    // resumed, flipped, rolled-back), carrying the name and strategy.
+    "agent_convert_phase",
     "agent_stopped",
     // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
@@ -1028,12 +1402,28 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // so a quiet repo cannot be mistaken for a sweep that never ran.
     "worktree_sweep",
     // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
-    // ran on its 6h floor and reconciled the durable [watchdog-stale:*]
-    // operator question to the measured fleet. Report-only: rows past the
-    // wake ceiling are the needs-human bucket no action lane may take.
+    // ran on its 6h floor and reconciled the lane's fleet tasks (the former
+    // [watchdog-stale:*] operator question) to the measured fleet through
+    // the Rust fleet-task door. Report-only: a king reads open tasks on the
+    // board's fleet_task queue.
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",
+    // Question sweep (daemon-emitted): `fno agents question-sweep` ran on
+    // its interval floor and closed the node-closed questions it found,
+    // appending one empty-answer row per question (a non-empty answer would
+    // arm the unrecorded-decision gate against the asking session). Emitted
+    // even on outcome none, so a quiet run cannot be mistaken for a sweep
+    // that never ran.
+    "question_sweep",
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // floor and un-parked open rows whose head moved or whose park passed
+    // 24h, marking finished rows handled. Emitted even on a quiet or skipped
+    // run, so a quiet run cannot be mistaken for a sweep that never ran.
+    "park_sweep",
+    // A parked PR resumed polling (pr-park-emitted): retries reset, by hand
+    // (the king row's verb) or by the sweep.
+    "pr_watch_unparked",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
@@ -1070,6 +1460,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_started",
     "daemon_exited",
     "daemon_idle_pending_exit",
+    // Drift retirement (daemon-emitted): the daemon measured its own
+    // build drifted and, at a quiet tick with no live worker, retired through
+    // the graceful tail so the next lazy start runs the installed binary.
+    "daemon_drift_pending_exit",
     "daemon_shutting_down",
     // The socket path stopped resolving to the inode this daemon bound, so
     // something else now owns it and this process is unreachable.
@@ -1105,6 +1499,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The receipt a reign's tenure bound leaves; `fno doctor event audit`
     // resolves it through this table exactly like the reign kinds above.
     "king_term",
+    // A crown whose holder session is proven dead left its territory: the
+    // dead-crown sweep journals the vacate with cause holder_dead, the
+    // death evidence, and the inheritor (crown_reap.rs; the daemon retire
+    // arm and `fno agents reap`). Python's attended `king done` emits the
+    // same kind through the shared emitter.
+    "agent_crown_vacated",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
@@ -1123,9 +1523,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "keeper_row_superseded",
     "keeper_row_terminal_socket_live",
     // Store-keeper socket hygiene (daemon-start sweep): dead store sockets in
-    // the state root and the hashed temp root are unlinked; live listeners are
-    // left as found.
+    // the state root and the hashed temp root are unlinked, as are orphaned
+    // seat locks; live listeners are left as found.
     "store_socket_unlinked",
+    "store_seat_lock_unlinked",
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",
@@ -1170,6 +1571,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // dedupe index: a pair already observed in the window never re-emits.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    // Node-closed question sweep (daemon-emitted): the periodic walk that
+    // auto-closes open operator questions whose node has closed; one emit
+    // per pass names how many it closed and, when any, which.
+    "question_sweep",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
@@ -1200,6 +1605,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // for the same reason worktree_sweep is: a quiet repo must not read as a
     // loop that never ran. The Python tick emits nothing for this family.
     "pr_heal_tick",
+    // The heal loop's acted-on rows: one flake guard staged per flapping
+    // (sha, run id, check), and one remedy row per PR the loop acted on.
+    "pr_heal_flake",
+    "pr_heal_pr",
+    // Daemon startup scope declaration: sandbox home vs the operator's
+    // shared home. Fleet gating and board routing key off it.
+    "daemon_fleet_scope",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
     // run_summary) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
@@ -1244,7 +1656,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"
@@ -1335,4 +1747,102 @@ pub fn emit_schema_json() -> serde_json::Value {
             "data_size_encoding": events_limits::data_size_encoding()
         }
     })
+}
+
+/// A file's tail, at most `cap` bytes, starting on a line boundary: a seek
+/// into the middle of a line drops that partial line, so every admitted row
+/// is whole. Empty on any read failure, never a guess. The one tail walk:
+/// `tail_text` lossy-repairs it for observational readers, and a guard that
+/// must fail closed takes [`tail_text_strict`] instead.
+pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+    let start = len.saturating_sub(cap);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    if start > 0 {
+        match buf.iter().position(|&b| b == b'\n') {
+            // No whole line inside the window: nothing to admit.
+            Some(p) => buf.split_off(p + 1),
+            None => Vec::new(),
+        }
+    } else {
+        buf
+    }
+}
+
+/// [`tail_bytes`] as lossy text: observational readers never fail on bytes.
+pub(crate) fn tail_text(path: &std::path::Path, cap: u64) -> String {
+    String::from_utf8_lossy(&tail_bytes(path, cap)).into_owned()
+}
+
+/// [`tail_bytes`] as text, None when the tail is not valid UTF-8: a guard
+/// that answers with an allow reads corrupt evidence as unreadable, never
+/// as a repaired guess.
+pub(crate) fn tail_text_strict(path: &std::path::Path, cap: u64) -> Option<String> {
+    String::from_utf8(tail_bytes(path, cap)).ok()
+}
+
+/// Host boot as epoch ms. Linux reuses `claims::linux_boot_time_s` (the
+/// cached `/proc/stat` btime); macOS reads sysctl `kern.boottime`. None on
+/// any failure, never "now": a caller that cannot know the boot must drop
+/// the boot clause, not invent one.
+#[cfg(target_os = "linux")]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    crate::claims::linux_boot_time_s().and_then(|s| boot_ms_from(s, 0))
+}
+
+/// The macOS leg: sysctl `kern.boottime` into a zeroed timeval, the same
+/// call shape `census.rs` uses for its CTL_KERN probes. Cached like the
+/// Linux btime: constant for the life of the host, read once per process.
+#[cfg(target_os = "macos")]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    static BOOT: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+        let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::timeval>();
+        // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
+        // in this frame and are read only during the call.
+        let done = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                &mut tv as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if done != 0 {
+            return None;
+        }
+        boot_ms_from(tv.tv_sec as i64, tv.tv_usec as i64)
+    })
+}
+
+/// Platforms with neither reader read absent, like every other bound.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    None
+}
+
+/// Boot epoch ms from a boot-time second count. A non-positive count is a
+/// failed reading, not "the host booted at the epoch".
+fn boot_ms_from(sec: i64, usec: i64) -> Option<i64> {
+    if sec <= 0 {
+        return None;
+    }
+    Some(sec * 1000 + usec / 1000)
 }

@@ -34,6 +34,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::claude_ask::JobListing;
 use crate::state::{load_registry, MuxRef, Registry, RegistryEntry};
 
 /// Exit code for a refused re-entry: the evidence is named on stderr, no argv
@@ -43,11 +44,14 @@ pub const REENTRY_REFUSED_EXIT: i32 = 3;
 /// The transitions this resolver serves. One vocabulary so a plan's consumer
 /// can tell an attach (re-enter a live session) from a resume (relaunch a
 /// dead one) from a recover (operator-selected id) without re-deriving it.
+/// A revive is the mux tap: it attaches a running job and relaunches any
+/// other one first, then attaches, in one argv.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReentryTransition {
     Attach,
     Resume,
     Recover,
+    Revive,
 }
 
 impl ReentryTransition {
@@ -56,6 +60,7 @@ impl ReentryTransition {
             ReentryTransition::Attach => "attach",
             ReentryTransition::Resume => "resume",
             ReentryTransition::Recover => "recover",
+            ReentryTransition::Revive => "revive",
         }
     }
 
@@ -87,7 +92,7 @@ impl ReentryTransition {
 pub struct ReentryPlan {
     pub resolved: bool,
     pub transition: String,
-    /// "attach" | "respawn" | "resume" | "bg-resume". The transition is the
+    /// "attach" | "respawn" | "bg-resume". The transition is the
     /// caller's INTENT; this is what the plan actually does, and a consumer
     /// decides how to run it from here.
     pub mechanism: String,
@@ -122,6 +127,24 @@ pub struct ReentryPlan {
     /// namespace. Only ever `CLAUDE_CONFIG_DIR`; a value is a path, never a
     /// credential.
     pub env: BTreeMap<String, String>,
+}
+
+impl ReentryPlan {
+    /// Copy this plan's `--model`/`--effort` pin onto `argv`, the argv a door
+    /// built itself, and hand the plan back.
+    pub fn carry_pins(self, argv: &mut Vec<String>) -> Self {
+        let value_after = |flag: &str| -> Option<String> {
+            self.argv
+                .iter()
+                .position(|t| t == flag)
+                .and_then(|i| self.argv.get(i + 1))
+                .cloned()
+        };
+        let model = value_after("--model");
+        let effort = value_after("--effort");
+        crate::resume_pin::append_axes(argv, model.as_deref(), effort.as_deref());
+        self
+    }
 }
 
 /// How an account id resolves: its config dir when the lane has one. `Err`
@@ -412,17 +435,47 @@ pub fn resolve_reentry_with(
     } else {
         derived_short_id(&session_id)
     };
-    if short_id.is_empty() && transition == ReentryTransition::Attach {
-        return Err(format!(
-            "row {name:?} carries no transport key (short_id) and the session id derives none; claude attach has no target"
-        ));
-    }
-
     // Route evidence: a recorded path must still hold a route.
     if let Some(path) = entry.route_settings_path.as_deref() {
         if !path.is_empty() {
             validate_route_settings(path)?;
         }
+    }
+
+    // One binding read serves both the listing root and the config dir.
+    let binding = entry
+        .launch_account
+        .as_deref()
+        .filter(|id| *id != "default")
+        .map(account_binding);
+    // A revive of a running job IS an attach, so it takes the attach rules
+    // below; any other job relaunches first and takes the launch rules.
+    let listing = if transition == ReentryTransition::Attach || short_id.is_empty() {
+        JobListing::Unread
+    } else {
+        let root = binding.clone().and_then(|b| b.ok().flatten());
+        claude_home.listed_job(&short_id, root.as_deref().map(Path::new))
+    };
+    // Without the listing a live session cannot be told from a dead one, and
+    // a bg resume of a live one starts a copy the pane never stops.
+    if transition == ReentryTransition::Revive
+        && listing == JobListing::Unread
+        && !short_id.is_empty()
+    {
+        return Err(format!(
+            "row {name:?}: `claude agents --json --all` could not be read, so job {short_id} \
+             cannot be told live or dead; tap again once it answers"
+        ));
+    }
+    let transition = if transition == ReentryTransition::Revive && listing.is_running() {
+        ReentryTransition::Attach
+    } else {
+        transition
+    };
+    if short_id.is_empty() && transition == ReentryTransition::Attach {
+        return Err(format!(
+            "row {name:?} carries no transport key (short_id) and the session id derives none; claude attach has no target"
+        ));
     }
 
     // The account axis. Routed or non-Anthropic rows refuse on an unknown
@@ -444,7 +497,7 @@ pub fn resolve_reentry_with(
             ))
         }
         None | Some("default") => None,
-        Some(id) => match account_binding(id) {
+        Some(id) => match binding.unwrap_or_else(|| account_binding(id)) {
             // An account that resolves to NO config dir is an api-key lane:
             // its credential lives in env the secret-free binding never
             // carries, so a plan built here would launch WITHOUT the account's
@@ -507,36 +560,24 @@ pub fn resolve_reentry_with(
             argv.push("attach".into());
             argv.push(short_id.clone());
         }
-        ReentryTransition::Resume | ReentryTransition::Recover => {
-            // Three restore routes, tried in order. `jobs/<short>/state.json`
-            // is what `claude respawn` reads; present means the row comes
-            // back under its own id from its saved launch. A mux row keeps
-            // `claude --resume` on its pane (a pane hosts a foreground
-            // session). Everything else - the bg row whose job dir the
-            // daemon reaper already took - comes back under its own id with
-            // `claude --bg --resume`: measured on 2.1.272, a stopped session
-            // continues under the SAME id, and a live one answers with a
-            // copy notice the launcher must refuse.
+        ReentryTransition::Resume | ReentryTransition::Recover | ReentryTransition::Revive => {
+            // A job `claude agents --json --all` lists restarts under
+            // `claude respawn`, running or stopped. An unlisted one, or an
+            // unreadable listing, comes back under its own id with
+            // `claude --bg --resume` (a live session answers with a copy
+            // notice the launcher refuses). A pane row takes the same arms:
+            // a revival never opens a foreground `claude --resume`.
             if short_id.is_empty() {
                 return Err(format!(
                     "row {name:?} derives no claude jobId from session {session_id}; \
                      no transport key for respawn or bg-resume"
                 ));
             }
-            if claude_home
-                .jobs_dir_for(&short_id)
-                .join("state.json")
-                .is_file()
-            {
+            if matches!(listing, JobListing::Listed(_)) {
                 mechanism = "respawn".to_string();
                 argv.push("claude".into());
                 argv.push("respawn".into());
                 argv.push(short_id.clone());
-            } else if entry.mux.is_some() {
-                mechanism = "resume".to_string();
-                argv.push("claude".into());
-                argv.push("--resume".into());
-                argv.push(session_id.clone());
             } else {
                 mechanism = "bg-resume".to_string();
                 argv.push("claude".into());
@@ -565,6 +606,61 @@ pub fn resolve_reentry_with(
         }
     }
 
+    // The model pin. An unpinned `claude --resume` lands on the account
+    // default, so the resume arms ask resume_pin which model the session
+    // comes back on: the row's request, else the transcript's birth identity.
+    // A routed plan never pins (the route owns the argv); an unresolvable row
+    // leaves the argv as today - `fno agents resume` carries no model flag to
+    // override a refusal with, so a pin that cannot resolve cannot block an
+    // attended resume. The explicit-token guard keeps a `--model`/`--effort`
+    // an earlier arm added first (the pane-to-thread transition on this same
+    // arm plans to carry the live writer's own axes).
+    if mechanism == "bg-resume" {
+        let projects_base = claude_config_dir
+            .as_deref()
+            .map(|d| Path::new(d).join("projects"))
+            .unwrap_or_else(|| claude_home.projects_dir());
+        let transcript = crate::claude_drive::find_transcript_in(&projects_base, &session_id);
+        let pins = crate::resume_pin::RowPins::from_entry(entry);
+        let lookup: crate::resume_pin::RouteProviderOf<'_> =
+            &|m| crate::claude_adopt::provider_from_route_settings(m);
+        match crate::resume_pin::resolve(
+            Some(pins),
+            transcript.as_deref(),
+            routed,
+            &session_id,
+            lookup,
+        ) {
+            Ok(pin) => {
+                crate::resume_pin::append_axes(
+                    &mut argv,
+                    pin.argv_model.as_deref(),
+                    pin.effort.as_deref(),
+                );
+            }
+            Err(unpinned) => {
+                // A revival the resolver cannot pin - a bare re-created row
+                // whose transcript answers nothing - still comes back on the
+                // axes its reap receipt rendered, never on the account
+                // default. A lost-route refusal keeps today's door instead:
+                // a model without its provider routes on the wrong account.
+                if unpinned.lost_route.is_none() {
+                    if let Some((model, effort)) = receipt_resume_axes(&session_id) {
+                        crate::resume_pin::append_axes(
+                            &mut argv,
+                            model.as_deref(),
+                            effort.as_deref(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if transition == ReentryTransition::Revive {
+        argv = relaunch_then_attach(argv, &short_id);
+    }
+
     Ok(ReentryPlan {
         resolved: true,
         transition: transition.as_str().to_string(),
@@ -583,6 +679,44 @@ pub fn resolve_reentry_with(
         argv,
         env,
     })
+}
+
+/// One argv that runs the relaunch, then becomes `claude attach <short>`:
+/// the revive's pane shows the session it just brought back. The ids ride as
+/// positional arguments, never spliced into the script text.
+fn relaunch_then_attach(relaunch: Vec<String>, short_id: &str) -> Vec<String> {
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        r#""$@" && exec claude attach "$0""#.to_string(),
+        short_id.to_string(),
+    ];
+    argv.extend(relaunch);
+    argv
+}
+
+/// The model axes a reap receipt recorded, for a revival the row itself
+/// cannot pin. Reads the claude receipt for `session_id` and harvests the
+/// `--model` / `--effort` token pairs its rendered resume argv carries.
+/// `None` when no receipt answers or it names no axes.
+fn receipt_resume_axes(session_id: &str) -> Option<(Option<String>, Option<String>)> {
+    let path = crate::receipt::reap_receipt_path_for(
+        &crate::paths::AgentsHome::from_env(),
+        "claude",
+        session_id,
+    );
+    let receipt = crate::receipt::read_reap_receipt(&path).ok()?;
+    let mut tokens = receipt.resume_argv.iter();
+    let mut model = None;
+    let mut effort = None;
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "--model" => model = tokens.next().cloned(),
+            "--effort" => effort = tokens.next().cloned(),
+            _ => {}
+        }
+    }
+    (model.is_some() || effort.is_some()).then_some((model, effort))
 }
 
 /// The registry-reading wrapper the CLI action calls: load, resolve, refuse
@@ -608,11 +742,36 @@ pub fn resolve_reentry(
     )
 }
 
+/// The `holder <session-id>...` action: recognized when the first arg is the
+/// word, at least one id follows, and every id is a lowercase UUID. The shape
+/// check keeps the word off the agent-name path: `reentry-plan holder` alone
+/// still resolves an agent named `holder`, and `holder <uuid>` is an
+/// "unexpected argument" error today, so nothing that works now changes. A
+/// `holder` arg followed by a non-UUID falls through to the existing parser
+/// and its error.
+fn holder_action_ids(args: &[String]) -> Option<&[String]> {
+    match args.split_first() {
+        Some((first, rest)) if first == "holder" => {
+            if !rest.is_empty() && rest.iter().all(|a| crate::resume_wake::is_uuid_shaped(a)) {
+                Some(rest)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The `fno-agents reentry-plan` machine action:
-/// `reentry-plan <name> [--transition attach|resume|recover] [--session <id>]`.
-/// Exit 0 prints the plan as one JSON object; exit 3 prints the refusal on
-/// stderr and constructs no argv.
+/// `reentry-plan <name> [--transition attach|resume|recover] [--session <id>]`
+/// or the `reentry-plan holder <session-id>...` action, which answers the
+/// claude session records without naming a registry row. Exit 0 prints the
+/// answer as one JSON object; exit 3 prints the refusal on stderr and
+/// constructs no argv.
 pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32 {
+    if let Some(ids) = holder_action_ids(args) {
+        return crate::claude_sessions::run_holder_action(ids);
+    }
     let mut name: Option<&str> = None;
     let mut transition = ReentryTransition::Resume;
     let mut select_session: Option<String> = None;
@@ -623,9 +782,10 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
                 Some("attach") => transition = ReentryTransition::Attach,
                 Some("resume") => transition = ReentryTransition::Resume,
                 Some("recover") => transition = ReentryTransition::Recover,
+                Some("revive") => transition = ReentryTransition::Revive,
                 other => {
                     eprintln!(
-                        "reentry-plan: unknown --transition {other:?} (attach|resume|recover)"
+                        "reentry-plan: unknown --transition {other:?} (attach|resume|recover|revive)"
                     );
                     return 2;
                 }
@@ -676,26 +836,21 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
 mod tests {
     use super::*;
     use crate::claude_ask::ClaudeHome;
+    use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
     use crate::state::Registry;
 
     const SECRET: &str = "zai-secret-token";
 
-    /// A ClaudeHome over a throwaway home dir with `jobs/<short>/state.json`
-    /// staged: the one fact the respawn arm probes. Tests that expect a
-    /// respawn plan stage the id they resume; an empty home is the
-    /// job-state-gone case.
+    /// A claude home whose `claude agents --json --all` lists `shorts`: the
+    /// one fact the respawn arm reads. An empty listing is the unlisted case.
     fn staged_home(shorts: &[&str]) -> (tempfile::TempDir, ClaudeHome) {
         let dir = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(dir.path());
-        for short in shorts {
-            let jobs = home.jobs_dir_for(short);
-            std::fs::create_dir_all(&jobs).unwrap();
-            std::fs::write(
-                jobs.join("state.json"),
-                serde_json::json!({"state": "idle", "sessionId": "x"}).to_string(),
-            )
-            .unwrap();
-        }
+        let home = ClaudeHome::at(dir.path()).with_listing(ClaudeAgentsSnapshot::known(
+            shorts
+                .iter()
+                .map(|s| ClaudeAgentRow::new(s, Some("stopped")))
+                .collect(),
+        ));
         (dir, home)
     }
 
@@ -1061,6 +1216,61 @@ mod tests {
     }
 
     #[test]
+    fn reentry_plan_pins_the_reap_receipts_model_axes_on_a_bare_row() {
+        // A re-created bare row (no model, no route, no live transcript)
+        // cannot pin its model, so the revival would land on the account
+        // default. The receipt the reaper wrote carries the axes the
+        // original launch ran with; the bg-resume plan harvests them.
+        let _guard = crate::path_test_guard();
+        let (_tmp, home) = staged_home(&[]);
+        let mut e = row("bare");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        // The receipt lives under the AGENTS home (FNO_AGENTS_HOME is that
+        // root), exactly where the reaper wrote it.
+        let agents_tmp = tempfile::tempdir().unwrap();
+        let receipts = agents_tmp.path().join("reap-receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(
+            receipts.join("claude-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json"),
+            r#"{"row_name":"bare","short_id":"aaaaaaaa","harness":"claude",
+                "harness_session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "cwd":"/tmp","log_path":null,
+                "created_at":"2026-09-24T10:00:00Z","reaped_at":"2026-09-25T10:00:00Z",
+                "resume":"claude --bg --resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --model opus --effort high",
+                "resume_argv":["claude","--bg","--resume","aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","--model","opus","--effort","high"]}"#,
+        )
+        .unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", agents_tmp.path());
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "bare",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        );
+        match &saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        let plan = plan.unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(
+            plan.argv.windows(2).any(|w| w == ["--model", "opus"]),
+            "the receipt's model pin rides the argv: {:?}",
+            plan.argv
+        );
+        assert!(
+            plan.argv.windows(2).any(|w| w == ["--effort", "high"]),
+            "the receipt's effort pin rides the argv: {:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
     fn reentry_plan_names_both_ids_and_requires_selection_to_launch() {
         let (_tmp, home) = staged_home(&["aaaaaaaa", "11111111"]);
         let mut e = row("forked");
@@ -1422,7 +1632,7 @@ mod tests {
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
         e.launch_account = Some("default".into());
-        let (_tmp, home) = staged_home(&[]); // no jobs/<short>/state.json
+        let (_tmp, home) = staged_home(&[]); // not listed
         let plan = resolve_reentry_with(
             &reg(vec![e]),
             "gone",
@@ -1488,10 +1698,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reentry_plan_keeps_a_mux_row_on_its_pane_foreground_resume() {
-        // A mux row hosts a foreground session on its pane, so the restore
-        // route is the plain `claude --resume`, never a second bg job.
+    fn paned_plan(listed: &[&str]) -> ReentryPlan {
         let mut e = row("paned");
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
@@ -1500,8 +1707,8 @@ mod tests {
             session: "main".into(),
             pane_id: 0,
         });
-        let (_tmp, home) = staged_home(&[]);
-        let plan = resolve_reentry_with(
+        let (_tmp, home) = staged_home(listed);
+        resolve_reentry_with(
             &reg(vec![e]),
             "paned",
             ReentryTransition::Resume,
@@ -1510,14 +1717,122 @@ mod tests {
             &home,
             None,
         )
-        .unwrap();
-        assert_eq!(plan.mechanism, "resume");
+        .unwrap()
+    }
+
+    fn revive_with(listing: ClaudeAgentsSnapshot) -> Result<ReentryPlan, String> {
+        let mut e = row("tapped");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        let dir = tempfile::tempdir().unwrap();
+        let home = ClaudeHome::at(dir.path()).with_listing(listing);
+        resolve_reentry_with(
+            &reg(vec![e]),
+            "tapped",
+            ReentryTransition::Revive,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+    }
+
+    fn revive_plan(state: Option<&str>) -> ReentryPlan {
+        let rows = state
+            .map(|s| ClaudeAgentRow::new("9a1b2c3d", Some(s)))
+            .into_iter()
+            .collect();
+        revive_with(ClaudeAgentsSnapshot::known(rows)).unwrap()
+    }
+
+    #[test]
+    fn a_revive_refuses_when_the_listing_cannot_be_read() {
+        // A bg resume of a session that is in fact live starts a copy the
+        // pane never stops, so an unread listing refuses instead.
+        let err = revive_with(ClaudeAgentsSnapshot::unknown("timed out")).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn a_revive_attaches_a_running_job() {
+        for running in ["working", "blocked", "idle"] {
+            let plan = revive_plan(Some(running));
+            assert_eq!(plan.transition, "attach", "{running}");
+            assert_eq!(plan.argv, vec!["claude", "attach", "9a1b2c3d"], "{running}");
+        }
+    }
+
+    #[test]
+    fn a_revive_respawns_a_listed_dead_job_then_attaches() {
+        for dead in ["stopped", "failed", "done"] {
+            let plan = revive_plan(Some(dead));
+            assert_eq!(plan.transition, "revive", "{dead}");
+            assert_eq!(plan.mechanism, "respawn", "{dead}");
+            assert_eq!(
+                plan.argv,
+                vec![
+                    "sh",
+                    "-c",
+                    r#""$@" && exec claude attach "$0""#,
+                    "9a1b2c3d",
+                    "claude",
+                    "respawn",
+                    "9a1b2c3d",
+                ],
+                "{dead}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revive_bg_resumes_an_unlisted_job_then_attaches() {
+        let plan = revive_plan(None);
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(
+            &plan.argv[..7],
+            &[
+                "sh",
+                "-c",
+                r#""$@" && exec claude attach "$0""#,
+                "9a1b2c3d",
+                "claude",
+                "--bg",
+                "--resume",
+            ]
+        );
+        assert_eq!(plan.argv[7], "9a1b2c3d-eeee-ffff-0000-111122223333");
+    }
+
+    #[test]
+    fn reentry_plan_never_resumes_a_mux_row_as_a_foreground_pane() {
+        // A pane row the listing does not know comes back as a background
+        // job under its own id, never a foreground `claude --resume`.
+        let plan = paned_plan(&[]);
+        assert_eq!(plan.mechanism, "bg-resume");
         assert_eq!(
             plan.argv,
             vec![
                 "claude".to_string(),
+                "--bg".to_string(),
                 "--resume".to_string(),
                 "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reentry_plan_respawns_a_listed_job_whatever_its_files_say() {
+        // `claude agents --json --all` lists the job, so it respawns. No
+        // file under jobs/ was staged: the listing alone decides.
+        let plan = paned_plan(&["9a1b2c3d"]);
+        assert_eq!(plan.mechanism, "respawn");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "respawn".to_string(),
+                "9a1b2c3d".to_string(),
             ]
         );
     }
@@ -1527,7 +1842,7 @@ mod tests {
         // The recorded cwd is gone and no git worktree knows the session. The
         // transcript itself names the live directory; the plan must use it.
         let tmp = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(tmp.path());
+        let home = ClaudeHome::at(tmp.path()).with_listing(ClaudeAgentsSnapshot::known(vec![]));
         let live = tmp.path().join("live-dir");
         std::fs::create_dir_all(&live).unwrap();
         let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";
@@ -1634,5 +1949,245 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.node.as_deref(), Some("x-aaaa"));
+    }
+
+    /// An empty route dir, under the env lock: the resume-pin lookup misses,
+    /// which is the unrouted shape these tests isolate from the machine.
+    fn empty_route_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let routes = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", routes.path());
+        let path = routes.path().to_path_buf();
+        (routes, path)
+    }
+
+    fn has_flag(argv: &[String], flag: &str, value: &str) -> bool {
+        argv.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn ac3_hp_unrouted_row_pins_the_requested_model_on_bg_resume() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("opus");
+        e.harness_session_id = Some("cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "cccccccc".into();
+        e.requested_model = Some("claude-opus-5".into());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No job dir staged: the bg-resume arm is the plan.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "opus",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(has_flag(&plan.argv, "--model", "claude-opus-5"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_routed_row_pins_nothing() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("reentry-test-route-pin.json");
+        write_route(&dir, false);
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("glm");
+        e.harness_session_id = Some("dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "dddddddd".into();
+        e.provider = Some("zai".into());
+        e.launch_account = Some("makers".into());
+        e.requested_model = Some("glm-5.2".into());
+        e.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No job dir: the bg-resume arm carries the route as --settings and
+        // no --model, because the route owns the argv model.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "glm",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        assert!(plan.argv.iter().any(|t| t == "--settings"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_job_dir_respawn_argv_stays_bare() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("opus");
+        e.harness_session_id = Some("eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "eeeeeeee".into();
+        e.requested_model = Some("claude-opus-5".into());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // The staged job dir routes the plan to respawn, which restarts the
+        // saved launch; the pin never touches it.
+        let (_tmp, home) = staged_home(&["eeeeeeee"]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "opus",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "respawn");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_unresolvable_row_keeps_todays_argv() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("unpinned");
+        e.harness_session_id = Some("ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "ffffffff".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No model axis and no transcript the resolver can find: the pin
+        // cannot resolve, and the argv is exactly today's.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "unpinned",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--bg".to_string(),
+                "--resume".to_string(),
+                "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()
+            ]
+        );
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    fn pinned_plan(model: &str, effort: &str) -> ReentryPlan {
+        ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "resume".into(),
+            name: "w".into(),
+            fno_id: None,
+            node: None,
+            session_id: "123e4567-0000-0000-0000-000000000000".into(),
+            short_id: "123e4567".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: "/tmp".into(),
+            substrate: "pane".into(),
+            mux: None,
+            argv: vec![
+                "claude".into(),
+                "--resume".into(),
+                "123e4567-0000-0000-0000-000000000000".into(),
+                "--model".into(),
+                model.into(),
+                "--effort".into(),
+                effort.into(),
+            ],
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn ac4_hp_carry_pins_copies_the_plan_pin_onto_the_door_argv() {
+        let mut argv = vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            "u".to_string(),
+        ];
+        let plan = pinned_plan("claude-opus-5", "high");
+        let returned = plan.clone().carry_pins(&mut argv);
+        assert_eq!(returned, plan);
+        assert_eq!(
+            argv.iter().filter(|t| *t == "--model").count(),
+            1,
+            "exactly one --model"
+        );
+        assert_eq!(argv.iter().filter(|t| *t == "--effort").count(), 1);
+        assert!(argv.contains(&"claude-opus-5".to_string()));
+        assert!(argv.contains(&"high".to_string()));
+    }
+
+    #[test]
+    fn ac4_edge_carry_pins_never_duplicates_an_explicit_flag() {
+        // An argv that already names --model keeps it; a plan with no pin
+        // (attach, or a routed plan) leaves the argv unchanged.
+        let mut argv = vec!["claude".to_string(), "--model".to_string(), "m".to_string()];
+        pinned_plan("claude-opus-5", "high").carry_pins(&mut argv);
+        assert_eq!(argv.iter().filter(|t| *t == "--model").count(), 1);
+        assert!(argv.contains(&"m".to_string()));
+        assert_eq!(argv.iter().filter(|t| *t == "--effort").count(), 1);
+
+        let bare = ReentryPlan {
+            argv: vec!["claude".to_string()],
+            ..pinned_plan("claude-opus-5", "high")
+        };
+        let mut untouched = vec!["claude".to_string()];
+        let returned = bare.carry_pins(&mut untouched);
+        assert_eq!(untouched, vec!["claude".to_string()]);
+        assert_eq!(returned.argv, vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn holder_action_ids_recognizes_only_the_word_plus_uuids() {
+        let uuid = "bb2731c9-ad46-4303-a80d-152c68e91a4e";
+        let good = vec!["holder".to_string(), uuid.to_string()];
+        assert_eq!(
+            holder_action_ids(&good).map(|r| r.to_vec()),
+            Some(vec![uuid.to_string()])
+        );
+
+        let two = vec![
+            "holder".to_string(),
+            uuid.to_string(),
+            "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".to_string(),
+        ];
+        assert!(holder_action_ids(&two).is_some());
+
+        // `holder` alone resolves an agent named holder on the name path.
+        assert!(holder_action_ids(&["holder".to_string()]).is_none());
+        // A non-UUID after the word falls through to the parser's error.
+        assert!(holder_action_ids(&["holder".to_string(), "repro-row".to_string()]).is_none());
+        // Other first words never route here.
+        assert!(holder_action_ids(&["resume".to_string(), uuid.to_string()]).is_none());
+        assert!(holder_action_ids(&[]).is_none());
     }
 }

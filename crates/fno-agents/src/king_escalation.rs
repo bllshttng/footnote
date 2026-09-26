@@ -1,7 +1,8 @@
 //! The king-escalation question renderer : one pure function set
 //! behind a hidden JSON verb, reached as `fno-agents king-escalation-text`.
-//! Python keeps the question fold (`reconcile_channel`) and the liveness
-//! read; this side only renders text from the reading the producer passed.
+//! The lane's reconcile fold lives in Rust (`fleet_task::reconcile`, reached
+//! from Python through the `fleet-task` transport); this side only renders
+//! text from the reading the producer passed.
 //!
 //! A question states only a reading its writer handed over. An empty set is
 //! not a reading, so the renderer refuses it as data (`ok: false`) instead of
@@ -44,6 +45,10 @@ pub fn reading_term_reached() -> String {
 
 pub fn reading_term_unreadable() -> String {
     "reading:term-unreadable".to_owned()
+}
+
+pub fn reading_stale_crown_doc() -> String {
+    "reading:stale-crown-doc".to_owned()
 }
 
 #[derive(Deserialize)]

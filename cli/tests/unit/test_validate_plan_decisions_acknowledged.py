@@ -60,6 +60,7 @@ def _seed_decision(
     supersedes: str | None = None,
     expiry_ref: object = _EXPIRY_REF_UNSET,
     authority_source: str = "beastmode",
+    lifecycle: str | None = None,
 ) -> None:
     """Append one decision-index row directly, bypassing record_decision.
 
@@ -80,6 +81,8 @@ def _seed_decision(
         data["supersedes"] = supersedes
     if expiry_ref is not _EXPIRY_REF_UNSET:
         data["expiry_ref"] = expiry_ref
+    if lifecycle is not None:
+        data["lifecycle"] = lifecycle
     row = {"ts": "2026-08-01T00:00:00.000000Z", "type": "operator_decision", "source": "target", "data": data}
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
@@ -319,6 +322,70 @@ def test_unreadable_decision_index_fails_closed(tmp_path):
     assert "decisions_acknowledged could not be checked" in result.stdout
 
 
+def test_unreadable_graph_fails_closed_before_coord_lifecycle(tmp_path):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-c0ffee12",
+        subject="x-c0ffee12",
+        expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
+        authority_source="agent",
+    )
+    (state_dir / "graph.json").write_text("{not valid json\n", encoding="utf-8")
+
+    plan = tmp_path / "unreadable-graph.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "decisions_acknowledged could not be checked (the graph could not be read" in result.stdout
+    assert "no positive closure evidence" not in result.stdout
+
+
+def test_validator_recomputes_unknown_lifecycle_from_readable_graph(tmp_path):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-c0ffee12",
+        subject="x-c0ffee12",
+        expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
+        authority_source="agent",
+        lifecycle="unknown",
+    )
+    (state_dir / "graph.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-c0ffee12",
+                        "status": "done",
+                        "completed_at": "2026-09-20T00:00:00Z",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = tmp_path / "readable-graph.md"
+    plan.write_text(
+        _plan(
+            "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+            "consolidation:\n"
+            "  outcome: proceed_alone\n"
+            "  proceed_alone_against: []\n"
+        )
+    )
+    result = _run(plan, state_dir)
+
+    assert result.returncode == 0, result.stdout
+    assert "no positive closure evidence" not in result.stdout
+
+
 def test_damaged_index_rows_fail_closed_not_reported_as_clean(tmp_path):
     """codex finding: a damaged row's decision might be the closing verdict;
     reading the surviving rows as complete would silently pass a plan whose
@@ -341,5 +408,12 @@ def test_damaged_index_rows_fail_closed_not_reported_as_clean(tmp_path):
     ))
     result = _run(plan, state_dir)
     assert result.returncode == 1, result.stdout
-    assert "decisions_acknowledged could not be checked" in result.stdout
+    if "damaged row" not in result.stdout:
+        from fno.events.store_client import native_rows
+
+        raise AssertionError(
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            f" index_lines={index.read_text(encoding='utf-8')!r}"
+            f" native={native_rows(index)!r}"
+        )
     assert "damaged row" in result.stdout

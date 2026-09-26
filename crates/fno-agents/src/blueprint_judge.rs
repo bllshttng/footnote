@@ -26,21 +26,83 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const JUDGE_DIMENSIONS: [&str; 9] = [
-    "persona",
+/// Structural or source-grounded questions a plan of any kind answers.
+const SHARED_DIMENSIONS: [&str; 6] = [
     "surface_fit",
-    "uncovered_case",
     "deletable",
     "duplication",
     "epic_fit",
     "mission_fit",
-    "customer_fit",
     "code_truth",
 ];
 
+/// Product-fit questions asked of feature, epic and roadmap plans.
+const PRODUCT_DIMENSIONS: [&str; 6] = [
+    "persona",
+    "uncovered_case",
+    "customer_fit",
+    "competitive_fit",
+    "ship_quality",
+    "partner_challenge",
+];
+
+/// Cause questions asked of bug plans instead of the product pack.
+const CAUSE_DIMENSIONS: [&str; 4] = [
+    "reproduced",
+    "root_cause",
+    "sibling_callers",
+    "regression_test",
+];
+
+/// The whole vocabulary: shared, then product, then cause, in that order.
+/// It loads lenses, refuses an unknown dimension and bounds calibration; it
+/// no longer decides what one plan is asked -- `dimensions_for` does.
+pub const JUDGE_DIMENSIONS: [&str; 16] = [
+    "surface_fit",
+    "deletable",
+    "duplication",
+    "epic_fit",
+    "mission_fit",
+    "code_truth",
+    "persona",
+    "uncovered_case",
+    "customer_fit",
+    "competitive_fit",
+    "ship_quality",
+    "partner_challenge",
+    "reproduced",
+    "root_cause",
+    "sibling_callers",
+    "regression_test",
+];
+
+/// The questions one node's kind calls for: bug gets shared + cause, every
+/// other kind (and an unresolvable node) gets shared + product. That
+/// default is the pre-kind behavior for a node the judge cannot resolve.
+fn dimensions_for(kind: &str) -> Vec<&'static str> {
+    match kind {
+        "bug" => SHARED_DIMENSIONS
+            .iter()
+            .chain(CAUSE_DIMENSIONS.iter())
+            .copied()
+            .collect(),
+        _ => SHARED_DIMENSIONS
+            .iter()
+            .chain(PRODUCT_DIMENSIONS.iter())
+            .copied()
+            .collect(),
+    }
+}
+
 /// The dimensions whose reader grades against one outside source, each
 /// served by [`source_bundle`]; the rest grade the plan text alone.
-const SOURCE_DIMENSIONS: [&str; 4] = ["epic_fit", "mission_fit", "customer_fit", "code_truth"];
+const SOURCE_DIMENSIONS: [&str; 5] = [
+    "epic_fit",
+    "mission_fit",
+    "customer_fit",
+    "code_truth",
+    "competitive_fit",
+];
 pub const JUDGE_MODEL: &str = "sonnet";
 
 /// Lean readers answered in 7 to 80 seconds (measured 2026-09-15); 240
@@ -50,8 +112,8 @@ const READER_TIMEOUT_SECS: u64 = 240;
 
 /// The lens directory under the repo root or the deployed plugin root: one
 /// file per dimension plus preamble.md, read by the judge, never by the
-/// planner (`disable-model-invocation` keeps it that way).
-const LENS_SUBDIR: &str = "skills/pm-plan-review/lenses";
+/// planner (the blueprint skill never links it, and a lint test holds that).
+const LENS_SUBDIR: &str = "skills/blueprint/lenses/judge";
 
 type Lenses = (String, HashMap<String, String>);
 
@@ -98,7 +160,8 @@ fn load_lenses(dir: Option<&Path>) -> Lenses {
     (preamble, sections)
 }
 
-/// Code context for surface_fit/duplication; "" for other lenses or any fault.
+/// Code context for surface_fit/duplication/sibling_callers; "" for other
+/// lenses or any fault.
 fn gather_context(dimension: &str, plan_text: &str, cwd: &Path) -> String {
     if dimension == "surface_fit" {
         return match Command::new("fno").args(["help", "--all"]).output() {
@@ -108,7 +171,7 @@ fn gather_context(dimension: &str, plan_text: &str, cwd: &Path) -> String {
             _ => String::new(),
         };
     }
-    if dimension != "duplication" {
+    if dimension != "duplication" && dimension != "sibling_callers" {
         return String::new();
     }
     let sym_re = Regex::new(r"`([\w./-]{4,60})`").unwrap();
@@ -379,6 +442,16 @@ fn node_text_of(node_id: Option<&str>, entries: &[Value]) -> String {
         .join("\n")
 }
 
+/// The node's `type` field, or "" when there is no node, no entry or no
+/// field. `dimensions_for` reads "" as the product-pack default.
+fn node_kind(node_id: Option<&str>, entries: &[Value]) -> String {
+    node_id
+        .and_then(|id| find_entry(entries, id))
+        .and_then(|e| s_str(e, "type"))
+        .unwrap_or("")
+        .to_string()
+}
+
 fn entry_line(entry: &Value) -> String {
     format!(
         "{} {} {}",
@@ -426,7 +499,7 @@ fn source_bundle(
     match dimension {
         "epic_fit" => epic_bundle(node_id, entries, cwd),
         "mission_fit" => mission_bundle(node_id, entries, cwd),
-        "customer_fit" => customer_bundle(cwd),
+        "customer_fit" | "competitive_fit" => product_bundle(cwd),
         "code_truth" => code_bundle(plan_text, cwd),
         _ => None,
     }
@@ -496,8 +569,10 @@ fn mission_bundle(node_id: Option<&str>, entries: &[Value], cwd: &Path) -> Optio
 }
 
 /// The first readable PRODUCT.md at the repo root, `.agents/context/` or
-/// `docs/`. None when the project names no customer.
-fn customer_bundle(cwd: &Path) -> Option<String> {
+/// `docs/`. None when the project names no customer. Two dimensions read
+/// it: `customer_fit` for who this is for, `competitive_fit` for what they
+/// use instead.
+fn product_bundle(cwd: &Path) -> Option<String> {
     let root = worktree_repo_root(cwd);
     for rel in [
         "PRODUCT.md",
@@ -563,25 +638,39 @@ fn resolve_citation(root: &Path, cited: &str, start: usize, end: usize) -> Strin
     out
 }
 
-/// One row per judge dimension, each carrying the reader's wall clock. The
-/// graph is read once here; each source reader gets the bundle its
-/// dimension names.
+/// One row per judge dimension the node's kind calls for, each carrying the
+/// reader's wall clock. The graph is read once here; each source reader gets
+/// the bundle its dimension names. Returns the kind with the rows so the
+/// printed object says why the row list is the length it is.
 fn judge_rows(
     plan_text: &str,
     node_id: Option<&str>,
     cwd: &Path,
     lenses: &Lenses,
     spawn: Spawn,
-) -> Vec<Value> {
+) -> (String, Vec<Value>) {
     let entries: Vec<Value> =
         crate::graph_store::read_rows(&default_graph_path()).unwrap_or_default();
-    let node_text = node_text_of(node_id, &entries);
-    JUDGE_DIMENSIONS
+    judge_rows_in(&entries, plan_text, node_id, cwd, lenses, spawn)
+}
+
+/// [`judge_rows`] against a handed-in graph, so a test can pin a fixture.
+fn judge_rows_in(
+    entries: &[Value],
+    plan_text: &str,
+    node_id: Option<&str>,
+    cwd: &Path,
+    lenses: &Lenses,
+    spawn: Spawn,
+) -> (String, Vec<Value>) {
+    let kind = node_kind(node_id, entries);
+    let node_text = node_text_of(node_id, entries);
+    let rows = dimensions_for(&kind)
         .iter()
         .map(|dimension| {
             let started = std::time::Instant::now();
             let bundle = if SOURCE_DIMENSIONS.contains(dimension) {
-                source_bundle(dimension, node_id, &entries, plan_text, cwd, None)
+                source_bundle(dimension, node_id, entries, plan_text, cwd, None)
             } else {
                 None
             };
@@ -601,7 +690,8 @@ fn judge_rows(
                 "secs": started.elapsed().as_secs(),
             })
         })
-        .collect()
+        .collect();
+    (kind, rows)
 }
 
 fn run_single_plan(
@@ -621,8 +711,8 @@ fn run_single_plan(
             return 0;
         }
     };
-    let rows = judge_rows(&plan_text, node_id, cwd, lenses, spawn);
-    println!("{}", json!({"rows": rows}));
+    let (kind, rows) = judge_rows(&plan_text, node_id, cwd, lenses, spawn);
+    println!("{}", json!({"kind": kind, "rows": rows}));
     0
 }
 
@@ -912,7 +1002,7 @@ mod tests {
         assert_eq!(verdict, None);
         assert_eq!(
             reason,
-            "no lens file skills/pm-plan-review/lenses/deletable.md"
+            "no lens file skills/blueprint/lenses/judge/deletable.md"
         );
         let (verdict, _) = judge_plan("plan", "", "persona", dir.path(), &lenses, None, &spawn);
         assert_eq!(verdict.as_deref(), Some("pass"));
@@ -1003,7 +1093,8 @@ mod tests {
                 ("duplication".to_string(), "existing module".to_string()),
             ]),
         );
-        let rows = judge_rows(&plan_text, None, dir.path(), &lenses, &spawn);
+        let (kind, rows) = judge_rows(&plan_text, None, dir.path(), &lenses, &spawn);
+        assert_eq!(kind, "", "no node, no kind");
         let persona = rows
             .iter()
             .find(|r| r["dimension"] == "persona")
@@ -1197,5 +1288,238 @@ mod tests {
             bundle.contains("Keep one monorepo and one brand."),
             "{bundle}"
         );
+    }
+
+    #[test]
+    fn judge_dimensions_is_the_ordered_union_of_the_packs() {
+        let mut union: Vec<&str> = SHARED_DIMENSIONS.to_vec();
+        union.extend_from_slice(&PRODUCT_DIMENSIONS);
+        union.extend_from_slice(&CAUSE_DIMENSIONS);
+        assert_eq!(JUDGE_DIMENSIONS.to_vec(), union);
+    }
+
+    #[test]
+    fn a_bug_node_gets_the_cause_pack_and_never_the_product_pack() {
+        let dims = dimensions_for("bug");
+        for name in CAUSE_DIMENSIONS {
+            assert!(dims.contains(&name), "bug pack misses {name}");
+        }
+        for name in SHARED_DIMENSIONS {
+            assert!(dims.contains(&name), "bug pack misses shared {name}");
+        }
+        assert!(!dims.contains(&"persona"));
+        assert!(!dims.contains(&"customer_fit"));
+        assert_eq!(dims.len(), 10);
+    }
+
+    #[test]
+    fn every_other_kind_defaults_to_the_product_pack() {
+        for kind in ["", "feature", "epic", "roadmap", "mystery"] {
+            let dims = dimensions_for(kind);
+            for name in PRODUCT_DIMENSIONS {
+                assert!(dims.contains(&name), "{kind} pack misses {name}");
+            }
+            for name in SHARED_DIMENSIONS {
+                assert!(dims.contains(&name), "{kind} pack misses shared {name}");
+            }
+            assert!(
+                !dims.iter().any(|d| CAUSE_DIMENSIONS.contains(d)),
+                "{kind} got a cause dimension"
+            );
+            assert_eq!(dims.len(), 12, "{kind}");
+        }
+    }
+
+    #[test]
+    fn node_kind_reads_the_entry_type_field() {
+        let mut typed = serde_json::Map::new();
+        typed.insert("id".to_string(), Value::String("x-b1".to_string()));
+        typed.insert("type".to_string(), Value::String("bug".to_string()));
+        let entries = vec![
+            Value::Object(typed),
+            fixture_entry("x-f1", None, "ready", "F", ""),
+        ];
+        assert_eq!(node_kind(Some("x-b1"), &entries), "bug");
+        assert_eq!(node_kind(Some("x-f1"), &entries), "", "no type field");
+        assert_eq!(node_kind(Some("x-absent"), &entries), "");
+        assert_eq!(node_kind(None, &entries), "");
+    }
+
+    #[test]
+    fn a_bug_node_gets_ten_rows_and_never_the_persona_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bug = serde_json::Map::new();
+        bug.insert("id".to_string(), Value::String("x-b1".to_string()));
+        bug.insert("type".to_string(), Value::String("bug".to_string()));
+        let entries = vec![Value::Object(bug)];
+        let seen = std::sync::Mutex::new(Vec::new());
+        let spawn = |name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            seen.lock().unwrap().push(name.to_string());
+            Ok((0, "VERDICT: pass".to_string(), String::new()))
+        };
+        let lenses = (
+            String::new(),
+            JUDGE_DIMENSIONS
+                .iter()
+                .map(|d| (d.to_string(), "grade it".to_string()))
+                .collect(),
+        );
+        let (kind, rows) = judge_rows_in(
+            &entries,
+            "a plan",
+            Some("x-b1"),
+            dir.path(),
+            &lenses,
+            &spawn,
+        );
+        assert_eq!(kind, "bug");
+        assert_eq!(rows.len(), 10, "{rows:?}");
+        assert!(rows.iter().all(|r| r["dimension"] != "persona"));
+        // epic_fit/mission_fit/code_truth have no source in this fixture: a
+        // source gap spawns nobody, so 7 of the 10 rows spawn.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7, "source-gap rows spawn nothing: {seen:?}");
+        assert!(!seen.iter().any(|n| n.ends_with("persona")));
+        for dim in ["epic_fit", "mission_fit", "code_truth"] {
+            let row = rows.iter().find(|r| r["dimension"] == dim).unwrap();
+            assert!(row["verdict"].is_null(), "{row}");
+            assert_eq!(row["reason"], format!("no {dim} source"));
+        }
+    }
+
+    #[test]
+    fn a_feature_node_gets_twelve_rows_and_a_fault_leaves_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut feature = serde_json::Map::new();
+        feature.insert("id".to_string(), Value::String("x-f1".to_string()));
+        feature.insert("type".to_string(), Value::String("feature".to_string()));
+        let entries = vec![Value::Object(feature)];
+        let spawn = |name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            if name.ends_with("persona") {
+                Err("spawn went sideways".to_string())
+            } else {
+                Ok((0, "VERDICT: pass".to_string(), String::new()))
+            }
+        };
+        let lenses = (
+            String::new(),
+            JUDGE_DIMENSIONS
+                .iter()
+                .map(|d| (d.to_string(), "grade it".to_string()))
+                .collect(),
+        );
+        let (kind, rows) = judge_rows_in(
+            &entries,
+            "a plan",
+            Some("x-f1"),
+            dir.path(),
+            &lenses,
+            &spawn,
+        );
+        assert_eq!(kind, "feature");
+        assert_eq!(rows.len(), 12, "{rows:?}");
+        assert!(rows.iter().all(|r| r["secs"].is_u64()));
+        let persona = rows
+            .iter()
+            .find(|r| r["dimension"] == "persona")
+            .expect("persona row");
+        assert!(persona["verdict"].is_null());
+        assert!(persona["reason"]
+            .as_str()
+            .unwrap()
+            .contains("went sideways"));
+        let others: Vec<&Value> = rows
+            .iter()
+            .filter(|r| r["dimension"] != "persona")
+            .collect();
+        // A row is a pass or a named gap (this fixture carries no PRODUCT.md
+        // and no epic/vision/citations, so the source readers gap out).
+        for r in others {
+            let verdict = r["verdict"].as_str();
+            assert!(
+                verdict == Some("pass")
+                    || (verdict.is_none()
+                        && r["reason"].as_str().is_some_and(|s| s.ends_with(" source"))),
+                "{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_callers_gets_code_context_and_reproduced_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("checker.rs"),
+            "fn unique_symbol_name() {}\n",
+        )
+        .unwrap();
+        let plan = "fix the `unique_symbol_name` path";
+        let ctx = gather_context("sibling_callers", plan, dir.path());
+        assert!(ctx.contains("checker.rs"), "{ctx}");
+        assert!(ctx.contains("unique_symbol_name"));
+        assert_eq!(gather_context("reproduced", plan, dir.path()), "");
+    }
+
+    #[test]
+    fn competitive_fit_reads_the_product_bundle_and_a_quoted_fail_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("PRODUCT.md"),
+            "## Users\nsolo founders\n\n## Alternatives\na tracker plus a coding agent with nothing joining them\n",
+        )
+        .unwrap();
+        let bundle = product_bundle(dir.path()).expect("PRODUCT.md found");
+        assert!(bundle.contains("## Alternatives"), "{bundle}");
+        let lenses = (
+            String::new(),
+            HashMap::from([(
+                "competitive_fit".to_string(),
+                "argue from the source".to_string(),
+            )]),
+        );
+        let reply = "the alternative already does this\nEVIDENCE: \"a tracker plus a coding agent with nothing joining them\"\nVERDICT: fail";
+        let spawn = move |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            Ok((0, reply.to_string(), String::new()))
+        };
+        let (verdict, reason) = judge_plan(
+            "a plan",
+            "",
+            "competitive_fit",
+            dir.path(),
+            &lenses,
+            Some(bundle.as_str()),
+            &spawn,
+        );
+        assert_eq!(verdict.as_deref(), Some("fail"));
+        assert!(reason.contains("the alternative already does this"));
+    }
+
+    #[test]
+    fn competitive_fit_without_a_source_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let lenses = (
+            String::new(),
+            HashMap::from([(
+                "competitive_fit".to_string(),
+                "argue from the source".to_string(),
+            )]),
+        );
+        let calls = std::cell::Cell::new(0u32);
+        let spawn = |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            calls.set(calls.get() + 1);
+            Ok((0, "VERDICT: fail".to_string(), String::new()))
+        };
+        let (verdict, reason) = judge_plan(
+            "a plan",
+            "",
+            "competitive_fit",
+            dir.path(),
+            &lenses,
+            None,
+            &spawn,
+        );
+        assert_eq!(calls.get(), 0, "no source, no spawn");
+        assert_eq!(verdict, None);
+        assert_eq!(reason, "no competitive_fit source");
     }
 }

@@ -27,6 +27,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/generated-write-guard.sh",
+            "statusMessage": "checking generated copies"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash ${PLUGIN_ROOT}/hooks/plan-location-guard.sh",
             "statusMessage": "checking plan save location"
           }
@@ -47,13 +57,18 @@
           },
           {
             "type": "command",
-            "command": "python3 ${PLUGIN_ROOT}/hooks/truncation-guard.py",
-            "statusMessage": "checking for a truncated count-or-existence read"
+            "command": "bash ${PLUGIN_ROOT}/hooks/pipe-guard.sh",
+            "statusMessage": "checking for a pipe that hides the exit or the rows"
           },
           {
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/recursive-grep-guard.py",
             "statusMessage": "checking recursive grep cache traversal"
+          },
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/test-run-guard.sh",
+            "statusMessage": "checking for an unadmitted raw test run"
           }
         ]
       }
@@ -77,6 +92,11 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
+            "timeout": 2
           },
           {
             "type": "command",

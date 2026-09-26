@@ -16,7 +16,6 @@ pub(super) fn chrome_hit_label(hit: &Option<ChromeHit>) -> &'static str {
         None => "None",
         Some(ChromeHit::Cmds(_)) => "Cmds",
         Some(ChromeHit::Notice(_)) => "Notice",
-        Some(ChromeHit::Confirm(_)) => "Confirm",
         Some(ChromeHit::OpenCreate) => "OpenCreate",
         Some(ChromeHit::CycleSection(_)) => "CycleSection",
         Some(ChromeHit::SortColumn(_)) => "SortColumn",

@@ -52,7 +52,14 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
         .unwrap_or_else(|e| e.into_inner());
     let home = short_home("rmcrownstate");
     let project = home.root().join("project");
-    let manifest = project.join(".fno/kings/alpha.md");
+    // The manifest lives where the row's cwd resolves it: the project's
+    // space dir under the pinned FNO_SPACES_DIR, not a repo-relative .fno.
+    let spaces = home.root().join("spaces");
+    std::env::set_var("FNO_SPACES_DIR", &spaces);
+    let manifest = crate::paths::space_dir_opt(&project)
+        .unwrap()
+        .join("kings")
+        .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, "---\nscope: alpha\n---\n").unwrap();
     let mut row = claude_rm_row(
@@ -85,6 +92,7 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
         !manifest.exists(),
         "successful rm left crown loop state behind"
     );
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -99,7 +107,12 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
     // live successor's stop gate.
     let home = short_home("rmcrownsucc");
     let project = home.root().join("project");
-    let manifest = project.join(".fno/kings/alpha.md");
+    let spaces = home.root().join("spaces");
+    std::env::set_var("FNO_SPACES_DIR", &spaces);
+    let manifest = crate::paths::space_dir_opt(&project)
+        .unwrap()
+        .join("kings")
+        .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(
         &manifest,
@@ -136,6 +149,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
         manifest.exists(),
         "rm deleted a manifest naming a different session: the live successor's gate"
     );
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -205,7 +219,12 @@ async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
     )
     .await;
 
-    assert_eq!(response.result().unwrap()["event_written"], true);
+    assert_eq!(
+        response.result().unwrap()["event_written"],
+        true,
+        "reason: {:?}",
+        response.result().unwrap()["event_reason"]
+    );
     assert!(response.result().unwrap()["event_reason"].is_null());
     std::fs::remove_dir_all(home.root()).ok();
 }
@@ -675,6 +694,52 @@ async fn rm_removes_a_hosted_codex_thread_and_drops_its_actor() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// A codex thread row whose actor is gone (a daemon restart left the handle
+/// dead) is removed by rm without --force: nothing can be running in a dead
+/// actor, so teardown is already done. Before the fix this refused with
+/// `interrupt-failed-turn-still-running` and kept the dead row, which then
+/// blocked every dispatch on its node.
+#[tokio::test]
+async fn rm_drops_a_codex_thread_row_whose_actor_is_gone() {
+    let _guard = crate::path_test_guard();
+    let home = short_home("rmthreadgone");
+    let cwd = tempfile::tempdir().unwrap();
+    let mut row = thread_entry("t-rm-gone", AgentStatus::Live, None);
+    row.cwd = cwd.path().to_string_lossy().into_owned();
+    row.project_root = row.cwd.clone();
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    ctx.codex_threads.lock().await.insert(
+        "t-rm-gone".into(),
+        std::sync::Arc::new(crate::codex_thread::CodexThreadActor::with_dead_actor()),
+    );
+    let request = Request::new(1, "agent.rm", json!({"name": "t-rm-gone"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a codex row must not read the claude roster"),
+        &|_| panic!("rm must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a thread row has no mux ref to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "{:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 #[tokio::test]
 async fn rm_ends_a_live_non_thread_codex_row_with_no_stop_leg() {
     // Law d-81c6da7e: rm ends a live codex row itself (the widened
@@ -709,5 +774,97 @@ async fn rm_ends_a_live_non_thread_codex_row_with_no_stop_leg() {
         .unwrap()
         .entries
         .is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC13-HP, the stout-tapir shape: an exited pane row whose pid the sweep
+/// wiped, with a live claude session record naming a live interactive
+/// process for its session, is stopped and removed by rm without --force.
+/// The stop resolves the holder by session, escalates straight to the
+/// holder pid, confirms on ESRCH, and never reaches claude rm.
+#[cfg(unix)]
+#[tokio::test]
+async fn rm_ends_a_swept_pane_row_through_its_session_record_holder() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = short_home("rmsessionholder");
+    let mut row = ask_row("swept-pane", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Exited;
+    row.substrate = Some("pane".into());
+    row.harness = Some("claude".into());
+    row.harness_session_id = Some("a15300000-1111-2222-3333-444444444444".into());
+    // The sweep's Exited write wipes pid and start time; exited_at stays.
+    row.pid = None;
+    row.pid_start_time = None;
+    // The sleeper must NOT be this test's own child (an unreaped zombie
+    // answers kill(0)); a shell-detached sleeper is reparented, and its
+    // death reads as gone.
+    let sh = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("sleep 30 >/dev/null 2>&1 & echo $!")
+        .output()
+        .expect("test spawns a detached sleeper");
+    let pid: u32 = String::from_utf8_lossy(&sh.stdout)
+        .trim()
+        .parse()
+        .expect("the shell echoes the sleeper pid");
+    // Claude's own record names the live holder: procStart is the pid's
+    // create time in UTC, the same string the real records carry.
+    let create_ms = crate::claims::process_create_time_ms(pid as i32).expect("the sleeper is live");
+    let proc_start = chrono::DateTime::from_timestamp(create_ms / 1000, 0)
+        .unwrap()
+        .format("%a %b %d %H:%M:%S %Y")
+        .to_string();
+    let home_dir = tempfile::tempdir().unwrap();
+    let sessions = home_dir.path().join(".claude").join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join(format!("{pid}.json")),
+        format!(
+            r#"{{"pid":{pid},"sessionId":"a15300000-1111-2222-3333-444444444444","procStart":"{proc_start}","kind":"interactive"}}"#
+        ),
+    )
+    .unwrap();
+    // The record reader resolves $HOME at call time: pin it over the rm.
+    // The pin dir must sit INSIDE std::env::temp_dir(): a leaked
+    // FNO_TEST_HERMETIC=1 fences every env-resolved root against
+    // temp_dir, and short_home's /tmp path is outside it on macOS.
+    let home_backup = std::env::var_os("HOME");
+    std::env::set_var("HOME", home_dir.path());
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "swept-pane"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+        &|_| panic!("rm must not reach claude rm for a pane row"),
+        &|_| panic!("no claude stop may run for a pane-substrate row"),
+        &|_, _| panic!("a pane-substrate row takes the pane arm, not the mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    match home_backup {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    assert!(
+        response.error().is_none(),
+        "pane rm refused: {:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    // The holder pid is really gone (ESRCH), not merely dropped.
+    assert!(
+        crate::claims::process_create_time_ms(pid as i32).is_none(),
+        "sleeper pid {pid} must be dead after the rm"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }

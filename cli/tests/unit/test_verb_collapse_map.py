@@ -235,12 +235,28 @@ def test_map_covers_current_surface_once():
     # / `evals export` and `doctor evals qualify` / `evals qualify`, the four
     # argv-form transport leaves (refs 0: the flag surface never grows):
     # 628 -> 632. The hidden `agents autonomy provenance` audit verb retired
-    # into the binary (`name-codes --check`, PR 1813): 632 -> 631.
-    # The decide shim then keeps four distinct compatibility leaves in the
-    # baseline, including its hidden-origin retract option: 631 -> 635.
+    # into the binary (`name-codes --check`, PR 1813): 632 -> 631. The
+    # nudge-peek leaf's removal then took its row back: 631 -> 630. The
+    # decide shim then keeps four distinct compatibility leaves in the
+    # baseline, including its hidden-origin retract option: 630 -> 634.
     # This branch allocates `agents king term`, the crown's-term declare
-    # verb, sharing the `king shape` dispatch point: 635 -> 636.
-    assert len(mapped) == 636, (
+    # verb, sharing the `king shape` dispatch point: 634 -> 635. The
+    # command-tree cutover then deleted the 29 mux rows: the typed mux tree
+    # declares those paths natively and the verb-ratchet reads the generated
+    # inventory, so no collapse-map row is consumed: 635 -> 606.
+    # The spawn seam's permission-posture and sandbox-verdict owners each
+    # take one row: 608 -> 610. This branch allocates `doctor intel`, the
+    # doctor leaf over the binary's provenance fold (the binary-side action
+    # stays unregistered under d-fe66560a and takes no row): 610 -> 611.
+    # Main then allocates `agents select-read`, the bounded selection read
+    # the auto-continue arm calls through call_binary_json (one corpus ref,
+    # the architecture doc): 611 -> 612.
+    # The feed verb retired with the territory blueprinter (x-701c): 612 -> 611.
+    # The store flip then deletes the `backlog archive-dedupe-ids` action
+    # with the json leg it belonged to: 611 -> 610.
+    # The schema-4 branch allocates `backlog session backfill`, the verb
+    # that fills missing session stamps from transcripts: 610 -> 611.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -302,8 +318,10 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
     # The merged tree carries 79 registered leaves before the decide shim's
-    # four retained compatibility leaves are counted: 79 -> 82.
-    assert projected == 82
+    # four retained compatibility leaves are counted: 79 -> 82. The
+    # command-tree cutover deleted the 29 mux rows (the native tree declares
+    # those paths; the ratchet reads the generated inventory): 82 -> 81.
+    assert projected == 81
     assert projected <= 99
 
 
@@ -342,7 +360,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # ratchet still counts, so the rename nets +3, not 0. Counted from the
     # merged file, not taken from either side: 133, with `agents autonomy
     # provenance` (x-84b2) among them - the group row split into leaves.
-    assert len(leaves) <= 133
+    # +2 for the inbox day boundary commands (start/end): the operator-facing
+    # morning and end-of-day readbacks; the native fold verb behind them stays
+    # unregistered on the shrink-only binary action list.
+    assert len(leaves) <= 135
     assert "fno-agents" in leaves
 
 

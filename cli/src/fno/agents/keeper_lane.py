@@ -77,13 +77,57 @@ LEAVE = "leave"
 #: socket) is a refusal, and the verdict names which arm refused.
 REAPABLE_SOCK_STATES = frozenset({NO_LISTENER, ABSENT})
 
+# Store keeper RSS bound in KiB (2 GiB): a fresh keeper holds the graph
+# resident (~0.8 GB); past it, growth is the leak shape.
+DEFAULT_KEEPER_RSS_KB = 2 * 1024 * 1024
+
+
+def keeper_rss_bound_kb() -> int:
+    """`FNO_STORE_KEEPER_RSS_KB` or the 2 GiB default, read at call time."""
+    import os
+
+    raw = os.environ.get("FNO_STORE_KEEPER_RSS_KB")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_KEEPER_RSS_KB
+
+
+def store_backend_of(graph: Optional[Path]) -> str:
+    """``graph_meta.backend``, the way ``crate::backlog::backend`` reads it;
+    absent db reads json. Asked through the keeper's ``export_status``: the
+    db is Rust-owned and Python is sealed off it (test_graph_db_sealed)."""
+    if graph is None:
+        return "json"
+    db = graph.with_suffix(".db")
+    if not db.exists():
+        return "json"
+    try:
+        from fno.graph.store import store_export_status
+
+        return str(store_export_status(graph).get("backend") or "json")
+    except Exception:  # noqa: BLE001 - unreadable meta reads json, never refuses
+        return "json"
+
+
+def graph_read_source() -> str:
+    """The backend the default graph actually reads through; an unanswered
+    store reads json, so a rollback leg never reads as a leak."""
+    from fno.graph.store import GRAPH_JSON, store_export_status
+
+    return str(store_export_status(GRAPH_JSON).get("backend") or "json")
+
 
 @dataclass(frozen=True)
 class KeeperObs:
     """One live keeper candidate read off the process table."""
 
     pid: int
-    lane: str  # "pane" (--pane) | "thread" (--keeper)
+    lane: str  # "pane" (--pane) | "thread" (--keeper) | "store" (--store-keeper)
     sock: Optional[Path]  # from argv --sock; None when argv declares none
     session: Optional[str]  # from argv --session
     cwd: Optional[str]
@@ -96,6 +140,10 @@ class KeeperObs:
     #: unclaimed - the exact absence-as-proof shape the watchdog exists to
     #: refuse. Unreadable registry, no reap.
     registry_ok: bool = True
+    #: The bound graph, from argv --graph: the legality arm's feed.
+    graph: Optional[Path] = None
+    #: Resident memory in KiB, read at discovery; None when unreadable.
+    rss_kb: Optional[int] = None
 
 
 def sock_state_of(sock: Optional[Path]) -> str:
@@ -165,11 +213,35 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
     """``(verdict, reason)`` - pure over one observation, so tests need no
     live processes.
 
-    REAP requires all three arms, each a POSITIVE reading; anything else is
-    LEAVE and the reason names the arm that refused. ``grace_s`` defaults to
-    the module constant read at CALL time (a def-time bind would freeze a
-    test's monkeypatch out)."""
+    REAP requires a POSITIVE reading: a positively dead socket past grace
+    (the original arm), a keeper illegally resident on a sqlite graph while
+    config reads sqlite, or RSS over the leak bound. The fail-closed arms
+    (unreadable registry, a claimed keeper) outrank all three, so claimed
+    work is never killed. ``grace_s`` defaults to the module constant read
+    at CALL time (a def-time bind would freeze a test's monkeypatch out)."""
     grace_s = REAP_MIN_AGE_S if grace_s is None else grace_s
+    if not obs.registry_ok:
+        return LEAVE, "registry unreadable, so the claim arm cannot read - no reap"
+    if obs.claimed_by is not None:
+        return LEAVE, f"registry row {obs.claimed_by} claims this keeper"
+    if obs.rss_kb is not None:
+        bound_kb = keeper_rss_bound_kb()
+        if obs.rss_kb > bound_kb:
+            gb = obs.rss_kb / (1024 * 1024)
+            return REAP, (
+                f"rss {gb:.2f} GB exceeds the {bound_kb // 1024} MiB "
+                "bound - growth with requests served is the leak shape"
+            )
+    if (
+        obs.lane == "store"
+        and obs.graph is not None
+        and store_backend_of(obs.graph) == "sqlite"
+        and graph_read_source() == "sqlite"
+    ):
+        return REAP, (
+            f"{obs.graph} reads backend=sqlite while graph.read_source=sqlite - "
+            "a resident keeper must not exist there (clients serve by exec)"
+        )
     if obs.sock_state not in REAPABLE_SOCK_STATES:
         if obs.sock_state == SILENT:
             return LEAVE, (
@@ -184,10 +256,6 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
                 "connect failed without refusing - the listener is unproven, not dead"
             )
         return LEAVE, f"socket has a live listener ({obs.sock})"
-    if not obs.registry_ok:
-        return LEAVE, "registry unreadable, so the claim arm cannot read - no reap"
-    if obs.claimed_by is not None:
-        return LEAVE, f"registry row {obs.claimed_by} claims this keeper"
     if obs.age_s <= grace_s:
         return LEAVE, f"age {obs.age_s:.0f}s <= grace {grace_s:.0f}s - a fresh keeper is a keeper"
     return REAP, (
@@ -225,8 +293,10 @@ class KeeperLaneResult:
                     "lane": o.lane,
                     "session": o.session,
                     "sock": str(o.sock) if o.sock else None,
+                    "graph": str(o.graph) if o.graph else None,
                     "cwd": o.cwd,
                     "age_s": round(o.age_s),
+                    "rss_kb": o.rss_kb,
                     "child_pids": list(o.child_pids),
                     "sock_state": o.sock_state,
                     "claimed_by": o.claimed_by,
@@ -238,10 +308,11 @@ class KeeperLaneResult:
         }
 
 
-def _parse_argv(argv: list[str]) -> tuple[Optional[str], Optional[Path]]:
-    """``(session, sock)`` off the keeper's own command line."""
+def _parse_argv(argv: list[str]) -> tuple[Optional[str], Optional[Path], Optional[Path]]:
+    """``(session, sock, graph)`` off the keeper's own command line."""
     session: Optional[str] = None
     sock: Optional[Path] = None
+    graph: Optional[Path] = None
     it = iter(argv)
     for arg in it:
         if arg == "--session":
@@ -249,7 +320,10 @@ def _parse_argv(argv: list[str]) -> tuple[Optional[str], Optional[Path]]:
         elif arg == "--sock":
             value = next(it, None)
             sock = Path(value) if value else None
-    return session, sock
+        elif arg == "--graph":
+            value = next(it, None)
+            graph = Path(value) if value else None
+    return session, sock, graph
 
 
 def discover(
@@ -322,7 +396,7 @@ def discover(
             pid = info.get("pid")
             if not isinstance(pid, int):
                 continue
-            session, sock = _parse_argv([str(a) for a in argv])
+            session, sock, graph = _parse_argv([str(a) for a in argv])
             try:
                 create = info.get("create_time") or now_s
                 age_s = max(0.0, now_s - create)
@@ -334,6 +408,10 @@ def discover(
                 )
             except Exception:  # noqa: BLE001 - unreadable children default empty
                 children = ()
+            try:
+                rss_kb = psutil.Process(pid).memory_info().rss // 1024
+            except Exception:  # noqa: BLE001 - unreadable RSS is not a verdict
+                rss_kb = None
             if info.get("cwd"):
                 cwd = info.get("cwd")
             else:
@@ -367,6 +445,8 @@ def discover(
                 sock_state=state,
                 claimed_by=claimed_by,
                 registry_ok=registry_ok,
+                graph=graph,
+                rss_kb=rss_kb,
             )
             result.observations.append(obs)
             result.verdicts[pid] = keeper_verdict(obs, grace_s=grace_s)
@@ -452,9 +532,11 @@ def render(result: KeeperLaneResult) -> str:
     for obs in result.observations:
         verdict, reason = result.verdicts[obs.pid]
         sock = str(obs.sock) if obs.sock else "-"
+        rss = f"{obs.rss_kb // 1024} MiB" if obs.rss_kb is not None else "-"
+        graph = str(obs.graph) if obs.graph else "-"
         lines.append(
             f"  pid {obs.pid:<7} {obs.lane:6} age {obs.age_s / 3600:5.1f}h "
-            f"{obs.sock_state:11} {verdict:5} {reason}  sock={sock}"
+            f"rss {rss:>9} {obs.sock_state:11} {verdict:5} {reason}  sock={sock} graph={graph}"
         )
     reapable = result.reapable
     if reapable:

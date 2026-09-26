@@ -147,3 +147,48 @@ def test_targets_group_by_pr_and_extract_repo():
         ("ab-b", 555, "2", "o/r"),
         ("ab-c", 42, "3", "o/r"),
     }
+
+
+def test_apply_close_records_its_reason(monkeypatch):
+    """The --apply closer closes with --note; --force is gone.
+
+    The store refuses an evidence-less close, so the close must carry its
+    reason as the completion note.
+    """
+    import subprocess
+    from types import SimpleNamespace
+
+    import fno.graph.cli as graph_cli
+    from typer.testing import CliRunner
+
+    finding = SimpleNamespace(
+        node_id="x-phantom", pr_number=555, comment_id=1, signal="resolved/outdated"
+    )
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda: None)
+    monkeypatch.setattr(graph_cli, "wire_rows", lambda **kwargs: [])
+    monkeypatch.setattr(
+        graph_cli,
+        "scan_addressed_findings",
+        lambda entries, warnings=None: [finding],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "fno.retro.reconcile_findings.scan_addressed_findings",
+        lambda entries, warnings=None: [finding],
+    )
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = CliRunner().invoke(graph_cli.cli, ["reconcile-findings", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert calls, "the close must shell out"
+    argv = calls[0]
+    assert argv[:4] == ["fno", "backlog", "done", "x-phantom"]
+    assert "--note" in argv and "--force" not in argv
+    assert argv[-1].startswith("addressed on PR #555")

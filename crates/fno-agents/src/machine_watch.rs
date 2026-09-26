@@ -1,41 +1,24 @@
-//! The machine_watch arm: one watcher reads the box, bands it, and escalates
-//! on its own.
-//!
-//! Python decides (x-aaaa LD3): `machine_pressure` in doctor_footprint.py
-//! computes the verdict and the reason sentence. This arm reads
-//! `machine.verdict`/`machine.reason` verbatim from the same
-//! `fno doctor footprint --json --cause-only` payload the spawn gate already
-//! shells, and computes no machine verdict of its own. The band sits on
-//! whole-machine CPU; load and the runnable count ride as context and never
-//! raise a hot verdict (LD2). The arm escalates, it never gates (LD1): the
-//! spawn gate keeps deciding admission.
+//! The daemon's 300-second machine sample arm.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::machine_sample::MachineSample;
 use crate::paths::AgentsHome;
 
-/// Consecutive hot samples before a notice, and consecutive hot samples kept
-/// while the throttle holds. The `under_streak` shape from spawn_gate.rs
-/// (`CPU_ADMIT_SAMPLES`, LD4): a band on a 300-second beat with no
-/// debounce is a pager that cries on a 60-second spike (x-aaaa LD6).
 pub const MACHINE_HOT_SAMPLES: u32 = 2;
-
-/// The arm's own beat, matching its `KNOWN_ARMS` row (AC8).
 pub const MACHINE_WATCH_INTERVAL_S: u64 = 300;
+pub const LOAD_PER_CORE_BAND: f64 = 10.0;
 
-/// The arm's debounce and throttle memory, owned by the daemon loop and
-/// mutated only inside the arm's one-in-flight body.
 #[derive(Default)]
 pub struct MachineWatchState {
-    hot_streak: u32,
-    calm_streak: u32,
-    last_notified: Option<Instant>,
+    pub(crate) hot_streak: u32,
+    pub(crate) calm_streak: u32,
+    pub(crate) last_notified: Option<Instant>,
+    pub(crate) prev_ticks: Option<crate::machine_sample::HostTicks>,
 }
 
-/// The arm as the daemon holds it: cadence stamp, one-in-flight gate, and the
-/// streak/throttle memory in one handle, so the loop declares one name.
 pub struct Arm {
     last_tick: Mutex<Option<Instant>>,
     in_flight: Arc<AtomicBool>,
@@ -52,48 +35,84 @@ impl Default for Arm {
     }
 }
 
-/// One tick's outcome: the tick row's `acted`, `skip_reason` and `detail`.
 pub struct WatchOutcome {
     pub acted: u64,
     pub skip_reason: Option<String>,
     pub detail: String,
 }
 
-/// One pass of the arm body, with the payload handed in and the notice send
-/// handed in - the same seam `notify_signal_via` proved. `now` is the clock,
-/// so tests drive the throttle without sleeping. The Python decider's verdict
-/// names the branch; nothing here reads a busy fraction (AC11).
+pub fn decide(sample: &MachineSample, busy_band: f64, load_band: f64) -> (String, String) {
+    let busy_hot = sample.busy_fraction.is_some_and(|value| value > busy_band);
+    let load_hot = sample
+        .load_15m
+        .zip(sample.cores)
+        .is_some_and(|(load, cores)| cores > 0.0 && load / cores > load_band);
+    let busy_readable = sample.busy_fraction.is_some() && sample.cores.is_some();
+    let load_readable = sample.load_15m.is_some() && sample.cores.is_some();
+    let verdict = if busy_hot || load_hot {
+        "hot"
+    } else if busy_readable && load_readable {
+        "calm"
+    } else {
+        "unreadable"
+    };
+    let busy = sample
+        .busy_fraction
+        .map_or_else(|| "unavailable".into(), |v| format!("{:.1}%", v * 100.0));
+    let cores = sample
+        .cores
+        .map_or_else(|| "unavailable".into(), |v| format!("{v:.2}"));
+    let busy_cores = sample.busy_fraction.zip(sample.cores).map_or_else(
+        || "unavailable".into(),
+        |(busy, cores)| format!("{:.3}", busy * cores),
+    );
+    let per_core = sample.load_15m.zip(sample.cores).map_or_else(
+        || "unavailable".into(),
+        |(load, cores)| format!("{:.1}", load / cores),
+    );
+    let busy_relation = if busy_hot { "crosses" } else { "of" };
+    let load_relation = if load_hot { "crosses" } else { "of" };
+    let reason = if sample.busy_fraction.is_none() {
+        "machine busy unmeasured (host CPU ticks unavailable)".to_string()
+    } else {
+        format!(
+            "machine {busy} {busy_relation} band {:.0}% ({busy_cores} of {cores} cores) -> {verdict}; load_15m {}, {} runnable of {} processes; {per_core} per core {load_relation} load band {load_band:.0}",
+            busy_band * 100.0,
+            sample.load_15m.map_or_else(|| "unavailable".into(), |v| format!("{v:.1}")),
+            sample.runnable.map_or_else(|| "None".into(), |v| v.to_string()),
+            sample.processes.map_or_else(|| "None".into(), |v| v.to_string()),
+        )
+    };
+    (verdict.into(), reason)
+}
+
 pub fn tick_machine_watch(
     state: &mut MachineWatchState,
-    reading: Result<&crate::spawn_gate::FootprintCausePayload, &str>,
+    reading: Result<&MachineSample, &str>,
     mut notify: impl FnMut(&str, &str) -> bool,
     now: Instant,
 ) -> WatchOutcome {
-    let payload = match reading {
-        Ok(payload) => payload,
+    let sample = match reading {
+        Ok(sample) => sample,
         Err(why) => {
             return WatchOutcome {
                 acted: 0,
-                skip_reason: Some("machine_unreadable".to_string()),
+                skip_reason: Some("machine_unreadable".into()),
                 detail: short(&format!("probe: {why}")),
-            };
+            }
         }
     };
-    let Some(machine) = payload.machine.as_ref() else {
-        return WatchOutcome {
-            acted: 0,
-            skip_reason: Some("machine_unreadable".to_string()),
-            detail: "payload carries no machine object".to_string(),
-        };
-    };
-    match machine.verdict.as_str() {
+    let busy_band = sample.busy_band.unwrap_or(0.9);
+    let load_band = sample.load_band_per_core.unwrap_or(LOAD_PER_CORE_BAND);
+    let (verdict, reason) = decide(sample, busy_band, load_band);
+    match verdict.as_str() {
         "calm" => {
             state.calm_streak = state.calm_streak.saturating_add(1);
             state.hot_streak = 0;
             WatchOutcome {
                 acted: 0,
-                skip_reason: Some("calm".to_string()),
-                detail: short(&machine.reason),
+                skip_reason: Some("calm".into()),
+                detail: short(&reason),
             }
         }
         "hot" => {
@@ -102,90 +121,81 @@ pub fn tick_machine_watch(
             if state.hot_streak < MACHINE_HOT_SAMPLES {
                 return WatchOutcome {
                     acted: 0,
-                    skip_reason: Some("debouncing".to_string()),
+                    skip_reason: Some("debouncing".into()),
                     detail: short(&format!(
-                        "{}/{} hot: {}",
-                        state.hot_streak, MACHINE_HOT_SAMPLES, machine.reason
+                        "{}/{} hot: {reason}",
+                        state.hot_streak, MACHINE_HOT_SAMPLES
                     )),
                 };
             }
-            // Hot past the debounce. The throttle suppresses repeats while the
-            // state stays hot (LD6); a state change to calm never notifies.
+            let throttle = Duration::from_secs(sample.throttle_minutes.saturating_mul(60));
             if let Some(last) = state.last_notified {
-                let floor = Duration::from_secs(machine.throttle_minutes.saturating_mul(60));
                 if let Some(held) = now.checked_duration_since(last) {
-                    if held < floor {
-                        let remaining = (floor - held).as_secs();
+                    if held < throttle {
                         return WatchOutcome {
                             acted: 0,
-                            skip_reason: Some("throttled".to_string()),
+                            skip_reason: Some("throttled".into()),
                             detail: short(&format!(
-                                "hot, notice held {remaining}s more: {}",
-                                machine.reason
+                                "hot, notice held {}s more: {reason}",
+                                (throttle - held).as_secs()
                             )),
                         };
                     }
                 }
             }
-            let body = notice_body(machine, payload);
-            if notify("machine_watch: box hot", &body) {
+            if notify("machine_watch: box hot", &notice_body(&reason, sample)) {
                 state.last_notified = Some(now);
                 WatchOutcome {
                     acted: 1,
                     skip_reason: None,
-                    detail: short(&format!("notified: {}", machine.reason)),
+                    detail: short(&format!("notified: {reason}")),
                 }
             } else {
-                // No state for a notice that never left: the next beat retries.
                 WatchOutcome {
                     acted: 0,
-                    skip_reason: Some("notify_failed".to_string()),
-                    detail: short(&machine.reason),
+                    skip_reason: Some("notify_failed".into()),
+                    detail: short(&reason),
                 }
             }
         }
-        // The Python decider's own "unreadable", or any word this reader does
-        // not know: an unreadable sensor never reads as calm (AC3).
         _ => WatchOutcome {
             acted: 0,
-            skip_reason: Some("machine_unreadable".to_string()),
-            detail: short(&machine.reason),
+            skip_reason: Some("machine_unreadable".into()),
+            detail: short(&reason),
         },
     }
 }
 
-/// The escalation body: the decider's reason sentence verbatim (busy
-/// fraction, band, load_15m, runnable count, process count - AC4), then the
-/// top three consumers by their own argv strings, so a keeper running from a
-/// worktree target directory appears by its own path (AC7).
-fn notice_body(
-    machine: &crate::spawn_gate::MachinePressurePayload,
-    payload: &crate::spawn_gate::FootprintCausePayload,
-) -> String {
-    let mut body = String::new();
-    body.push_str(&machine.reason);
-    let mut parts: Vec<String> = Vec::new();
-    for consumer in payload.top.iter().take(3) {
-        parts.push(format!(
-            "{} ({:.1}%)",
-            consumer.command, consumer.cpu_percent
-        ));
-    }
-    if !parts.is_empty() {
+fn notice_body(reason: &str, sample: &MachineSample) -> String {
+    let mut body = reason.to_string();
+    let top: Vec<String> = sample
+        .top_cpu
+        .iter()
+        .map(|row| format!("{} ({:.1}%)", row.command, row.cpu_pct))
+        .collect();
+    if !top.is_empty() {
         body.push_str(" top: ");
-        body.push_str(&parts.join(", "));
+        body.push_str(&top.join(", "));
     }
+    body.push_str(&format!(
+        "; compressor {} GB, swap {} of {} GB, {} zombies",
+        opt(sample.compressor_gb),
+        opt(sample.swap_used_gb),
+        opt(sample.swap_total_gb),
+        sample
+            .zombies
+            .map_or_else(|| "unmeasured".into(), |v| v.to_string())
+    ));
     body
 }
 
-/// The tick row's detail is a short human string, capped like the other arms.
+fn opt(value: Option<f64>) -> String {
+    value.map_or_else(|| "unmeasured".into(), |v| format!("{v:.1}"))
+}
 fn short(text: &str) -> String {
     text.chars().take(200).collect()
 }
 
-/// The daemon-facing wrapper: due-check plus one-in-flight gate, the
-/// `maybe_retirement_sweep` shape. The probe shells out (8s budget), so the
-/// whole body runs off-loop; every path ends in exactly one tick row.
 pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
     let interval = Duration::from_secs(MACHINE_WATCH_INTERVAL_S);
     {
@@ -201,24 +211,60 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
     let state = Arc::clone(&arm.state);
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
-        let reading: Result<crate::spawn_gate::FootprintCausePayload, String> =
-            crate::spawn_gate::footprint_cause_raw().and_then(|raw| {
-                serde_json::from_str(&raw)
-                    .map_err(|e| format!("footprint payload unparseable: {e}"))
-            });
-        let outcome = {
-            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
-            tick_machine_watch(
-                &mut guard,
-                reading.as_ref().map_err(|s| s.as_str()),
-                |title, body| crate::operator_notice::notify_operator(title, body, None),
-                Instant::now(),
-            )
+        let (mut sample, ticks) = {
+            let previous = state.lock().unwrap_or_else(|e| e.into_inner()).prev_ticks;
+            crate::machine_sample::read(&home, previous)
         };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let busy_band = crate::agents_config::config_lookup(
+            &cwd,
+            &["resource_meter.thresholds.cpu_busy_fraction"],
+        )
+        .and_then(|v| v.as_float())
+        .filter(|v| *v > 0.0 && *v <= 1.0)
+        .unwrap_or(0.9);
+        sample.busy_band = Some(busy_band);
+        sample.load_band_per_core = Some(LOAD_PER_CORE_BAND);
+        match crate::session_cost::price(&home, &sample.procs) {
+            Ok(value) => {
+                sample.sessions = value.get("sessions").cloned();
+                sample.unresolved = Some(
+                    value
+                        .get("unresolved")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([])),
+                );
+                sample.top_rss = value.get("top_rss").cloned();
+            }
+            Err(error) => sample.sessions_error = Some(error),
+        }
+        let (verdict, _) = decide(&sample, busy_band, LOAD_PER_CORE_BAND);
+        sample.verdict = Some(verdict.clone());
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
         );
+        let _ = journal.append(
+            "machine_sample",
+            sample.to_data(&verdict, busy_band, LOAD_PER_CORE_BAND),
+        );
+        let outcome = {
+            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.prev_ticks = ticks;
+            sample.throttle_minutes = crate::agents_config::config_lookup(
+                &cwd,
+                &["resource_meter.notifications.throttle_minutes"],
+            )
+            .and_then(|v| v.as_integer())
+            .unwrap_or(60)
+            .clamp(0, 10080) as u64;
+            tick_machine_watch(
+                &mut guard,
+                Ok(&sample),
+                |title, body| crate::operator_notice::notify_operator(title, body, None),
+                Instant::now(),
+            )
+        };
         crate::tick_ledger::emit_tick(
             &journal,
             "machine_watch",
@@ -234,236 +280,65 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spawn_gate::{MachinePressurePayload, TopConsumer};
 
-    fn machine(verdict: &str, throttle_minutes: u64) -> MachinePressurePayload {
-        MachinePressurePayload {
-            verdict: verdict.to_string(),
-            reason: format!("machine 91.7% crosses band 90% -> {verdict}; context"),
-            busy_fraction: Some(0.917),
-            band: 0.9,
-            machine_cores: Some(11.0),
-            capacity_cores: 12.0,
-            runnable: Some(160),
-            processes: Some(1100),
-            load_15m: Some(279.12),
-            throttle_minutes,
-        }
-    }
-
-    fn payload(
-        machine: Option<MachinePressurePayload>,
-    ) -> crate::spawn_gate::FootprintCausePayload {
-        crate::spawn_gate::FootprintCausePayload::from_parts(machine, Vec::new())
-    }
-
-    fn counter(calls: &mut Vec<String>) -> impl FnMut(&str, &str) -> bool + '_ {
-        move |title, body| {
-            calls.push(format!("{title}|{body}"));
-            true
+    fn sample(busy: Option<f64>, load: Option<f64>) -> MachineSample {
+        MachineSample {
+            busy_fraction: busy,
+            cores: Some(12.0),
+            load_15m: load,
+            runnable: Some(1),
+            processes: Some(2),
+            busy_band: Some(0.9),
+            load_band_per_core: Some(10.0),
+            throttle_minutes: 30,
+            ..Default::default()
         }
     }
 
     #[test]
-    fn two_hot_samples_notify_exactly_once() {
-        let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let now = Instant::now();
-        let first = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(first.skip_reason.as_deref(), Some("debouncing"));
-        assert_eq!(first.acted, 0);
-        let second = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(second.skip_reason, None);
-        assert_eq!(second.acted, 1);
-        assert_eq!(calls.len(), 1);
+    fn load_can_make_machine_hot() {
+        let (verdict, reason) = decide(&sample(Some(0.487), Some(363.0)), 0.9, 10.0);
+        assert_eq!(verdict, "hot");
+        assert!(reason.contains("30.2 per core crosses load band 10"));
     }
 
     #[test]
-    fn hot_then_calm_never_notifies_and_resets_the_streak() {
-        let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let now = Instant::now();
-        let hot = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(hot.skip_reason.as_deref(), Some("debouncing"));
-        let calm = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("calm", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(calm.skip_reason.as_deref(), Some("calm"));
-        assert_eq!(calm.acted, 0);
-        assert_eq!(calls.len(), 0);
-        assert_eq!(state.hot_streak, 0);
-        assert_eq!(state.calm_streak, 1);
+    fn unreadable_never_reads_calm() {
+        let (verdict, _) = decide(&sample(None, Some(2.0)), 0.9, 10.0);
+        assert_eq!(verdict, "unreadable");
     }
 
     #[test]
-    fn a_hot_repeat_inside_the_throttle_is_held_with_seconds_named() {
+    fn two_hot_samples_notify_once() {
         let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let now = Instant::now();
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(calls.len(), 1);
-        let five_minutes_later = now + Duration::from_secs(300);
-        let repeat = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            five_minutes_later,
-        );
-        assert_eq!(repeat.skip_reason.as_deref(), Some("throttled"));
-        assert_eq!(repeat.acted, 0);
-        assert!(repeat.detail.contains("1500s more"), "{}", repeat.detail);
-        assert_eq!(calls.len(), 1, "no second notice");
-    }
-
-    #[test]
-    fn a_hot_repeat_past_the_throttle_notifies_again() {
-        let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let now = Instant::now();
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        let past = now + Duration::from_secs(31 * 60);
-        let repeat = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            counter(&mut calls),
-            past,
-        );
-        assert_eq!(repeat.skip_reason, None);
-        assert_eq!(calls.len(), 2);
-    }
-
-    #[test]
-    fn an_unreadable_sensor_notifies_nobody() {
-        let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let now = Instant::now();
-        let probe_failed = tick_machine_watch(
-            &mut state,
-            Err("footprint probe did not answer inside 8s"),
-            counter(&mut calls),
-            now,
+        let mut calls = 0;
+        let hot = sample(Some(1.0), Some(1.0));
+        assert_eq!(
+            tick_machine_watch(
+                &mut state,
+                Ok(&hot),
+                |_, _| {
+                    calls += 1;
+                    true
+                },
+                Instant::now()
+            )
+            .acted,
+            0
         );
         assert_eq!(
-            probe_failed.skip_reason.as_deref(),
-            Some("machine_unreadable")
+            tick_machine_watch(
+                &mut state,
+                Ok(&hot),
+                |_, _| {
+                    calls += 1;
+                    true
+                },
+                Instant::now()
+            )
+            .acted,
+            1
         );
-        assert!(
-            probe_failed.detail.contains("8s"),
-            "{}",
-            probe_failed.detail
-        );
-        let no_machine =
-            tick_machine_watch(&mut state, Ok(&payload(None)), counter(&mut calls), now);
-        assert_eq!(
-            no_machine.skip_reason.as_deref(),
-            Some("machine_unreadable")
-        );
-        assert!(no_machine.detail.contains("no machine object"));
-        let unreadable_verdict = tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("unreadable", 30)))),
-            counter(&mut calls),
-            now,
-        );
-        assert_eq!(
-            unreadable_verdict.skip_reason.as_deref(),
-            Some("machine_unreadable")
-        );
-        assert_eq!(calls.len(), 0);
-    }
-
-    #[test]
-    fn the_notice_names_the_reason_then_the_top_three_by_their_own_strings() {
-        let mut state = MachineWatchState::default();
-        let mut calls: Vec<String> = Vec::new();
-        let mut top: Vec<TopConsumer> = Vec::new();
-        for (cpu, cmd) in [
-            (
-                54.8,
-                "/Users/bb16/.fno/worktrees/footnote/x-aaaa/target/debug/fno-agents store-keeper",
-            ),
-            (38.8, "rustc --edition=2021"),
-            (22.1, "sccache server"),
-            (1.0, "tiny"),
-        ] {
-            top.push(TopConsumer {
-                cpu_percent: cpu,
-                command: cmd.to_string(),
-            });
-        }
-        let reading =
-            crate::spawn_gate::FootprintCausePayload::from_parts(Some(machine("hot", 30)), top);
-        let now = Instant::now();
-        tick_machine_watch(&mut state, Ok(&reading), counter(&mut calls), now);
-        tick_machine_watch(&mut state, Ok(&reading), counter(&mut calls), now);
-        assert_eq!(calls.len(), 1);
-        let body = calls[0].clone();
-        assert!(body.contains("machine 91.7%"), "{body}");
-        assert!(
-            body.contains("worktrees/footnote/x-aaaa/target/debug/fno-agents"),
-            "{body}"
-        );
-        assert!(body.contains("rustc --edition=2021 (38.8%)"), "{body}");
-        assert!(body.contains("sccache server (22.1%)"), "{body}");
-        assert!(!body.contains("tiny"), "only the top three: {body}");
-    }
-
-    #[test]
-    fn a_failed_notice_send_commits_no_throttle_state() {
-        let mut state = MachineWatchState::default();
-        let now = Instant::now();
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            |_, _| false,
-            now,
-        );
-        tick_machine_watch(
-            &mut state,
-            Ok(&payload(Some(machine("hot", 30)))),
-            |_, _| false,
-            now,
-        );
-        assert_eq!(state.last_notified, None);
+        assert_eq!(calls, 1);
     }
 }

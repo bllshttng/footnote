@@ -26,8 +26,9 @@ pub fn run_provider_cap(args: &[String]) -> i32 {
     match args.split_first() {
         Some((action, rest)) if action == "status" => cap_status(rest),
         Some((action, rest)) if action == "decide" => cap_decide(rest),
+        Some((action, rest)) if action == "vault" => crate::claude_vault::run(rest),
         _ => {
-            eprintln!("usage: provider-cap status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait");
+            eprintln!("usage: provider-cap status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait | vault sync|refresh");
             2
         }
     }
@@ -285,6 +286,18 @@ fn open_lane_count(snap: &CapSnapshot) -> usize {
 // ---------------------------------------------------------------------------
 
 fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Duration) -> bool {
+    run_fno_output(args, cwd, timeout).is_some()
+}
+
+/// `run_fno` with the child's stdout captured: `Some(stdout)` on a zero exit,
+/// `None` on spawn failure, timeout, or non-zero exit. The capacity refresh
+/// reads the `--refresh --json` answer from it; no second process helper.
+pub(crate) fn run_fno_output(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
     use std::process::{Command, Stdio};
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
     let mut cmd = Command::new(&fno);
@@ -295,26 +308,35 @@ fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Dur
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    match cmd.spawn() {
-        Err(_) => false,
-        Ok(mut child) => {
-            let deadline = std::time::Instant::now() + timeout;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return status.success(),
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Ok(None) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return false;
-                    }
-                    Err(_) => return false,
-                }
+    let mut child = cmd.spawn().ok()?;
+    // A reader thread owns the pipe so a chatty child can never fill the OS
+    // buffer and deadlock the wait, and nothing read from it is discarded.
+    let reader = {
+        let mut out = child.stdout.take()?;
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = out.read_to_string(&mut buf);
+            buf
+        })
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            Err(_) => break false,
         }
-    }
+    };
+    ok.then(|| reader.join().ok())
+        .flatten()
+        .filter(|s| !s.is_empty())
 }
 
 /// The armed actor's world: fno verbs with bounded waits. A step that cannot

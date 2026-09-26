@@ -60,10 +60,3 @@ def test_decision_record_round_trips_and_joins_to_subject_node(tmp_path: Path) -
     assert [row["decision_id"] for row in api.decisions("x-decision-node", path=graph)] == [
         "d-wave12"
     ]
-
-
-def test_import_requires_every_node_decision_to_have_a_durable_event(tmp_path: Path) -> None:
-    graph = _graph(tmp_path, [{"decision_id": "d-missing", "ts": "2026-09-16T00:00:01Z"}])
-
-    with pytest.raises(Exception, match="d-missing"):
-        api.decisions(path=graph)

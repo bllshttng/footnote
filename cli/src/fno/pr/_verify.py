@@ -155,11 +155,13 @@ def _events_file(repo_root: str, reason: str) -> Optional[str]:
 
 
 def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) -> None:
-    """Validate-with-warning, then append under the events mkdir-mutex.
+    """Validate-with-warning, then commit through the native event store.
 
     Mirrors the bash: a schema-validation failure logs a warning but the event
-    is appended anyway (missing audit evidence is worse than a relaxed shape).
+    is committed anyway (missing audit evidence is worse than a relaxed shape).
     An unresolved journal (None) was already warned about by ``_events_file``.
+    Like the writer it replaces, this stays best-effort: a store failure is one
+    stderr line, never a failed verdict.
     """
     if events_file is None:
         return
@@ -170,25 +172,14 @@ def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) 
     except Exception:
         sys.stderr.write(
             f"pr-verify: schema validation failed for transcript_audit_failed "
-            f"(reason={reason}); appending anyway\n"
+            f"(reason={reason}); committing anyway\n"
         )
-    requested_path = Path(events_file)
-    while True:
-        path = requested_path.resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_dir = path.with_name(path.name + ".lock.d")
-        token = acquire_dir_mutex(lock_dir, 30, steal=True, poll_s=1)
-        if token is None:
-            sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
-            return
-        if requested_path.resolve() == path:
-            break
-        release_dir_mutex(lock_dir, token)
     try:
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-    finally:
-        release_dir_mutex(lock_dir, token)
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(event, Path(events_file))
+    except Exception as exc:  # noqa: BLE001 - audit stays best-effort
+        sys.stderr.write(f"pr-verify: event store commit failed (reason={reason}): {exc}\n")
 
 
 def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:

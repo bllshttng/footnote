@@ -1,8 +1,8 @@
 """The pr-watch tick's heal phase: the gate in front of the Rust drive loop.
 
 The loop lives in crates/fno-agents/src/heal.rs (`--all --apply`); this module
-resolves the binary and runs it once per project root, each passed with
-``--cwd`` because launchd starts the tick in ``/``.
+resolves the binary and runs it ONCE, carrying every project root via
+repeated ``--cwd`` flags, because launchd starts the tick in ``/``.
 """
 from __future__ import annotations
 
@@ -12,9 +12,13 @@ from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
-#: Belt over a wedged binary; the drive loop bounds each remedy itself and
-#: the tick's own SIGALRM deadline bounds the phase.
-_DRIVE_TIMEOUT_S = 600
+#: Belt over a wedged spawn, not a run bound: the phase passes ``--detach``,
+#: the binary answers in milliseconds and the drive loop bounds each remedy
+#: and the loop itself (DRIVE_BUDGET) in Rust. 5s, not the old
+#: 30: at 30 the belt equaled the heal cap, so one wedged root spent the
+#: whole phase (18 of 50 measured ticks saturated at 30.1s against a 0.3s
+#: median).
+_DRIVE_TIMEOUT_S = 5
 
 
 def run_heal_phase(
@@ -24,12 +28,12 @@ def run_heal_phase(
     resolve_binary: Callable[[], Any] | None = None,
     run: Callable[..., Any] | None = None,
 ) -> str:
-    """Run ``fno-agents pr-heal --all --apply`` once per root.
+    """Run ``fno-agents pr-heal --all --apply`` once, every root aboard.
 
     Unarmed (``auto_heal.enabled`` falsy or the block absent) answers
     ``"unarmed"`` without resolving the binary: the launchd hot path pays
-    nothing. Armed, returns ``"ran"``, ``"no-binary"``, or ``"no-roots"``;
-    one failing root logs and never stops the rest.
+    nothing. Armed, returns ``"ran"``, ``"no-binary"``, ``"no-roots"``, or
+    ``"failed"`` (the one spawn failed or exited a non-verdict code).
     """
     if not getattr(getattr(settings, "auto_heal", None), "enabled", False):
         return "unarmed"
@@ -49,13 +53,23 @@ def run_heal_phase(
         import subprocess
 
         run = subprocess.run
-    for root in roots:
-        try:
-            run(
-                [str(binary), "pr-heal", "--all", "--apply", "--cwd", str(root)],
-                check=False,
-                timeout=_DRIVE_TIMEOUT_S,
+    try:
+        proc = run(
+            [str(binary), "pr-heal", "--all", "--apply", "--detach"]
+            + [x for root in roots for x in ("--cwd", str(root))],
+            check=False,
+            timeout=_DRIVE_TIMEOUT_S,
+        )
+        # 0..3 are drive-loop verdicts; 4/127 means a stale binary that
+        # lacks --detach and would otherwise read as "ran" with no row.
+        code = getattr(proc, "returncode", 0)
+        if code not in (0, 1, 2, 3):
+            log.warning(
+                "pr-watch: heal drive loop over every root exited %s; run `fno doctor`",
+                code,
             )
-        except Exception as exc:  # noqa: BLE001 - one root never stops the rest
-            log.warning("pr-watch: heal drive loop failed for %s: %s", root, exc)
-    return "ran"
+            return "failed"
+        return "ran"
+    except Exception as exc:  # noqa: BLE001 - one wedged spawn never stops a tick
+        log.warning("pr-watch: heal drive loop failed: %s", exc)
+        return "failed"

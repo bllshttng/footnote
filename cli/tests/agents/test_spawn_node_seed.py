@@ -9,6 +9,7 @@ wins over the node.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
@@ -85,7 +86,7 @@ def _invoke(runner, *args):
     return runner.invoke(agents_app, ["spawn", "--name", "w1", *args])
 
 
-def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner):
+def test_node_seeded_pane_carries_verb_and_brief(monkeypatch, runner, loop_admission_ready):
     """AC1-HP: no typed message + encoded node -> the pane seed is the node's
     rendered verb command, the brief rides TARGET_BRIEF, and the receipt names
     both sources."""
@@ -129,7 +130,9 @@ def test_typed_message_without_a_node_is_never_consulted(monkeypatch, runner):
     assert "TARGET_BRIEF" not in received["provenance"]
 
 
-def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runner):
+def test_typed_message_with_a_node_composes_the_nodes_command(
+    monkeypatch, runner, loop_admission_ready
+):
     """with `--node`, a prose message gains the node's derived
     command in front; the node row is read and the brief rides along."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -139,7 +142,9 @@ def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runne
     assert "brief_source" not in result.output
 
 
-def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runner):
+def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(
+    monkeypatch, runner, loop_admission_ready
+):
     """The dispatch-next porcelain pins its lane: --mux-session reaches
     dispatch_spawn_bounded_pane as `session`, and a non-pane substrate refuses."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -154,7 +159,7 @@ def test_mux_session_forwards_to_the_pane_and_refuses_off_pane(monkeypatch, runn
     assert "pane-only" in result.output
 
 
-def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
+def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner, loop_admission_ready):
     """(x-c914) The pane's birth account rides the provenance env so the mux
     reads it back for the sideline glyph; claude-gated like the row axis."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
@@ -175,63 +180,69 @@ def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
 # ---- x-3873 change 1: the door ensures the worktree (AC1-*) ----------------
 
 
-def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path):
-    """AC1-HP: no typed message and no explicit cwd source -> the ensure runs
-    once with the node's recorded cwd, the resolved --name and the resolved
+def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path, loop_admission_ready):
+    """AC1-HP: no typed message and no explicit cwd source -> the ensure seam
+    runs once with the node's recorded cwd, the NODE id and the resolved
     harness, and the worker launches in the path it printed."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED, cwd="/repo"))
     seen: dict = {}
 
-    def fake_ensure(recorded_cwd, agent_name, harness):
-        seen["args"] = (str(recorded_cwd), agent_name, harness)
-        return str(tmp_path / "wt")
+    def fake_verb_call(verb, payload, unavailable_cls, **kw):
+        seen["verb"] = verb
+        seen["payload"] = dict(payload)
+        return {"workdir": str(tmp_path / "wt")}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", fake_ensure
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", fake_verb_call)
     result = _invoke(runner, "--node", "x-1", "--substrate", "pane")
     assert result.exit_code == 0, result.output
-    assert seen["args"] == ("/repo", "w1", "claude")
+    assert seen["verb"] == "launch-workdir"
+    assert seen["payload"] == {"recorded_cwd": "/repo", "node": "x-1", "harness": "claude"}
     assert received["cwd"] == (tmp_path / "wt").resolve()
 
 
 def test_ensure_refusal_holds_the_node(monkeypatch, runner):
-    """AC1-ERR: a None ensure answer exits 2 naming the node and the hold;
-    no peer is created."""
+    """AC1-ERR: a hold answer exits 2 naming the node and the hold; no peer
+    is created."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", lambda *a: None
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", lambda *a, **k: {"hold": "refused"})
     result = _invoke(runner, "--node", "x-1", "--substrate", "pane")
     assert result.exit_code == 2
     assert "worktree ensure refused or misconfigured for x-1" in result.output
     assert received == {}
 
 
-def test_typed_here_skips_the_ensure(monkeypatch, runner):
+def test_typed_here_skips_the_ensure(monkeypatch, runner, loop_admission_ready):
     """AC1-EDGE (--here): the caller opted in; the ensure is never consulted."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
-    def boom(*a):
-        raise AssertionError("ensure must not run")
+    def boom(verb, payload, unavailable_cls, **kw):
+        if verb == "launch-workdir":
+            raise AssertionError("ensure must not run")
+        return {"action": "pass"}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", boom
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", boom)
     result = _invoke(runner, "--node", "x-1", "--here", "--substrate", "pane")
     assert result.exit_code == 0, result.output
 
 
-def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path):
+def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path, loop_admission_ready):
     """AC1-EDGE (--cwd): the caller's explicit dir wins, unchanged."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
-    def boom(*a):
-        raise AssertionError("ensure must not run")
+    def boom(verb, payload, unavailable_cls, **kw):
+        if verb == "launch-workdir":
+            raise AssertionError("ensure must not run")
+        return {"action": "pass"}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", boom
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", boom)
     result = _invoke(
         runner,
         "--node", "x-1", "--substrate", "pane",
@@ -316,19 +327,21 @@ def test_seam_names_the_binary_when_the_verb_is_unavailable(monkeypatch, capsys)
 
 
 def test_seam_skips_without_an_explicit_node_flag(monkeypatch):
-    """AC3-HP: no `--node` (with or without FNO_NODE) calls no verb and reads
-    no graph: the env var is provenance, never a decision."""
+    """AC3-HP: no `--node` (with or without FNO_NODE) reads no graph: the env
+    var is provenance, never a decision. The derivation asks the verb (one
+    derive call); a prose seed reads none, so the argv is untouched."""
     monkeypatch.setenv("FNO_NODE", "x-1")
 
     def boom_graph():
         raise AssertionError("graph must not be read")
 
     monkeypatch.setattr("fno.graph.load.load_graph", boom_graph)
-    seen = _stub_verb(monkeypatch, {"action": "pass"})
+    seen = _stub_verb(monkeypatch, {"action": "pass", "derive_reason": "prose seed names no verb"})
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("port it"))
-    assert seen == []
+    assert len(seen) == 1
+    assert "node" not in seen[0]
     assert node_verb is None
     assert args[1] == "port it"
 
@@ -419,3 +432,159 @@ def test_seam_real_binary_refuses_a_disagreeing_verb(monkeypatch):
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:blueprint x-1", "--node", "x-1"))
     assert node_verb is None
+
+
+# ---- x-8d88: the seed names the node; the seam binds it ---------------------
+
+
+@pytest.fixture
+def _target_row(tmp_path):
+    """A node whose lifecycle answers /target: a readable plan (no status
+    scalar reads READY) beside a declared /target verb."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    row = _row(dispatch_verb="/target", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path))
+    return row
+
+
+@pytest.fixture
+def _rust_graph(tmp_path, monkeypatch):
+    """Point the binary's own store read (FNO_HOME -> graph.json) at a fixture
+    naming x-1, so the nodeless derive arm resolves it without the machine."""
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8"
+    )
+
+
+def _stub_verb_seq(monkeypatch, answers):
+    """Like _stub_verb but each call pops the next canned answer; later calls
+    answer pass, which is what an agreeing /target derivation meets."""
+    import fno.rust_binary as rb
+
+    seen: list = []
+
+    def _call(verb, payload, unavailable_cls, **kw):
+        seen.append(payload.get("node_seed", payload))
+        return answers.pop(0) if answers else {"action": "pass"}
+
+    monkeypatch.setattr(rb, "verb_call", _call)
+    return seen
+
+
+def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
+    """x-8d88 Task 2: the derive answer inserts --node x-1 into the argv, the
+    seam applies it and the unmodified explicit block re-decides with the row
+    facts, so the mint below the seam binds the row to the node the seed named."""
+    _stub_row(monkeypatch, _row(dispatch_verb="/target"))
+    inserted = ["spawn", "/fno:target x-1", "--node", "x-1"]
+    seen = _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": inserted}])
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-1"))
+    assert "--node" in args
+    assert args[args.index("--node") + 1] == "x-1"
+    assert node_verb is None
+    assert len(seen) == 2
+    assert "node" not in seen[0], "the derive call carries no row facts"
+    assert seen[1]["node"] == "x-1"
+
+
+def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
+    """x-8d88 Task 4: the seed names a node the verb's store read cannot
+    resolve, so the receipt-compose answer hands the reason to the mint
+    through FNO_NODE_REASON and the spawn proceeds WITHOUT a node binding;
+    the receipt is never a parser flag."""
+    _stub_row(monkeypatch, None)
+    receipt_argv = [
+        "spawn",
+        "/fno:target x-gone",
+        "--node-reason",
+        "x-gone names no readable backlog row (derived from the seed)",
+    ]
+    _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": receipt_argv}])
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
+    assert node_verb is None
+    assert "--node-reason" not in args
+    assert "--node" not in args
+    assert "x-gone" in os.environ.get("FNO_NODE_REASON", "")
+    monkeypatch.delenv("FNO_NODE_REASON", raising=False)
+
+
+def test_seam_degrades_when_the_verb_predates_the_derivation(monkeypatch, capsys):
+    """The skew half: a verb binary that predates the derivation answers the
+    nodeless payload with the row gate's refuse. The seam says so on stderr
+    and spawns exactly as before the derivation existed."""
+    monkeypatch.delenv("FNO_AGENTS_RUNTIME", raising=False)
+    _stub_row(monkeypatch, None)
+    _stub_verb_seq(monkeypatch, [{"action": "refuse", "message": "names no readable backlog row"}])
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
+    assert node_verb is None
+    assert "--node-reason" not in args
+    assert "--node" not in args
+    assert "predates seed-node derivation" in capsys.readouterr().err
+
+
+@requires_rust
+def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch, _target_row, _rust_graph):
+    """x-8d88 on the real transport: only the graph row is stubbed; the
+    compiled node-seed answer derives x-1 from the seed and the seam inserts
+    the flag. Fails against a binary built before the derivation."""
+    _stub_row(monkeypatch, _target_row)
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-1"))
+    assert "--node" in args
+    assert args[args.index("--node") + 1] == "x-1"
+    assert node_verb is None
+
+
+@requires_rust
+def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row, _rust_graph):
+    """x-8d88 Task 1 follow-up: the operator template spells
+    `/fno:target x-5d17. Plan: ...`; the trailing period is prose, not id."""
+    _stub_row(monkeypatch, _target_row)
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, _ = _node_seed_at_seam(_seed_args("/fno:target x-1. Plan: /plans/x.md. Rebase first."))
+    assert args[args.index("--node") + 1] == "x-1"
+
+
+@requires_rust
+def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
+    monkeypatch, runner, _target_row, _rust_graph, loop_admission_ready
+):
+    """x-8d88 Task 2: a /fno:target x-1 seed and no --node reaches the pane
+    mint with the node resolved: provenance carries FNO_NODE and the seed
+    passes through unchanged (agreement, so no compose rewrite)."""
+    from fno.agents import mux_spawn, spawn_gate
+
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [_target_row])
+
+    class _Gate:
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        mux_spawn,
+        "resolve_provenance",
+        lambda node=None, *a, **k: {"FNO_NODE": node} if node else {},
+    )
+    received: dict = {}
+
+    def fake_pane(**kwargs):
+        received.update(kwargs)
+        return mux_spawn.MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="s",
+            pane_id=1, child_pid=None, session_uuid=None,
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_pane)
+    result = _invoke(runner, "/fno:target x-1", "--here", "--substrate", "pane")
+    assert result.exit_code == 0, result.output
+    assert received["provenance"]["FNO_NODE"] == "x-1"
+    assert received["message"] == "/fno:target x-1"

@@ -43,6 +43,22 @@ impl AttachPlace {
     }
 }
 
+/// What `P` does with the row under the cursor: open the picker, or refuse
+/// naming the row's observed state. One decision, one home, so the four
+/// states the old gate collapsed into one sentence (`a portal shows a
+/// paneless live row`) can never collapse again - the sentence contradicted
+/// the screen whenever the row was already shown through a portal the
+/// picker itself would have listed. The shape is `paneless_route_hint`'s
+/// (mux_cli), the same fix one layer down: the state rides in the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PortalPickDecision {
+    /// The attach key the picker opens on - the old gate's exact outcome.
+    Open(String),
+    /// The refusal the notice strip shows: the row, its state, and the verb
+    /// that moves it where one applies.
+    Refuse(String),
+}
+
 /// The portal-placement picker state: the attach id of the row being
 /// placed and a cursor. Like [`AttachPlace`] the cursor is an index into the
 /// DRAWN list, never a portal index - portal membership is derived per frame,
@@ -118,6 +134,49 @@ impl View {
         });
     }
 
+    /// The `P` decision for the row under the cursor; `None` = the cursor is
+    /// not on an agent row at all, the only arm that states the rule, because
+    /// there is no row whose state could be named. The GATE does not move: a
+    /// pane-hosted row still refuses rather than opening the picker. Only the
+    /// refusal's words changed, and they live here with the picker so
+    /// client.rs stays under the file budget.
+    pub(crate) fn portal_pick_decision(&self, row: Option<&AgentRow>) -> PortalPickDecision {
+        let Some(a) = row else {
+            return PortalPickDecision::Refuse("a portal shows an agent row".into());
+        };
+        if a.pane_id.is_none() && !a.exited {
+            return PortalPickDecision::Open(a.attach_id.clone().unwrap_or_else(|| a.name.clone()));
+        }
+        // The tab context resolves through the SAME renderer the picker
+        // listing uses, so the refusal and the list cannot disagree about
+        // where the row sits.
+        let tab = match self.agent_tab_context(a.squad, a.tab) {
+            Some(TabContext::Ordinal(n)) => format!(" at tab {n}"),
+            Some(TabContext::Named(name)) => format!(" at ·{name}"),
+            None => String::new(),
+        };
+        // Meaning-first: the notice strip ellipsizes from the right, so the
+        // row and its state lead and the recovery verb trails.
+        if let Some(idx) = a.portal {
+            PortalPickDecision::Refuse(format!(
+                "{} is already portal {idx}{tab}; move it: \
+                 fno mux thread reseat <name> --portal N",
+                a.name
+            ))
+        } else if a.exited {
+            PortalPickDecision::Refuse(format!(
+                "{} has exited; a portal shows a live row only",
+                a.name
+            ))
+        } else {
+            PortalPickDecision::Refuse(format!(
+                "{} already has a pane{tab}; move it: \
+                 fno mux thread reseat <name> --portal N",
+                a.name
+            ))
+        }
+    }
+
     /// Build the attach-placement picker lines: a header, one row per candidate
     /// workspace, then a footer where each axis names its OWN keys.
     ///
@@ -151,7 +210,10 @@ impl View {
         // `shift+HJKL` rather than a bare `HJKL`, naming the modifier in words
         // so it reads as "hjkl, held with shift" rather than an unrelated set
         // of four capital-letter bindings.
-        lines.push(pad_to(" hjkl/arrows move · 1-9 jump · shift+HJKL split", W));
+        lines.push(pad_to(
+            " arrows/hjkl move · 1-9 jump · shift+arrows/HJKL split",
+            W,
+        ));
         lines.push(pad_to(
             " enter/t new tab in › · space/. here · esc/q cancel",
             W,
@@ -221,10 +283,29 @@ impl View {
         };
         lines.push(pad_to(&format!(" {marker} {ord} +   new portal"), W));
         lines.push(pad_to(
-            " hjkl/arrows move · 1-9 jump · enter place · esc/q cancel",
+            " arrows/hjkl move · 1-9 jump · enter place · esc/q cancel",
+            W,
+        ));
+        // The commit axis on the + row, one line below the navigation footer:
+        // neither line exceeds W, so nothing ellipsizes.
+        lines.push(pad_to(
+            " on + new portal: shift+arrows/HJKL split · t new tab",
             W,
         ));
         lines
+    }
+}
+
+/// The split direction a capitalized key names, one map for both placement
+/// pickers so the vocabulary cannot fork: `H` left, `J` down, `K` up,
+/// `L` right. Uppercase acts on geometry, the mux-wide rule keys.rs sets.
+pub(crate) fn split_dir(key: u8) -> Option<Dir> {
+    match key {
+        b'H' => Some(Dir::Left),
+        b'J' => Some(Dir::Down),
+        b'K' => Some(Dir::Up),
+        b'L' => Some(Dir::Right),
+        _ => None,
     }
 }
 
@@ -239,7 +320,7 @@ pub(crate) async fn attach_place_keys(
             return Ok(StdinFlow::Continue);
         };
         let mut esc = std::mem::take(&mut picker.esc);
-        let keys = fold_selector_keys(&mut esc, bytes);
+        let keys = fold_selector_keys_with_split_arrows(&mut esc, bytes);
         picker.esc = esc;
         keys
     };
@@ -311,17 +392,13 @@ pub(crate) async fn attach_place_keys(
         // rather than freed, so the muscle memory from when `.` was the only
         // "here" binding still works.
         let (split, here) = match key {
-            b'H' => (Some(Some(Dir::Left)), false),
-            b'J' => (Some(Some(Dir::Down)), false),
-            b'K' => (Some(Some(Dir::Up)), false),
-            b'L' => (Some(Some(Dir::Right)), false),
             b'\r' | b'\n' | b't' => (Some(None), false),
             b' ' | b'.' => (Some(None), true),
             0x1b | b'q' => {
                 view.attach_place = None;
                 return Ok(StdinFlow::Continue);
             }
-            _ => (None, false),
+            key => (split_dir(key).map(Some), false),
         };
         let Some(split) = split else { continue };
         let picker = view.attach_place.take().unwrap();
@@ -374,9 +451,13 @@ pub(crate) async fn attach_place_keys(
 /// The portal picker's keys, mirrored on [`attach_place_keys`] so one
 /// interaction never grows a second vocabulary: lowercase hjkl and the arrows
 /// MOVE the cursor, `1`-`9` jump the cursor to that list row, Enter commits,
-/// esc/q cancels. The list is re-derived per key from the live layout, so a
-/// portal that closed under the open picker is gone from the rows the very
-/// next keypress - and the commit - sees.
+/// esc/q cancels. On the new-portal row the commit axis widens: shift+HJKL
+/// opens the new portal as a SPLIT beside the focused pane and `t` is Enter's
+/// alias, both reusing [`split_dir`]; on an open-portal row those keys send
+/// nothing (a repoint keeps its geometry by design, so the split would only
+/// earn the server's refusal). The list is re-derived per key from the live
+/// layout, so a portal that closed under the open picker is gone from the
+/// rows the very next keypress - and the commit - sees.
 pub(crate) async fn portal_pick_keys(
     view: &mut View,
     bytes: &[u8],
@@ -387,7 +468,7 @@ pub(crate) async fn portal_pick_keys(
             return Ok(StdinFlow::Continue);
         };
         let mut esc = std::mem::take(&mut pick.esc);
-        let keys = fold_selector_keys(&mut esc, bytes);
+        let keys = fold_selector_keys_with_split_arrows(&mut esc, bytes);
         pick.esc = esc;
         keys
     };
@@ -435,63 +516,89 @@ pub(crate) async fn portal_pick_keys(
             continue;
         }
 
-        match key {
-            0x1b | b'q' => {
+        // The commit vocabulary: Enter and its `t` alias on every row, plus
+        // shift+HJKL as a new-portal-only commit. One shared tail re-checks
+        // the agent and sends, so a second commit path cannot grow its own
+        // staleness rules.
+        let split = split_dir(key);
+        if split.is_none() && !matches!(key, b'\r' | b'\n' | b't') {
+            if key == 0x1b || key == b'q' {
                 view.portal_pick = None;
                 return Ok(StdinFlow::Continue);
             }
-            b'\r' | b'\n' => {
-                let pick = view.portal_pick.take().unwrap();
-                // The agent is re-checked at commit, the way the attach picker
-                // re-checks its target: the row can exit or gain a pane while
-                // the picker sits open, and the server's stale-id refusal must
-                // not be the first thing that tells the operator.
-                let attachable = view.layout.agents.iter().any(|a| {
-                    a.pane_id.is_none()
-                        && !a.exited
-                        && a.attach_id
-                            .as_deref()
-                            .map(|s| s == pick.id.as_str())
-                            .unwrap_or(a.name == pick.id)
-                });
-                if !attachable {
-                    view.set_notice("agent is no longer attachable".into());
-                    return Ok(StdinFlow::Continue);
-                }
-                // Resolve the cursor against the CURRENT portal set: the list
-                // is derived per frame, so the cursor only guarantees a row in
-                // the list as drawn now. A commit past the new-portal row means
-                // portals closed under the picker; refuse rather than act on
-                // the stale list (AC5-EDGE), exactly the attach picker's
-                // "workspace is no longer available" shape.
-                let rows = view.open_portal_rows();
-                let placement = if pick.cursor < rows.len() {
-                    PanePlacement {
-                        portal: Some(rows[pick.cursor].1),
-                        ..PanePlacement::default()
-                    }
-                } else if pick.cursor == rows.len() {
-                    PanePlacement {
-                        portal_new: true,
-                        ..PanePlacement::default()
-                    }
-                } else {
-                    view.set_notice("portal is no longer available".into());
-                    return Ok(StdinFlow::Continue);
-                };
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::AttachAgent {
-                        id: pick.id,
-                        placement,
-                    }),
-                )
-                .await
-                .map_err(|e| format!("portal placement send failed: {e}"))?;
+            continue;
+        }
+        let pick = view.portal_pick.take().unwrap();
+        // The agent is re-checked at commit, the way the attach picker
+        // re-checks its target: the row can exit or gain a pane while
+        // the picker sits open, and the server's stale-id refusal must
+        // not be the first thing that tells the operator.
+        let attachable = view.layout.agents.iter().any(|a| {
+            a.pane_id.is_none()
+                && !a.exited
+                && a.attach_id
+                    .as_deref()
+                    .map(|s| s == pick.id.as_str())
+                    .unwrap_or(a.name == pick.id)
+        });
+        if !attachable {
+            view.set_notice("agent is no longer attachable".into());
+            return Ok(StdinFlow::Continue);
+        }
+        // Resolve the cursor against the CURRENT portal set: the list
+        // is derived per frame, so the cursor only guarantees a row in
+        // the list as drawn now. A commit past the new-portal row means
+        // portals closed under the picker; refuse rather than act on
+        // the stale list (AC5-EDGE), exactly the attach picker's
+        // "workspace is no longer available" shape. The index is copied out
+        // before any mutable borrow, so the refusals below can reuse `view`.
+        let rows = view.open_portal_rows();
+        let portal_at_cursor = rows.get(pick.cursor).map(|(_, p)| *p);
+        let at_new_row = pick.cursor == rows.len();
+        let placement = if !at_new_row && portal_at_cursor.is_none() {
+            view.set_notice("portal is no longer available".into());
+            return Ok(StdinFlow::Continue);
+        } else if !at_new_row {
+            if split.is_some() {
+                // A split or `t` is a NEW-PORTAL gesture, so on an open
+                // portal it names a row that cannot take it. Nothing is
+                // sent - the picker keeps its state and the rest of the
+                // read is dropped, the out-of-range digit's discipline:
+                // the trailing bytes were typed against a model that just
+                // proved wrong.
+                let _ = raw_out(b"\x07");
+                view.set_notice("a split or t opens a new portal: move to the + row".into());
+                view.portal_pick = Some(pick);
                 return Ok(StdinFlow::Continue);
             }
-            _ => {}
-        }
+            PanePlacement {
+                portal: portal_at_cursor,
+                ..PanePlacement::default()
+            }
+        } else {
+            match split {
+                Some(dir) => PanePlacement {
+                    portal_new: true,
+                    split: Some(dir),
+                    target: PaneTarget::SquadId(view.layout.active_squad),
+                    ..PanePlacement::default()
+                },
+                None => PanePlacement {
+                    portal_new: true,
+                    ..PanePlacement::default()
+                },
+            }
+        };
+        write_msg(
+            sock_w,
+            &ClientMsg::Command(Command::AttachAgent {
+                id: pick.id,
+                placement,
+            }),
+        )
+        .await
+        .map_err(|e| format!("portal placement send failed: {e}"))?;
+        return Ok(StdinFlow::Continue);
     }
     Ok(StdinFlow::Continue)
 }

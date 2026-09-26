@@ -1,9 +1,9 @@
-"""x-7783 Change 2: the gate reads the CPU axis's verdict and holds on over.
+"""x-7783 Change 2, x-c588: the gate reads the CPU axis's verdict and holds on over.
 
 LD1/LD3/LD4: the fleet's attributed share decides; over is a HOLD that
 re-samples on CPU_HOLD_POLL_S and admits after CPU_ADMIT_SAMPLES consecutive
-under-ceiling samples; an unreadable instrument refuses; the 15-minute load
-is the absolute backstop. The old trigger and its prefetch band are gone.
+under-ceiling samples; an unreadable instrument refuses. The old trigger, its
+prefetch band, and the 15-minute backstop are gone.
 """
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ import pytest
 
 from fno.agents import spawn_gate
 from fno.footprint import Admission, Footprint
-
-HARD = 40.0
 
 
 def _reading(fleet: float, measured: float, gap: str | None = None) -> Footprint:
@@ -36,8 +34,6 @@ def _adm(verdict: str, *, axis: str = "fleet_cpu_share", **kw) -> Admission:
         capacity_cores=kw.pop("capacity_cores", 12.0),
         ceiling=kw.pop("ceiling", 0.5),
         gap=kw.pop("gap", None),
-        load_15m=kw.pop("load_15m", 1.0),
-        backstop=kw.pop("backstop", HARD * 12),
         top_holder=kw.pop("top_holder", None),
     )
     assert not kw, f"unexpected overrides: {kw}"
@@ -99,7 +95,7 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(
         spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
     )
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     monkeypatch.setattr(
         "fno.agents.session_procs.bg_socket_pid_map", lambda **k: {}
     )
@@ -165,10 +161,10 @@ def test_config_defaults_and_coercion():
 
     a = AgentsBlock()
     assert a.max_fleet_cpu_share == 0.5
-    assert a.hard_max_load_per_cpu == 40.0
     assert AgentsBlock(max_fleet_cpu_share="0.25").max_fleet_cpu_share == 0.25
     assert AgentsBlock(max_fleet_cpu_share="junk").max_fleet_cpu_share == 0.5
-    assert AgentsBlock(hard_max_load_per_cpu="junk").hard_max_load_per_cpu == 40.0
+    # The load backstop is retired: the key is unmodeled and reads as absent.
+    assert getattr(AgentsBlock(hard_max_load_per_cpu="junk"), "hard_max_load_per_cpu", None) is None
 
 
 def test_non_finite_never_disarms_a_machine_guard():
@@ -176,7 +172,7 @@ def test_non_finite_never_disarms_a_machine_guard():
 
     Either way the ceiling stops refusing while still reading as
     configured, which is worse than a value that is merely wrong. All
-    four sibling knobs shared the hole, so all four are checked.
+    sibling knobs shared the hole, so all are checked.
     """
     from fno.config import AgentsBlock
 
@@ -184,7 +180,6 @@ def test_non_finite_never_disarms_a_machine_guard():
         "min_free_gb": 4.0,
         "max_load_per_cpu": 8.0,
         "max_fleet_cpu_share": 0.5,
-        "hard_max_load_per_cpu": 40.0,
     }
     for name, default in fields.items():
         for bad in ("nan", "inf", "-inf", "NaN", float("nan"), float("inf")):
@@ -206,10 +201,9 @@ def test_a_settings_object_missing_new_fields_keeps_its_cap():
         max_live = 9  # the value that must survive
         min_free_gb = 0.0
         max_load_per_cpu = 0.0
-        # max_fleet_cpu_share and hard_max_load_per_cpu deliberately ABSENT
+        # max_fleet_cpu_share deliberately ABSENT
 
     assert float(getattr(_Agents, "max_fleet_cpu_share", 0.5)) == 0.5
-    assert float(getattr(_Agents, "hard_max_load_per_cpu", 40.0)) == 40.0
     assert int(_Agents.max_live) == 9
 
 
@@ -256,7 +250,7 @@ class TestCauseMainProbeEntry:
             "_spawn_load_snapshot",
             lambda: SimpleNamespace(load_1m=None, load_cpu_count=12, load_15m=1.0),
         )
-        monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+        monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
         monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
 
         def invoke(entry):

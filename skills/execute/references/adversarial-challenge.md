@@ -6,8 +6,7 @@ costs extra tokens.
 
 ## Activation
 
-Only when `--adversarial` flag is present in operator arguments.
-This costs extra tokens and should be an explicit opt-in.
+When `--adversarial` is present in user arguments, activate this step. It costs extra tokens, so the user must opt in.
 
 ## Dispatch
 

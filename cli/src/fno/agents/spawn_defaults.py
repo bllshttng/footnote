@@ -95,7 +95,7 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--pane",
-        "--node", "--slug", "--plan", "--name", "--recorded-provider",
+        "--node", "--node-reason", "--slug", "--plan", "--name", "--recorded-provider",
         # --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
         # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
@@ -644,7 +644,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
 # King work walks the crown slot whichever verb opens its seed.
-_CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
+_CROWN_VERBS = frozenset({"reign", "fno-me"})
 
 # The one built-in answer to "what permission mode does an unattended worker
 # get". Formerly config.agents.spawn_permission_mode's default; a constant now,
@@ -781,7 +781,7 @@ def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optio
     """Classify a seed into its profile key. THREE outcomes : a
     verb-shaped token that resolves (either sigil, anywhere, via
     ``_VERB_ALIASES``) returns the canonical key, except a king verb
-    (``reign``, ``king-for-a-day``, ``fno-me``), which returns ``crown``
+    (``reign``, ``fno-me``), which returns ``crown``
     like a verbless seed; NO verb-shaped token - every king seed, seedless
     spawn, path, plain prose - returns ``crown``,
     so ``[agents.profiles.crown]`` reaches crown spawns like every other
@@ -906,21 +906,36 @@ def _substrate_compatible(substrate: str, provider: str) -> bool:
 
 def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> bool:
     """Whether the resolved (provider, substrate) can honor a mapped
-    permission-mode. Mirrors the spawn parser's own gate: claude honors it on
-    every substrate; a non-claude provider maps it ONLY on the pane lane
-    (bg/headless hardcode their own bypass and exit 2 on ``--permission-mode``).
-    A config value that would be refused there degrades open (warn, skip)."""
-    if provider == "claude":
-        return True
-    if substrate != "pane":
+    permission-mode, answered by the one Rust owner (see
+    crates/fno-agents/src/codex_posture.rs permission_mappable): the pane lane
+    maps through the per-harness vocabulary; a thread lane is declared by
+    ``harness.<provider>.thread.carries`` in harness_capabilities.toml. A
+    refusal (or an unavailable owner) is answered False and NAMED by the
+    caller's skip line - never a silent skip that leaves the posture unnamed."""
+    if not mode:
         return False
-    try:
-        from fno.agents.mux_spawn import permission_pane_tokens
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-        permission_pane_tokens(provider, mode)
-        return True
-    except Exception:
+    try:
+        answer = verb_call(
+            "permission-tokens",
+            {"provider": provider, "mode": mode, "substrate": substrate or "pane"},
+            VerbUnavailable,
+        )
+    except VerbUnavailable as exc:
+        print(
+            f"fno agents spawn: permission mappability owner unavailable ({exc}); "
+            f"treating {provider} mode {mode!r} on {substrate} as unmappable",
+            file=sys.stderr,
+        )
         return False
+    if answer.get("refusal"):
+        print(
+            f"fno agents spawn: permission mappability refused: {answer['refusal']}",
+            file=sys.stderr,
+        )
+        return False
+    return bool(answer.get("mappable"))
 
 
 
@@ -1232,18 +1247,21 @@ def inject_spawn_defaults(
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:
             grid_node_entry = _grid_node(out[1:], env)
-        capacity: Optional[dict[str, object]] = None
         _slot_inventory = None
-        if lanes_present or grid_node_entry or enforced:
+        slot_walk_armed = lanes_present or grid_node_entry or enforced
+        capacity_refresh = False
+        if slot_walk_armed:
             try:
                 from fno import route_resolve as _rr
 
                 _slot_inventory = _rr.resolve_inventory()
-                capacity = dict(_rr.runtime_capacity(inventory=_slot_inventory))
-            except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
-                capacity = {}
-        if capacity is not None:
-            # the resolved leading verb is the phase authority.
+            except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
+                _slot_inventory = None
+            # The verb computes capacity itself now, and the spawn door
+            # refreshes a stale or never-probed lane reading once before the
+            # walk skips the lane (the same rule the dispatch seam follows).
+            capacity_refresh = True
+        if slot_walk_armed:
             # blueprint/think bill planning; target never acquires frontier
             # eligibility merely because its low-difficulty node has no plan -
             # that model-only plan-presence inference is gone (the derived
@@ -1265,7 +1283,7 @@ def inject_spawn_defaults(
                 slot_candidate, slot_chain, _slot_verdict = _rr.resolve_slot(
                     profile_verb,
                     grid_node_entry,
-                    capacity,
+                    None,
                     inventory=_slot_inventory,
                     settings=settings,
                     substrate=explicit_substrate,
@@ -1284,6 +1302,7 @@ def inject_spawn_defaults(
                         (explicit_vendor or "").strip() or None if explicit_vendor_present else None
                     ),
                     meta=_slot_meta,
+                    capacity_refresh=capacity_refresh,
                 )
             except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
                 if enforced:
@@ -1691,8 +1710,12 @@ def inject_spawn_defaults(
     _substrate_unknown = bool(cfg_substrate) and cfg_substrate not in _SUBSTRATES
     _substrate_ok = bool(prov) and bool(cfg_substrate) and _substrate_compatible(cfg_substrate, prov)
     _pane_tokens_ok = False
-    if cfg_permission and prov and _permission_mappable(prov, cfg_permission, "pane"):
-        _pane_tokens_ok = True
+    _thread_tokens_ok = False
+    if cfg_permission and prov and not _has_permission:
+        if _permission_mappable(prov, cfg_permission, "pane"):
+            _pane_tokens_ok = True
+        if _permission_mappable(prov, cfg_permission, "thread"):
+            _thread_tokens_ok = True
     _axes = {}
     if cfg_effort or cfg_substrate or cfg_permission:
         from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
@@ -1707,6 +1730,7 @@ def inject_spawn_defaults(
                 "substrate_valid_list": ", ".join(_SUBSTRATES),
                 "permission_mode": {"value": cfg_permission, "rung": permission_rung},
                 "has_permission": _has_permission, "pane_tokens_ok": _pane_tokens_ok,
+                "thread_tokens_ok": _thread_tokens_ok,
                 "prov": prov,
             })
         except SpawnAxesUnavailable as _exc:

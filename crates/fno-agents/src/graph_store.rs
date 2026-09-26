@@ -139,6 +139,8 @@ const OVERLAY_TERMINAL_STATUSES: &[&str] = &["done", "superseded", "deferred", "
 /// Terminal rungs (statuses.TERMINAL_RUNGS): past these a node is closed.
 pub const TERMINAL_RUNGS: &[&str] = &["done", "superseded"];
 
+pub const CLOSING_DEFER_KINDS: &[&str] = &["wont_do", "retracted"];
+
 /// Sentinel prefix the pre-feature workaround overloaded `completed_at` with
 /// to encode deferral (statuses._LEGACY_DEFER_PREFIX).
 const LEGACY_DEFER_PREFIX: &str = "deferred:";
@@ -706,25 +708,25 @@ fn is_deferred_blocker(blocker: &Value) -> bool {
 /// instead of looping). `Ok` carries the effective entry and id; `Err`
 /// carries the last id visited when the chain hits a missing row or
 /// overruns the hop bound.
-fn effective_blocker(
-    blocker: &Value,
+fn effective_blocker<'a>(
+    blocker: &'a Value,
     blocker_id: &str,
-    by_id: &std::collections::HashMap<String, Value>,
-) -> Result<(Value, String), String> {
+    by_id: &std::collections::HashMap<&str, &'a Value>,
+) -> Result<(&'a Value, String), String> {
     const MAX_CHAIN_HOPS: usize = 8;
-    let mut current = blocker.clone();
-    let mut current_id = blocker_id.to_string();
+    let mut current = blocker;
+    let mut current_id = blocker_id;
     for _ in 0..MAX_CHAIN_HOPS {
         let Some(next_id) = current.get("superseded_by").and_then(Value::as_str) else {
-            return Ok((current, current_id));
+            return Ok((current, current_id.to_string()));
         };
-        let Some(next) = by_id.get(next_id).cloned() else {
+        let Some(next) = by_id.get(next_id) else {
             return Err(next_id.to_string());
         };
-        current_id = next_id.to_string();
-        current = next;
+        current_id = next_id;
+        current = *next;
     }
-    Err(current_id) // overrun: a chain this long is a cycle in disguise
+    Err(current_id.to_string()) // overrun: a chain this long is a cycle in disguise
 }
 
 /// Read-time dependency readiness for one entry: never a boolean
@@ -734,7 +736,7 @@ fn effective_blocker(
 /// kind of its own (statuses stays blocked for both).
 pub fn compute_readiness(
     entry: &Value,
-    by_id: &std::collections::HashMap<String, Value>,
+    by_id: &std::collections::HashMap<&str, &Value>,
 ) -> (String, Option<String>) {
     let Some(blockers) = entry.get("blocked_by").and_then(Value::as_array) else {
         return ("ready".to_string(), None);
@@ -762,7 +764,7 @@ pub fn compute_readiness(
                 .map(|v| v.is_null())
                 .unwrap_or(true)
             {
-                if is_deferred_blocker(&effective) {
+                if is_deferred_blocker(effective) {
                     return ("blocked-by-deferred".to_string(), Some(effective_id));
                 }
                 return ("blocked-by".to_string(), Some(effective_id));
@@ -815,115 +817,129 @@ pub fn settle_blocked_by_edges(
     let by_id = index_by_id(&entries);
     let mut receipts: Vec<Value> = Vec::new();
     let mut changes: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
-    for e in entries.iter_mut() {
-        if !is_dict(e) || !is_open_entry(e) {
-            continue;
-        }
-        let Some(blockers) = e.get("blocked_by").and_then(Value::as_array) else {
-            continue;
-        };
-        if blockers.is_empty() {
-            continue;
-        }
-        // An id-less row is malformed: the change map keys on the node id, so
-        // no caller could apply its settlement - emit nothing, touch nothing.
-        let Some(node_id) = entry_id(e) else {
-            continue;
-        };
-        let node_id = node_id.to_string();
-        let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
-        let mut changed = false;
-        for blocker_id in blockers {
-            let Some(bid) = blocker_id.as_str() else {
-                settled.push(blocker_id.clone());
-                continue;
-            };
-            let Some(target) = by_id.get(bid) else {
-                receipts.push(json_receipt(
-                    "blocked_by_held",
-                    &node_id,
-                    bid,
-                    "blocker missing from graph",
-                ));
-                settled.push(blocker_id.clone());
-                continue;
-            };
-            if !target
-                .get("completed_at")
-                .map(|v| v.is_null())
-                .unwrap_or(true)
-            {
-                receipts.push(json_receipt(
-                    "blocked_by_pruned",
-                    &node_id,
-                    bid,
-                    "blocker done",
-                ));
-                changed = true;
-                continue;
+    // Pass 1 computes every settlement against the pre-sweep rows (the old
+    // cloned index read the same pre-sweep list, never a half-settled one);
+    // pass 2 applies. The receipts keep their emission order either way.
+    let settled_lists: Vec<Option<Vec<Value>>> = entries
+        .iter()
+        .map(|e| {
+            if !is_dict(e) || !is_open_entry(e) {
+                return None;
             }
-            if target
-                .get("superseded_by")
-                .and_then(Value::as_str)
-                .is_none()
-            {
-                if is_deferred_blocker(target) {
+            let Some(blockers) = e.get("blocked_by").and_then(Value::as_array) else {
+                return None;
+            };
+            if blockers.is_empty() {
+                return None;
+            }
+            // An id-less row is malformed: the change map keys on the node
+            // id, so no caller could apply its settlement - emit nothing,
+            // touch nothing.
+            let Some(node_id) = entry_id(e) else {
+                return None;
+            };
+            let node_id = node_id.to_string();
+            let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
+            let mut changed = false;
+            for blocker_id in blockers {
+                let Some(bid) = blocker_id.as_str() else {
+                    settled.push(blocker_id.clone());
+                    continue;
+                };
+                let Some(target) = by_id.get(bid) else {
                     receipts.push(json_receipt(
                         "blocked_by_held",
                         &node_id,
                         bid,
-                        "blocker deferred",
-                    ));
-                    settled.push(blocker_id.clone());
-                } else {
-                    settled.push(blocker_id.clone());
-                }
-                continue;
-            }
-            let (effective, effective_id) = match effective_blocker(target, bid, &by_id) {
-                Ok(pair) => pair,
-                Err(last_id) => {
-                    receipts.push(json_receipt(
-                        "blocked_by_held",
-                        &node_id,
-                        bid,
-                        &format!("supersession chain stops at {last_id}"),
+                        "blocker missing from graph",
                     ));
                     settled.push(blocker_id.clone());
                     continue;
+                };
+                if !target
+                    .get("completed_at")
+                    .map(|v| v.is_null())
+                    .unwrap_or(true)
+                {
+                    receipts.push(json_receipt(
+                        "blocked_by_pruned",
+                        &node_id,
+                        bid,
+                        "blocker done",
+                    ));
+                    changed = true;
+                    continue;
                 }
-            };
-            if effective
-                .get("completed_at")
-                .map(|v| v.is_null())
-                .unwrap_or(true)
-            {
-                let already_named = settled
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(|s| s == effective_id);
-                if !already_named {
-                    settled.push(Value::String(effective_id.clone()));
+                if target
+                    .get("superseded_by")
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
+                    if is_deferred_blocker(target) {
+                        receipts.push(json_receipt(
+                            "blocked_by_held",
+                            &node_id,
+                            bid,
+                            "blocker deferred",
+                        ));
+                        settled.push(blocker_id.clone());
+                    } else {
+                        settled.push(blocker_id.clone());
+                    }
+                    continue;
                 }
-                receipts.push(json_receipt(
-                    "blocked_by_rewired",
-                    &node_id,
-                    bid,
-                    "blocker superseded; edge now names the live successor",
-                ));
-                changed = true;
-            } else {
-                receipts.push(json_receipt(
-                    "blocked_by_pruned",
-                    &node_id,
-                    bid,
-                    &format!("superseded by {effective_id}, which is done"),
-                ));
-                changed = true;
+                let (effective, effective_id) = match effective_blocker(target, bid, &by_id) {
+                    Ok(pair) => pair,
+                    Err(last_id) => {
+                        receipts.push(json_receipt(
+                            "blocked_by_held",
+                            &node_id,
+                            bid,
+                            &format!("supersession chain stops at {last_id}"),
+                        ));
+                        settled.push(blocker_id.clone());
+                        continue;
+                    }
+                };
+                if effective
+                    .get("completed_at")
+                    .map(|v| v.is_null())
+                    .unwrap_or(true)
+                {
+                    let already_named = settled
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|s| s == effective_id);
+                    if !already_named {
+                        settled.push(Value::String(effective_id.clone()));
+                    }
+                    receipts.push(json_receipt(
+                        "blocked_by_rewired",
+                        &node_id,
+                        bid,
+                        "blocker superseded; edge now names the live successor",
+                    ));
+                    changed = true;
+                } else {
+                    receipts.push(json_receipt(
+                        "blocked_by_pruned",
+                        &node_id,
+                        bid,
+                        &format!("superseded by {effective_id}, which is done"),
+                    ));
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            changes.insert(node_id.clone(), settled.clone());
+            if changed {
+                changes.insert(node_id, settled.clone());
+                Some(settled)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (e, settled) in entries.iter_mut().zip(settled_lists) {
+        if let Some(settled) = settled {
             e.as_object_mut()
                 .unwrap()
                 .insert("blocked_by".to_string(), Value::Array(settled));
@@ -941,7 +957,7 @@ fn json_receipt(kind: &str, node: &str, blocker: &str, reason: &str) -> Value {
 /// else overlays compute_readiness.
 pub fn readiness_status(
     entry: &Value,
-    by_id: &std::collections::HashMap<String, Value>,
+    by_id: &std::collections::HashMap<&str, &Value>,
 ) -> (Option<String>, Option<String>) {
     let status = entry.get("status").and_then(Value::as_str);
     if let Some(s) = status {
@@ -962,23 +978,57 @@ pub fn readiness_status(
     )
 }
 
-fn index_by_id(entries: &[Value]) -> std::collections::HashMap<String, Value> {
+/// The borrowed id index: one `&Value` per row, no copy of any row. The
+/// cache's entries are shared `Arc` data; a read-side overlay must not
+/// clone a full graph to look up a handful of blockers.
+pub(crate) fn index_by_id(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {
     entries
         .iter()
         .filter(|e| is_dict(e))
-        .filter_map(|e| entry_id(e).map(|i| (i.to_string(), e.clone())))
+        .filter_map(|e| entry_id(e).map(|i| (i, e)))
         .collect()
+}
+
+/// The overlay's field half for one row: status + blocked_reason derived
+/// from a borrowed id index, written in the same order the full overlay
+/// has always used.
+pub(crate) fn overlay_entry(entry: &mut Value, by_id: &std::collections::HashMap<&str, &Value>) {
+    if !is_dict(entry) {
+        return;
+    }
+    let (status, reason) = readiness_status(entry, by_id);
+    let obj = entry.as_object_mut().unwrap();
+    obj.insert(
+        "status".to_string(),
+        status.map(Value::String).unwrap_or(Value::Null),
+    );
+    obj.insert(
+        "blocked_reason".to_string(),
+        reason.map(Value::String).unwrap_or(Value::Null),
+    );
 }
 
 /// Overlay read-time dependency readiness onto `status`/`blocked_reason`
 /// (store._apply_readiness_overlay).
 pub fn apply_readiness_overlay(entries: &mut [Value]) {
     let by_id = index_by_id(entries);
-    for e in entries.iter_mut() {
+    // Compute first against the pre-overlay rows, mutate after the index
+    // borrow ends: every overlay answer must come from the same list the
+    // old cloned index read, not from half-overlaid rows.
+    let computed: Vec<(Option<String>, Option<String>)> = entries
+        .iter()
+        .map(|e| {
+            if is_dict(e) {
+                readiness_status(e, &by_id)
+            } else {
+                (None, None)
+            }
+        })
+        .collect();
+    for (e, (status, reason)) in entries.iter_mut().zip(computed) {
         if !is_dict(e) {
             continue;
         }
-        let (status, reason) = readiness_status(e, &by_id);
         let obj = e.as_object_mut().unwrap();
         obj.insert(
             "status".to_string(),
@@ -1282,6 +1332,15 @@ pub fn is_terminal_entry(entry: &Value) -> bool {
         || entry
             .get("superseded_by")
             .map(|v| !v.is_null())
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    if entry.get("status").and_then(Value::as_str) == Some("deferred")
+        && entry
+            .get("deferred_kind")
+            .and_then(Value::as_str)
+            .map(|kind| CLOSING_DEFER_KINDS.contains(&kind))
             .unwrap_or(false)
     {
         return true;
@@ -2295,13 +2354,27 @@ pub fn locked_mutate_with_hook(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
-    // The shadow baseline is the rows AS READ: the db holds the last
-    // publish, so `raw` IS that publish. A change normalization alone makes
-    // (defaults, settles, ownership stamps, children) must compare unequal
-    // against this baseline to reach the store. Deriving the baseline from
-    // the normalized pre-image instead hid exactly those changes, and the
-    // db row stayed stale for good.
-    let shadow_before = raw.clone();
+    // A JSON writer can replace the file before this seam runs, so its raw
+    // rows may already differ from the relational shadow's last publish.
+    // Diff against that shadow when it exists; without one, the file is the
+    // only available pre-image and the first shadow write imports it.
+    let mut shadow_read_warning = None;
+    let shadow_before = if sqlite_backend {
+        raw.clone()
+    } else if crate::backlog::database_path(path).exists() {
+        match crate::backlog::read_entries(path) {
+            Ok(rows) => rows,
+            Err(error) => {
+                shadow_read_warning = Some(format!(
+                    "SQLite shadow read for {} failed: {error}",
+                    path.display()
+                ));
+                raw.clone()
+            }
+        }
+    } else {
+        raw.clone()
+    };
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -2369,16 +2442,29 @@ pub fn locked_mutate_with_hook(
     ensure_slugs(&mut entries);
     recompute_statuses_with_plan_rungs(&mut entries, input.plan_rungs.as_ref());
 
-    // touched_at stamp: a curation-field change vs the pre-image.
+    // touched_at stamp: a curation-field change vs the pre-image. The
+    // pre-image is defaulted, so the compare reads the defaulted view too:
+    // a caller that ships raw untouched rows (commit_rows merges the raw
+    // export) would otherwise re-stamp every row missing a defaulted field.
+    // Status stays the row's own: the pre-image carries the recomputed
+    // status, not the readiness overlay the defaults pass applies.
     let now_iso = now_isoformat();
-    for e in entries.iter_mut() {
+    let mut defaulted = entries.clone();
+    apply_defaults(&mut defaulted, true);
+    for (e, view) in entries.iter_mut().zip(defaulted.iter_mut()) {
         let (Some(id), true) = (entry_id(e).map(str::to_string), is_dict(e)) else {
             continue;
         };
         let Some(before) = pre_curation.get(&id) else {
             continue; // absent from the pre-image: new node, created_at carries it
         };
-        if curation_key(e) != *before {
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert(
+                "status".to_string(),
+                e.get("status").cloned().unwrap_or(Value::Null),
+            );
+        }
+        if curation_key(view) != *before {
             e.as_object_mut()
                 .unwrap()
                 .insert("touched_at".to_string(), Value::String(now_iso.clone()));
@@ -2425,13 +2511,35 @@ pub fn locked_mutate_with_hook(
     // through here, so every writer obeys the combined details+current_state
     // budget, and a migrated row's progress_notes can never grow again.
     enforce_node_state_policy(&raw, &entries)?;
+    // The epic child cap holds at this seam too: every whole-graph writer
+    // (update --parent, idea --parent, contain, decompose, the rollup
+    // auto-link) meets the same refusal. The single-row seam answers for
+    // api node_create under sqlite.
+    crate::backlog::epic_cap::enforce(
+        &raw,
+        &entries,
+        crate::backlog::epic_cap::configured_cap(path),
+    )
+    .map_err(StoreError::Invalid)?;
+    crate::backlog::idea_cap::enforce(
+        &raw,
+        &entries,
+        crate::backlog::idea_cap::configured_cap(path).0,
+    )
+    .map_err(StoreError::Invalid)?;
+    // The close-evidence rule holds at this seam too: a write that sets
+    // completed_at on an existing open row must leave the row a record of
+    // why, or the whole publish refuses and nothing lands.
+    crate::backlog::done_evidence::enforce(&raw, &entries).map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
 
     let (backup, shadow_warning, version) = if sqlite_backend {
-        let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
-            .map_err(StoreError::Sqlite)?;
+        let (version, _retries) = crate::backlog::retry_on_busy(|| {
+            crate::backlog::authoritative_sync(path, &shadow_before, &entries)
+        })
+        .map_err(StoreError::Sqlite)?;
         // graph.json is frozen under sqlite: the readers moved onto the
         // backend switch, so a publish rewrites only graph.db. The file
         // comes back on demand via `fno doctor graph export --now`.
@@ -2444,26 +2552,26 @@ pub fn locked_mutate_with_hook(
             use sha2::Digest as _;
             format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
         };
-        let warning = crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
-            .err()
-            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
+        let warning = shadow_read_warning.or_else(|| {
+            crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
+                .err()
+                .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()))
+        });
         (backup, warning, version)
     };
 
-    // Still under the lock, read the published bytes back
-    // and compare digests. Every receipt (idea, session close, note) rides
-    // this Ok, so a publish that silently failed to land refuses instead of
-    // claiming success.
-    let readback = if sqlite_backend {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)?
-    } else {
-        file_content_version(path)
-    };
-    if readback != version {
-        return Err(StoreError::Invalid(format!(
-            "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
-            path.display()
-        )));
+    // The JSON backend still reads the published bytes back and compares
+    // digests. The sqlite backend already confirmed its stored ids in
+    // authoritative_sync. Every receipt rides this Ok, so a publish that
+    // silently failed to land refuses instead of claiming success.
+    if !sqlite_backend {
+        let readback = file_content_version(path);
+        if readback != version {
+            return Err(StoreError::Invalid(format!(
+                "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
+                path.display()
+            )));
+        }
     }
 
     Ok(MutateOutcome {
@@ -2492,10 +2600,41 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
+        crate::backlog::Backend::Json => read_json_leg(path, false, true)?,
     };
     apply_defaults(&mut rows, false);
     Ok(rows)
+}
+
+/// The narrowed read the merge-grant ops pay for: on the sqlite backend,
+/// only the nodes a grant op can use (a PR's carriers, or the queue's grant
+/// candidates plus every carrier of their PR numbers). Any other backend
+/// keeps the full [`read_rows`] switch.
+pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) != crate::backlog::Backend::Sqlite {
+        return read_rows(path);
+    }
+    let mut rows = crate::backlog::read_pr_entries(path, pr).map_err(StoreError::Sqlite)?;
+    apply_defaults(&mut rows, false);
+    Ok(rows)
+}
+
+/// The strict rows read: an absent json store is `Err`, never an empty
+/// answer. Territory's boundary contract reads through it ("an unreadable
+/// graph is unknown, never an empty list"); the soft [`read_rows`] would
+/// turn a missing file into zero rows and let resolve assert territory no
+/// store recognizes. Under sqlite the store's own errors surface unchanged.
+pub fn read_rows_strict(path: &Path) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
+        return crate::backlog::read_entries(path).map_err(StoreError::Sqlite);
+    }
+    if !path.exists() {
+        return Err(StoreError::Unreadable(
+            path.display().to_string(),
+            "no such file".to_string(),
+        ));
+    }
+    read_json_leg(path, false, false)
 }
 
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
@@ -2571,6 +2710,10 @@ pub fn mutate_rows(
 /// The soft read that degrades `MalformedRoot` to empty and copies the
 /// corrupt bytes to a `.json.bak` sibling first is the explicit
 /// `read_defaulted_opts(path, keep_malformed, true)` spelling.
+///
+/// Both refuse under `graph_meta.backend=sqlite`: there the file is the
+/// frozen mirror, and answering from it turns a stale read into a wrong
+/// one. The guard names the switch (`read_rows`) to call instead.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
     read_defaulted_opts(path, keep_malformed, false)
 }
@@ -2580,6 +2723,24 @@ pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, S
 /// `.json.bak` before the error surfaces. `false` is strict and read-only:
 /// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
 pub fn read_defaulted_opts(
+    path: &Path,
+    keep_malformed: bool,
+    backup_on_corrupt: bool,
+) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
+        return Err(StoreError::Invalid(format!(
+            "{} is the frozen json mirror (graph_meta.backend=sqlite); read through graph_store::read_rows",
+            path.display()
+        )));
+    }
+    read_json_leg(path, keep_malformed, backup_on_corrupt)
+}
+
+/// The json leg itself: the file parse under the soft/strict spellings, no
+/// backend awareness. In-crate callers reach it through the switch
+/// (`read_rows`' Json arm) or the guarded public pair; a direct call from
+/// production code elsewhere is a census finding.
+pub(crate) fn read_json_leg(
     path: &Path,
     keep_malformed: bool,
     backup_on_corrupt: bool,
@@ -2719,6 +2880,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn terminal_entry_closes_only_decision_deferrals() {
+        for kind in ["wont_do", "retracted"] {
+            assert!(is_terminal_entry(&json!({
+                "status": "deferred",
+                "deferred_kind": kind,
+            })));
+        }
+        for kind in ["later", "contingent"] {
+            assert!(!is_terminal_entry(&json!({
+                "status": "deferred",
+                "deferred_kind": kind,
+            })));
+        }
+        assert!(!is_terminal_entry(&json!({
+            "status": "deferred",
+            "deferred_kind": null,
+        })));
+        assert!(!is_terminal_entry(&json!({
+            "status": "ready",
+            "deferred_kind": "wont_do",
+        })));
+    }
+
+    #[test]
     fn python_json_matches_reference_shapes() {
         // Byte-compat with json.dumps(indent=2, ensure_ascii=True), verified
         // against fixtures the differential parity corpus also drives through
@@ -2735,6 +2920,47 @@ mod tests {
     fn empty_containers_stay_inline_like_python() {
         let v = json!({"a": [], "b": {}});
         assert_eq!(to_python_json(&v), "{\n  \"a\": [],\n  \"b\": {}\n}");
+    }
+
+    #[test]
+    fn an_evidence_less_close_is_refused_at_the_publication_seam() {
+        // The whole-graph seam refuses the write outright and the file
+        // keeps its bytes: a refusal leaves no trace on disk.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            json!({"entries": [json!({
+                "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+                "type": "feature", "status": "ready", "priority": "p2",
+            })]})
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&graph).unwrap();
+        let entries = vec![json!({
+            "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+            "type": "feature", "status": "done", "priority": "p2",
+            "completed_at": "2026-09-23T00:00:00+00:00",
+        })];
+        let input = MutateInput {
+            entries,
+            canonical_path: None,
+            base_version: file_content_version(&graph),
+            plan_rungs: None,
+        };
+        let err = locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .err()
+            .expect("an evidence-less close must refuse");
+        assert!(
+            matches!(&err, StoreError::Invalid(text) if text.contains("ab-evid0001")),
+            "expected an Invalid naming the id, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&graph).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
     }
 
     #[test]
@@ -3419,6 +3645,132 @@ mod tests {
     }
 
     #[test]
+    fn the_whole_graph_seam_refuses_a_child_past_the_epic_cap() {
+        // AC2-ERR, whole-graph side: a 16th-child write through
+        // locked_mutate is refused, the digest is unchanged, and the same
+        // child aimed at a fresh epic lands.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        // Built through serde, never string concatenation: a hand-joined
+        // array leaves a trailing comma and the fixture stops being JSON.
+        let mut rows = vec![json!({"id": "e-1", "slug": "e-1", "title": "the full epic",
+                                   "type": "epic", "status": "in_progress",
+                                   "priority": "p1", "domain": "code"})];
+        for i in 1..=15 {
+            rows.push(
+                json!({"id": format!("c-{i:02}"), "slug": format!("c-{i:02}"),
+                             "title": format!("child {i}"), "type": "feature",
+                             "status": "idea", "priority": "p2", "domain": "code",
+                             "parent": "e-1"}),
+            );
+        }
+        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nepic_max_open_children = 15\n",
+        )
+        .unwrap();
+        let before = file_content_version(&graph);
+        let pre = read_rows(&graph).unwrap();
+        let mut entries = pre.clone();
+        entries.push(json!({"id": "c-16", "slug": "c-16", "title": "child 16",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "parent": "e-1"}));
+        let error = locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StoreError::Invalid(message) = error else {
+            panic!("want Invalid, got {error:?}");
+        };
+        assert!(message.contains("epic cap: refusing to add"), "{message}");
+        assert!(
+            message.contains("backlog.epic_max_open_children"),
+            "{message}"
+        );
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        // The same child under a fresh epic lands.
+        let pre = read_rows(&graph).unwrap();
+        let mut entries = pre.clone();
+        entries.push(json!({"id": "e-2", "slug": "e-2", "title": "the new epic",
+                            "type": "epic", "status": "idea", "priority": "p2",
+                            "domain": "code"}));
+        entries.push(json!({"id": "c-16", "slug": "c-16", "title": "child 16",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "parent": "e-2"}));
+        locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let rows = read_rows(&graph).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| crate::graph_store::entry_id(r) == Some("c-16")),
+            "the child landed under the fresh epic"
+        );
+    }
+
+    #[test]
+    fn the_whole_graph_seam_refuses_the_26th_unplanned_idea() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let rows: Vec<Value> = (1..=25)
+            .map(|i| {
+                json!({"id": format!("i-{i:02}"), "slug": format!("i-{i:02}"),
+                       "title": format!("idea {i}"), "type": "feature", "status": "idea",
+                       "priority": "p2", "domain": "code", "project": "p",
+                       "created_at": format!("2026-01-{i:02}T00:00:00Z")})
+            })
+            .collect();
+        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nmax_open_ideas = 25\n",
+        )
+        .unwrap();
+        let before = file_content_version(&graph);
+        let mut entries = read_rows(&graph).unwrap();
+        entries.push(json!({"id": "i-26", "slug": "i-26", "title": "idea 26",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "project": "p"}));
+        let error = locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StoreError::Invalid(message) = error else {
+            panic!("want Invalid, got {error:?}");
+        };
+        assert!(message.contains("idea cap:"), "{message}");
+        assert!(message.contains("i-01, i-02, i-03"), "{message}");
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        assert!(!read_rows(&graph)
+            .unwrap()
+            .iter()
+            .any(|row| entry_id(row) == Some("i-26")));
+    }
+
+    #[test]
     fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
         // First acceptance line: the returned version equals
         // the file's content digest and no graph.json.tmp-* sibling remains.
@@ -3483,8 +3835,8 @@ mod tests {
         assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
     }
 
-    fn readiness_fixture(entries: Vec<Value>) -> std::collections::HashMap<String, Value> {
-        index_by_id(&entries)
+    fn readiness_fixture(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {
+        index_by_id(entries)
     }
 
     #[test]
@@ -3496,7 +3848,7 @@ mod tests {
             json!({"id": "ab-2", "superseded_by": "ab-3"}),
             json!({"id": "ab-3", "completed_at": "2026-09-01T00:00:00Z"}),
         ];
-        let by_id = readiness_fixture(entries);
+        let by_id = readiness_fixture(&entries);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(compute_readiness(&a, &by_id), ("ready".to_string(), None));
     }
@@ -3508,7 +3860,7 @@ mod tests {
             json!({"id": "ab-2", "superseded_by": "ab-3"}),
             json!({"id": "ab-3"}),
         ];
-        let by_id = readiness_fixture(entries);
+        let by_id = readiness_fixture(&entries);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(
             compute_readiness(&a, &by_id),
@@ -3518,7 +3870,7 @@ mod tests {
 
     #[test]
     fn readiness_marks_a_deferred_blocker_and_never_loops_a_cycle() {
-        let by_id = readiness_fixture(vec![
+        let rows = vec![
             json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
             json!({"id": "ab-2", "deferred_at": "2026-08-01T00:00:00Z"}),
             // A ring of nine rows, each superseding into the next: the chase
@@ -3533,7 +3885,8 @@ mod tests {
             json!({"id": "ab-c7", "superseded_by": "ab-c8"}),
             json!({"id": "ab-c8", "superseded_by": "ab-c9"}),
             json!({"id": "ab-c9", "superseded_by": "ab-c1"}),
-        ]);
+        ];
+        let by_id = readiness_fixture(&rows);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(
             compute_readiness(&a, &by_id),

@@ -11,6 +11,14 @@ use crate::spawn_journal::ReentryVerdict;
 /// twin of `reentry::REENTRY_REFUSED_EXIT`.
 const REENTRY_REFUSED_EXIT: i32 = 3;
 
+/// Stamp the child command only; the server's environment also reaches pane
+/// shells, so it must not inherit the mux caller marker.
+pub(super) fn mux_command(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = crate::process_admission::tokio_command(bin);
+    command.env("FNO_CALLER_KIND", "mux");
+    command
+}
+
 /// Why `run_resume_argv` failed. The split is load-bearing: the mux
 /// gesture fail-opens to the declared-form render ONLY on `Unavailable`; a
 /// `Refused` line names the door that restores the route and spawns nothing.
@@ -44,8 +52,7 @@ pub(super) async fn run_resume_argv(
              resume it with `fno agents resume <row>`",
         ))
     };
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command.args([
         "resume-argv",
         harness,
@@ -119,16 +126,14 @@ struct AgentVerbResult {
     unavailable: bool,
 }
 
-async fn run_agent_verb(verb: &str, name: &str) -> AgentVerbResult {
-    const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+async fn run_agent_verb(verb: &str, name: &str, timeout: Duration) -> AgentVerbResult {
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args([verb, name])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
+    match tokio::time::timeout(timeout, fut).await {
         Err(_) => AgentVerbResult {
             ok: false,
             stdout: String::new(),
@@ -174,7 +179,48 @@ fn render_agent_verb(verb: &str, name: &str, r: &AgentVerbResult) -> String {
 }
 
 pub(super) async fn run_agent_action(verb: &str, name: &str) -> String {
-    render_agent_verb(verb, name, &run_agent_verb(verb, name).await)
+    render_agent_verb(
+        verb,
+        name,
+        &run_agent_verb(verb, name, Duration::from_secs(20)).await,
+    )
+}
+
+/// Shell the per-harness resume door, which owns the route and any race-time
+/// refusal. Its receipt is the useful notice; keep the longer bound for the
+/// claude background-resume confirmation poll.
+pub(super) async fn run_resume(name: &str) -> String {
+    let result = run_agent_verb("resume", name, Duration::from_secs(60)).await;
+    render_resume_notice(name, &result)
+}
+
+fn resume_output_line(output: &str, last: bool) -> Option<String> {
+    let mut lines = output.lines().filter_map(|line| {
+        let clean: String = line.chars().filter(|c| !c.is_control()).collect();
+        (!clean.trim().is_empty()).then_some(clean)
+    });
+    if last {
+        lines.last()
+    } else {
+        lines.next()
+    }
+}
+
+fn render_resume_notice(name: &str, result: &AgentVerbResult) -> String {
+    if result.timed_out {
+        return format!("resume {name}: timed out");
+    }
+    if result.unavailable {
+        return format!("resume {name}: unavailable");
+    }
+    if result.ok {
+        return resume_output_line(&result.stdout, true)
+            .or_else(|| resume_output_line(&result.stderr, true))
+            .unwrap_or_else(|| format!("resumed {name}"));
+    }
+    resume_output_line(&result.stderr, false)
+        .or_else(|| resume_output_line(&result.stdout, false))
+        .unwrap_or_else(|| format!("resume {name}: failed"))
 }
 
 /// The daemon's own last non-empty stdout line, for notices that quote the
@@ -193,7 +239,7 @@ fn daemon_verdict(stdout: &str) -> Option<&str> {
 /// The remove leg: rm alone. Since law d-81c6da7e the daemon's rm
 /// ends a live row's process itself, so the gesture never composes a stop.
 pub(super) async fn run_remove(name: &str) -> String {
-    let rm = run_agent_verb("rm", name).await;
+    let rm = run_agent_verb("rm", name, Duration::from_secs(20)).await;
     measure_remove_notice(name, &rm)
 }
 
@@ -229,8 +275,7 @@ fn reap_notice(stdout: &str) -> String {
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 pub(super) async fn run_reap() -> String {
     const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         // --no-mux keeps this gesture on its registry-row contract:
         // the 20s bound kills only the direct child, so a mux tab sweep that
@@ -350,8 +395,7 @@ fn reap_progress_note(stderr: &str) -> String {
 /// stderr's first line.
 pub(super) async fn run_agent_rename(token: &str, new_name: &str) -> Result<String, String> {
     const RENAME_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args(["rename", token, "--name", new_name])
         .stdin(std::process::Stdio::null())
@@ -385,8 +429,7 @@ pub(super) async fn run_reentry_plan(
     transition: &str,
 ) -> Result<ReentryVerdict, String> {
     const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    let mut command = mux_command(crate::digest_overlay::fno_agents_bin());
     command
         .args(["reentry-plan", name, "--transition", transition])
         .stdin(std::process::Stdio::null())
@@ -396,19 +439,7 @@ pub(super) async fn run_reentry_plan(
         Err(_) => Err(format!("re-entry plan for {name}: timed out")),
         Ok(Err(_)) => Err(format!("re-entry plan for {name}: fno-agents unavailable")),
         Ok(Ok(o)) if o.status.success() => {
-            let verdict =
-                ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))?;
-            // A pane cannot host a bg launcher: the launcher backgrounds the
-            // session and exits at once, so the pane would hold a dead shell
-            // while the row's real transport is a thread. Refuse and name the
-            // door that runs the same plan off-pane.
-            if verdict.mechanism.as_deref() == Some("bg-resume") {
-                return Err(format!(
-                    "{name}: re-enters as a background thread (bg-resume), not a pane; \
-                     run `fno agents resume {name}` for it"
-                ));
-            }
-            Ok(verdict)
+            ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))
         }
         Ok(Ok(o)) => Err(first_line_or(
             &String::from_utf8_lossy(&o.stderr),
@@ -425,9 +456,18 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let mut command = crate::process_admission::tokio_command(fno_bin());
+    let mut command = mux_command(fno_bin());
     command
-        .args(["agents", "mail", "send", "--", name, text])
+        .args([
+            "agents",
+            "mail",
+            "send",
+            "--from-name",
+            "mux-peek",
+            "--",
+            name,
+            text,
+        ])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
@@ -502,13 +542,13 @@ pub(super) async fn resolve_restore_plans(
     let mut set = tokio::task::JoinSet::new();
     for name in claude_names {
         set.spawn(async move {
-            let verdict = run_reentry_plan(&name, "resume").await;
+            let verdict = run_reentry_plan(&name, "revive").await;
             (name, verdict)
         });
     }
     for name in portal_names {
         set.spawn(async move {
-            let verdict = run_reentry_plan(&name, "attach").await;
+            let verdict = run_reentry_plan(&name, "revive").await;
             (format!("portal:{name}"), verdict)
         });
     }
@@ -695,6 +735,71 @@ mod tests {
         }
     }
 
+    fn resume_fixture(label: &str, body: &str) -> (std::path::PathBuf, PinnedAgentEnv) {
+        let tmp =
+            std::env::temp_dir().join(format!("fno-resume-probe-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bin = tmp.join("fake-agents.sh");
+        write_fake_bin(&bin, body);
+        let env = PinnedAgentEnv::set(&bin, &tmp);
+        (tmp, env)
+    }
+
+    struct FnoBinGuard(Option<std::ffi::OsString>);
+
+    impl FnoBinGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("FNO_BIN");
+            std::env::set_var("FNO_BIN", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for FnoBinGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_BIN", value),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mux_mail_send_names_its_arm_without_operator_origin() {
+        let _serial = fno_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_log = tmp.path().join("argv.log");
+        let fake_bin = tmp.path().join("fake-fno.sh");
+        write_fake_bin(
+            &fake_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf 'msg-1 delivered (hosted)\\n'\n",
+                argv_log.display()
+            ),
+        );
+        let _fno_bin = FnoBinGuard::set(&fake_bin);
+
+        let receipt = run_mail_send("worker", "--reply-looking-body").await;
+
+        assert_eq!(receipt, "msg-1 delivered (hosted)");
+        let argv = std::fs::read_to_string(argv_log).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            [
+                "agents",
+                "mail",
+                "send",
+                "--from-name",
+                "mux-peek",
+                "--",
+                "worker",
+                "--reply-looking-body",
+            ]
+        );
+        assert!(!argv.lines().any(|arg| arg == "--origin"));
+    }
+
     #[tokio::test]
 
     async fn remove_press_shells_rm_alone() {
@@ -732,6 +837,230 @@ mod tests {
 
         assert_eq!(stop_calls, 0, "no stop call: {log}");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_success_shells_resume_and_shows_the_cli_receipt() {
+        // AC1-HP and AC2-HP: the mux resume gesture delegates once to the
+        // resume door and surfaces its codex receipt from stderr.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "receipt",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'delivered to resume-probe-codex over the codex daemon' >&2\n\
+             exit 0\n",
+        );
+
+        let notice = run_resume("resume-probe-codex").await;
+
+        assert_eq!(
+            notice,
+            "delivered to resume-probe-codex over the codex daemon"
+        );
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            ["resume resume-probe-codex"]
+        );
+        assert!(
+            !log.contains("spawn"),
+            "resume never forks a new session: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_claude_uses_resume_without_spawning() {
+        // AC2-HP: claude uses the same-id resume door, never spawn --resume.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "claude",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'claude session resumed'\n\
+             exit 0\n",
+        );
+
+        let notice = run_resume("claude-worker").await;
+
+        assert_eq!(notice, "claude session resumed");
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        assert_eq!(log.lines().collect::<Vec<_>>(), ["resume claude-worker"]);
+        assert!(
+            !log.contains("spawn"),
+            "resume never forks a new session: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_failure_shows_the_refusal_line_without_wrapping_it() {
+        // AC3-ERR: the door's refusal is the complete operator notice.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "refusal",
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             printf ' worker became busy before resume \\n' >&2\n\
+             exit 13\n",
+        );
+
+        let notice = run_resume("raced-worker").await;
+
+        assert_eq!(notice, " worker became busy before resume ");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn resume_timeout_uses_the_sixty_second_bound() {
+        // AC4-EDGE: resume waits longer than the ordinary lifecycle verbs,
+        // then reports its fixed timeout notice.
+        let _serial = fno_env_lock();
+        let (tmp, _env) = resume_fixture(
+            "timeout",
+            "#!/bin/bash\n\
+             sleep 80\n",
+        );
+        let started = std::time::Instant::now();
+
+        let notice = run_resume("slow-worker").await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(notice, "resume slow-worker: timed out");
+        assert!(
+            elapsed >= Duration::from_secs(55),
+            "timed out after {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    struct PinnedFnoBin {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PinnedFnoBin {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("FNO_BIN");
+            std::env::set_var("FNO_BIN", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for PinnedFnoBin {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("FNO_BIN", value),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+        }
+    }
+
+    struct PinnedCallerKind {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PinnedCallerKind {
+        fn unset() -> Self {
+            let previous = std::env::var_os("FNO_CALLER_KIND");
+            std::env::remove_var("FNO_CALLER_KIND");
+            Self { previous }
+        }
+    }
+
+    impl Drop for PinnedCallerKind {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("FNO_CALLER_KIND", value),
+                None => std::env::remove_var("FNO_CALLER_KIND"),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RowGesture {
+        Resume,
+        Stop,
+        Remove,
+        Mail,
+        Reap,
+    }
+
+    async fn run_row_gesture(gesture: RowGesture) {
+        match gesture {
+            RowGesture::Resume => {
+                run_resume("agent").await;
+            }
+            RowGesture::Stop => {
+                run_agent_action("stop", "agent").await;
+            }
+            RowGesture::Remove => {
+                run_remove("agent").await;
+            }
+            RowGesture::Mail => {
+                run_mail_send("agent", "hello").await;
+            }
+            RowGesture::Reap => {
+                run_reap().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mux_row_gestures_stamp_child_and_map_to_one_cli_verb() {
+        let _serial = fno_env_lock();
+        let _home_guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _bin_guard = crate::pane_send_audit::FNO_BIN_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _caller_kind = PinnedCallerKind::unset();
+        let (tmp, _agents_env) = resume_fixture(
+            "gesture-table",
+            "#!/bin/bash\n\
+             printf 'agents|%s|%s\\n' \"${FNO_CALLER_KIND-unset}\" \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             case \"$1\" in\n\
+               resume) echo 'resumed agent' ;;\n\
+               stop) echo 'stopped agent' ;;\n\
+               rm) echo 'removed: agent' ;;\n\
+               reap) printf '{\\\"reaped\\\":[]}\\n' ;;\n\
+             esac\n\
+             exit 0\n",
+        );
+        let fno_bin = tmp.join("fake-fno.sh");
+        write_fake_bin(
+            &fno_bin,
+            "#!/bin/bash\n\
+             printf 'fno|%s|%s\\n' \"${FNO_CALLER_KIND-unset}\" \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
+             echo 'msg-1 queued'\n\
+             exit 0\n",
+        );
+        let _fno_bin = PinnedFnoBin::set(&fno_bin);
+
+        let gesture_table = [
+            (RowGesture::Resume, "agents|mux|resume agent"),
+            (RowGesture::Stop, "agents|mux|stop agent"),
+            (RowGesture::Remove, "agents|mux|rm agent"),
+            (
+                RowGesture::Mail,
+                "fno|mux|agents mail send --from-name mux-peek -- agent hello",
+            ),
+            (RowGesture::Reap, "agents|mux|reap --json --no-mux"),
+        ];
+        for (gesture, _) in gesture_table {
+            run_row_gesture(gesture).await;
+        }
+
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
+        let actual: Vec<_> = log.lines().collect();
+        let expected: Vec<_> = gesture_table.iter().map(|(_, argv)| *argv).collect();
+        assert_eq!(actual, expected);
+        assert!(
+            std::env::var_os("FNO_CALLER_KIND").is_none(),
+            "caller kind belongs to each child command, not the server"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -211,6 +211,16 @@ impl Popup {
         self
     }
 
+    /// Opt this anchored menu into the full chrome (title row + footer row).
+    /// `Anchor::At` fixes `Level::Bare` - border-only, the selector menus'
+    /// shape - but the composer's pickers carry their grammar in words: the
+    /// live filter query rides the title and the list keys the footer, so
+    /// both rows must render while the menu stays anchored to its chip.
+    pub fn full_chrome(mut self) -> Self {
+        self.chrome = self.chrome.full();
+        self
+    }
+
     /// Scroll the body by `delta` rows (negative = up), saturating at the top.
     /// The bottom clamp happens in [`Popup::render`] against the live viewport.
     pub fn scroll_by(&mut self, delta: isize) {
@@ -480,6 +490,8 @@ impl Popup {
         let body: Vec<BodyLine> = windowed
             .iter()
             .map(|l| BodyLine {
+                segs: Vec::new(),
+                pad_role: Role::Body,
                 text: l.text.clone(),
                 header: l.header,
                 disabled: l.disabled,

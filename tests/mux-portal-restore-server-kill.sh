@@ -148,7 +148,10 @@ time.sleep(2)
 s.close()
 PY
 
+. "$REPO_ROOT/scripts/lib/keeper-reap.sh"
+
 cleanup() {
+    local exit_status=$?
     if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
         # The LIVE run plants its threads in the real agents home by design;
         # without this removal every run leaks rows the daemon then re-hosts.
@@ -178,10 +181,14 @@ sys.exit(1 if left else 0)
     for pid in $SURVIVOR_PIDS; do
         kill -9 "$pid" 2>/dev/null || true
     done
+    if ! reap_tmp_keepers "$TMP_DIR"; then
+        exit_status=1
+    fi
     wait 2>/dev/null || true
     if [[ "${KEEP_TMP:-0}" != "1" ]]; then
         rm -rf "$TMP_DIR"
     fi
+    return "$exit_status"
 }
 trap cleanup EXIT
 
@@ -288,24 +295,32 @@ assert portals is not None, f"the reply carries no portals array: {doc}"
 by_idx = {p.get("portal"): p for p in portals}
 zero = by_idx.get(0)
 assert zero, f"portal 0 is missing from the reply: {portals}"
-assert zero.get("outcome") == "resumed", f"portal 0 did not resume: {zero}"
+# Every pane is keeper-hosted now, portal seats included, so a seat's own
+# viewer can survive the kill through the SAME keeper re-adoption race the
+# pane worker below proves. Which portal's keeper reconnects to the fresh
+# server first is scheduling, not policy: the winner reports "focused"
+# (already there, no fill needed) and the loser reports "resumed" (freshly
+# filled) - both are a live, working seat. A hardcoded "portal 0 must be
+# resumed" flaked on that race; either outcome is correct here.
+assert zero.get("outcome") in ("resumed", "focused"), f"portal 0 did not resume or stay focused: {zero}"
 two = by_idx.get(2)
 assert two, f"portal 2 is missing from the reply: {portals}"
 if two.get("outcome") == "refused":
     assert two.get("reason"), f"portal 2 refused with no reason: {two}"
     open(f"{tmp}/portal2-refused", "w").write(two["reason"])
-print(f"[restore 1] portal 0 resumed (pane {zero.get('pane')}); portal 2: {two.get('outcome')}")
+print(f"[restore 1] portal 0 {zero.get('outcome')} (pane {zero.get('pane')}); portal 2: {two.get('outcome')}")
 PY
 
-# The filled claude portal ANSWERS from its restored seat.
+# The filled claude portal ANSWERS from its restored seat, whichever outcome
+# it won the re-adoption race with (see the assert above).
 PORTAL_PANE="$(python3 -c '
 import json, sys
 doc = json.load(open(sys.argv[1]))
 for p in doc.get("portals", []):
-    if p.get("portal") == 0 and p.get("outcome") == "resumed":
+    if p.get("portal") == 0 and p.get("outcome") in ("resumed", "focused"):
         print(p["pane"]); break
 else:
-    sys.exit("portal 0 resumed with no pane")
+    sys.exit("portal 0 did not resume or stay focused, with no pane")
 ' "$TMP_DIR/restore1.json")"
 "$MUX_BIN" mux pane send --session "$SESSION" "$PORTAL_PANE" --text 'portal-restore-a6b9' --raw --submit >/dev/null 2>&1 \
     || echo "[send] submission receipt unconfirmed; the grid read decides"

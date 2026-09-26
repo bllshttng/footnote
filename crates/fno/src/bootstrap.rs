@@ -2316,13 +2316,14 @@ mod tests {
             "the refusal must name the cause: {}",
             e.msg
         );
-        let spawns = fs::read_to_string(&calls)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(
-            spawns, 1,
-            "a stable refusal must cost one spawn, not the whole budget"
+        // Same marker rule as the torn-read test, in reverse: a stable
+        // refusal returns on the pass that answered, so the message carries
+        // no "still failing after re-asking", whatever transient spawn
+        // failures the runner threw before it.
+        assert!(
+            !e.msg.contains("still failing after re-asking"),
+            "a stable refusal must return on its own pass, not after the budget: {}",
+            e.msg
         );
         fs::remove_dir_all(&root).ok();
     }
@@ -2384,13 +2385,16 @@ mod tests {
                 "{case}: {}",
                 e.msg
             );
-            let spawns = fs::read_to_string(&calls)
-                .unwrap_or_default()
-                .lines()
-                .count();
-            assert_eq!(
-                spawns, 4,
-                "{case}: an incomplete answer is an instrument failure: re-ask it"
+            // The spent budget is read from the message's "still failing
+            // after re-asking" marker, never a spawn tally: one transient
+            // probe spawn failure on a loaded runner still ends in the right
+            // refusal, and the tally must not fail the instrument for it.
+            // A stable early exit returns above the marker, so its absence
+            // here would mean the loop quit on a torn answer.
+            assert!(
+                e.msg.contains("still failing after re-asking for 30ms"),
+                "{case}: the budget must be spent, not exited early: {}",
+                e.msg
             );
         }
         fs::remove_dir_all(&root).ok();

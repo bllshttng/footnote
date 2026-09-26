@@ -37,15 +37,6 @@ pub enum SectionKey {
     Squad(String),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
-    /// The `~ backlog` lane.
-    WorkQueue,
-    /// The `~ missions` band: the synthetic mission squads grouped as one
-    /// pull-section. A mission squad can never hold an agent row (its id is a
-    /// high-bit sentinel no agent is ever assigned), so it is a progress
-    /// indicator, not a workspace - rendering it under a `~` band keeps it from
-    /// being read as one. Binary like WorkQueue: the mission names have no
-    /// exited state, so the cycle is expanded <-> collapsed.
-    Missions,
 }
 
 impl SectionKey {
@@ -57,29 +48,19 @@ impl SectionKey {
         match self {
             SectionKey::Squad(cwd) => format!("squad:{cwd}"),
             SectionKey::Elsewhere => "elsewhere".into(),
-            SectionKey::WorkQueue => "work-queue".into(),
-            SectionKey::Missions => "missions".into(),
         }
     }
 
     fn from_wire(s: &str) -> Option<Self> {
         match s {
             "elsewhere" => Some(SectionKey::Elsewhere),
-            "work-queue" => Some(SectionKey::WorkQueue),
-            "missions" => Some(SectionKey::Missions),
-            // Anything else, including a `mission:` key saved before missions
-            // moved off `squads`, reads as None and `load` drops that key alone.
+            // Anything else, including a `mission:`, `missions`, or `work-queue`
+            // key saved by an older build, reads as None and `load` drops that
+            // key alone.
             _ => s
                 .strip_prefix("squad:")
                 .map(|cwd| SectionKey::Squad(cwd.into())),
         }
-    }
-
-    /// Whether this section's cycle is binary (expanded <-> collapsed). The
-    /// Backlog section's rows are cards, which have no exited state, so its middle
-    /// state would hide nothing.
-    fn is_binary(&self) -> bool {
-        matches!(self, SectionKey::WorkQueue | SectionKey::Missions)
     }
 }
 
@@ -96,14 +77,13 @@ pub enum SectionView {
 
 /// One click on a section header, as a pure function so the cycle is testable
 /// without a View. `has_dead` false skips the `LiveOnly` state entirely (there
-/// would be nothing to hide, so the click would look like a no-op), as does a
-/// binary section - a rule this owns via `key` rather than taking as a second
-/// transposable bool from its caller. `LiveOnly -> Collapsed` unconditionally,
+/// would be nothing to hide, so the click would look like a no-op).
+/// `LiveOnly -> Collapsed` unconditionally,
 /// so a section whose last dead row was reaped elsewhere can never wedge in
 /// `LiveOnly`.
-pub fn next_view(current: SectionView, has_dead: bool, key: &SectionKey) -> SectionView {
+pub fn next_view(current: SectionView, has_dead: bool) -> SectionView {
     match current {
-        SectionView::Expanded if has_dead && !key.is_binary() => SectionView::LiveOnly,
+        SectionView::Expanded if has_dead => SectionView::LiveOnly,
         SectionView::Expanded => SectionView::Collapsed,
         SectionView::LiveOnly => SectionView::Collapsed,
         SectionView::Collapsed => SectionView::Expanded,
@@ -193,6 +173,72 @@ struct StoreFile {
     /// until their first drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     feed_width: Option<serde_json::Value>,
+    /// The experimental backlog board in the sidebar menu. Default
+    /// absent = off: the view is experimental, so the next toggle persists a
+    /// clean value. Same contract as `confirm_lifecycle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    experimental_backlog_view: Option<serde_json::Value>,
+    /// The backlog board's column layout (which columns, order, focus
+    /// width). Default absent = the shipped default. Same contract as
+    /// `experimental_backlog_view`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_layout: Option<serde_json::Value>,
+    /// The sideline's active view. Default absent = agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sideline_view: Option<serde_json::Value>,
+    /// The backlog board's full-screen toggle. Default absent = false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_full: Option<serde_json::Value>,
+}
+
+/// Which view the sideline column paints. `Agents` is the agent list the
+/// sideline shipped with; `Backlog` is the backlog's one-column list (the
+/// docked window's replacement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SidelineView {
+    #[default]
+    Agents,
+    Backlog,
+}
+
+/// Read the sideline view pref. Absent, corrupt, or unknown reads as
+/// `Agents`, and the next cycle persists a clean value.
+pub fn load_sideline_view() -> SidelineView {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return SidelineView::default();
+    }
+    read_raw()
+        .sideline_view
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the sideline view pref. Best-effort like every other write here.
+pub fn save_sideline_view(v: SidelineView) {
+    mutate(|file| {
+        file.sideline_view = serde_json::to_value(v).ok();
+    });
+}
+
+/// Read the board full-screen pref. Absent or corrupt reads as `false`.
+pub fn load_board_full() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .board_full
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Persist the board full-screen pref. Best-effort like every other write.
+pub fn save_board_full(full: bool) {
+    mutate(|file| {
+        file.board_full = serde_json::to_value(full).ok();
+    });
 }
 
 /// Read the operator's stop/remove confirm pref. Absent, corrupt, or
@@ -237,6 +283,29 @@ pub fn load_feed_width() -> Option<u16> {
 pub fn save_feed_width(width: u16) {
     mutate(|file| {
         file.feed_width = serde_json::to_value(width).ok();
+    });
+}
+
+/// Read the experimental backlog board pref. Absent, corrupt, or
+/// non-bool reads as `false` - the view is off until the operator turns it
+/// on, and the next toggle persists a clean value. The same degrade posture
+/// every pref here keeps.
+pub fn load_experimental_backlog_view() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .experimental_backlog_view
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Persist the experimental backlog board pref. Best-effort like every
+/// other write here.
+pub fn save_experimental_backlog_view(on: bool) {
+    mutate(|file| {
+        file.experimental_backlog_view = serde_json::to_value(on).ok();
     });
 }
 
@@ -640,15 +709,14 @@ mod tests {
         }
     }
 
-    // AC1-HP: a saved map round-trips, including a squad name and both fixed
-    // sections.
+    // AC1-HP: a saved map round-trips, including a squad name and the fixed
+    // section.
     #[test]
     fn save_load_round_trips() {
         let _s = Scratch::new("round-trip");
         let mut m = HashMap::new();
         m.insert(SectionKey::Squad("footnote".into()), SectionView::LiveOnly);
         m.insert(SectionKey::Elsewhere, SectionView::Collapsed);
-        m.insert(SectionKey::WorkQueue, SectionView::Expanded);
         save(&m);
         assert_eq!(load(), m);
     }
@@ -672,6 +740,84 @@ mod tests {
     fn missing_file_loads_empty() {
         let _s = Scratch::new("missing");
         assert!(load().is_empty());
+    }
+
+    // The experimental backlog toggle: absent reads off, a corrupt
+    // value reads off, and save/load round-trips (AC3-HP).
+    #[test]
+    fn experimental_backlog_view_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("backlog-view");
+        assert!(!load_experimental_backlog_view(), "absent reads off");
+        std::fs::write(view_path(), r#"{"experimental_backlog_view":"yes-please"}"#).unwrap();
+        assert!(!load_experimental_backlog_view(), "corrupt reads off");
+        save_experimental_backlog_view(true);
+        assert!(load_experimental_backlog_view());
+        save_experimental_backlog_view(false);
+        assert!(!load_experimental_backlog_view());
+    }
+
+    // The sideline view pref: absent reads agents, a corrupt or unknown
+    // value reads agents, and save/load round-trips.
+    #[test]
+    fn sideline_view_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("sideline-view");
+        assert_eq!(
+            load_sideline_view(),
+            SidelineView::Agents,
+            "absent reads agents"
+        );
+        std::fs::write(view_path(), r#"{"sideline_view":"diagonal"}"#).unwrap();
+        assert_eq!(
+            load_sideline_view(),
+            SidelineView::Agents,
+            "unknown reads agents"
+        );
+        save_sideline_view(SidelineView::Backlog);
+        assert_eq!(load_sideline_view(), SidelineView::Backlog);
+        save_sideline_view(SidelineView::Agents);
+        assert_eq!(load_sideline_view(), SidelineView::Agents);
+    }
+
+    // The board layout pref: absent reads the shipped default (every model
+    // column, half focus), a corrupt value reads the default, and
+    // save/load round-trips a subset with a different focus.
+    #[test]
+    fn board_layout_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("board-layout");
+        let dflt = load_board_layout();
+        assert_eq!(
+            dflt.columns,
+            backlog_default_columns(),
+            "absent reads all columns"
+        );
+        assert_eq!(dflt.focus_pct, 50, "absent reads half focus");
+        std::fs::write(view_path(), r#"{"board_layout":{"columns":"wide"}}"#).unwrap();
+        let corrupt = load_board_layout();
+        assert_eq!(
+            corrupt.columns,
+            backlog_default_columns(),
+            "corrupt reads default"
+        );
+        let custom = BoardLayout {
+            columns: vec!["Now".into(), "Done".into()],
+            focus_pct: 65,
+        };
+        save_board_layout(&custom);
+        assert_eq!(load_board_layout(), custom);
+    }
+
+    // The board full-screen pref: absent or corrupt reads false, and
+    // save/load round-trips.
+    #[test]
+    fn board_full_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("board-full");
+        assert!(!load_board_full(), "absent reads false");
+        std::fs::write(view_path(), r#"{"board_full":"wide"}"#).unwrap();
+        assert!(!load_board_full(), "corrupt reads false");
+        save_board_full(true);
+        assert!(load_board_full());
+        save_board_full(false);
+        assert!(!load_board_full());
     }
 
     // An unknown key or value is dropped entry-wise, not fatally: a file
@@ -706,29 +852,21 @@ mod tests {
         assert_eq!(got[&SectionKey::Elsewhere], SectionView::Collapsed);
     }
 
-    // AC5-EDGE: a section with no dead rows skips LiveOnly entirely, and the
-    // the Backlog section is binary in both directions.
+    // AC5-EDGE: a section with no dead rows skips LiveOnly entirely.
     #[test]
     fn next_view_skips_live_only_without_dead() {
         use SectionView::*;
-        let sq = SectionKey::Squad("/repo".into());
-        assert_eq!(next_view(Expanded, false, &sq), Collapsed);
-        assert_eq!(next_view(Collapsed, false, &sq), Expanded);
-        assert_eq!(
-            next_view(Expanded, true, &SectionKey::WorkQueue),
-            Collapsed,
-            "backlog binary even when told rows are dead"
-        );
+        assert_eq!(next_view(Expanded, false), Collapsed);
+        assert_eq!(next_view(Collapsed, false), Expanded);
     }
 
     // AC4-UI: the full tri-state cycle when dead rows exist.
     #[test]
     fn next_view_cycles_tri_state_with_dead() {
         use SectionView::*;
-        let sq = SectionKey::Squad("/repo".into());
-        assert_eq!(next_view(Expanded, true, &sq), LiveOnly);
-        assert_eq!(next_view(LiveOnly, true, &sq), Collapsed);
-        assert_eq!(next_view(Collapsed, true, &sq), Expanded);
+        assert_eq!(next_view(Expanded, true), LiveOnly);
+        assert_eq!(next_view(LiveOnly, true), Collapsed);
+        assert_eq!(next_view(Collapsed, true), Expanded);
     }
 
     // AC12-FR: a section left in LiveOnly whose last dead row was reaped
@@ -736,13 +874,25 @@ mod tests {
     #[test]
     fn live_only_never_wedges_when_dead_disappears() {
         assert_eq!(
-            next_view(
-                SectionView::LiveOnly,
-                false,
-                &SectionKey::Squad("/repo".into())
-            ),
+            next_view(SectionView::LiveOnly, false),
             SectionView::Collapsed
         );
+    }
+
+    // A mux-view.json saved by an older build with the deleted `work-queue`
+    // and `missions` section keys loads, and only the readable entries
+    // survive (AC6-EDGE for the sections' removal).
+    #[test]
+    fn legacy_work_queue_and_missions_keys_load_and_drop() {
+        let _s = Scratch::new("legacy-keys");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{"work-queue":"expanded","missions":"collapsed","squad:/x":"live_only"}}"#,
+        )
+        .unwrap();
+        let got = load();
+        assert_eq!(got.len(), 1, "only the squad key survives: {got:?}");
+        assert_eq!(got[&SectionKey::Squad("/x".into())], SectionView::LiveOnly);
     }
 
     // `strip_prefix` removes only the leading marker, so an identity that
@@ -981,4 +1131,46 @@ mod tests {
         assert_eq!(AgentSort::Squad.toggle(), AgentSort::Attention);
         assert_eq!(AgentSort::Attention.toggle(), AgentSort::Squad);
     }
+}
+
+/// The board's column layout as the store sees it: JSON so the schema can
+/// evolve without a breaking read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BoardLayout {
+    pub columns: Vec<String>,
+    pub focus_pct: u16,
+}
+
+/// Read the board layout pref. Absent or corrupt reads as the shipped
+/// default: every model column, model order, half focus.
+pub fn load_board_layout() -> BoardLayout {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return BoardLayout {
+            columns: backlog_default_columns(),
+            focus_pct: 50,
+        };
+    }
+    let cfg = read_raw()
+        .board_layout
+        .and_then(|v| serde_json::from_value::<BoardLayout>(v).ok());
+    cfg.unwrap_or(BoardLayout {
+        columns: backlog_default_columns(),
+        focus_pct: 50,
+    })
+}
+
+/// Persist the board layout pref. Best-effort like every other write here.
+pub fn save_board_layout(layout: &BoardLayout) {
+    mutate(|file| {
+        file.board_layout = serde_json::to_value(layout).ok();
+    });
+}
+
+/// The model's column names, as the store's default.
+fn backlog_default_columns() -> Vec<String> {
+    crate::backlog_view::KANBAN_COLUMNS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
