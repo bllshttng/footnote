@@ -375,11 +375,12 @@ pub fn detect_retask(
         }
     }
 
-    let desired_model = target
-        .model
-        .clone()
-        .filter(|m| !m.is_empty())
-        .or(row.model.clone());
+    // The model axis resolves from the new verb's routed lane alone; a row
+    // never carries its old tier across a retask, so an unrouted lane spawns.
+    let desired_model = target.model.clone().filter(|m| !m.is_empty());
+    if desired_model.is_none() && row.model.is_some() {
+        return spawn_required("model_unrouted");
+    }
     let desired_effort = target
         .effort
         .clone()
