@@ -239,6 +239,7 @@ print("APPENDED")
         .arg("-c")
         .arg(&script)
         .env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .output()
         .expect("python spawns");
     assert!(
