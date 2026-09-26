@@ -460,8 +460,8 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
 /// The mappability answer the spawn seam and both front doors read: whether
 /// the (harness, mode, substrate) triple carries the permission axis. The
 /// capability table is the declaration for the thread lanes; the pane lane is
-/// answered by the vocabulary itself; headless stays claude-only, matching
-/// the client.rs guard. An undeclared lane answers a declared `false` so the
+/// answered by the vocabulary itself; headless supports providers whose
+/// one-shot argv carries the mapped tokens. An undeclared lane answers `false` so the
 /// seam names the skip, never a guessed yes.
 pub fn permission_mappable(provider: &str, mode: &str, substrate: &str) -> Result<bool, String> {
     if mode.trim().is_empty() {
@@ -488,7 +488,15 @@ pub fn permission_mappable(provider: &str, mode: &str, substrate: &str) -> Resul
             }
             permission_pane_tokens(provider, mode).map(|_| true)
         }
-        "headless" => Ok(provider == "claude"),
+        "headless" => {
+            if provider == "claude" {
+                Ok(true)
+            } else if provider == "grok" {
+                permission_pane_tokens(provider, mode).map(|_| true)
+            } else {
+                Ok(false)
+            }
+        }
         _ => Err(format!(
             "unknown substrate {substrate:?}; use pane, thread (bg), or headless"
         )),
@@ -593,6 +601,12 @@ mod mappable_tests {
         assert!(err.contains("banana"), "got: {err}");
         assert!(permission_mappable("claude", "bypassPermissions", "bg").unwrap());
         assert!(!permission_mappable("codex", "yolo", "headless").unwrap_or(false));
+    }
+
+    #[test]
+    fn grok_headless_maps_permission_modes_but_cursor_agent_does_not() {
+        assert!(permission_mappable("grok", "acceptEdits", "headless").unwrap());
+        assert!(!permission_mappable("cursor-agent", "acceptEdits", "headless").unwrap());
     }
 }
 
