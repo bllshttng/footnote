@@ -29,17 +29,28 @@ pub(crate) trait GhProbe {
 
 pub(crate) struct RealGhProbe;
 
+/// One wall-clock bound per gh call: the status door serves callers (the
+/// king-board gate read, the nudge ladder) that each lost their own
+/// per-call bound when they moved in process, so the bound lives here where
+/// every door read passes. Generous by design - it stops a hang, it does
+/// not pace reads (the fleet budget ledger owns that).
+const GH_CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl GhProbe for RealGhProbe {
     fn run_gh(&self, cwd: &Path, args: &[String]) -> Result<(bool, String, String), String> {
-        let out = Command::new("gh")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = crate::loopcheck::bounded_read(
+            std::ffi::OsStr::new("gh"),
+            &refs,
+            cwd,
+            "pr-status gh",
+            GH_CALL_BOUND,
+        )
+        .map_err(|error| crate::loopcheck::bounded_read_diagnostic("pr-status", &error))?;
         Ok((
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
+            String::from_utf8_lossy(&out.stderr_tail).into_owned(),
         ))
     }
 }

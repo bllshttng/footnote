@@ -432,7 +432,10 @@ fn mint_key(cwd: &Path, pr: u64, head_sha: &str, pr_state: &str, slug_key: &str)
     {
         return key.to_string();
     }
-    format!("{slug_key}-{pr}-{}", &head_sha[..head_sha.len().min(12)])
+    format!(
+        "{slug_key}-{pr}-{}",
+        head_sha.chars().take(12).collect::<String>()
+    )
 }
 
 /// The live read the row is written from, plus the write and the prune of
