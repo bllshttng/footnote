@@ -1436,6 +1436,23 @@ else
     skip_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)"
 fi
 
+# advisory: never flips the exit code. This leg sits BEFORE the cargo audit
+# leg because the advisory receipt below reads the LAST recorded leg.
+echo ""
+echo "preflight: === edit integrity (ADVISORY) ==="
+if [[ -n "${CHANGED_BASE:-}" ]]; then
+    a0="$SECONDS"
+    EDIT_INTEGRITY_RC=0
+    run_hermetic env EDIT_INTEGRITY_BASE="$CHANGED_BASE" bash scripts/ci/check-edit-integrity.sh || EDIT_INTEGRITY_RC=$?
+    case "$EDIT_INTEGRITY_RC" in
+        0) record_leg "" "edit integrity (ADVISORY)" pass $(( SECONDS - a0 )) ;;
+        1) record_leg "" "edit integrity (ADVISORY)" "advisory-fail" $(( SECONDS - a0 )) ;;
+        *) record_leg "" "edit integrity (ADVISORY)" unavailable $(( SECONDS - a0 )) ;;
+    esac
+else
+    record_leg "" "edit integrity (ADVISORY)" "skipped (no merge base)" 0
+fi
+
 # advisory: never flips the exit code
 echo ""
 echo "preflight: === cargo audit (ADVISORY) ==="
