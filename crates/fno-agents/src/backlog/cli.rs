@@ -157,7 +157,7 @@ pub fn run(args: &[String]) -> i32 {
         {
             super::super::graph_get::run_graph_get(resolved.tail)
         }
-        _ => forward_python(args),
+        _ => forward_python(&resolved),
     }
 }
 
@@ -165,13 +165,15 @@ fn positional_count(tail: &[String]) -> usize {
     tail.iter().filter(|a| !a.starts_with('-')).count()
 }
 
-/// The compatibility forward: exec the wheel's Python CLI with the original
-/// `fno backlog ...` argv, stdio inherited, its exit code returned. The one
+/// The compatibility forward: exec the wheel's Python CLI with the resolved
+/// `fno backlog <legacy-command> ...` argv, stdio inherited, its exit code
+/// returned. A grouped spelling arrives as the legacy command it resolves
+/// to, so the Python surface sees the shape it has always owned. The one
 /// new seam crossing this fold pays; the resolver is the baselined
 /// `scrape::fno_py`.
-fn forward_python(args: &[String]) -> i32 {
+fn forward_python(resolved: &Resolved<'_>) -> i32 {
     let mut cmd = std::process::Command::new(crate::scrape::fno_py());
-    cmd.arg("backlog").args(args);
+    cmd.arg("backlog").arg(resolved.legacy).args(resolved.tail);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -235,6 +237,20 @@ mod tests {
     #[test]
     fn the_native_aux_vocabulary_resolves_before_the_catalog() {
         assert_eq!(routed(&["notes", "history", "x"]), Ok("notes"));
+    }
+
+    #[test]
+    fn a_grouped_spelling_forwards_as_the_legacy_command_it_resolves_to() {
+        // The compat forward passes [legacy] + tail, so `fno backlog move
+        // done x` reaches Python as `fno-py backlog done x` - the shape it
+        // owns - never the grouped form it does not know.
+        let owned: Vec<String> = ["move", "done", "x-abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let r = resolve_head(&owned).unwrap();
+        assert_eq!(r.legacy, "done");
+        assert_eq!(r.tail, &["x-abc".to_string()]);
     }
 
     #[test]
