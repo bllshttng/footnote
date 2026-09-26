@@ -588,6 +588,32 @@ class TestReapDeadClaims:
         swept = [e for e in lines if e["type"] == "claim_reap_swept"]
         assert swept == []
 
+    def test_reap_row_names_the_native_verdict_basis(self, tmp_path, monkeypatch):
+        import fno.claims.core as claims_core
+        from fno.claims import events as claim_events
+        from fno.events import validate
+
+        acquire_claim("node:x-absent", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        verdict = {
+            "state": "stale",
+            "basis": "session-absent",
+            "bucket": "",
+            "provably_dead": True,
+        }
+        monkeypatch.setattr(
+            claims_core, "claim_verdicts", lambda *a, **k: {"node:x-absent": verdict}
+        )
+        emitted: list[dict] = []
+        monkeypatch.setattr(claim_events, "_emit", emitted.append)
+
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        reaped = [e for e in emitted if e["type"] == "claim_reaped"]
+        assert len(reaped) == 1
+        assert reaped[0]["data"]["basis"] == "session-absent"
+        validate(reaped[0])
+
     def test_second_apply_run_is_idempotent(self, tmp_path):
         acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
 
