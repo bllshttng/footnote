@@ -1839,14 +1839,18 @@ mod tests {
         declare_test_roots(spaces.path());
         let (_dir, graph) = seeded_sqlite_fixture();
         // Seed the trap the store itself can produce: a closed row holding
-        // an empty details (stored as the description column).
-        open(&graph)
-            .unwrap()
-            .execute(
-                "UPDATE nodes SET status = 'done', description = '' WHERE id = 'ab-one'",
-                [],
-            )
-            .unwrap();
+        // an empty details (stored as the description column). The write
+        // routes through the table's owning module (the table-ownership
+        // gate), like every write.
+        {
+            let connection = open(&graph).unwrap();
+            let mut one = crate::backlog::nodes::load(&connection, "ab-one")
+                .unwrap()
+                .unwrap();
+            one.status = crate::backlog::model::Status::parse("done").unwrap();
+            one.description = Some(String::new());
+            crate::backlog::nodes::save(&connection, &one).unwrap();
+        }
         // A write touching only the OTHER row succeeds.
         let ok = mutate_single_row(&graph, "comment_create", |rows| {
             for row in rows.iter_mut() {

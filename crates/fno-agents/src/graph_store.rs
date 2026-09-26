@@ -3056,23 +3056,15 @@ mod tests {
         .unwrap();
         {
             let connection = crate::backlog::open(&graph).unwrap();
-            let body: String = connection
-                .query_row(
-                    "SELECT body FROM nodes_raw WHERE id = 'ab-legacy'",
-                    [],
-                    |row| row.get(0),
-                )
+            let (_, ordinal, mut body) = crate::backlog::nodes::raw_rows(&connection)
+                .unwrap()
+                .into_iter()
+                .find(|(id, _, _)| *id == "ab-legacy")
                 .unwrap();
-            let mut seeded: Value = serde_json::from_str(&body).unwrap();
-            let obj = seeded.as_object_mut().unwrap();
+            let obj = body.as_object_mut().unwrap();
             obj.insert("status".into(), json!("done"));
             obj.insert("details".into(), json!(""));
-            connection
-                .execute(
-                    "UPDATE nodes_raw SET body = ?1 WHERE id = 'ab-legacy'",
-                    rusqlite::params![seeded.to_string()],
-                )
-                .unwrap();
+            crate::backlog::nodes::save_raw(&connection, "ab-legacy", ordinal, &body).unwrap();
         }
         let legacy = || json!({"id": "ab-legacy", "title": "t", "status": "done", "details": ""});
         locked_mutate(
