@@ -2941,6 +2941,32 @@ pub(crate) fn mux_sidecar_root() -> PathBuf {
     resolved_state_root()
 }
 
+/// The state root Python's renderer writes `reign.html` to: the PROJECT-AWARE
+/// `state_dir` ladder (Python `fno.paths.state_dir()`), not the mux's
+/// explicit-only tier. Writer and reader must walk the same chain or /crown
+/// serves the global dir's stale page while the project render lands
+/// elsewhere. A miss or an unexpandable value falls to `legacy_state_root()`,
+/// Python's own default (`~/.fno`), with the same one-time warnings the mux
+/// resolver emits; a relative project value stays declined rather than
+/// anchoring the bridge's cwd against the renderer's.
+#[cfg(not(test))]
+pub(crate) fn reign_state_root() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match crate::digest_overlay::config_top_str(&cwd, "state_dir") {
+        Some(raw) => match expand_state_dir(&raw) {
+            Some(root) => root,
+            None => {
+                warn_once_unexpandable_state_dir(&raw);
+                legacy_state_root()
+            }
+        },
+        None => {
+            warn_once_legacy_yaml_state_dir();
+            legacy_state_root()
+        }
+    }
+}
+
 /// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
 /// (anchored against cwd so a bare relative pin resolves to one dir per
 /// invocation site), else the pre-config-chain global root. `warn` names the

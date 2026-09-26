@@ -540,6 +540,17 @@ pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
     global_config_toml().and_then(|g| read_top_file(&g, key))
 }
 
+/// A TOP-LEVEL key read through the FULL ladder: `$FNO_CONFIG` (sole
+/// candidate) else the project tier, else the global config. The reign page
+/// resolver reads through this so the bridge serves the state root Python's
+/// renderer wrote to (`fno.paths.state_dir()` is project-aware); the mux's
+/// sockets and sidecars keep the existing explicit-only reader (see
+/// [`config_explicit_top_str`]) because one machine's fleet is shared
+/// infrastructure invoked from many cwds.
+pub(crate) fn config_top_str(cwd: &Path, key: &str) -> Option<String> {
+    resolve_config_key(cwd, &|path| read_top_file(path, key))
+}
+
 /// The per-user global config.toml: the config.toml SIBLING of
 /// `$FNO_GLOBAL_SETTINGS_PATH` when set, else `$HOME/.fno/config.toml`. One
 /// source for both the explicit tier and the section ladder's last rung, so
@@ -887,6 +898,9 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dev_profile_dir_recognizes_both_cargo_binary_shapes() {
@@ -960,6 +974,54 @@ mod tests {
             read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),
             None
         );
+    }
+
+    #[test]
+    fn the_top_ladder_reads_the_project_tier_the_explicit_reader_ignores() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-top-ladder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let proj_state = base.join("proj-state");
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join(".fno")).unwrap();
+        std::fs::create_dir_all(&proj_state).unwrap();
+        std::fs::write(
+            base.join(".fno/config.toml"),
+            format!("state_dir = \"{}\"\n", proj_state.display()),
+        )
+        .unwrap();
+        let global = base.join("global-config.toml");
+        std::fs::write(&global, "state_dir = \"/global/state\"\n").unwrap();
+        let explicit = base.join("explicit-config.toml");
+        std::fs::write(&explicit, "state_dir = \"/explicit/state\"\n").unwrap();
+        for key in ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH", "FNO_REPO_ROOT"] {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
+
+        // The project tier answers where the explicit-only reader saw only
+        // the global file: this is the reign-page resolution the bridge owed
+        // Python's renderer.
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some(proj_state.to_str().unwrap())
+        );
+        // No project key: the global leg still answers.
+        std::fs::write(base.join(".fno/config.toml"), "[mux]\n").unwrap();
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some("/global/state")
+        );
+        // The explicit pin is the SOLE candidate when set, project included.
+        std::env::set_var("FNO_CONFIG", &explicit);
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some("/explicit/state")
+        );
+        for key in ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH"] {
+            std::env::remove_var(key);
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

@@ -156,7 +156,7 @@ fn reign_html_path_from_state_root(state_root: &Path) -> PathBuf {
 fn reign_html_path() -> PathBuf {
     #[cfg(not(test))]
     {
-        reign_html_path_from_state_root(&crate::proto::mux_sidecar_root())
+        reign_html_path_from_state_root(&crate::proto::reign_state_root())
     }
     #[cfg(test)]
     {
