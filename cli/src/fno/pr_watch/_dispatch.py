@@ -830,26 +830,31 @@ def _run_tick(
             if isinstance(row, dict):
                 row["last_seen_state"] = current
 
-    # Order after the sweep so the listing's answer can lead the queue: OPEN
-    # candidates first (a merge among them is what the ritual is for), then
-    # least-recently-read (cache cursor, else the delivery record's; missing
-    # stamp first), discovery order breaking ties. The dispatch loop stamps
-    # each read, so a budget break resumes where the last tick stopped.
+    # Order after the sweep so unfailed candidates lead the queue, then OPEN
+    # candidates, then least-recently-read (cache cursor, else the delivery
+    # record's; missing stamp first), discovery order breaking ties. A failed
+    # read yields to the remaining candidates instead of retrying at the head.
     def _poll_order(indexed):
         idx, cand = indexed
         try:
             key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
         except ValueError:
-            return (2, "", idx)
+            return (0, 2, "", idx)
         head = 0 if batch_states.get(key) == "OPEN" else 1
         row = state.get(key)
-        stamp = row.get("last_polled_at") if isinstance(row, dict) else None
-        if not (isinstance(stamp, str) and stamp):
-            drec = delivery_state.get(key)
-            stamp = drec.get("last_polled_at") if isinstance(drec, dict) else None
-            if not (isinstance(stamp, str) and stamp):
-                stamp = ""
-        return (head, stamp, idx)
+        drec = delivery_state.get(key)
+        failed = isinstance(row, dict) and row.get("last_seen_state") == "UNKNOWN"
+        failed = failed or isinstance(drec, dict) and drec.get("last_read_failed") is True
+        stamps = [
+            value
+            for value in (
+                row.get("last_polled_at") if isinstance(row, dict) else None,
+                drec.get("last_polled_at") if isinstance(drec, dict) else None,
+            )
+            if isinstance(value, str) and value
+        ]
+        stamp = max(stamps, default="")
+        return (int(failed), head, stamp, idx)
 
     candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
 
@@ -946,20 +951,19 @@ def _run_tick(
             continue
 
         try:
-            # Stamp the poll cursor on the delivery record before the read:
-            # a merged candidate has no cache row to stamp, so this is what
-            # moves it to the back of the order. persist() in finally carries
-            # the stamp across a budget break.
-            if batch_states.get(key) == "NOT_OPEN":
-                drec = delivery_state.get(key)
-                drec = drec if isinstance(drec, dict) else {}
-                drec["last_polled_at"] = now_iso
-                delivery_state[key] = drec
+            # The sidecar keeps attempt cursors when the phase alarm cuts.
+            drec = delivery_state.get(key)
+            drec = drec if isinstance(drec, dict) else {}
+            drec["last_polled_at"] = now_iso
+            delivery_state[key] = drec
 
             # Fetch current state
             try:
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
+                drec = delivery_state.get(key)
+                if isinstance(drec, dict):
+                    drec.pop("last_read_failed", None)
                 swept.add(key)
                 merge_scan_scanned += 1
                 SCAN_PROGRESS["sweep"] = _scan_note()
@@ -972,6 +976,10 @@ def _run_tick(
                 stale = state.get(key)
                 if isinstance(stale, dict):
                     stale["last_seen_state"] = "UNKNOWN"
+                drec = delivery_state.get(key)
+                drec = drec if isinstance(drec, dict) else {}
+                drec["last_read_failed"] = True
+                delivery_state[key] = drec
                 continue
 
             entry = store.get(key)
