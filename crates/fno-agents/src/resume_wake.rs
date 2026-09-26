@@ -465,7 +465,6 @@ pub(crate) fn run_and_confirm_respawn(
         ClaudeHome::from_env(),
         family1_truth_state,
         std::thread::sleep,
-        || crate::resume_gate::admit_revival(home, verb, &plan.name, Path::new(&plan.cwd)),
     )
 }
 
@@ -564,7 +563,7 @@ where
     }
 }
 
-pub(crate) fn run_and_confirm_respawn_with_truth<F, S, A>(
+pub(crate) fn run_and_confirm_respawn_with_truth<F, S>(
     plan: &crate::reentry::ReentryPlan,
     name: &str,
     verb: &str,
@@ -573,22 +572,11 @@ pub(crate) fn run_and_confirm_respawn_with_truth<F, S, A>(
     claude_home: ClaudeHome,
     truth_fn: F,
     sleep_fn: S,
-    admit: A,
 ) -> i32
 where
     F: Fn(&str) -> Option<String>,
     S: Fn(std::time::Duration),
-    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
 {
-    // Hold admission through the relaunch and its live confirmation so the
-    // slot count cannot miss the row before it becomes visible.
-    let _admission = match admit() {
-        Ok(guard) => guard,
-        Err(code) => {
-            crate::resume_gate::release_revival_claims(&plan.session_id);
-            return code;
-        }
-    };
     let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
     let bg_resume = plan.mechanism == "bg-resume";
     // A bg resume relaunches a session whose job dir is typically GONE, so
@@ -916,7 +904,7 @@ fn parked_sender_name(home: &AgentsHome) -> String {
 /// Bring a parked session whose daemon worker is gone back up, then wait for
 /// it to reappear on the roster. Every failure prints its own line naming the
 /// step and returns the exit code it maps to.
-fn revive_parked_claude_session<A>(
+fn revive_parked_claude_session(
     home: &AgentsHome,
     name: &str,
     row_name: &str,
@@ -924,15 +912,7 @@ fn revive_parked_claude_session<A>(
     short_id: &str,
     session_uuid: &str,
     cwd: &str,
-    admit: A,
-) -> Result<(), (i32, String)>
-where
-    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
-{
-    let _admission = match admit() {
-        Ok(guard) => guard,
-        Err(code) => return Err((code, "spawn-gate".to_string())),
-    };
+) -> Result<(), (i32, String)> {
     // A revive brings the session back from down: the same second-writer
     // gate the relaunch arm runs, before anything launches.
     if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, session_id) {
@@ -1037,7 +1017,6 @@ pub(crate) fn parked_claude_route(
                 short,
                 uuid,
                 cwd,
-                || crate::resume_gate::admit_revival(home, "resume", row_name, Path::new(cwd)),
             )
         },
         |uuid, wrapped| {
@@ -1653,23 +1632,6 @@ mod tests {
     }
 
     #[test]
-    fn parked_revive_gate_refusal_prevents_claim_and_launch() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = AgentsHome::at(temp.path().join("agents-home"));
-        let result = revive_parked_claude_session(
-            &home,
-            "w1",
-            "w1",
-            "sess-uuid",
-            "abcd1234",
-            "123e4567-0000-0000-0000-000000000000",
-            "/tmp",
-            || Err(83),
-        );
-        assert_eq!(result, Err((83, "spawn-gate".to_string())));
-    }
-
-    #[test]
     fn respawn_receipt_reads_live_only_when_truth_reads_live() {
         // ClaudeHome is injected (not read off HOME) so the test is hermetic
         // against concurrent tests mutating HOME.
@@ -1722,7 +1684,6 @@ mod tests {
                 Some("working".to_string())
             },
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 0);
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -1730,67 +1691,6 @@ mod tests {
         assert_eq!(row.status, crate::AgentStatus::Live);
         assert_eq!(row.harness_session_id.as_deref(), Some("sess-uuid"));
         std::fs::remove_dir_all(temp.path()).ok();
-    }
-
-    #[test]
-    fn respawn_gate_refusal_prevents_relaunch() {
-        let _env_guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        let claims_root = temp.path().join("claims-root");
-        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
-        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
-        let jobs = claude_home.jobs_dir_for("abcd1234");
-        std::fs::create_dir_all(&jobs).unwrap();
-        let state = jobs.join("state.json");
-        std::fs::write(
-            &state,
-            r#"{"state":"idle","updatedAt":"2026-09-13T00:00:00Z"}"#,
-        )
-        .unwrap();
-        let marker = temp.path().join("launched");
-        let plan = crate::reentry::ReentryPlan {
-            resolved: true,
-            transition: "resume".into(),
-            mechanism: "respawn".into(),
-            name: "w1".into(),
-            fno_id: None,
-            node: None,
-            session_id: "sess-uuid".into(),
-            short_id: "abcd1234".into(),
-            launch_account: "default".into(),
-            claude_config_dir: None,
-            route_settings_path: None,
-            cwd: temp.path().display().to_string(),
-            substrate: "bg".into(),
-            mux: None,
-            argv: vec![
-                "sh".into(),
-                "-c".into(),
-                format!(
-                    "touch '{}' && printf '%s' '{{\"state\":\"working\",\"updatedAt\":\"2026-09-13T00:01:00Z\"}}' > '{}'",
-                    marker.display(),
-                    state.display()
-                ),
-            ],
-            env: Default::default(),
-        };
-        let home = AgentsHome::at(temp.path().join("agents-home"));
-        seed_exited_row(&home, "w1", "sess-uuid");
-        let _ = run_and_confirm_respawn_with_truth(
-            &plan,
-            "w1",
-            "resume",
-            "agent_resumed",
-            &home,
-            claude_home,
-            |_| Some("working".to_string()),
-            |_| {},
-            || Err(83),
-        );
-        assert!(!marker.exists(), "refused revival must not launch a child");
-        std::env::remove_var("FNO_CLAIMS_ROOT");
     }
 
     #[test]
@@ -1840,7 +1740,6 @@ mod tests {
             claude_home,
             |_| Some("stalled".to_string()),
             |_| {}, // no-op sleep: the window must not cost wall clock in tests
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 16);
         std::fs::remove_dir_all(temp.path()).ok();
@@ -1910,7 +1809,6 @@ mod tests {
             claude_home.clone(),
             |_| Some("working".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         assert_eq!(code, 0);
         let reg = crate::state::load_registry(&home.registry_json()).unwrap();
@@ -1982,7 +1880,6 @@ mod tests {
             // The stale fno view: never live, never terminal.
             |_| Some("unreachable".to_string()),
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
@@ -2204,7 +2101,6 @@ mod tests {
                 unreachable!("truth probe must not run on the copy path: {handle}");
             },
             |_| {},
-            || Ok(crate::spawn_gate::GateGuard::default()),
         );
         match &old_path {
             Some(v) => std::env::set_var("PATH", v),
