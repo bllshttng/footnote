@@ -179,7 +179,7 @@ def native_update(
     graph_path,
     json_out: bool = True,
 ) -> "tuple[int, Optional[dict]]":
-    """One native `backlog-update` invocation : the patch door.
+    """One native `backlog update` invocation : the patch door.
 
     Returns `(exit, receipt)`; the receipt is parsed from the child's stdout
     when `json_out` and the exit is 0. Without `json_out` the child's text

@@ -237,7 +237,7 @@ class VerbUnavailable(RuntimeError):
 
 
 def verb_call(
-    verb: str,
+    verb: "str | list[str]",
     payload: dict,
     unavailable: type = VerbUnavailable,
     *,
