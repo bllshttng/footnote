@@ -994,7 +994,13 @@ mod tests {
         std::fs::write(&global, "state_dir = \"/global/state\"\n").unwrap();
         let explicit = base.join("explicit-config.toml");
         std::fs::write(&explicit, "state_dir = \"/explicit/state\"\n").unwrap();
-        for key in ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH", "FNO_REPO_ROOT"] {
+        // Save the ambient pins; a lib test process runs every module's
+        // tests together, so the walk ends by restoring what it found.
+        let ambient: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH", "FNO_REPO_ROOT"]
+                .map(|k| (k, std::env::var_os(k)))
+                .to_vec();
+        for (key, _) in &ambient {
             std::env::remove_var(key);
         }
         std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
@@ -1012,14 +1018,17 @@ mod tests {
             config_top_str(&base, "state_dir").as_deref(),
             Some("/global/state")
         );
-        // The explicit pin is the SOLE candidate when set, project included.
+        // The explicit pin is the project-excluding sole candidate when set.
         std::env::set_var("FNO_CONFIG", &explicit);
         assert_eq!(
             config_top_str(&base, "state_dir").as_deref(),
             Some("/explicit/state")
         );
-        for key in ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH"] {
-            std::env::remove_var(key);
+        for (key, value) in &ambient {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
         std::fs::remove_dir_all(&base).ok();
     }
