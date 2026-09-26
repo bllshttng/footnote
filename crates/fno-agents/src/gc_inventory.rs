@@ -425,7 +425,7 @@ fn claude_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
 
 /// The codex rollout store walked once: the thread id embedded in each
 /// `rollout-<stamp>-<uuid>.jsonl` filename under `$CODEX_HOME/sessions`.
-fn codex_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
+pub(crate) fn codex_store_sessions() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
     let root = crate::client_verbs::codex_home()
         .ok_or_else(|| "no codex home".to_string())?
         .join("sessions");

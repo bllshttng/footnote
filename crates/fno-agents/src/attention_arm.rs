@@ -1034,6 +1034,21 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             skip = http.skip.clone();
         }
         detail.extend(http.detail);
+        // The mux pass: every unsuperseded attention_answer row, whatever its
+        // sink, drives one reply ladder (clear while open, mail, resume,
+        // crown). Runs with no sinks configured - the answer rows are the
+        // input, not the sink config.
+        mark("answers");
+        let (ans_acted, ans_detail) = crate::attention_reply::tick_answers(
+            &items,
+            &cwd,
+            &attention_dir().unwrap_or_else(|_| dir.join(".state")),
+            started + std::time::Duration::from_secs(ATTENTION_TICK_BUDGET_S),
+            &mut RealIo::new(&cwd),
+            &|argv: &[String]| crate::attention_reply::real_runner_pub(argv),
+        );
+        acted += ans_acted;
+        detail.extend(ans_detail);
         if acted == 0 && skip.is_none() {
             // An idle beat must say which kind of idle: a folder of open
             // pages is not an empty projection.

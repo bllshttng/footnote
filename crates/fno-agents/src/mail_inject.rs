@@ -613,7 +613,7 @@ fn escaped_marker(marker: &str) -> String {
 /// nothing, and a busy recipient's unrelated growth never carries our marker -- so
 /// this rejects the growth-only false positive (node x-aaaa). `since_byte` is a
 /// prior full-file length, hence a clean line boundary.
-fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Result<bool> {
+pub(crate) fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Result<bool> {
     let escaped = escaped_marker(marker);
     if escaped.is_empty() {
         return Ok(false);
