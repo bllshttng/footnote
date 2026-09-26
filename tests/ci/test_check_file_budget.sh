@@ -237,5 +237,33 @@ else
   printf 'FAIL: a clean tree prints no uncommitted warning\n%s\n' "$out"
 fi
 
+# --- a stale local copy of the gate -------------------------------------------
+# Main replaced the gate after this branch was cut, so the local run measures
+# with an older rule than CI will. Warn; the exit code stays the same.
+fresh
+mkdir -p scripts/ci
+echo 'v1' > scripts/ci/check-file-budget.sh
+commit
+git push -q origin HEAD:main
+git checkout -q main
+git merge -q --no-edit feature
+echo 'v2' >> scripts/ci/check-file-budget.sh
+commit
+git push -q origin main
+git checkout -q feature
+check 'a stale gate copy warns and keeps the verdict' 0 'predates main'
+
+fresh
+mkdir -p scripts/ci
+echo 'branch copy' > scripts/ci/check-file-budget.sh
+commit
+out="$(bash "$GATE" 2>&1)"; got=$?
+if [[ "$got" -eq 0 && "$out" == *'ok'* && "$out" != *'predates main'* ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: a branch that edits the gate itself prints no stale-copy warning\nexit %s\n%s\n' "$got" "$out"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

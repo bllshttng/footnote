@@ -12,7 +12,7 @@ Design constraints (locked):
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
     Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
-  - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
+  - PATH from default_agent_path (fixed install dirs), never the caller's env
 """
 
 from __future__ import annotations
@@ -153,6 +153,20 @@ def _xml_escape(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def default_agent_path(fno_binary: str = "fno") -> str:
+    entries = [str(Path(fno_binary).parent)] if "/" in fno_binary else []
+    entries += [p for p in (str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin",
+                            "/usr/local/bin", "/usr/bin", "/bin") if p not in entries]
+    return ":".join(entries)
+
+def _write_if_changed(plist_path: Path, plist_text: str) -> bool:
+    if plist_path.exists() and plist_path.read_text(encoding="utf-8") == plist_text:
+        return False
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_text, encoding="utf-8")
+    return True
+
+
 def _augment_path(install_path: str) -> str:
     """Ensure ~/.local/bin and /opt/homebrew/bin are in PATH."""
     entries = [p for p in install_path.split(":") if p]
@@ -175,7 +189,7 @@ def render_plist(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
 ) -> str:
     """Render the plist XML string.  No filesystem writes.
@@ -196,7 +210,7 @@ def render_plist(
     log_out = str(fno_state / "pr-watcher.out.log")
     log_err = str(fno_state / "pr-watcher.err.log")
 
-    augmented_path = _augment_path(install_path)
+    augmented_path = _augment_path(install_path or default_agent_path(fno_binary))
 
     return _PLIST_TEMPLATE.format(
         label=_xml_escape(_LABEL),
@@ -445,10 +459,11 @@ def refresh_watcher(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
     defer_when_ticking: bool = False,
     caller: str = "unknown",
+    force_bounce: bool = False,
 ) -> tuple[str, int]:
     """Re-render the plist onto the current binary, then bounce. Post-update hook.
 
@@ -469,10 +484,11 @@ def refresh_watcher(
             install_path=install_path,
             interval=interval,
         )
-        launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(plist_text, encoding="utf-8")
+        changed = _write_if_changed(plist_path, plist_text)
     except OSError as exc:
         return (f"failed to write plist {plist_path}: {exc}", 1)
+    if not changed and not force_bounce:
+        return (f"plist unchanged; not re-registered ({caller})", 0)
     return bounce(
         plist_path=plist_path, defer_when_ticking=defer_when_ticking, caller=caller
     )
@@ -530,7 +546,6 @@ def install(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
     dry_run: bool = False,
     activate: bool = True,
@@ -543,8 +558,6 @@ def install(
         Where to write ``sh.fno.pr-watcher.plist``.
     fno_binary:
         Absolute path to the ``fno`` binary.
-    install_path:
-        ``$PATH`` at install time.
     interval:
         Poll interval in seconds.
     dry_run:
@@ -557,7 +570,6 @@ def install(
     plist_text = render_plist(
         launch_agents_dir=launch_agents_dir,
         fno_binary=fno_binary,
-        install_path=install_path,
         interval=interval,
     )
 
@@ -615,7 +627,6 @@ def ensure_activated(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
 ) -> str:
     """Idempotently install + load the watcher.  Non-interactive, never raises.
@@ -642,7 +653,6 @@ def ensure_activated(
         plist_text = render_plist(
             launch_agents_dir=launch_agents_dir,
             fno_binary=fno_binary,
-            install_path=install_path,
             interval=interval,
         )
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
