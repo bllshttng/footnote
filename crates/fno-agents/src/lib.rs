@@ -89,6 +89,7 @@ pub mod claude_ask;
 pub mod claude_attach;
 pub mod claude_drive;
 pub mod claude_login;
+pub mod claude_resume;
 pub mod claude_roster;
 pub mod claude_sessions;
 pub mod claude_stream_entry;
