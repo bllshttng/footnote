@@ -62,8 +62,10 @@ fn a_missing_sibling_refuses_with_the_install_remedy_and_exits_2() {
         stderr.contains("FNO_AGENTS_BIN"),
         "the refusal names the override: {stderr}"
     );
+    // The backlog door never walks the bootstrap provisioning path: its
+    // one-time uv install banner never prints here.
     assert!(
-        !stderr.contains("uv tool install"),
-        "the backlog door never provisions the Python wheel: {stderr}"
+        !stderr.contains("installing the standalone uv"),
+        "the backlog door never provisions: {stderr}"
     );
 }

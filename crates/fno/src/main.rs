@@ -653,7 +653,9 @@ mod tests {
 
     #[test]
     fn proto_role_subcommands_forward_to_python_cli() {
-        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Forward);
+        // `backlog` claims itself natively now; every other unclaimed root
+        // still forwards.
+        assert_eq!(decide_role(&os(&["backlog", "list"]), true), Role::Backlog);
         assert_eq!(decide_role(&os(&["--help"]), false), Role::Forward);
         // `fno --version` is a Python-forwarded callback, NOT the mux self-report.
         assert_eq!(decide_role(&os(&["--version"]), false), Role::Forward);
