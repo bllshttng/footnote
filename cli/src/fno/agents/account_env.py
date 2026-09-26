@@ -132,12 +132,10 @@ def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
     inherited pin propagates unchanged and a caller that meant to redirect a
     root is not second-guessed.
 
-    The remaining honest limit: the ``FNO_HOME``-anchored sidecars
-    (push-stamps, the corrections log, the decision index) and any root
-    without a carrier still follow the moved HOME. The three pins above
-    cover the agents registry, the claims tree, the locks dir and the
-    config state root (graph.json, the ledger, the briefs). Prefer the
-    argv carrier over this seal wherever a launch has one.
+    The remaining honest limit: the ``FNO_HOME``-anchored sidecars and any
+    root without a carrier still follow the moved HOME; the three pins cover
+    the registry, the claims tree, the locks and the config state root.
+    Prefer the argv carrier over this seal wherever a launch has one.
 
     Never mutates the input.
     """

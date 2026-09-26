@@ -763,9 +763,8 @@ def locks_dir() -> Path:
     so the two fno writers only need to agree on this directory; a config
     ``state_dir`` override deliberately does NOT move it (moving it would desync
     the config-loading append side from the config-free stamp side). The
-    ``FNO_STATE_DIR`` carrier does: it needs no config load, so both writers
-    still agree under it, and ``seal_state_root`` pins it around a forwarded
-    HOME so the lock does not strand under the account's home."""
+    ``FNO_STATE_DIR`` carrier may: it needs no config load, so both writers
+    agree under it, and the seal pins it around a forwarded HOME."""
     carrier = os.environ.get("FNO_STATE_DIR")
     if carrier:
         return Path(os.path.expanduser(carrier)).resolve() / "locks"
@@ -792,15 +791,14 @@ def ledger_json() -> Path:
 
     Pinned global: the ledger is cross-project by definition (one row per
     terminal session across every repo), so it must never fork into a
-    per-repo stray. The ``FNO_STATE_DIR`` carrier wins first: the seal pins it
-    to an absolute root, so a sealed worker's ledger follows ``state_dir()``
-    instead of the raw relative-config branch below. An absolute
-    ``config.paths.ledger_json`` override wins, while a relative override is
-    anchored under ``~/.fno``. Otherwise it follows ``config.state_dir`` only
-    when that is an absolute anchor - the ``~/.fno`` default and test
-    sandboxes both are; a *relative* (project-/CWD-anchored) ``state_dir``
-    would land the ledger inside a repo checkout, so it falls back to the
-    user-global ``~/.fno`` instead.
+    per-repo stray. The ``FNO_STATE_DIR`` carrier wins first: the seal pins an
+    absolute root, so a sealed worker's ledger follows ``state_dir()``. An
+    absolute ``config.paths.ledger_json`` override wins, while a relative
+    override is anchored under ``~/.fno``. Otherwise it follows
+    ``config.state_dir`` only when that is an absolute anchor - the ``~/.fno``
+    default and test sandboxes both are; a *relative* (project-/CWD-anchored)
+    ``state_dir`` would land the ledger inside a repo checkout, so it falls
+    back to the user-global ``~/.fno`` instead.
     """
     if os.environ.get("FNO_STATE_DIR"):
         return _guard_state_path(state_dir() / "ledger.json")
