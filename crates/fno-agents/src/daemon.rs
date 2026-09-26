@@ -5540,7 +5540,6 @@ async fn handle_rm_with(
     }
     // Orphaned entries are removed with no subprocess action (AC8-FR); the
     // distinction is surfaced in the event for the operator's audit trail.
-    let was_orphaned = entry.status == AgentStatus::Orphaned;
     // Surface a removal-write failure rather than reporting removed:true while
     // the entry still persists (silent-failure review): a force-rm has already
     // killed the worker, so a swallowed write leaves a dangling row pointing at
@@ -5705,7 +5704,7 @@ async fn handle_rm_with(
         "reclaimed_bytes": reclaimed_bytes,
         "event_written": event_error.is_none(),
         "event_reason": event_error,
-        "was_orphaned": was_orphaned,
+        "was_orphaned": entry.status == AgentStatus::Orphaned,
     });
     let mut response = Response::ok(req.id, result);
     release_stopped_claims_into(
