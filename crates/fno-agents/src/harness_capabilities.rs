@@ -2050,8 +2050,14 @@ mod tests {
 
     #[test]
     fn a_row_without_a_features_table_loads_with_no_refusal() {
-        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\n";
+        // The stanza is stripped whole, receipt line included: an orphaned
+        // `measured_by` would land at the row level, where it is unknown.
+        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\nmeasured_by = { reader = \"agy spawn journey\", version = \"1.1.24\", date = \"2026-09-03\" }\n";
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
+        assert_ne!(
+            stripped, CAPABILITY_TOML,
+            "the agy spawn stanza moved; update the stripped text"
+        );
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
     }

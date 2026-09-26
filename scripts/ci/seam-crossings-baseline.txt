@@ -6,26 +6,26 @@
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	1255	let out = Command::new("fno")
 crossing	crates/fno-agents/src/authorized_merge.rs	1264	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1952	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	2007	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	4608	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
+crossing	crates/fno-agents/src/bin/client.rs	1962	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	2011	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	4616	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	167	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	283	let out = Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	5215	let mut child = match std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6072	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon/fleet_arms.rs	141	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon/fleet_arms.rs	230	std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	5398	let mut child = match std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6263	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/distress.rs	251	.or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
 crossing	crates/fno-agents/src/distress.rs	379	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	459	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
-crossing	crates/fno-agents/src/finalize.rs	1823	let mut command = Command::new("fno");
-crossing	crates/fno-agents/src/finalize.rs	1879	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2280	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2362	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2732	let out = match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2752	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	1861	let mut command = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	1917	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2318	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2400	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2770	let out = match Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2790	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize_run_summary.rs	164	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/gc.rs	1017	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/gc.rs	1072	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	319	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	171	let mut argv = vec![fno_bin()];
 crossing	crates/fno-agents/src/lifecycle_child.rs	107	let mut command = std::process::Command::new("fno");
@@ -45,8 +45,8 @@ crossing	crates/fno-agents/src/provider.rs	730	let out = match std::process::Com
 crossing	crates/fno-agents/src/reentry.rs	153	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/restart_run.rs	298	match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/restart_run.rs	327	let mux_out = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/resume_wake.rs	151	let out = std::process::Command::new("fno").args(argv).output()?;
-crossing	crates/fno-agents/src/resume_wake.rs	162	std::process::Command::new("fno")
+crossing	crates/fno-agents/src/resume_wake.rs	158	let out = std::process::Command::new("fno").args(argv).output()?;
+crossing	crates/fno-agents/src/resume_wake.rs	169	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/retask/transport.rs	33	fn fno_bin() -> String {
 crossing	crates/fno-agents/src/retask/transport.rs	247	let mut cmd = Command::new(fno_bin());
 crossing	crates/fno-agents/src/route_slot.rs	2846	let mut cmd = std::process::Command::new("fno");
@@ -59,7 +59,7 @@ crossing	crates/fno-agents/src/spawn_gate_lanes.rs	151	let mut cmd = Command::ne
 crossing	crates/fno-agents/src/truth_probe.rs	91	let mut command = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/truth_probe.rs	680	let mut command = std::process::Command::new("fno");
 crossing	crates/fno/src/backlog_write.rs	133	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-crossing	crates/fno/src/client.rs	2006	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+crossing	crates/fno/src/client.rs	2013	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/agent_launcher.rs	1335	let bin = crate::server::fno_bin().to_string_lossy().into_owned();
 crossing	crates/fno/src/client/config_set.rs	21	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	85	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
@@ -87,10 +87,11 @@ crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
 resolver	crates/fno-agents/src/census.rs	867	fn resolve_fno() -> Option<PathBuf> {
 resolver	crates/fno-agents/src/crown_alarm.rs	197	pub(crate) fn read_court_payload(config_cwd: &Path) -> Result<Value, String> {
-resolver	crates/fno-agents/src/daemon.rs	1426	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
+resolver	crates/fno-agents/src/daemon.rs	1427	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
 resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> DeliveryCompletion {
 resolver	crates/fno-agents/src/graph_keeper.rs	586	fn run_render_pass() -> Result<(), (i32, String)> {
-resolver	crates/fno-agents/src/hook/test_run_guard.rs	568	fn is_footnote_checkout(root: &Path) -> bool {
+resolver	crates/fno-agents/src/harness_reader.rs	502	pub fn establish(harness: &str) -> Result<IsolatedRoot, String> {
+resolver	crates/fno-agents/src/hook/test_run_guard.rs	641	fn is_footnote_checkout(root: &Path) -> bool {
 resolver	crates/fno-agents/src/loop_dispatch.rs	136	pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
 resolver	crates/fno-agents/src/loop_target.rs	393	fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
 resolver	crates/fno-agents/src/loopcheck.rs	258	pub(crate) fn loopcheck_fno_bin() -> String {
@@ -101,8 +102,8 @@ resolver	crates/fno-agents/src/loopcheck/block_reason.rs	58	pub(super) fn build_
 resolver	crates/fno-agents/src/opencode_install.rs	61	fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/operator_notice.rs	85	pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
-resolver	crates/fno-agents/src/plugin_install.rs	201	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
-resolver	crates/fno-agents/src/plugin_install.rs	776	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
+resolver	crates/fno-agents/src/plugin_install.rs	194	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
+resolver	crates/fno-agents/src/plugin_install.rs	769	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	295	pub(crate) fn run_fno_output(
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	344	fn real_deps() -> crate::provider_cap::LeaveDeps {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn fno_plugin_dir(root: &Path) -> PathBuf {
