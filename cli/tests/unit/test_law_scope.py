@@ -1,8 +1,10 @@
-"""Law scope: the door stamps, the chokepoint filter, both fail visibly.
+"""Law scope: the door stamps in Rust, the chokepoint filter, both fail visibly.
 
-Crate tests pin the matcher; these pin the transport contracts: `record-scope`
-answers at the door, `scope-split` filters `list_decisions`, and a project
-that cannot be resolved REFUSES at the door but fails OPEN in a reader.
+The scope stamp and the widening moved to the Rust record door
+(`crates/fno-agents/src/law_match.rs`, the record-door and scope_tests
+sections); what stays here are the transport contracts that still run in
+Python: `scope-split` filters `list_decisions`, and a project that cannot be
+resolved REFUSES at the door but fails OPEN in a reader.
 """
 
 from __future__ import annotations
@@ -20,15 +22,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _rows(index):
-    from tests._event_rows import event_rows
-
-    return event_rows(index)
-
-
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "state"))
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     index = tmp_path / "state" / "decisions.jsonl"
     index.parent.mkdir(exist_ok=True)
@@ -51,8 +48,7 @@ def _work_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str = "demo
     map_file.write_text(
         "work:\n"
         "  workspaces:\n"
-        "    main:\n"
-        "      projects:\n"
+        "    main:\n      projects:\n"
         f"        - name: {slug}\n"
         f"          path: {proj}\n",
         encoding="utf-8",
@@ -71,58 +67,24 @@ def _run(args: list[str]):
     return CliRunner().invoke(parent, ["law", *args])
 
 
-def _as_chat_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_shim_forwards_global_so_the_door_can_widen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Widening is the crate door's flag; the shim carries it verbatim."""
+    index = _isolate(tmp_path, monkeypatch)
+    proj = _work_map(tmp_path, monkeypatch)
+    monkeypatch.chdir(proj)
     from types import SimpleNamespace
 
-    from fno.agents import self_stamp
-
-    monkeypatch.setattr(
-        self_stamp,
-        "resolve_self_identity",
-        lambda *a, **k: SimpleNamespace(session_id="a" * 32, harness="claude"),
-    )
-
-
-def test_door_stamps_the_recording_project(tmp_path, monkeypatch):
-    index = _isolate(tmp_path, monkeypatch)
-    _as_chat_session(monkeypatch)
-    proj = _work_map(tmp_path, monkeypatch)
-    monkeypatch.chdir(proj)
-
-    result = _run(
-        [
-            "set",
-            "merge-authority",
-            "Merges belong to the operator",
-            "--rationale",
-            "The operator owns durable policy.",
-        ]
-    )
-
-    assert result.exit_code == 0, result.output
-    data = _rows(index)[0]["data"]
-    assert data["scope"] == "project:demo"
-
-
-def test_the_door_never_widens_on_its_own(tmp_path, monkeypatch):
-    """Widening lives on the crate verb's `global` key; the door cannot send it."""
-    index = _isolate(tmp_path, monkeypatch)
-    _as_chat_session(monkeypatch)
-    proj = _work_map(tmp_path, monkeypatch)
-    monkeypatch.chdir(proj)
-    captured = {}
-
-    def fake_verb(verb, payload, *a, **k):
-        if payload["mode"] == "record-scope":
-            captured.update(payload)
-            return {"ok": True, "scope": "project:demo"}
-        if payload["mode"] == "validate":
-            return {"ok": True, "refusal": None}
-        return {"ok": True, "candidates": [], "total": 0, "lines": []}
+    seen: dict = {}
 
     import fno.rust_binary
 
-    monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb)
+    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0),
+    )
 
     result = _run(
         [
@@ -131,35 +93,13 @@ def test_the_door_never_widens_on_its_own(tmp_path, monkeypatch):
             "Every project answers only what needs the user.",
             "--rationale",
             "General.",
+            "--global",
         ]
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["global"] is False
-    data = _rows(index)[0]["data"]
-    assert data["scope"] == "project:demo"
-
-
-def test_door_refuses_an_unplacable_repo(tmp_path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    _as_chat_session(monkeypatch)
-    _work_map(tmp_path, monkeypatch)
-    nowhere = tmp_path / "nowhere"
-    nowhere.mkdir()
-    monkeypatch.chdir(nowhere)
-
-    result = _run(
-        [
-            "set",
-            "merge-authority",
-            "Merges belong to the operator",
-            "--rationale",
-            "The operator owns durable policy.",
-        ]
-    )
-
-    assert result.exit_code == 3, result.output
-    assert "no project stamps this law" in result.output, result.output
+    assert "--global" in seen["args"]
+    assert index.exists()
 
 
 def test_scope_split_keeps_global_and_the_matching_project(tmp_path, monkeypatch):

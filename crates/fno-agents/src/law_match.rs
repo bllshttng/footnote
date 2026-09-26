@@ -1304,6 +1304,643 @@ fn scope_split_answer_in(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The record door: `fno-agents law-match record <fno inbox law set argv>`
+//
+// The Python `fno inbox law set` command is a shim that forwards its argv
+// here, so these are the door's real flags: --global and --paths live on the
+// Rust side and the typer option ratchet stays at zero for the shim. The
+// gate order and every refusal text mirror `record_command` + the law-door
+// path of `record_decision` (cli/src/fno/law.py, cli/src/fno/decide/__init__.py)
+// one for one: the authority gate is law, and a drifted refusal is a second
+// law.
+// ---------------------------------------------------------------------------
+
+const WAIVER_SUBJECT_PREFIX: &str = "review-coverage-waiver";
+
+/// The law-set argv, parsed natively.
+struct RecordDoor {
+    subject: String,
+    decision: Option<String>,
+    decision_file: Option<String>,
+    rationale: Option<String>,
+    options: Vec<String>,
+    supersedes: Option<String>,
+    graduation: Option<String>,
+    graduation_ref: Option<String>,
+    reads: Vec<String>,
+    is_global: bool,
+    raw_paths: Vec<String>,
+}
+
+const RECORD_USAGE: &str = "usage: fno-agents law-match record <subject> [decision] [--decision-file f|-] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--read cmd]... [--global] [--paths glob,glob]";
+
+fn parse_record_door(args: &[String]) -> Result<RecordDoor, String> {
+    let mut door = RecordDoor {
+        subject: String::new(),
+        decision: None,
+        decision_file: None,
+        rationale: None,
+        options: Vec::new(),
+        supersedes: None,
+        graduation: None,
+        graduation_ref: None,
+        reads: Vec::new(),
+        is_global: false,
+        raw_paths: Vec::new(),
+    };
+    let mut positional = 0usize;
+    let mut i = 0usize;
+    while i < args.len() {
+        let (flag, inline) = match args[i].split_once('=') {
+            Some((f, v)) => (f.to_string(), Some(v.to_string())),
+            None => (args[i].clone(), None),
+        };
+        let take = |i: &mut usize| -> Result<String, String> {
+            if let Some(v) = &inline {
+                return Ok(v.clone());
+            }
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value\n{RECORD_USAGE}"))
+        };
+        match flag.as_str() {
+            "--decision-file" => door.decision_file = Some(take(&mut i)?),
+            "--rationale" => door.rationale = Some(take(&mut i)?),
+            "--option" => door.options.push(take(&mut i)?),
+            "--supersedes" => door.supersedes = Some(take(&mut i)?),
+            "--graduation" => door.graduation = Some(take(&mut i)?),
+            "--graduation-ref" => door.graduation_ref = Some(take(&mut i)?),
+            "--read" => door.reads.push(take(&mut i)?),
+            "--paths" => door.raw_paths.push(take(&mut i)?),
+            "--global" => door.is_global = true,
+            f if f.starts_with('-') && f != "-" => {
+                return Err(format!("no such option: {f}\n{RECORD_USAGE}"));
+            }
+            _ => {
+                positional += 1;
+                if positional == 1 {
+                    door.subject = args[i].clone();
+                } else if positional == 2 {
+                    door.decision = Some(args[i].clone());
+                } else {
+                    return Err(format!("too many positional arguments\n{RECORD_USAGE}"));
+                }
+            }
+        }
+        i += 1;
+    }
+    if positional == 0 {
+        return Err(format!("subject is required\n{RECORD_USAGE}"));
+    }
+    Ok(door)
+}
+
+fn mint_decision_id() -> String {
+    // 'd-<hex>', matching decide/__init__.py::mint_decision_id (8 hex chars).
+    let mut buf = [0u8; 4];
+    if getrandom::fill(&mut buf).is_err() {
+        // Fallback entropy: pid + clock. A collision costs one duplicate id.
+        let seed = (std::process::id() as u64) << 32
+            | std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+        buf.copy_from_slice(&seed.to_le_bytes()[..4]);
+    }
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("d-{hex}")
+}
+
+fn attended_terminal() -> bool {
+    // A positive marker, not an absence (the Python doc states the limit
+    // plainly: a tty is obtainable; this raises the cost of forging the
+    // superuser lane and never stands alone).
+    unsafe { libc::isatty(0) == 1 }
+}
+
+/// The trusted columns: (decided_by, attested_by, relayed_by). Port of
+/// `_resolve_decider` for the law door (no `decided_by` claim, no origin):
+/// a resolved session stamps its handle; an attended terminal records
+/// "operator" and marks attested_by; the unattributed state never reaches
+/// here because `require_marked_caller` refused it.
+/// The resolved caller: the authority lane plus the provenance columns,
+/// derived from ONE identity resolution. Port of require_marked_caller +
+/// `_resolve_decider` composed, so the two can never disagree.
+pub(crate) struct Caller {
+    authority: String,
+    decided_by: String,
+    attested_by: Option<String>,
+    relayed_by: Option<String>,
+}
+
+/// Resolve the caller from process truth: the ancestry prover first, the
+/// attended terminal second, the fail-closed refusal last.
+pub(crate) fn resolve_caller() -> Result<Caller, String> {
+    let get = |name: &str| std::env::var(name).ok();
+    let ident = crate::spawn_context::resolve_self_identity(
+        &get,
+        None,
+        None,
+        &crate::paths::AgentsHome::from_env(),
+    );
+    if let (Some(session_id), Some(_harness)) = (&ident.session_id, &ident.harness) {
+        let handle = crate::identity::canonical_handle(session_id);
+        if !handle.is_empty() {
+            return Ok(Caller {
+                authority: "chat_attested".to_string(),
+                decided_by: handle,
+                attested_by: None,
+                relayed_by: None,
+            });
+        }
+    }
+    if attended_terminal() {
+        return Ok(Caller {
+            authority: "operator".to_string(),
+            decided_by: "operator".to_string(),
+            attested_by: Some("operator".to_string()),
+            relayed_by: None,
+        });
+    }
+    Err("no session identity and no terminal, so nothing here marks a decider".to_string())
+}
+
+#[cfg(test)]
+impl Caller {
+    fn as_authority(authority: &str) -> Caller {
+        Caller {
+            authority: authority.to_string(),
+            decided_by: if authority == "operator" {
+                "operator".to_string()
+            } else {
+                "testf4c6".to_string()
+            },
+            attested_by: (authority == "operator").then(|| "operator".to_string()),
+            relayed_by: None,
+        }
+    }
+}
+
+/// Port of `graduation.validate_graduation` + `graduation_or_guidance`:
+/// an omitted declaration (both flags absent) defaults to honest guidance;
+/// an empty `kind` with a reference is not a kind and refuses.
+fn graduation_or_guidance(kind: Option<&str>, reference: Option<&str>) -> Result<Value, String> {
+    match (kind, reference) {
+        (None, None) => Ok(json!({"kind": "guidance"})),
+        _ => validate_graduation(kind.unwrap_or("").trim(), reference.unwrap_or("").trim()),
+    }
+}
+
+fn validate_graduation(kind: &str, reference: &str) -> Result<Value, String> {
+    match kind {
+        "" => Err(
+            "graduation must be enforced, guidance, or should-be-enforced-but-i-did-not"
+                .to_string(),
+        ),
+        "guidance" => {
+            if !reference.is_empty() {
+                return Err("guidance takes no graduation reference".to_string());
+            }
+            Ok(json!({"kind": "guidance"}))
+        }
+        "enforced" => {
+            static ARTIFACT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let re = ARTIFACT_RE.get_or_init(|| {
+                regex::Regex::new(r"^(file|test|doc|gate|default):\S(?:.*\S)?$").expect("parses")
+            });
+            if !re.is_match(reference) {
+                return Err(
+                    "enforced graduation requires file:, test:, doc:, gate:, or default:"
+                        .to_string(),
+                );
+            }
+            Ok(json!({"kind": "enforced", "artifact": reference}))
+        }
+        "should-be-enforced-but-i-did-not" => {
+            static FOLLOW_UP_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let re = FOLLOW_UP_RE.get_or_init(|| {
+                regex::Regex::new(r"(?i)^node:[a-z][a-z0-9]*-[0-9a-f]+$").expect("parses")
+            });
+            if !re.is_match(reference) {
+                return Err("should-be-enforced-but-i-did-not requires node:<id>".to_string());
+            }
+            Ok(json!({
+                "kind": "should-be-enforced-but-i-did-not",
+                "follow_up": reference.to_ascii_lowercase()
+            }))
+        }
+        other => Err(format!(
+            "graduation must be enforced, guidance, or should-be-enforced-but-i-did-not (got {other})"
+        )),
+    }
+}
+
+/// The newest recoverable row for a decision id, casefold-equal. Port of
+/// `_decision_row_by_id` over the same store read.
+fn find_decision_row(index: &decision_index::Index, decision_id: &str) -> Option<Value> {
+    index
+        .rows
+        .iter()
+        .filter(|row| {
+            let etype = row.get("_event_type").and_then(Value::as_str);
+            matches!(etype, None | Some("operator_decision"))
+                && row
+                    .get("decision_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case(decision_id)
+        })
+        .max_by_key(|row| {
+            (
+                row.get("ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                row.get("decision_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .cloned()
+}
+
+/// The repo root the evidence gate resolves citations against: the
+/// FNO_REPO_ROOT test hook, then the git toplevel, then the cwd.
+fn evidence_repo_root() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("FNO_REPO_ROOT") {
+        return std::path::PathBuf::from(root);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !text.is_empty() {
+                return std::path::PathBuf::from(text);
+            }
+        }
+    }
+    cwd
+}
+
+/// The project journal beside the carveout ledger under the CANONICAL (main)
+/// worktree: `resolve_carveout_root` + `events_path`. The canonical root
+/// honors the FNO_REPO_ROOT test hook first, then the first `git worktree
+/// list` row.
+fn project_events_journal() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("FNO_REPO_ROOT") {
+        return std::path::PathBuf::from(root)
+            .join(".fno")
+            .join("events.jsonl");
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let main_root = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find_map(|l| l.strip_prefix("worktree ").map(str::to_string))
+        })
+        .map(std::path::PathBuf::from)
+        .unwrap_or(cwd);
+    main_root.join(".fno").join("events.jsonl")
+}
+
+/// Open questions the new law may answer: `read_open_questions`' fold over
+/// the machine questions store, minus the closed rows. Best-effort: a missing
+/// or malformed store reads as no questions, never an error.
+fn read_open_questions() -> Vec<OpenQuestion> {
+    let path = decision_index::default_state_path("questions.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut asked: Vec<OpenQuestion> = Vec::new();
+    let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in text.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let data = row.get("data");
+        let id = data
+            .and_then(|d| d.get("question_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        match row.get("type").and_then(Value::as_str) {
+            Some("operator_question") => {
+                let d = data.and_then(|d| d.as_object());
+                asked.push(OpenQuestion {
+                    id: id.to_string(),
+                    ts: d
+                        .and_then(|d| d.get("ts"))
+                        .or(row.get("ts"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    question: d
+                        .and_then(|d| d.get("question"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    subject: None,
+                    node: None,
+                    asker: None,
+                    session_id: None,
+                })
+            }
+            Some("operator_question_closed") => {
+                closed.insert(id.to_string());
+            }
+            _ => {}
+        }
+    }
+    asked.retain(|q| !closed.contains(&q.id));
+    asked
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn door_refuse(message: &str) -> i32 {
+    eprintln!("fno law: refused: {message}. Nothing was recorded.");
+    3
+}
+
+/// The door body, gate by gate in `record_command`'s order. Prints the
+/// decision id on stdout alone; every refusal and hint rides stderr.
+fn run_record_door(args: &[String]) -> i32 {
+    let (door, decision) = match record_door_preflight(args) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
+    // The authority gate: law is never inherited by silence. The resolver
+    // reads process truth (the ancestry prover), never env claims, so the
+    // gate is not forgeable by environment.
+    let caller = match resolve_caller() {
+        Ok(c) => c,
+        Err(message) => return door_refuse(&message),
+    };
+    record_door_write(door, decision, &caller)
+}
+
+/// The argv parse, the decision text, and the statement validator: the gates
+/// that run before anyone asks who is calling. Split from the write so tests
+/// can drive the gated write with an injected authority (the real gate reads
+/// process ancestry and has no hermetic shape).
+fn record_door_preflight(args: &[String]) -> Result<(RecordDoor, String), i32> {
+    let door = match parse_record_door(args) {
+        Ok(d) => d,
+        Err(usage) => {
+            eprintln!("fno-agents law-match: {usage}");
+            return Err(2);
+        }
+    };
+    // The decision text: positional, a file, or stdin ('-').
+    let decision: String = match door.decision_file.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            if std::io::stdin().read_to_string(&mut buf).is_err() {
+                return Err(door_refuse("could not read the decision from stdin"));
+            }
+            buf
+        }
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => return Err(door_refuse(&format!("could not read {path} ({e})"))),
+        },
+        None => door.decision.clone().unwrap_or_default(),
+    };
+    // The statement validator, in-process (mode validate's own gate).
+    let validate = validate_answer(&ValidateRequest {
+        subject: door.subject.clone(),
+        decision: decision.clone(),
+        rationale: door.rationale.clone(),
+        supersedes: door.supersedes.clone(),
+    });
+    if let Some(msg) = validate.get("refusal").and_then(Value::as_str) {
+        return Err(door_refuse(msg));
+    }
+    Ok((door, decision))
+}
+
+/// The gated write: every gate from graduation through the stores, then the
+/// sweep. `authority` is the RESOLVED caller lane (chat_attested | operator).
+pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Caller) -> i32 {
+    let authority = caller.authority.as_str();
+    let graduation =
+        match graduation_or_guidance(door.graduation.as_deref(), door.graduation_ref.as_deref()) {
+            Ok(g) => g,
+            Err(message) => return door_refuse(&message),
+        };
+    let Caller {
+        authority: _,
+        decided_by,
+        attested_by,
+        relayed_by,
+    } = caller;
+    // The scope stamp with the widening and the globs validated at the door.
+    let scope_answer =
+        record_scope_answer_in(None, &settings_sources(), door.is_global, &door.raw_paths);
+    if scope_answer.get("ok") != Some(&json!(true)) {
+        let message = scope_answer
+            .get("refusal")
+            .and_then(Value::as_str)
+            .unwrap_or("no project to stamp under");
+        return door_refuse(message);
+    }
+    let scope = scope_answer
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let paths: Vec<Value> = scope_answer
+        .get("paths")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // The evidence gate: a measured claim carries the read that produced it.
+    // Exempt when the RESOLVED authority is operator.
+    let mut read_rows: Option<Vec<Value>> = None;
+    if authority != "operator" {
+        let text = format!("{decision}\n{}", door.rationale.as_deref().unwrap_or(""));
+        let root = evidence_repo_root();
+        let mut runner =
+            |cmd: &str, root: &std::path::Path| crate::evidence::shell_run(cmd, root, 20);
+        match crate::evidence::check_ruling_evidence(&text, &door.reads, &root, &mut runner) {
+            Ok(rows) => read_rows = rows,
+            Err(gate) => return door_refuse(&gate.message),
+        }
+    }
+    // A waiver subject is operator-evidence-only.
+    if (door.subject == WAIVER_SUBJECT_PREFIX
+        || door
+            .subject
+            .starts_with(&format!("{WAIVER_SUBJECT_PREFIX}:")))
+        && authority != "operator"
+    {
+        return door_refuse(&format!(
+            "'{}' is a review-coverage waiver subject: waiver evidence needs \
+             superuser authority, and a chat-attested row proves only that a \
+             session was addressed, not that a person reviewed anything. \
+             Waivers are recorded by the attended command \
+             `fno do pr coverage-waive <pr> --reason \"...\"` at an operator \
+             terminal; a session a harness identifies records nothing there.",
+            door.subject
+        ));
+    }
+    // Supersession: the target must be recoverable, and a chat recording may
+    // retire its own kind, never the operator's.
+    if let Some(sup) = &door.supersedes {
+        let index = match decision_index::default_store_live() {
+            Ok(i) => i,
+            Err(reason) => {
+                return door_refuse(&format!(
+                    "the decision index could not be read ({reason}); \
+                     supersession needs it first"
+                ));
+            }
+        };
+        let Some(row) = find_decision_row(&index, sup) else {
+            return door_refuse(&format!(
+                "supersession target {sup} is not recoverable from the \
+                 decision index. Run `fno backlog decide-reindex` before retrying."
+            ));
+        };
+        if decision_index::is_law(&row) && authority != "operator" && authority != "chat_attested" {
+            return door_refuse(&format!(
+                "agent {decided_by} cannot record under superuser authority"
+            ));
+        }
+        if authority == "chat_attested"
+            && row.get("authority_source").and_then(Value::as_str) == Some("operator")
+        {
+            return door_refuse(&format!(
+                "agent {decided_by} cannot record under superuser authority"
+            ));
+        }
+    }
+    let decision_id = mint_decision_id();
+    let ts = now_iso();
+    // The envelope mirrors the Python `operator_decision` builder: a key
+    // appears only when its value is set; text fields cap at 2000 chars.
+    let mut data = json!({
+        "decision_id": decision_id,
+        "decision": text_cap(&decision, 2000),
+        "authority_source": authority,
+        "graduation": graduation,
+    });
+    if !door.subject.trim().is_empty() {
+        data["subject"] = json!(door.subject.trim());
+    }
+    if !door.options.is_empty() {
+        data["options"] = json!(door.options);
+    }
+    data["decided_by"] = json!(decided_by);
+    if let Some(a) = &attested_by {
+        data["attested_by"] = json!(a);
+    }
+    if let Some(r) = &relayed_by {
+        data["relayed_by"] = json!(r);
+    }
+    if let Some(rationale) = &door.rationale {
+        if !rationale.trim().is_empty() {
+            data["rationale"] = json!(text_cap(rationale, 2000));
+        }
+    }
+    if let Some(sup) = &door.supersedes {
+        data["supersedes"] = json!(sup);
+    }
+    if let Some(rows) = &read_rows {
+        data["reads"] = json!(rows);
+    }
+    if !scope.is_empty() {
+        data["scope"] = json!(scope);
+    }
+    if !paths.is_empty() {
+        data["paths"] = json!(paths);
+    }
+    let envelope = json!({"ts": ts, "type": "operator_decision", "source": "target", "data": data});
+    // Durability first: the project journal. A failed write here records
+    // nothing anywhere.
+    let journal = project_events_journal();
+    if let Err(e) = crate::event_store::append_envelope(&journal, &envelope.to_string(), None) {
+        return door_refuse(&format!("the project journal write failed ({e})"));
+    }
+    // Recall second: the machine-wide decision index. The event id names the
+    // recovery, because re-running would mint a second id for one ruling.
+    let index_path = decision_index::default_state_path("decisions.jsonl");
+    if let Err(e) = crate::event_store::append_envelope(&index_path, &envelope.to_string(), None) {
+        eprintln!(
+            "fno law: recorded {decision_id} to the project journal, but the \
+             recall index write failed ({e}). Run `fno backlog decide-reindex`; \
+             do not re-run the law command."
+        );
+        return 1;
+    }
+    // The graph decisions table is the store `fno backlog decisions` reads
+    // first; a refusal degrades to the durable capture, never a lost ruling.
+    let graph_path = crate::graph_get::default_graph_path();
+    if let Err(e) = crate::backlog::api::decision_record(
+        &crate::backlog::api::Store::new(&graph_path),
+        envelope.clone(),
+    ) {
+        eprintln!(
+            "decide: recorded {decision_id}, but the graph store refused the \
+             ruling ({e:?}). The decision is durable in the journal and the index."
+        );
+    }
+    if matches_node_id_shape(&door.subject.to_lowercase()) {
+        // The node-view projection (`_project`) is Python-side and not ported;
+        // the durable stores hold the row and every decisions read reaches it.
+        eprintln!(
+            "decide: recorded {decision_id}, but the node projection is not \
+             ported to the record door yet; the decision is durable and \
+             recoverable with `fno backlog decisions`."
+        );
+    }
+    println!("{decision_id}");
+    // The best-effort rule-time join, on stderr: near laws first, then the
+    // open questions the new law may answer.
+    let law_row = LawRow {
+        decision_id: decision_id.clone(),
+        subject: Some(door.subject.clone()),
+        decision: Some(decision),
+        ts: Some(ts),
+        lane: None,
+    };
+    let near = near_law_lines(&law_row);
+    let answer = law_answer_with(
+        &LawRequest {
+            law: law_row,
+            questions: read_open_questions(),
+        },
+        near,
+    );
+    for line in &answer.lines {
+        eprintln!("{line}");
+    }
+    0
+}
+
+/// Raw text cap: the first `cap` chars, Python `text[:cap]` semantics (no
+/// newline collapse; the law row keeps its line breaks).
+fn text_cap(text: &str, cap: usize) -> String {
+    text.chars().take(cap).collect()
+}
+
 /// Near-law lines for a law being recorded: live laws on the same subject
 /// (casefold equality) or a nearby subject (shared `tokens()`), at most 5,
 /// newest first. A warning at record time, never a refusal.
@@ -1348,9 +1985,14 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split; record-scope takes paths: comma-separated repo-relative globs - the law prints once per session at the first Edit or Write of a matching file)"
+            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split) | law-match record <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]..."
         );
         return 0;
+    }
+    // The record door: `law-match record` is the argv form; the JSON modes
+    // below keep the one-request-on-stdin contract.
+    if args.first().map(String::as_str) == Some("record") {
+        return run_record_door(&args[1..]);
     }
     if !args.is_empty() {
         eprintln!("fno-agents law-match: unexpected arguments; the request rides stdin");
@@ -2614,6 +3256,311 @@ mod scope_tests {
                 answer["refusal"].as_str().expect("refusal").contains(bad),
                 "{answer}"
             );
+        }
+    }
+
+    // ── the record door ───────────────────────────────────────────────────
+
+    fn door(subject: &str, decision: &str) -> RecordDoor {
+        RecordDoor {
+            subject: subject.to_string(),
+            decision: Some(decision.to_string()),
+            decision_file: None,
+            rationale: Some("the operator owns durable policy.".to_string()),
+            options: Vec::new(),
+            supersedes: None,
+            graduation: None,
+            graduation_ref: None,
+            reads: Vec::new(),
+            is_global: false,
+            raw_paths: Vec::new(),
+        }
+    }
+
+    /// Hermetic state for a door write: tmp FNO_HOME (index, questions,
+    /// graph) + tmp FNO_REPO_ROOT (journal, evidence root) + a work map.
+    /// Restores every variable it touched.
+    struct DoorEnv(tempfile::TempDir, tempfile::TempDir);
+
+    impl DoorEnv {
+        fn new() -> Self {
+            let home = tempfile::tempdir().expect("tempdir");
+            let root = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(root.path().join(".fno")).expect("mkdir");
+            std::env::set_var("FNO_HOME", home.path());
+            std::env::set_var("FNO_REPO_ROOT", root.path());
+            let map = root.path().join("settings.yaml");
+            // The map names THIS process's cwd: the door resolves the scope
+            // from std::env::current_dir against the work map.
+            std::fs::write(
+                &map,
+                format!(
+                    "work:\n  workspaces:\n    main:\n      projects:\n        - name: demo\n          path: {}\n",
+                    std::env::current_dir()
+                        .expect("cwd")
+                        .display()
+                ),
+            )
+            .expect("writes");
+            std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &map);
+            Self(home, root)
+        }
+
+        // The appends land in the SQLite store beside the journal, so the
+        // reads go through the store merge, never the raw jsonl.
+        fn store_text(&self, journal: &std::path::Path) -> String {
+            crate::event_store::journal_text(journal, &["operator_decision"])
+        }
+
+        fn index_text(&self) -> String {
+            self.store_text(&self.0.path().join("decisions.jsonl"))
+        }
+
+        fn journal_text(&self) -> String {
+            self.store_text(&self.1.path().join(".fno").join("events.jsonl"))
+        }
+    }
+
+    impl Drop for DoorEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_HOME");
+            std::env::remove_var("FNO_REPO_ROOT");
+            std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+        }
+    }
+
+    #[test]
+    fn parse_record_door_reads_positionals_flags_and_inline_values() {
+        let argv: Vec<String> = [
+            "topic",
+            "The body",
+            "--rationale=why",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--global",
+            "--paths",
+            "crates/**, hooks/*.sh",
+            "--read",
+            "head -5 x.rs",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let door = parse_record_door(&argv).expect("parses");
+        assert_eq!(door.subject, "topic");
+        assert_eq!(door.decision.as_deref(), Some("The body"));
+        assert_eq!(door.rationale.as_deref(), Some("why"));
+        assert_eq!(door.options, vec!["a", "b"]);
+        assert!(door.is_global);
+        assert_eq!(door.raw_paths, vec!["crates/**, hooks/*.sh"]);
+        assert_eq!(door.reads, vec!["head -5 x.rs"]);
+
+        assert!(parse_record_door(&[]).is_err());
+        assert!(parse_record_door(&["--nope".to_string(), "x".to_string()]).is_err());
+        assert!(parse_record_door(&["--rationale".to_string()])
+            .err()
+            .expect("errs")
+            .contains("needs a value"));
+    }
+
+    #[test]
+    fn graduation_defaults_to_guidance_and_refuses_bad_kinds() {
+        assert_eq!(
+            graduation_or_guidance(None, None).expect("ok")["kind"],
+            json!("guidance")
+        );
+        assert_eq!(
+            graduation_or_guidance(Some("guidance"), None).expect("ok")["kind"],
+            json!("guidance")
+        );
+        assert!(graduation_or_guidance(Some("guidance"), Some("x")).is_err());
+        let enforced =
+            graduation_or_guidance(Some("enforced"), Some("file:docs/law.md=>marker")).expect("ok");
+        assert_eq!(enforced["artifact"], json!("file:docs/law.md=>marker"));
+        assert!(graduation_or_guidance(Some("enforced"), Some("no prefix")).is_err());
+        let follow = graduation_or_guidance(
+            Some("should-be-enforced-but-i-did-not"),
+            Some("NODE:x-4a11c2de"),
+        )
+        .expect("ok");
+        assert_eq!(follow["follow_up"], json!("node:x-4a11c2de"));
+        assert!(graduation_or_guidance(Some("nonsense"), None).is_err());
+        assert!(graduation_or_guidance(None, Some("x")).is_err());
+    }
+
+    #[test]
+    fn the_door_records_journal_index_and_table_under_chat_authority() {
+        let env = DoorEnv::new();
+        let code = record_door_write(
+            door("merge-authority", "Merges belong to the operator"),
+            "Merges belong to the operator".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0, "exit 0 on the happy record");
+        let index = env.index_text();
+        assert!(
+            index.contains("\"authority_source\":\"chat_attested\""),
+            "{index}"
+        );
+        assert!(index.contains("\"scope\":\"project:demo\""), "{index}");
+        assert!(
+            index.contains("\"graduation\":{\"kind\":\"guidance\"}"),
+            "{index}"
+        );
+        assert!(
+            !index.contains("\"paths\""),
+            "no paths key when none sent: {index}"
+        );
+        let journal = env.journal_text();
+        assert!(
+            journal.contains("Merges belong to the operator"),
+            "{journal}"
+        );
+    }
+
+    #[test]
+    fn the_door_records_the_paths_globs_it_validated() {
+        let env = DoorEnv::new();
+        let mut d = door("edit-governed", "A law that names a path.");
+        d.raw_paths = vec!["crates/**".to_string()];
+        let code = record_door_write(
+            d,
+            "A law that names a path.".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0);
+        assert!(
+            env.index_text().contains("\"paths\":[\"crates/**\"]"),
+            "{}",
+            env.index_text()
+        );
+    }
+
+    #[test]
+    fn chat_cannot_supersede_an_operator_row_but_can_its_own() {
+        let env = DoorEnv::new();
+        let index = env.0.path().join("decisions.jsonl");
+        std::fs::write(
+            &index,
+            concat!(
+                "{\"ts\":\"2026-08-29T19:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+                "\"data\":{\"decision_id\":\"d-0ad0ad0a\",\"subject\":\"merge-authority\",",
+                "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"operator\"}}\n"
+            ),
+        )
+        .expect("writes");
+        let mut d = door("merge-authority", "Merges belong to whoever asks");
+        d.supersedes = Some("d-0ad0ad0a".to_string());
+        let code = record_door_write(
+            d,
+            "Merges belong to whoever asks".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 3, "operator rows are out of a chat session's reach");
+        assert_eq!(
+            std::fs::read_to_string(&index)
+                .expect("reads")
+                .lines()
+                .count(),
+            1,
+            "nothing new recorded"
+        );
+
+        // The make-it-fail control: the same supersession at a chat row lands.
+        let body = concat!(
+            "{\"ts\":\"2026-08-29T19:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+            "\"data\":{\"decision_id\":\"d-c4a7c4a7\",\"subject\":\"merge-authority\",",
+            "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"chat_attested\"}}\n"
+        );
+        std::fs::write(&index, body).expect("writes");
+        let mut d = door("merge-authority", "Merges belong to whoever asks");
+        d.supersedes = Some("d-c4a7c4a7".to_string());
+        let code = record_door_write(
+            d,
+            "Merges belong to whoever asks".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0);
+        assert!(env.index_text().contains("d-c4a7c4a7"));
+    }
+
+    #[test]
+    fn a_waiver_subject_refuses_chat_authority() {
+        let env = DoorEnv::new();
+        let code = record_door_write(
+            door(
+                "review-coverage-waiver:acme/widgets#42@cccc",
+                "review coverage waived for this head",
+            ),
+            "review coverage waived for this head".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 3);
+        assert!(env.index_text().is_empty());
+    }
+
+    #[test]
+    fn a_code_fact_without_a_read_refuses_and_with_one_records_the_row() {
+        let env = DoorEnv::new();
+        std::fs::write(
+            env.1.path().join("advance.py"),
+            (1..=200).map(|i| format!("line {i}\n")).collect::<String>(),
+        )
+        .expect("writes");
+        let code = record_door_write(
+            door(
+                "territory-resolver",
+                "advance.py:167 is the territory resolver",
+            ),
+            "advance.py:167 is the territory resolver".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 3, "unmeasured claim refused");
+        assert!(env.index_text().is_empty());
+
+        let mut d = door("territory-resolver", "advance.py is 200 lines");
+        d.reads = vec!["head -5 advance.py".to_string()];
+        let code = record_door_write(
+            d,
+            "advance.py is 200 lines".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0);
+        let index = env.index_text();
+        assert!(index.contains("\"reads\":[{"), "{index}");
+        assert!(index.contains("head -5 advance.py"), "{index}");
+    }
+
+    #[test]
+    fn an_index_write_failure_exits_1_with_the_journal_durable() {
+        let env = DoorEnv::new();
+        // A DIRECTORY at the index store path: the recall append cannot land.
+        let home = env.0.path();
+        std::fs::remove_file(home.join("decisions.jsonl")).ok();
+        std::fs::create_dir_all(home.join("decisions.db")).expect("mkdir");
+        let code = record_door_write(
+            door("merge-authority", "Merges belong to the operator"),
+            "Merges belong to the operator".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 1, "recorded-but-index-failed");
+        assert!(
+            env.journal_text().contains("Merges belong to the operator"),
+            "the journal holds the ruling"
+        );
+    }
+
+    #[test]
+    fn preflight_refuses_a_placeholder_statement_before_any_identity_read() {
+        let argv: Vec<String> = ["x", "y", "--rationale", "z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        match record_door_preflight(&argv) {
+            Err(code) => assert_eq!(code, 3),
+            Ok(_) => panic!("placeholder must refuse"),
         }
     }
 
