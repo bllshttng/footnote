@@ -2888,11 +2888,10 @@ def test_next_claims_with_lockfile_without_writing_graph_owner(tmp_graph, monkey
     assert result.exit_code == 0, result.output
     assert f'"id": "{node_id}"' in result.output
     assert claim_status(f"node:{node_id}")["state"] == "live"
-    # No graph owner is written: the claim lockfile is the holder of record,
-    # and the read serves the stored word (the lock fields are the retired
-    # mirror), so the served row carries no owner at all.
+    # The served holder is the claim projection: the lockfile is the holder
+    # of record and no graph owner is ever written.
     served = read_graph(tmp_graph)[0]
-    assert served["locked_by"] is None
+    assert served["locked_by"] == "next-session"
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

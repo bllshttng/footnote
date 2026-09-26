@@ -1508,6 +1508,20 @@ fn overlay_work_claim_statuses(entries: &mut [Value]) {
             continue;
         }
         if let Some(obj) = entry.as_object_mut() {
+            // The holder projects with the status: the cached rows were read
+            // at a graph version the claim store has since moved past, and
+            // the stored lock fields are the retired mirror.
+            let mut stamp = |key: &str, value: &Option<String>| {
+                obj.insert(
+                    key.to_string(),
+                    value.clone().map(Value::String).unwrap_or(Value::Null),
+                );
+            };
+            stamp("locked_by", &claim.locked_by);
+            stamp("locked_by_harness", &claim.harness);
+            stamp("locked_by_harness_session", &claim.harness_session);
+            stamp("locked_at", &claim.locked_at);
+            stamp("session_id", &claim.locked_by);
             if obj
                 .get("status")
                 .and_then(Value::as_str)

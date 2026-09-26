@@ -1202,6 +1202,11 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
+    // Project the external claim store once for the whole export: the claim
+    // is the holder of record, and the stored lock fields are the retired
+    // mirror. Loading each node through `nodes::load` would rescan every
+    // lockfile for every row.
+    let node_claims = nodes::node_claims_by_id()?;
     let mut statement = connection
         .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
         .map_err(|error| error.to_string())?;
@@ -1213,7 +1218,8 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     let mut typed: Vec<(i64, String, Value)> = Vec::new();
     for id in ids {
         let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
             return Err(format!("node {id} vanished mid-export"));
         };
         typed.push((ordinal, id, node.to_json()));
@@ -1223,6 +1229,10 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
         .into_iter()
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();
+    for (_, id, body) in &mut merged {
+        let claim = node_claims.get(id).cloned().unwrap_or_default();
+        nodes::project_claim_value(body, claim);
+    }
     merged.append(&mut typed);
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(merged.into_iter().map(|(_, _, row)| row).collect())
