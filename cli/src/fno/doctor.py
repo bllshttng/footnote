@@ -4440,9 +4440,7 @@ def doctor_command(
         # current binary first.
         pw = result.get("pr_watch") or {}
         if pw.get("verdict") in ("dead", "wedged") and not json_out:
-            from fno.pr_watch._install import (
-                _LAUNCH_AGENTS_DIR, default_agent_path, heal_watcher, refresh_watcher,
-            )
+            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher, refresh_watcher
 
             if pw.get("verdict") == "wedged":
                 from fno.pr_watch.cli import _resolve_fno_binary
@@ -4450,7 +4448,6 @@ def doctor_command(
                 rmsg, _ = refresh_watcher(
                     launch_agents_dir=_LAUNCH_AGENTS_DIR,
                     fno_binary=_resolve_fno_binary(),
-                    install_path=default_agent_path(_resolve_fno_binary()),
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
                     caller="doctor-fix",

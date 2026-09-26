@@ -469,8 +469,8 @@ _GROOM_PLIST = """\
     <string>groom</string>
   </array>
 
-  <!-- launchd launches with a minimal PATH; fixed install-location PATH
-       (default_agent_path) so the rendered bytes never depend on the caller. -->
+  <!-- launchd launches with a minimal PATH; capture install-time PATH so
+       fno / gh / claude resolve without a login shell. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -563,9 +563,7 @@ def install_groom_agent(
 
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
-    install_path = (
-        install_path if install_path is not None else default_agent_path(fno_binary)
-    )
+    install_path = install_path or default_agent_path(fno_binary)
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.
@@ -581,20 +579,10 @@ def install_groom_agent(
 
     plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
     try:
-        plist_text = render_groom_plist(
-            fno_binary=fno_binary,
-            install_path=install_path,
-            hour=hour,
-            workdir=workdir,
-        )
-        if not _write_if_changed(plist_path, plist_text):
-            return {
-                "status": "unchanged",
-                "plist": str(plist_path),
-                "hour": hour,
-                "workdir": workdir,
-                "detail": "rendered plist matches installed; not re-registered",
-            }
+        rendered = render_groom_plist(
+            fno_binary=fno_binary, install_path=install_path, hour=hour, workdir=workdir)
+        if not _write_if_changed(plist_path, rendered):
+            return {"status": "unchanged", "detail": "plist matches; not re-registered"}
     except OSError as exc:
         return {"status": "failed", "detail": f"write {plist_path}: {exc}"}
 

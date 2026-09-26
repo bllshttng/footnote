@@ -12,8 +12,7 @@ Design constraints (locked):
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
     Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
-  - PATH rendered from fixed install locations (default_agent_path), never the
-    caller's environment, whose variation re-registered agents on every refresh
+  - PATH from default_agent_path (fixed install dirs), never the caller's env
 """
 
 from __future__ import annotations
@@ -95,8 +94,8 @@ _PLIST_TEMPLATE = """\
     <string>tick</string>
   </array>
 
-  <!-- launchd launches with a minimal PATH.  Fixed install-location PATH
-       (default_agent_path) so the rendered bytes never depend on the caller. -->
+  <!-- launchd launches with a minimal PATH.  Capture install-time PATH so
+       gh / claude / uv are resolvable without a login shell. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -154,32 +153,15 @@ def _xml_escape(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-_SYSTEM_PATH_ENTRIES = ["/usr/local/bin", "/usr/bin", "/bin"]
-
-
 def default_agent_path(fno_binary: str = "fno") -> str:
-    """Caller-independent PATH: launchd must resolve fno/gh/claude without
-    reading the caller's environment, whose variation re-registered agents."""
-    entries: list[str] = []
-    if "/" in fno_binary:
-        entries.append(str(Path(fno_binary).parent))
-    for entry in [
-        str(Path.home() / ".local" / "bin"),
-        "/opt/homebrew/bin",
-        *_SYSTEM_PATH_ENTRIES,
-    ]:
-        if entry not in entries:
-            entries.append(entry)
+    entries = [str(Path(fno_binary).parent)] if "/" in fno_binary else []
+    entries += [p for p in (str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin",
+                            "/usr/local/bin", "/usr/bin", "/bin") if p not in entries]
     return ":".join(entries)
 
-
 def _write_if_changed(plist_path: Path, plist_text: str) -> bool:
-    """Write only when bytes differ; launchd charges a notice per re-registration."""
-    try:
-        if plist_path.read_text(encoding="utf-8") == plist_text:
-            return False
-    except OSError:
-        pass  # absent or unreadable: write it
+    if plist_path.exists() and plist_path.read_text(encoding="utf-8") == plist_text:
+        return False
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_text(plist_text, encoding="utf-8")
     return True
@@ -207,7 +189,7 @@ def render_plist(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
 ) -> str:
     """Render the plist XML string.  No filesystem writes.
@@ -228,7 +210,7 @@ def render_plist(
     log_out = str(fno_state / "pr-watcher.out.log")
     log_err = str(fno_state / "pr-watcher.err.log")
 
-    augmented_path = _augment_path(install_path)
+    augmented_path = _augment_path(install_path or default_agent_path(fno_binary))
 
     return _PLIST_TEMPLATE.format(
         label=_xml_escape(_LABEL),
@@ -477,7 +459,7 @@ def refresh_watcher(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
+    install_path: Optional[str] = None,
     interval: int = 600,
     defer_when_ticking: bool = False,
     caller: str = "unknown",
@@ -493,9 +475,6 @@ def refresh_watcher(
     by ``fno do pr watch refresh`` at the tail of ``fno doctor update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
-    Identical rendered bytes skip the write and bounce (launchd charges a
-    notice per re-registration); ``force_bounce=True`` overrides for a job
-    already reported dead or wedged.
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     try:
@@ -567,7 +546,6 @@ def install(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
     dry_run: bool = False,
     activate: bool = True,
@@ -580,8 +558,6 @@ def install(
         Where to write ``sh.fno.pr-watcher.plist``.
     fno_binary:
         Absolute path to the ``fno`` binary.
-    install_path:
-        ``$PATH`` at install time.
     interval:
         Poll interval in seconds.
     dry_run:
@@ -594,7 +570,6 @@ def install(
     plist_text = render_plist(
         launch_agents_dir=launch_agents_dir,
         fno_binary=fno_binary,
-        install_path=install_path,
         interval=interval,
     )
 
@@ -652,7 +627,6 @@ def ensure_activated(
     *,
     launch_agents_dir: Path,
     fno_binary: str,
-    install_path: str,
     interval: int = 600,
 ) -> str:
     """Idempotently install + load the watcher.  Non-interactive, never raises.
@@ -679,7 +653,6 @@ def ensure_activated(
         plist_text = render_plist(
             launch_agents_dir=launch_agents_dir,
             fno_binary=fno_binary,
-            install_path=install_path,
             interval=interval,
         )
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
