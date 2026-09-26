@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// One selected `review_attestation` row, reduced to the fields the line needs.
+#[derive(Clone)]
 struct AttestationRow {
     head_sha: String,
     verdict: String,
@@ -42,8 +43,12 @@ fn sha_matches(a: &str, b: &str) -> bool {
     n >= 7 && a.get(..n) == b.get(..n)
 }
 
-fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
-    let mut rows = Vec::new();
+/// One pass over the journal, rows grouped by branch. `evidence` answers per
+/// item for a whole corpus, and a per-item `select_rows` re-parse of the full
+/// text is O(items x journal) - minutes on a measured 62MB journal - so the
+/// classification reads one index instead.
+fn index_rows(events_text: &str) -> BTreeMap<String, Vec<AttestationRow>> {
+    let mut map: BTreeMap<String, Vec<AttestationRow>> = BTreeMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -52,9 +57,6 @@ fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
             continue;
         }
         let row_branch = val.pointer("/data/branch").and_then(|v| v.as_str());
-        if row_branch != Some(branch) {
-            continue;
-        }
         let head_sha = val
             .pointer("/data/head_sha")
             .and_then(|v| v.as_str())
@@ -77,14 +79,25 @@ fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
             .pointer("/data/findings_nonblocking")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        rows.push(AttestationRow {
-            head_sha,
-            verdict,
-            review_round,
-            findings: blocking + nonblocking,
-        });
+        if let Some(branch) = row_branch {
+            map.entry(branch.to_string())
+                .or_default()
+                .push(AttestationRow {
+                    head_sha,
+                    verdict,
+                    review_round,
+                    findings: blocking + nonblocking,
+                });
+        }
     }
-    rows
+    map
+}
+
+fn select_rows(events_text: &str, branch: &str) -> Vec<AttestationRow> {
+    index_rows(events_text)
+        .get(branch)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The display line for a branch/head pair, or `None` when the ledger does
@@ -117,6 +130,7 @@ pub fn summary_line(events_text: &str, branch: &str, head: &str) -> Option<Strin
 /// and found nothing); every `no_*` state is missing evidence, never a
 /// verified clean. Items come back in input order.
 pub fn evidence(events_text: &str, items: &[Value]) -> Value {
+    let index = index_rows(events_text);
     let mut out = Vec::with_capacity(items.len());
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for item in items {
@@ -128,7 +142,10 @@ pub fn evidence(events_text: &str, items: &[Value]) -> Value {
             (None, _) => ("no_node", Value::Null),
             (Some(_), None) => ("no_pr", Value::Null),
             (Some(node), Some(_)) => {
-                let rows = select_rows(events_text, &format!("feature/{node}"));
+                let rows = index
+                    .get(&format!("feature/{node}"))
+                    .cloned()
+                    .unwrap_or_default();
                 if rows.is_empty() {
                     ("no_attestation", Value::Null)
                 } else if rows.iter().all(|r| r.findings == 0) {
