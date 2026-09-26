@@ -112,7 +112,6 @@ struct Baseline {
 /// base revision's copy. None when the file is new, untracked, outside a
 /// repo, or a read fails - the checks then treat the file as new.
 fn baseline_for(
-    canonical: &Path,
     rel: &str,
     base: &str,
     before: Option<&Path>,
@@ -159,7 +158,7 @@ fn check_one(path: &Path, base: &str, before: Option<&Path>) -> Vec<String> {
             .unwrap_or_else(|_| abs.to_string_lossy().into_owned()),
         None => abs.to_string_lossy().into_owned(),
     };
-    let baseline = baseline_for(&canonical, &rel, base, before, root.as_deref());
+    let baseline = baseline_for(&rel, base, before, root.as_deref());
     let Some(text) = read_text(&abs) else {
         return out;
     };
