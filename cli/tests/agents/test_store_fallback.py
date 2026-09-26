@@ -1169,14 +1169,14 @@ def test_expired_tombstone_no_longer_blocks_adoption(tmp_path):
     assert entry.origin == "adopted"
 
 
-def test_tombstoned_hit_yields_to_a_live_alternative(tmp_path):
+def test_tombstoned_short_token_still_refuses_ambiguity(tmp_path):
     _write_claude_session(tmp_path, CLAUDE_UUID)
     _write_codex_session(tmp_path, CODEX_UUID)
-    # Same 8-hex prefix -> both stores match the short token; the codex hit
-    # is tombstoned, so the claude hit is the one remaining match.
+    # Same 8-hex prefix -> both stores match the short token. The tombstone
+    # lives at the registration seam, so it does not disambiguate: the mixed
+    # answer is still refused, nothing is adopted, no duplicate can form.
     _write_tombstone(tmp_path, "codex", CODEX_UUID)
 
-    entry = store_fallback.heal_from_harness_store(CLAUDE_UUID[:8])
-
-    assert entry is not None
-    assert entry.harness == "claude"
+    with pytest.raises(AgentResolutionError):
+        store_fallback.heal_from_harness_store(CLAUDE_UUID[:8])
+    assert load_registry() == []
