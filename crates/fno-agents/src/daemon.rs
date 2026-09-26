@@ -5566,9 +5566,7 @@ async fn handle_rm_with(
     // mode). Nor can it report WHICH rows it dropped, so the identity match
     // above is also the only defense against dropping more than the one row
     // this request resolved -- checked below.
-    // The tombstone lands BEFORE the row is published absent: a resolver
-    // racing this rm must never see row-gone-but-no-tombstone, or the store
-    // healer adopts the session back under a fresh short-id name.
+    // Stamp BEFORE the removal publishes: a racing resolver must never see row-gone-but-no-tombstone.
     let tombstone_error = rm_teardown::stamp_removed_session_tombstone(&ctx.home, &entry);
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
@@ -5695,8 +5693,7 @@ async fn handle_rm_with(
         "pane_session": pane_session,
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        // a confirmed pane stop's detail (pane killed, pid gone)
-        // rides here because `Removed` carries no reason of its own.
+        // a confirmed pane stop's detail rides here: `Removed` carries no reason.
         "pane_reason": pane_stop_detail.as_deref().or(pane_outcome.reason()),
         "worktree_receipt": worktree_receipt,
         "actor": audit.actor,
