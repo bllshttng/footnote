@@ -6935,8 +6935,10 @@ impl Core {
         // attach path and refreshes this via `ExternalLifecycleSync`.
         self.external_lifecycle = loaded.external_lifecycle;
         if loaded.squads.is_empty() {
-            // No stored workspace: adopted panes get their own tabs in home
-            // rather than dangling unplaced.
+            // No stored workspace: the stand-in prune runs first, then
+            // adopted panes get their own tabs in home rather than
+            // dangling unplaced.
+            self.prune_portal_standins();
             self.place_adopted_leftovers(home_sid);
             self.restored = true;
             return;
@@ -7859,6 +7861,11 @@ impl Core {
                 "restore: kept {kept_unknown_members} member(s) with no death evidence; they re-decide on the next restore"
             ));
         }
+        // The one-time stand-in prune, after every squad's portal slots
+        // bound (a portal's screen is never a candidate) and before the
+        // leftovers place. The shapes no code mints anymore close here,
+        // operator-shaped, with no parked screen minted.
+        self.prune_portal_standins();
         // policy = resume: the walk deliberately left every member
         // idle; the bulk driver now brings each back through its own
         // harness's declared form. The reply end is dropped on purpose - at
