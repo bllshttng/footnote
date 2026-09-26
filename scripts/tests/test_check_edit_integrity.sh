@@ -98,5 +98,16 @@ else
   fail "T3 rc=$RC out='$OUT'"
 fi
 
+# T4: a deletion in the diff is judged as emptied content, not skipped.
+/usr/bin/git -C "$REPO" rm -q docs/a.md
+/usr/bin/git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm drop-md
+OUT="$(cd "$REPO" && EDIT_INTEGRITY_BASE="$BASE_SHA" bash "$SCRIPT" 2>/dev/null)"
+RC=$?
+if [[ $RC -eq 0 && "$OUT" == *"docs/a.md"*"file is now empty"* ]]; then
+  pass "T4 a deleted file is judged as emptied content"
+else
+  fail "T4 rc=$RC out='$OUT'"
+fi
+
 echo "[check-edit-integrity] $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

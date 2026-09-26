@@ -27,7 +27,7 @@ fi
 FILES=()
 while IFS= read -r -d '' f; do
     FILES+=("$f")
-done < <(git -C "$REPO" diff --name-only --diff-filter=AMR -z "$BASE" HEAD)
+done < <(git -C "$REPO" diff --name-only --diff-filter=AMRD -z "$BASE" HEAD)
 if [[ ${#FILES[@]} -eq 0 ]]; then
     echo "check-edit-integrity: no changed files"
     exit 0

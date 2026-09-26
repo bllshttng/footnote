@@ -143,14 +143,12 @@ fn baseline_for(
 fn check_one(path: &Path, base: &str, before: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
     let abs = absolutize(path);
-    if !abs.is_file() {
-        return out;
-    }
     // One repo-root read per path. git prints the canonical root
     // (/private/var on macOS) while the path may arrive through a symlink
     // (/var), so the comparison is canonical to canonical.
-    let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
-    let root = canonical.parent().and_then(repo_root);
+    let canonical = canonical_target(&abs);
+    let root = surviving_ancestor(canonical.parent().unwrap_or(Path::new(".")))
+        .and_then(|d| repo_root(&d));
     let rel = match &root {
         Some(root) => canonical
             .strip_prefix(root)
@@ -159,8 +157,21 @@ fn check_one(path: &Path, base: &str, before: Option<&Path>) -> Vec<String> {
         None => abs.to_string_lossy().into_owned(),
     };
     let baseline = baseline_for(&rel, base, before, root.as_deref());
-    let Some(text) = read_text(&abs) else {
+    // A deleted target is still judged against its baseline: a delete is
+    // the sharpest form of the truncation this entry names, and its stale
+    // imports are exactly the findings that matter. A path that never
+    // existed here has no baseline and nothing to judge.
+    let deleted = !abs.is_file();
+    if deleted && baseline.is_none() {
         return out;
+    }
+    let text = if deleted {
+        String::new()
+    } else {
+        let Some(text) = read_text(&abs) else {
+            return out;
+        };
+        text
     };
     let prefix = format!("edit-integrity: {rel}: ");
     let ext = abs
@@ -168,8 +179,11 @@ fn check_one(path: &Path, base: &str, before: Option<&Path>) -> Vec<String> {
         .map(|e| e.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    if let Some(message) = parse_finding(&text, &ext, &abs, baseline.as_ref()) {
-        out.push(format!("{prefix}does not parse: {message}"));
+    // A delete is not a parse break; the parse check judges edited text.
+    if !deleted {
+        if let Some(message) = parse_finding(&text, &ext, &abs, baseline.as_ref()) {
+            out.push(format!("{prefix}does not parse: {message}"));
+        }
     }
     if let Some(message) = last_line_finding(baseline.as_ref(), &text) {
         out.push(format!("{prefix}{message}"));
@@ -194,6 +208,48 @@ fn absolutize(path: &Path) -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+/// Canonical path for a target whose ancestors may be gone: git rm prunes
+/// emptied directories, so the nearest surviving ancestor is canonicalized
+/// and the missing tail rejoined, keeping the repo-relative mapping (the
+/// /var to /private/var symlink) intact for deletes.
+fn canonical_target(abs: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(abs) {
+        return canonical;
+    }
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut dir: &Path = abs;
+    loop {
+        match std::fs::canonicalize(dir) {
+            Ok(base) => {
+                let mut canonical = base;
+                for seg in missing.iter().rev() {
+                    canonical.push(seg);
+                }
+                return canonical;
+            }
+            Err(_) => match (dir.parent(), dir.file_name()) {
+                (Some(parent), Some(name)) => {
+                    missing.push(name.to_os_string());
+                    dir = parent;
+                }
+                _ => return abs.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// The nearest ancestor of `dir` that still exists: git commands need a
+/// living cwd, and a deleted file's own directory may already be pruned.
+fn surviving_ancestor(dir: &Path) -> Option<PathBuf> {
+    let mut dir = dir.to_path_buf();
+    loop {
+        if dir.is_dir() {
+            return Some(dir);
+        }
+        dir = dir.parent()?.to_path_buf();
     }
 }
 
@@ -1023,6 +1079,57 @@ mod tests {
             .filter(|f| f.contains("test count fell 3 -> 2 against before this edit"))
             .collect();
         assert_eq!(count.len(), 1, "{findings:?}");
+    }
+
+    /// Deleting a tracked module that a test still patches is judged as
+    /// empty content: the emptied-file advice and the stale patch target
+    /// both fire, where an is_file guard used to skip the path entirely.
+    #[test]
+    fn end_to_end_deleted_module_names_patch_targets() {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let root = repo.path();
+        git(root, &["init", "-q"]);
+        let module = root.join("helpers.py");
+        std::fs::write(&module, "def heal():\n    pass\n\ndef keep():\n    pass\n").expect("write");
+        let test = root.join("test_helpers.py");
+        std::fs::write(
+            &test,
+            "from fno import helpers\n\ndef test_one():\n    patch(\"helpers.heal\")\n",
+        )
+        .expect("write");
+        git(root, &["add", "."]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        );
+        std::fs::remove_file(&module).expect("delete");
+
+        let findings = check_paths(&[module.clone()], "HEAD", None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("file is now empty; HEAD had 5 lines")),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("removed top-level heal")),
+            "{findings:?}"
+        );
+        // No parse finding: a delete is not a parse break.
+        assert!(
+            !findings.iter().any(|f| f.contains("does not parse")),
+            "{findings:?}"
+        );
     }
 
     fn git(root: &Path, args: &[&str]) {
