@@ -2956,6 +2956,39 @@ event_types:
         pr:
           type: [integer, "null"]
 
+  - name: burn_watch_wake
+    description: "The burn arm waked a worker whose spend or node age grew while its branch and node touched_at stayed flat. attempt counts from 1; delivered is receipt-confirmed landing; via names the leg that carried it (mail, resume, or a durable receipt held over a busy turn)."
+    sources: [daemon]
+    data:
+      required: [session_id, node, attempt, delivered, via, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        attempt:
+          type: integer
+        delivered:
+          type: boolean
+        via:
+          type: string
+          enum: [mail, resume, durable]
+        reason:
+          type: string
+
+  - name: burn_watch_escalated
+    description: "The burn arm's wake budget is spent with no progress on any sampled axis: one fleet task was filed through the pr-nudge store (deduplicated on lane and key) and the arm now waits for progress or the operator. The task closes itself when progress lands."
+    sources: [daemon]
+    data:
+      required: [session_id, node, reason]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        reason:
+          type: string
+
   - name: state_reap
     description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
     sources: [daemon, test]
@@ -3650,7 +3683,7 @@ event_types:
     consumers: [operator]
 
   - name: guard_decision
-    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Emitted by hooks/lib/guard-mark.sh (bash guards, in their _approve/_block funnels) and the inline _guard_mark in the python guards (at their decision funnels)."
+    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Healthy allow polls for the same (guard, tool) subject coalesce inside a heartbeat window at the event store: a summary row then carries occurrence_count and the window bounds, while every block and unknown-decision shape still emits one row each."
     sources: [hook]
     data:
       required: [guard, decision, tool]
@@ -3665,6 +3698,15 @@ event_types:
         tool:
           type: string
           description: "Tool name from the payload; 'unknown' when the guard approved before parsing."
+        occurrence_count:
+          type: integer
+          description: "On a coalescing summary row: how many identical healthy polls the row represents. Absent means 1."
+        window_started_ms:
+          type: integer
+          description: "On a coalescing summary row: the represented window's start, epoch ms. Absent on ordinary rows."
+        window_finished_ms:
+          type: integer
+          description: "On a coalescing summary row: the represented window's end, epoch ms. Absent on ordinary rows."
     consumers: [operator]
 
   - name: daemon_recovery_interrupted_temp
@@ -4732,7 +4774,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_skipped
-    description: "Emitted by `fno backlog advance` (and advance_dependents / epic advance) when it deliberately dispatches nothing. The reason discriminates disabled / no-work / walker-live / already-claimed / next-error / claim-error plus the dependent-path reasons unmapped-project / no-project / no-cwd / dependents-error / closed-project-unknown and the epic-advance-path reasons lane-cap / children-error. capacity-refused, gate-unavailable and sandbox-unreachable are MACHINE-SCOPED : a spawn-gate or sandbox-probe refusal is true for every row equally, so it is never charged to the node's failure streak and the row stays ready. Pure skips stay quiet to the user; dispatched/failed outcomes are the loud ones."
+    description: "Emitted by `fno backlog advance` (and advance_dependents / epic advance) when it deliberately dispatches nothing. The reason enum carries the case split; machine-scoped refusals are true for every row equally and never charge the node's failure streak. Pure skips stay quiet to the user. Repeated identical skips for one subject coalesce at the event store: a summary row carries occurrence_count and the window bounds, and epic status still sees the newest reason."
     sources: [backlog]
     data:
       required: [reason]
@@ -4773,6 +4815,15 @@ event_types:
           type: string
           enum: [env, config, default, autonomy]
           description: "The precedence rank that supplied config.auto_continue's armed value for this decision (wave 1, AC3-HP). See advance_dispatched.rank."
+        occurrence_count:
+          type: integer
+          description: "On a coalescing summary row: how many identical skip polls the row represents. Absent means 1."
+        window_started_ms:
+          type: integer
+          description: "On a coalescing summary row: the represented window's start, epoch ms. Absent on ordinary rows."
+        window_finished_ms:
+          type: integer
+          description: "On a coalescing summary row: the represented window's end, epoch ms. Absent on ordinary rows."
     consumers: [operator]
 
   - name: advance_failed
