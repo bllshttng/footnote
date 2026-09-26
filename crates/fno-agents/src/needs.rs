@@ -854,10 +854,19 @@ fn run_answer(home: &AgentsHome, cwd: &Path, args: &NeedsArgs, item_id: &str) ->
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     // The same projection `run_items` folds, so a closed or already-answered
-    // item refuses for the reason the panel will show.
-    let (items, _, _) = crate::attention_arm::read_items_at(&fno_dir, cwd);
+    // item refuses for the reason the panel will show. An unreadable store
+    // makes the projection incomplete; the refusal names it instead of
+    // reading as a clean not-found.
+    let (items, unreadable, _) = crate::attention_arm::read_items_at(&fno_dir, cwd);
     let Some(item) = items.iter().find(|i| i.id == item_id) else {
-        eprintln!("fno-agents: not found: {item_id}");
+        if unreadable.is_empty() {
+            eprintln!("fno-agents: not found: {item_id}");
+        } else {
+            eprintln!(
+                "fno-agents: not found: {item_id} (some stores unreadable: {})",
+                unreadable.join("; ")
+            );
+        }
         return 2;
     };
     if item.state != "open" {
