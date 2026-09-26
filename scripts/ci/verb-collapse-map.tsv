@@ -215,6 +215,7 @@ backlog project-root	T1	backlog project-root	6
 backlog provenance	T1	backlog provenance	7
 backlog queue	T1	backlog queue	1
 backlog queued	KEEP	backlog queued	1	ruled KEEP: read-back half of the live backlog queue path
+backlog rank	T1	backlog rank	20
 backlog ready	T1	backlog ready	21
 backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
 backlog reconcile-findings	T1	backlog reconcile-findings	0

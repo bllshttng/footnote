@@ -44,6 +44,12 @@ BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
 COLLAPSE_MAP_REL = Path("scripts") / "ci" / "verb-collapse-map.tsv"
 COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 
+# Collapse-kept leaves the fno-agents binary serves natively after their
+# Python click leg retired (`backlog rank`'s lane pin answers in the binary
+# now). The map row stays: the mux menu binds the leaf and the Rust
+# verb-baseline ratchet reads the same row.
+NATIVE_SERVED_LEAVES = {"backlog rank"}
+
 # Two people hit these gates cold within an hour and both reverse-engineered the
 # row format by reading the file. The refusal said what to do and not how, so it
 # now carries the shape. Runtime text cannot drift from the behaviour that
@@ -261,6 +267,13 @@ def iter_python_leaves():
     }
     live_actions: set[str] = set()
     live_action_flags: set[str] = set()
+
+    # Leaves the fno-agents binary serves natively after their Python click
+    # leg retired. The collapse map still tracks each (a menu binds it, so
+    # the Rust baseline ratchet demands the row), but no Python click leaf
+    # backs it, so the live side claims it here instead of the map cutting
+    # the row.
+    live_actions.update(NATIVE_SERVED_LEAVES)
 
     # Eager inline commands (help, cost, review) are seeded on the main app, not
     # LAZY_SUBCOMMANDS, so resolve each from the root Click tree rather than emit

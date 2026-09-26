@@ -260,9 +260,7 @@ def test_map_covers_current_surface_once():
     # `backlog find`, `backlog notes`, `agents backlog-note`,
     # `agents backlog-notes` and `agents graph-get` no longer resolve on the
     # live surface; their stale rows freed five: 609 -> 604.
-    # The python leg of `backlog rank` retired and the verb answers natively,
-    # so its stale row freed one: 604 -> 603.
-    assert len(mapped) == 603, (
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -273,7 +271,7 @@ def test_map_matches_the_uncollapsed_click_action_inventory():
     import typer
 
     from fno.cli import COLLAPSE_KEEP, LAZY_SUBCOMMANDS
-    from fno.lint_verb_ratchet import _iter_group_leaves
+    from fno.lint_verb_ratchet import _iter_group_leaves, NATIVE_SERVED_LEAVES
 
     live: set[str] = set()
     for group in COLLAPSE_KEEP:
@@ -283,6 +281,7 @@ def test_map_matches_the_uncollapsed_click_action_inventory():
         command = typer.main.get_command(obj)
         context = click.Context(command, info_name=group)
         live.update(path for path, _sub in _iter_group_leaves(command, context, group))
+    live.update(NATIVE_SERVED_LEAVES)
 
     mapped = {leaf for leaf in _mapped_leaves() if leaf.split()[0] in COLLAPSE_KEEP}
     assert live == mapped
