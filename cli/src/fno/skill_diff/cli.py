@@ -182,10 +182,10 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
         if not str(candidates[0].get("title") or "").startswith(
             f"skill-diff: {skill_id} failure"
         ):
-            return _file_no_diff_node_separate(argv)
+            argv, fold_id = [*argv, "--separate"], None
         try:
             out = subprocess.run(
-                [
+                argv if fold_id is None else [
                     "fno", "backlog", "idea", title, "-d", details,
                     "--wave-of", fold_id, "--difficulty", "medium", "--json",
                 ],
@@ -197,6 +197,8 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
             _LOG.warning("skill-diff: folding no-diff-helps node failed: %s", exc)
             return None
         receipt = _idea_receipt(out.stdout)
+        if fold_id is None:
+            return (receipt or {}).get("id") or None
         if receipt is None or receipt.get("outcome") != "wave":
             _LOG.warning(
                 "skill-diff: unexpected fold receipt: %r", (out.stdout or "")[:120]
@@ -204,16 +206,6 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
             return None
         return receipt.get("node_id") or fold_id
     return receipt.get("id") or None
-
-
-def _file_no_diff_node_separate(argv: list) -> Optional[str]:
-    try:
-        out = subprocess.run([*argv, "--separate"], capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        _LOG.warning("skill-diff: filing separate no-diff-helps node failed: %s", exc)
-        return None
-    receipt = _idea_receipt(out.stdout)
-    return (receipt or {}).get("id") or None
 
 
 def _no_diff_helps(name: str, level: str, run_id: str, skill_id: str, reason: str) -> None:
