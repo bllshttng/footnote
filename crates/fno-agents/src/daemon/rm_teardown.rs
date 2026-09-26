@@ -97,7 +97,7 @@ pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// x-976b: the row is gone; stamp the tombstone so the harness-store healer
+/// The row is gone; stamp the tombstone so the harness-store healer
 /// does not adopt the same session back under a fresh short-id name (the
 /// adopted duplicate that then blocked resume). Any harness: the store
 /// fallback adopts claude transcripts by the same door. A failed write is

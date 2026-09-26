@@ -50,8 +50,8 @@ from fno.harness_identity import claude_transport_short_id, session_handle_tier
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
-# x-976b: `fno agents rm` stamps removed sessions in rm_tombstones.json beside
-# the registry; the healer refuses to re-adopt them inside this window.
+# `fno agents rm` stamps removed sessions in rm_tombstones.json beside the
+# registry; the healer refuses to re-adopt them inside this window.
 RM_TOMBSTONE_FILENAME = "rm_tombstones.json"
 RM_TOMBSTONE_GRACE_SECS = 86_400
 
@@ -498,10 +498,10 @@ def _recent_rm_tombstone(harness, session_id, registry_path) -> Optional[int]:
         path = agents_registry_path()
     try:
         raw = json.loads((path.parent / RM_TOMBSTONE_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return None
     now = int(datetime.datetime.now().timestamp())
-    stamps = [r.get("removed_at") for r in raw if isinstance(r, dict)
+    stamps = [r.get("removed_at") for r in raw if isinstance(raw, list) and isinstance(r, dict)
               and r.get("harness") == harness and r.get("session_id") == session_id]
     return next((int(t) for t in stamps if isinstance(t, (int, float))
                  and now - t <= RM_TOMBSTONE_GRACE_SECS), None)
