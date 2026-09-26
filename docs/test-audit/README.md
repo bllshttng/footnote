@@ -57,8 +57,8 @@ Rank rule: suites that test both legs of a dual implementation first, then src-r
 
 Declarations are `def test_` / `#[test]` counts. Campaign rows link their ledger in this folder. CI minutes come from the smoke-duration-report lines of the campaign PR run against the last main run.
 
-| Campaign | PR | Declarations before | Declarations after | CI minutes before | CI minutes after | Ledger |
-|---|---|---|---|---|---|---|
-| 1: tests/spec trial | 2504 | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | PR body |
-| 2: stress e2e | 2520 | 53 | 48 | 20.6 (20-trial job) | 15.9 | stress-e2e-campaign.md |
-| 3: claims | TBD | 446 Py + 169 Rust | 431 Py + 168 Rust | TBD (PR run) | TBD (PR run) | claims-campaign.md |
+| Campaign | Declarations before | Declarations after | CI minutes before | CI minutes after | Ledger |
+|---|---|---|---|---|---|
+| 1: tests/spec trial | 17 pytest cases + 6 doc greps | 16 + 6 | - | - | the trial PR body |
+| 2: stress e2e | 53 | 48 | 20.6 (20-trial job) | 15.9 | stress-e2e-campaign.md |
+| 3: claims | 446 Py + 169 Rust | 431 Py + 168 Rust | shards skipped: the PR touches docs and tests only | same (10 collected cases and 1 Rust test less to run) | claims-campaign.md |
