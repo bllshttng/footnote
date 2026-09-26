@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fno import paths as _paths
+from fno.graph._constants import NODE_ID_BODY
 from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 
 # The recorded value when no harness session id resolves. A row that omits
@@ -28,8 +29,8 @@ from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 # says "we looked and found nothing", which is a different fact.
 LEDGER_SESSION_UNRESOLVED = "unresolved:no-harness-session"
 
-# Canonical backlog node id shape, shared by parse_target_state and derive_phases.
-GRAPH_NODE_ID_SHAPE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$")
+# The canonical node id grammar, anchored for whole-token matches.
+GRAPH_NODE_ID_SHAPE = re.compile(rf"^{NODE_ID_BODY}$")
 
 
 def _utc_iso(value: datetime | str | None) -> str | None:
