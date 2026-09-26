@@ -2030,13 +2030,19 @@ async fn mission_drain_loop(
             break;
         }
 
-        // the EFFECTIVE dispatch pause (manual sentinel OR fleet
-        // incident) is checked BEFORE the target re-resolve and the converge
+        // The effective dispatch pause (manual sentinel, machine breaker,
+        // or this territory's targeted breaker record) is checked before the
         // permit, so a stopped incident runs no dispatch-oriented child. The
         // target this loop was spawned with names the blocked tick (cwd,
         // interval) without re-resolving; pending and the breaker are
         // untouched, and the same loop re-resolves and resumes on clear.
-        let pause = crate::loops_pause::dispatch_pause();
+        let subject = crate::fleet_incident::Subject {
+            session_ids: Vec::new(),
+            node: target.mission.clone().or_else(|| Some(key.clone())),
+            territory: (!target.scope.is_empty()).then(|| target.scope.clone()),
+            cwd: Path::new(&target.cwd),
+        };
+        let pause = crate::loops_pause::dispatch_pause_for_territory(&subject);
         if pause.is_paused() {
             let journal = journal_for(Path::new(&target.cwd));
             crate::tick_ledger::emit_tick(
@@ -3381,10 +3387,13 @@ mod tests {
         p.display().to_string()
     }
 
-    /// Write a fleet incident record into a sandbox agents home.
-    fn write_incident(home: &std::path::Path, state: &str, generation: u64) {
+    /// Write the targeted territory record into a sandbox agents home.
+    fn write_territory_incident(home: &std::path::Path, state: &str, generation: u64) {
+        let dir = home.join("fleet-stop.d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stopped = state == "stopped";
         std::fs::write(
-            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(home)),
+            dir.join("territory-x-epic.json"),
             serde_json::to_string(&crate::fleet_incident::IncidentRecord {
                 version: crate::fleet_incident::STATE_VERSION,
                 state: state.into(),
@@ -3392,15 +3401,23 @@ mod tests {
                 changed_at: "2026-09-13T01:07:00Z".into(),
                 changed_by: "op".into(),
                 reason: "load 385".into(),
-                holds: Vec::new(),
+                holds: if stopped {
+                    vec!["spawns".into(), "loops".into()]
+                } else {
+                    Vec::new()
+                },
                 source: Some("file".into()),
+                target: Some("territory:x-epic".into()),
+                expires_at: stopped.then(|| "2099-12-31T00:00:00Z".into()),
+                origin: None,
+                mail: None,
             })
             .unwrap(),
         )
         .unwrap();
     }
 
-    /// regression: with a positive stopped record, one supervisor and
+    /// regression: with a positive targeted stop, one supervisor and
     /// one mission cycle record ZERO dispatch-only poll children
     /// (`backlog advance`, `backlog undispatched`) while the tick rows name
     /// fleet_stop with the generation. The pause check sits BEFORE the loop's
@@ -3424,7 +3441,7 @@ mod tests {
         let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("FNO_AGENTS_HOME", &agents);
-        write_incident(&agents, "stopped", 5);
+        write_territory_incident(&agents, "stopped", 5);
 
         let target = ResolvedTarget {
             project: "fno".into(),
@@ -3432,7 +3449,7 @@ mod tests {
             interval_seconds: 1,
             failure_limit: 3,
             mission: Some("x-epic".into()),
-            scope: String::new(),
+            scope: "x-epic".into(),
             rung: 0,
             kingless: true,
             members: vec!["x-epic".into()],
@@ -3498,7 +3515,7 @@ mod tests {
         // base's dropout semantics - with still-zero dispatch children. The
         // supervisor's status-sinks ticks in the record are the positive
         // control that the stub was live the whole time.
-        write_incident(&agents, "clear", 6);
+        write_territory_incident(&agents, "clear", 6);
         tokio::time::sleep(Duration::from_millis(2500)).await;
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(
@@ -3557,6 +3574,10 @@ mod tests {
             reason: "wedged lock".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         };
         std::fs::write(
             crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home)),

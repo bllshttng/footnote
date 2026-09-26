@@ -2186,12 +2186,15 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return crate::resume_gate::gone_cwd_refusal(cwd, &name);
     }
 
-    // A parked claude row (`claude agents`: blocked/done/stopped/failed) takes
-    // the message directly - the harness state decides, not the transcript
-    // truth, so this serves the live arm and the dead arm alike. It runs its
-    // own gate before a revive, so it must precede the block below and never
-    // reserve twice; a row it does not serve returns None and meets that
-    // block as today.
+    // No resume route may wake a subject while its loop door is held.
+    if let Some(code) =
+        crate::resume_gate::pause_refusal_for_entry(home, &name, session_id, entry, cwd)
+    {
+        return code;
+    }
+
+    // Parked Claude rows use harness state for live and dead arms. That
+    // route reserves before reviving; other rows continue to the gate below.
     if matches!(&route, ResumeRoute::ClientResume) {
         if let Some(code) = crate::resume_wake::parked_claude_route(
             harness,
@@ -2206,12 +2209,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // A resume brings the session back from down. If its node (or a PR it
-    // binds) took a different live or suspect holder while it was down,
-    // relaunching would put a second writer on that branch - refuse before
-    // any launch. The live-attach arm is skipped (a live session is not
-    // coming back from down, so there is no collision to guard);
-    // `--print-command` returned earlier and stays pure inspection.
+    // A down-route launch also refuses if another holder took its node or PR;
+    // print-command and live-attach paths remain inspection/attach only.
     if !matches!(&route, ResumeRoute::ClientResume) || claim_uuid.is_some() {
         let gate_id = claim_uuid.as_deref().unwrap_or(session_id);
         if let Some(code) = crate::resume_gate::gate_and_reserve(home, &name, gate_id) {

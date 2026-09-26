@@ -3173,6 +3173,10 @@ mod tests {
             reason: "wedged lock".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 

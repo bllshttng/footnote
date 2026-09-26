@@ -76,6 +76,8 @@ truth. For the full subcommand map - which are human-facing vs
 machine-internal vs exploratory channel infra - see
 [references/fno-agents-subcommands.md](references/fno-agents-subcommands.md).
 
+Machine and targeted loop halts use the existing `fno agents incident stop|clear` commands; matching sessions refuse watchdog resumes and PR nudges until clear or expiry.
+
 Route on the verb, then run the matching section below.
 
 ---

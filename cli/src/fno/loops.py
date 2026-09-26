@@ -164,7 +164,7 @@ def cmd_pause_all(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def cmd_resume_all(ctx: typer.Context) -> None:
-    """Remove the pause-all sentinel and lift the held mail."""
+    """Remove the pause-all sentinel."""
     raise typer.Exit(code=_run_loops_passthrough("resume-all", ctx.args))
 
 

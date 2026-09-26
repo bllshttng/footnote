@@ -1431,6 +1431,10 @@ mod tests {
             reason: "repro".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         };
         std::fs::write(&incident_path, serde_json::to_string(&record).unwrap()).unwrap();
 

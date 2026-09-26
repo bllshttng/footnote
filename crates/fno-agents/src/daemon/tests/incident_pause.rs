@@ -123,6 +123,10 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             reason: "load 385".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         })
         .unwrap(),
     )
@@ -194,6 +198,10 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             reason: "resolved".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         })
         .unwrap(),
     )
@@ -267,6 +275,10 @@ fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             reason: "load 385".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         })
         .unwrap(),
     )
@@ -307,6 +319,10 @@ fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
             reason: "resolved".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
         })
         .unwrap(),
     )
