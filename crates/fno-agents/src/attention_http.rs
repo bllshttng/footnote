@@ -383,10 +383,6 @@ fn save(path: &Path, state: &Deliveries) {
 
 /// The post URL: the webhook endpoint, or the ntfy server root (the topic
 /// rides the JSON body).
-fn sink_url(sink: Option<&Sink>) -> String {
-    sink.map(|s| s.url.clone()).unwrap_or_default()
-}
-
 fn sink_headers(sink: Option<&Sink>) -> Option<Vec<(String, String)>> {
     sink.map(|s| {
         vec![
