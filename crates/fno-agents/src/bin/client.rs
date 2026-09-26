@@ -106,7 +106,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "review-start",
     "rm",
     "scratch",
-    "session-report",
     "session-start-bytes",
     "spawn",
     "spawn-gate",
@@ -849,12 +848,6 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "plugin-install" {
         return fno_agents::plugin_install::run_plugin_install(&args[1..]);
     }
-    // `session-report`: the thin SessionStart transport. Raw hook payload on
-    // stdin; never lazy-starts a daemon; spools when it is down.
-    if verb == "session-report" {
-        return fno_agents::session_report::run_session_report(&args[1..], &AgentsHome::from_env())
-            .await;
-    }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
     }
@@ -958,8 +951,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
     // Inside-leg state push (E3.2): a per-turn hook reports {working|blocked|done}.
     // `report`: sends to an ALREADY-RUNNING daemon; must never lazy-start one.
+    // `report --kind session` rides the SAME action (the action list is
+    // shrink-only): the SessionStart transport with the raw payload on stdin.
     if verb == "report" {
-        return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
+        return fno_agents::session_report::run_report_dispatch(
+            &args[1..],
+            &AgentsHome::from_env(),
+        )
+        .await;
     }
     // `wait`: poll registry.json directly for a state (no daemon RPC).
     if verb == "wait" {

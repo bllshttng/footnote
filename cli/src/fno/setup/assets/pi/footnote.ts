@@ -192,6 +192,20 @@ export default function (pi: {
       const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.() || ""
       const sessionKey = process.env.FNO_AGENT_SESSION_ID || sid || `pi:${process.cwd()}`
       const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+      // Session-start report: the registry holds this session's id (mail and
+      // liveness stop guessing). Fire-and-forget, best-effort; a spawned
+      // worker passes FNO_AGENT_SELF so the daemon can match its row.
+      if (sid) {
+        const reportArgs = [
+          "report", "--kind", "session",
+          "--harness", "pi",
+          "--session-id", sid,
+        ]
+        if (process.env.FNO_AGENT_SELF) {
+          reportArgs.push("--agent-self", process.env.FNO_AGENT_SELF)
+        }
+        runBounded(bin, reportArgs, 2000).catch(() => {})
+      }
       const out = await runBounded(
         bin,
         ["announce", "read", "--session-id", sessionKey, "--harness", "pi", "--boundary", "prompt"],

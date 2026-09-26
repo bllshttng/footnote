@@ -3,7 +3,7 @@
 //!
 //! One thin per-harness hook (`hooks/register-session-start.sh` and its
 //! per-harness siblings) posts its RAW SessionStart payload to the daemon via
-//! `fno-agents session-report`; this module is both ends. The daemon side
+//! `fno-agents report --kind session`; this module is both ends. The daemon side
 //! stamps the matching registry row additively - an empty primary session id
 //! fills (and promotes `spawning` to `live`), a second different id fills the
 //! ONE optional related slot, a third distinct id refuses the write - and
@@ -361,10 +361,27 @@ fn write_spool(path: &Path, lines: &[String]) {
     }
 }
 
+/// Exclusive lock over one spool read-modify-write. Concurrent reporters
+/// (a fleet starting while the daemon is down, exactly when the spool is
+/// needed) would otherwise each rename a private replacement over the
+/// others' frames. Same sidecar-flock pattern as the registry.
+fn spool_lock(path: &Path) -> Option<std::fs::File> {
+    let lock_path = path.with_extension("lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .ok()?;
+    file.lock().ok().map(|_| file)
+}
+
 /// Best-effort: a spool failure loses the frame rather than blocking the hook.
 fn spool_request(home: &AgentsHome, req: &Request) {
     let line = json!({"method": req.method, "params": req.params}).to_string();
     let path = home.agent_hooks_spool();
+    let _guard = spool_lock(&path);
     let mut lines = read_spool(&path);
     lines.push(line);
     if lines.len() > SPOOL_CAP_FRAMES {
@@ -400,24 +417,76 @@ async fn drain_attempt(home: &AgentsHome, line: &str) -> Drain {
     }
 }
 
-/// Replay the spool after a successful send. One frame at a time, rewriting
-/// the file after each, so a kill mid-drain loses nothing that was not sent.
-async fn drain_spool(home: &AgentsHome) {
-    let path = home.agent_hooks_spool();
-    let lines = read_spool(&path);
+/// Pop the oldest frame under the lock; the caller sends it off-lock. A kill
+/// between the pop and the send loses that one frame - the same bounded
+/// window the rewrite-after-send shape had.
+fn pop_spool(path: &Path) -> Option<String> {
+    let _guard = spool_lock(path)?;
+    let mut lines = read_spool(path);
     if lines.is_empty() {
-        return;
+        return None;
     }
-    for (i, line) in lines.iter().enumerate() {
-        if let Drain::Keep = drain_attempt(home, line).await {
-            write_spool(&path, &lines[i..]);
-            return;
-        }
-        write_spool(&path, &lines[i + 1..]);
+    let line = lines.remove(0);
+    write_spool(path, &lines);
+    Some(line)
+}
+
+fn unpop_spool(path: &Path, line: &str) {
+    if let Some(_guard) = spool_lock(path) {
+        let mut lines = read_spool(path);
+        lines.insert(0, line.to_string());
+        write_spool(path, &lines);
     }
 }
 
-/// `fno-agents session-report --harness <name> [--agent-self <row>]
+/// Replay the spool, FIFO. Called BEFORE the caller's own report is sent: a
+/// spooled startup frame must land before a newer resume report, or the
+/// replay would regress the row's transcript/source stamps to stale values.
+async fn drain_spool(home: &AgentsHome) {
+    let path = home.agent_hooks_spool();
+    loop {
+        let Some(line) = pop_spool(&path) else { return };
+        if let Drain::Keep = drain_attempt(home, &line).await {
+            unpop_spool(&path, &line);
+            return;
+        }
+    }
+}
+
+/// The `report` verb's dispatcher. `--kind session` selects the SessionStart
+/// transport; every other invocation is the inside-leg report, unchanged. The
+/// SessionStart form rides the EXISTING action because the client action list
+/// is shrink-only: no new verb, only an argument on `report`.
+pub async fn run_report_dispatch(rest: &[String], home: &AgentsHome) -> i32 {
+    let args = crate::client_verbs::expand_eq(rest);
+    let mut is_session = false;
+    let mut stripped: Vec<String> = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--kind" {
+            match it.next() {
+                Some(v) if v == "session" => {
+                    is_session = true;
+                    continue;
+                }
+                other => {
+                    stripped.push(a);
+                    if let Some(v) = other {
+                        stripped.push(v);
+                    }
+                    continue;
+                }
+            }
+        }
+        stripped.push(a);
+    }
+    if !is_session {
+        return crate::client_verbs::run_report(rest, home).await;
+    }
+    run_session_report(&stripped, home).await
+}
+
+/// `fno-agents report --kind session --harness <name> [--agent-self <row>]
 /// [--session-id <id>] [--wait-row]` - the thin SessionStart transport. The
 /// raw hook payload rides on stdin. Never lazy-starts a daemon; spools to a
 /// capped file when it is down. Always exits 0 on a delivered-or-spooled
@@ -435,6 +504,11 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
         params["payload"] = payload;
     }
     let req = Request::new(1, "agent.session_report", params);
+    // FIFO: spooled frames go first, so a replayed startup report can never
+    // regress the row behind the newer report this invocation carries. The
+    // drain no-ops on an empty spool and keeps its frames when the daemon is
+    // down; the send below then spools alongside them.
+    drain_spool(home).await;
     let sent = match tokio::time::timeout(SEND_TIMEOUT, crate::client::call_if_running(home, &req))
         .await
     {
@@ -447,9 +521,7 @@ pub async fn run_session_report(rest: &[String], home: &AgentsHome) -> i32 {
             return 1;
         }
     };
-    if sent {
-        drain_spool(home).await;
-    } else {
+    if !sent {
         spool_request(home, &req);
     }
     0

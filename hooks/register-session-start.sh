@@ -73,7 +73,9 @@ BIN="$(fno_agents_bin "$REPO_ROOT")"
 # dropped there, so this hook needs no "am I a grid pane?" gate).
 if [[ -n "${FNO_AGENT_SELF:-}" ]]; then
     [[ -z "$BIN" ]] && exit 0
-    ARGS=(session-report --harness "$HARNESS" --agent-self "$FNO_AGENT_SELF")
+    # `report --kind session`: the SessionStart transport rides the existing
+    # report action (the client action list is shrink-only).
+    ARGS=(report --kind session --harness "$HARNESS" --agent-self "$FNO_AGENT_SELF")
     [[ -n "$SESSION_ID" ]] && ARGS+=(--session-id "$SESSION_ID")
     # Pane substrate only: the spawner writes the row AFTER `mux pane run`
     # returns, so a fast-booting child reports before its row exists. The
