@@ -292,7 +292,7 @@ fn phase_rows(home: &crate::paths::AgentsHome) -> Result<Vec<PhaseRow>, String> 
         .map_err(|error| format!("{}: {}", path.display(), error.0))?;
     let mut phases = Vec::new();
     for row in rows {
-        for phase in ["think", "blueprint", "do", "review", "ship"] {
+        for phase in ["think", "blueprint", "execute", "review", "ship"] {
             if !crate::graph_store::is_open_phase_row(&row, phase) {
                 continue;
             }

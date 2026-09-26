@@ -78,7 +78,7 @@ def _wedged_node(**over) -> dict:
         "locked_at": None,
         "pr_number": None,
         "sessions": [{
-            "phase": "do",
+            "phase": "execute",
             "harness": "claude",
             "session_id": DEAD_SESSION,
             "started_at": "2026-09-05T06:11:05Z",
@@ -119,7 +119,7 @@ def _fresh_node() -> dict:
     """A do row started a minute ago: the idle arm cannot fire, so only the
     session's reachability decides."""
     return _wedged_node(sessions=[{
-        "phase": "do", "harness": "claude", "session_id": DEAD_SESSION,
+        "phase": "execute", "harness": "claude", "session_id": DEAD_SESSION,
         "started_at": _started_ago(60),
     }])
 
@@ -395,7 +395,7 @@ def test_ac3_hp_the_reachable_refusal_names_the_owners_self_close(
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code == 3
     assert (
-        f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
+        f"fno backlog session add {NODE_ID} --phase execute --ended-at" in _out(result)
     )
     assert "reap-open" not in _out(result)
 
@@ -496,7 +496,7 @@ def test_requeue_suspect_refusal_invents_no_clock(tmp_graph, claims_root, monkey
 
 def _idle_node() -> dict:
     return _wedged_node(sessions=[{
-        "phase": "do", "harness": "claude", "session_id": DEAD_SESSION,
+        "phase": "execute", "harness": "claude", "session_id": DEAD_SESSION,
         "started_at": _started_ago(30 * 3600),
     }])
 
@@ -541,8 +541,8 @@ def test_requeue_reachable_refusal_names_its_clock(tmp_graph, claims_root, monke
     _roster(monkeypatch, consulted=False)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code == 3, _out(result)
-    assert f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
-    assert "The do row stays: row idle 0h, inside the 24h bound" in _out(result)
+    assert f"fno backlog session add {NODE_ID} --phase execute --ended-at" in _out(result)
+    assert "The execute row stays: row idle 0h, inside the 24h bound" in _out(result)
 
 
 def test_requeue_refuses_an_idle_row_when_the_roster_is_unread(tmp_graph, claims_root, monkeypatch):

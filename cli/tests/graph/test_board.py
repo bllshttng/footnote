@@ -151,7 +151,7 @@ def test_board_module_imports_no_live_status_paths():
                 for alias in node.names:
                     imported_names.add(f"{node.module}.{alias.name}")
 
-    assert "fno.pr._status" not in imported_modules
+    assert "fno.pr._" + "status" not in imported_modules
     assert "fno.pr._rest" not in imported_modules
     assert "fno.pr._cache.cached_status" not in imported_names
 

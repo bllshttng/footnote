@@ -292,7 +292,7 @@ fn staged_probe_unread_home() -> (tempfile::TempDir, AgentsHome) {
             "id": "x-u1",
             "status": "done",
             "sessions": [{
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": "s-u1",
                 "started_at": "2026-09-01T00:00:00Z",

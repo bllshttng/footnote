@@ -87,7 +87,7 @@ def _sweep_stamp_carried_sessions(entries: list[dict]) -> list[str]:
         rows = e.get("sessions") if isinstance(e, dict) else None
         if not isinstance(rows, list):
             continue
-        do_rows = [r for r in rows if isinstance(r, dict) and r.get("phase") == "do"]
+        do_rows = [r for r in rows if isinstance(r, dict) and r.get("phase") == "execute"]
         for url in _urls(e) if do_rows else ():
             donors.setdefault(url, []).extend(do_rows)
 

@@ -402,7 +402,9 @@ fn new_reader_sites_must_join_the_table() {
                 *n == "fno do pr coverage-check <n> without --recompute (and the git-protection hook through it)"
             }),
             "_merge.py" => table_names.iter().any(|n| *n == "fno do pr merge <n>"),
-            "_status.py" => table_names.iter().any(|n| *n == "fno do pr status <n>"),
+            // _status.py was deleted by the pr-status port; its status read
+            // is the Rust composer's now (pr_status/reviews.rs), which this
+            // scan does not sweep.
             _ => false,
         };
         assert!(
@@ -412,20 +414,16 @@ fn new_reader_sites_must_join_the_table() {
     }
     assert!(
         reader_files.contains(&"_merge.py".to_string())
-            && reader_files.contains(&"_status.py".to_string())
             && reader_files.contains(&"_coverage_gate.py".to_string()),
         "a gate row stopped reading coverage"
     );
 
     // And the gates route through the recompute: both files name the shared
-    // helper, which is the only path to the verb. The status row passes
-    // `recompute=review_lane` (not a bare True): the producer spawn is gated
-    // on the same no-lane boundary merge reads, while the read itself still
-    // goes through this helper.
-    for (file, needle) in [
-        ("_merge.py", "review_coverage_for_gate"),
-        ("_status.py", "recompute=review_lane"),
-    ] {
+    // helper, which is the only path to the verb. The status row passed
+    // `recompute=review_lane` (not a bare True); that reader is the Rust
+    // composer's now (pr_status/reviews.rs), so only merge's Python row is
+    // pinned here.
+    for (file, needle) in [("_merge.py", "review_coverage_for_gate")] {
         let text = fs::read_to_string(pr_dir.join(file)).unwrap();
         assert!(
             text.contains(needle),
@@ -451,7 +449,9 @@ fn new_reader_sites_must_join_the_table() {
         finalize.contains("fno-gh-coverage") && finalize.contains("bot_verdict"),
         "finalize fallback stopped consuming the shared normalized evidence and predicate"
     );
-    for consumer in ["_status.py", "_merge.py"] {
+    // _status.py was deleted by the pr-status port; its reviewer-refused
+    // consumption is the Rust composer's now.
+    for consumer in ["_merge.py"] {
         let source = fs::read_to_string(pr_dir.join(consumer)).unwrap();
         assert!(
             source.contains("reviewer_refused"),

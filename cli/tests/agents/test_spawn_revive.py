@@ -34,6 +34,19 @@ DEAD_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 OTHER_UUID = "ffffffff-1111-2222-3333-444444444444"
 
 
+@pytest.fixture(autouse=True)
+def _admit_spawn_gate(monkeypatch):
+    """Hermetic spawn gate: this suite tests revival semantics, not admission.
+
+    The gate is a transport over the fno-agents binary, which a clean checkout
+    and the smoke-pytest shard leave unresolved, so every spawn here refused
+    exit 87 before reaching the revival paths under test. Sibling spawn suites
+    stub the same seam; the gate's own behavior is covered in
+    test_spawn_gate_agreement.py.
+    """
+    _admitting_gate(monkeypatch)
+
+
 @pytest.fixture
 def workdir_claude(tmp_path, monkeypatch):
     """Isolated fno home with the fake claude on PATH (emits short_id 7c5dcf5d).
@@ -215,14 +228,14 @@ def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> No
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-pinned", "-H", "claude", "--resume", DEAD_UUID,
-         "--node", "x-other", "--substrate", "bg", "/fix hi"],
+         "--node", "x-256d", "--substrate", "bg", "/fix hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
 
     row = next((e for e in load_registry() if e.name == "wake-pinned"), None)
     assert row is not None
-    assert row.node == "x-other"
+    assert row.node == "x-256d"
 
 
 def test_spawn_resume_fork_carries_provider_and_model_axes(
