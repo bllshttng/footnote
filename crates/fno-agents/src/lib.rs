@@ -304,6 +304,7 @@ pub mod resume_wake;
 pub mod retask;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod revive_proof;
 pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;

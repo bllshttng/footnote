@@ -328,6 +328,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if matches!(verb, "claude-birth-exec") {
+        // `revive-proof` rides this action as an argument (the fleet-incident
+        // gh-budget shape): law d-fe66560a allows no new client action, and
+        // the revival liveness gate belongs to the same claude birth/relaunch
+        // door. Direct dispatch, no daemon RPC - a fork that never started
+        // must refuse even when the daemon is the thing wedged.
+        if args.get(1).map(String::as_str) == Some("revive-proof") {
+            return fno_agents::revive_proof::run_revive_proof(&args[2..]);
+        }
         return fno_agents::claude_supervisor::run_birth_exec(&args[1..]);
     }
 
