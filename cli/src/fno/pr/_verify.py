@@ -436,36 +436,21 @@ def run_verify_merged(
 
 
 def _failing_required(pr_number: int, cwd: str) -> List[str] | None:
-    """Failing check names from the one Rust owner: the status-ci op with
-    the coverage projections dropped (`drop_coverage`), the SAME truth table
-    the merge verb uses - a second hand-built state table is how verify ends
-    up refusing what `fno do pr merge` merges (round 12). No isRequired
-    filter - `gh pr view` never emits that key (see the checks arm of
-    authorized_merge.rs), so with require_checks_pass every check counts.
-    Returns None when the read itself is unavailable: the caller refuses
-    rather than passing a precondition it could not read."""
-    rows = _status_ci_rows(
-        {
-            "op": "status-ci",
-            "cwd": cwd,
-            "pr": int(pr_number),
-            "drop_coverage": True,
-        }
-    )
-    if rows is None:
-        sys.stderr.write("verify-pr-merged: required checks unreadable (no fno-agents binary)\n")
-        return None
-    return [str(r.get("name") or "unnamed") for r in rows if r.get("bucket") == "fail"]
-
-
-def _status_ci_rows(payload: dict) -> list | None:
-    """The status-ci door transport, module-level so tests stub it."""
+    """Failing checks from the Rust owner's status-ci op (coverage rows
+    dropped): the SAME truth table the merge verb uses, never a second one.
+    None = unreadable read; the caller refuses rather than pass blind."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        return verb_call("authorized-merge", payload, timeout=120)
+        rows = verb_call(
+            "authorized-merge",
+            {"op": "status-ci", "cwd": cwd, "pr": int(pr_number), "drop_coverage": True},
+            timeout=120,
+        )
     except VerbUnavailable:
+        sys.stderr.write("verify-pr-merged: required checks unreadable\n")
         return None
+    return [str(r.get("name") or "unnamed") for r in rows if r.get("bucket") == "fail"]
 
 
 def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:

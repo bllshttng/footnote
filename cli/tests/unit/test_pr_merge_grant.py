@@ -129,8 +129,10 @@ def _stub_merge_world(monkeypatch, tmp_path):
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
     monkeypatch.setattr(
-        "fno.pr._merge._status_rerun",
-        lambda pr, repo, sha=None: {"recovered": False, "failed": []},
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"recovered": False, "failed": []}
+        if payload.get("op") == "status-rerun"
+        else (_ for _ in ()).throw(AssertionError(f"unexpected door call: {verb}")),
     )
 
 

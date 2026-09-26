@@ -277,10 +277,15 @@ def test_changes_requested_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
 def test_failing_required_check_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     # No isRequired key: gh's statusCheckRollup never emits it (whole-rollup
     # semantics; see the checks arm of authorized_merge.rs). The failing set
-    # rides the status-ci door now, so the rows are staged at that seam.
+    # rides the status-ci door now, so the rows are staged on the transport.
     sf = _state_file(tmp_path)
     rows = [{"name": "ci/build", "bucket": "fail"}]
-    monkeypatch.setattr(_verify, "_status_ci_rows", lambda payload: rows)
+
+    def fake_verb(verb, payload, **kw):
+        assert payload["op"] == "status-ci"
+        return rows
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN"}])
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)

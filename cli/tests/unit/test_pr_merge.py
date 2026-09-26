@@ -328,8 +328,10 @@ def enabled(monkeypatch, tmp_path):
     # Same hermeticity for the flake hold: no merge case here is about rerun
     # recovery, so the probe answers never-recovered (tests about it override).
     monkeypatch.setattr(
-        "fno.pr._merge._status_rerun",
-        lambda pr, repo, sha=None: {"recovered": False, "failed": []},
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"recovered": False, "failed": []}
+        if payload.get("op") == "status-rerun"
+        else _no_door(verb, payload),
     )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
@@ -337,6 +339,10 @@ def enabled(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_door(verb, payload):
+    raise AssertionError(f"unexpected door call: {verb} {payload.get('op')}")
+
+
 def _stub_pr_worktree_resolution(monkeypatch):
     """Keep merge tests hermetic; the resolver has its own real-worktree test."""
     monkeypatch.setattr(
@@ -509,8 +515,10 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
 
 def _flake_recovered(monkeypatch, failed=None):
     monkeypatch.setattr(
-        "fno.pr._merge._status_rerun",
-        lambda pr, repo, sha=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]}
+        if payload.get("op") == "status-rerun"
+        else _no_door(verb, payload),
     )
 
 

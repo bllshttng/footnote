@@ -1202,16 +1202,28 @@ def _unbake_constants_facade():
 
 @pytest.fixture(autouse=True)
 def _no_status_ci_door(monkeypatch):
-    """Hermetic default for the verify checks precondition (x-8ab0).
+    """Hermetic default for the status door transports (x-8ab0).
 
-    `_verify._failing_required` reads the failing set through the
-    `fno-agents` status-ci op. In the test environment that resolver finds
-    no dev binary or a stale installed one, so an unstubbbed call is a real
-    network read or a wrong-shape answer. The default answers an empty row
-    set (no required check failing, the same verdict as the default GREEN
-    rollup); tests pinning the precondition re-stub
-    `fno.pr._verify._status_ci_rows`.
+    `_verify._failing_required`, `_internal_gh._checks` and the merge flake
+    probe read their facts through `fno.rust_binary.verb_call` status ops.
+    In the test environment the resolver finds no dev binary or a stale
+    installed one, so an unstubbbed call is a real network read or a
+    wrong-shape answer. The default answers an empty row set for status-ci
+    (no required check failing) and the fail-open no-recovery fact for
+    status-rerun; any other op raises, like a missing binary. Tests pinning
+    real door answers re-stub `fno.rust_binary.verb_call`.
     """
-    from fno.pr import _verify
+    import fno.rust_binary as rust_binary
 
-    monkeypatch.setattr(_verify, "_status_ci_rows", lambda payload: [])
+    class _DoorUnavailable(Exception):
+        pass
+
+    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+        op = payload.get("op") if isinstance(payload, dict) else None
+        if op == "status-ci":
+            return []
+        if op == "status-rerun":
+            return {"recovered": False, "failed": []}
+        raise _DoorUnavailable(f"{verb} {op} unavailable in tests")
+
+    monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)

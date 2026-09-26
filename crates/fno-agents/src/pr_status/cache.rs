@@ -190,6 +190,8 @@ pub(crate) fn run_door(op: &str, payload: &Value) -> (i32, String, String) {
         "status-read" => status_read(payload),
         "status-wait" => super::wait::run_wait(payload),
         "status-logs" => super::logs::run_logs_door(payload),
+        "status-ci" => super::status_ci(payload),
+        "status-rerun" => status_rerun(payload),
         _ => (2, String::new(), format!("unknown status door op {op}\n")),
     }
 }
@@ -322,6 +324,38 @@ fn fresh_probe() -> CountingProbe<crate::pr_status_facts::RealGhProbe> {
         inner: crate::pr_status_facts::RealGhProbe,
         calls: AtomicUsize::new(0),
     }
+}
+
+/// The `status-rerun` door op: the rerun-recovery fact for a PR head,
+/// fail-open (`{"recovered": false, "failed": []}` on any read error). The
+/// merge gate asks with the covered head it already holds; no sha asks the
+/// light head read.
+fn status_rerun(payload: &Value) -> (i32, String, String) {
+    let cwd_str = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
+    let cwd = Path::new(cwd_str);
+    let no_recovery = || json!({"recovered": false, "failed": []}).to_string();
+    let Some(slug) = git_slug(cwd) else {
+        return (0, format!("{}\n", no_recovery()), String::new());
+    };
+    let probe = fresh_probe();
+    let sha = payload
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            read_head(&probe, cwd, &slug, pr).ok().and_then(|info| {
+                info.get("head_sha")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+    let Some(sha) = sha else {
+        return (0, format!("{}\n", no_recovery()), String::new());
+    };
+    let fact = super::seams::rerun_recovery(&probe, cwd, &slug, &sha, None);
+    (0, format!("{fact}\n"), String::new())
 }
 
 pub(crate) fn git_slug(cwd: &Path) -> Option<String> {

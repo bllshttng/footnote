@@ -2203,6 +2203,9 @@ pub(crate) fn preview_receipt_payload(payload: &Value) -> Value {
 
 fn read_payload(args: &[String]) -> Result<Value, String> {
     let text = match args.first() {
+        // An inline JSON payload is the thin-forwarder form: a CLI verb with
+        // no temp file. A path that names a payload file still works.
+        Some(path) if path.trim_start().starts_with('{') => path.clone(),
         Some(path) => std::fs::read_to_string(path)
             .map_err(|e| format!("authorized-merge: cannot read payload {path}: {e}\n"))?,
         None => {

@@ -97,21 +97,6 @@ def _metadata(
     return Result(0, json.dumps(payload) + "\n", "")
 
 
-def _status_ci_rows(cwd: str | None, number: int) -> list | None:
-    """The status-ci door transport, module-level so tests stub it. The
-    bucketed rows are the Rust reader's answer; None reads unavailable."""
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        return verb_call(
-            "authorized-merge",
-            {"op": "status-ci", "cwd": cwd or os.getcwd(), "pr": int(number)},
-            timeout=120,
-        )
-    except VerbUnavailable:
-        return None
-
-
 def _checks(
     args: Sequence[str], *, cwd: str | None, real_gh: str, runner: Callable
 ) -> Result:
@@ -119,9 +104,18 @@ def _checks(
     number, reason = _pr_number(args, cwd=cwd, runner=rest_runner)
     if number is None:
         return Result(1, "", reason)
-    rows = _status_ci_rows(cwd, number)
-    if rows is None:
-        return Result(1, "", "status-ci unavailable: the fno-agents binary was not found")
+    # The bucketed rows are the Rust reader's status-ci op; the rollup read
+    # and the classify live there now.
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        rows = verb_call(
+            "authorized-merge",
+            {"op": "status-ci", "cwd": cwd or os.getcwd(), "pr": int(number)},
+            timeout=120,
+        )
+    except VerbUnavailable as exc:
+        return Result(1, "", str(exc))
     return Result(0, json.dumps(rows) + "\n", "")
 
 

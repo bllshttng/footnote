@@ -142,34 +142,6 @@ def verify(
     raise typer.Exit(code=rc)
 
 
-def _run_status_door(payload: dict) -> None:
-    """Forward a PR-status verb to its Rust owner through the
-    authorized-merge door: payload on stdin, both streams attached, exit
-    propagated. The reads coalesce in the binary's status cache."""
-    import json
-    import subprocess
-
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo(
-            "fno do pr: the fno-agents binary was not found. It ships in the "
-            "`pip install fno` wheel and with the plugin; reinstall fno or "
-            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
-            err=True,
-        )
-        raise typer.Exit(code=127)
-    result = subprocess.run(
-        [str(binary), "authorized-merge"],
-        input=json.dumps(payload),
-        text=True,
-        check=False,
-    )
-    raise typer.Exit(code=propagate_returncode(result.returncode))
-
-
 @pr_app.command(
     "status",
     help=(
@@ -200,16 +172,10 @@ def status(
         ),
     ),
 ) -> None:
-    # The coalescing cache lives in the Rust owner: N sessions polling one PR
-    # must collapse to one network read per TTL or they trip the REST
-    # secondary limit (which counts request rate, not budget).
-    _run_status_door(
-        {
-            "op": "status-read",
-            "cwd": os.getcwd(),
-            "pr": pr_number,
-            "refresh": refresh,
-        }
+    # The coalescing cache lives in the Rust owner the payload names.
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-read", "cwd": os.getcwd(), "pr": pr_number, "refresh": refresh})],
     )
 
 
@@ -276,15 +242,9 @@ def wait(
     timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
 ) -> None:
-    _run_status_door(
-        {
-            "op": "status-wait",
-            "cwd": os.getcwd(),
-            "pr": pr_number,
-            "until": until,
-            "timeout": timeout,
-            "interval": interval,
-        }
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-wait", "cwd": os.getcwd(), "pr": pr_number, "until": until, "timeout": timeout, "interval": interval})],
     )
 
 
@@ -456,15 +416,9 @@ def logs(
             typer.echo(f"fno do pr logs: cannot read CI state: {reason}", err=True)
             raise typer.Exit(code=4)
         pr_number = resolved
-    _run_status_door(
-        {
-            "op": "status-logs",
-            "cwd": os.getcwd(),
-            "pr": pr_number,
-            "job": job,
-            "lines": lines,
-            "full": full,
-        }
+    _forward_to_binary(
+        "authorized-merge",
+        [json.dumps({"op": "status-logs", "cwd": os.getcwd(), "pr": pr_number, "job": job, "lines": lines, "full": full})],
     )
 
 

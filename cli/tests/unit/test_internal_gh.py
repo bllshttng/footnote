@@ -122,11 +122,12 @@ def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
         }
     ]
     seen: list[tuple] = []
-    monkeypatch.setattr(
-        _internal_gh,
-        "_status_ci_rows",
-        lambda cwd, number: (seen.append((cwd, number)), rows)[1],
-    )
+
+    def fake_verb(verb, payload, **kw):
+        seen.append((payload.get("cwd"), payload.get("pr")))
+        return rows
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb)
     result = _internal_gh.execute(
         "discretionary",
         ["pr", "checks", "930", "--json", "name,state,bucket,startedAt,workflow"],
