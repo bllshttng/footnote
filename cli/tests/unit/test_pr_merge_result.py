@@ -6,6 +6,7 @@ them; ``pr`` deletes the definition. Each branch is green alone, the merge
 tree is red with F821, and no git operation ever reports a conflict.
 """
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -77,6 +78,48 @@ def _bare_origin(repo: Path, tmp_path: Path) -> None:
     _git(repo, "remote", "add", "origin", str(bare))
 
 
+def _preamble_repo(tmp_path: Path) -> Path:
+    """Two branches off one base, each appending 20 bytes to a preamble file.
+
+    The ceiling sits 30 bytes over the base total, so either branch alone is
+    under it and main plus both is over: the collision the merge-time step
+    exists to refuse. No cli/ in the fixture, so the step ordering before the
+    no-cli early exit is proven too.
+    """
+    repo = tmp_path / "preamble"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "test")
+    (repo / "AGENTS.md").write_text("agents preamble\n")
+    (repo / "CLAUDE.md").write_text("claude preamble\n")
+    skill = repo / "skills" / "using-fno"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("body, no frontmatter\n")
+    root = Path(__file__).parents[3]
+    scripts = repo / "scripts" / "ci"
+    scripts.mkdir(parents=True)
+    for name in ("check-merge-result.sh", "check-python-static.sh", "check-preamble-budget.sh"):
+        (scripts / name).write_text((root / "scripts" / "ci" / name).read_text())
+    total = sum(len(p.read_bytes()) for p in (repo / "AGENTS.md", repo / "CLAUDE.md", skill / "SKILL.md"))
+    gate = scripts / "check-preamble-budget.sh"
+    gate.write_text(
+        re.sub(r"(?m)^DESCRIPTIONS_CEILING_BYTES=\d+$", "DESCRIPTIONS_CEILING_BYTES=0",
+               re.sub(r"(?m)^CEILING_BYTES=\d+$", f"CEILING_BYTES={total + 30}", gate.read_text()))
+    )
+    _commit(repo, "base: preamble corpus and gate scripts")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "a")
+    (repo / "AGENTS.md").write_text("agents preamble\n" + "a" * 20 + "\n")
+    _commit(repo, "a: 20 bytes on AGENTS.md")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-edit", "a")
+    _git(repo, "checkout", "-q", "-b", "b", base)
+    (repo / "CLAUDE.md").write_text("claude preamble\n" + "b" * 20 + "\n")
+    _commit(repo, "b: 20 bytes on CLAUDE.md")
+    return repo
+
+
 def test_both_parents_green_and_merge_red(tmp_path: Path) -> None:
     repo = _specimen_repo(tmp_path)
     for branch in ("main", "pr"):
@@ -87,6 +130,26 @@ def test_both_parents_green_and_merge_red(tmp_path: Path) -> None:
     assert "F821" in proc.stdout
     assert "CONST" in proc.stdout
     assert "cli/src/pkg/mod.py" in proc.stdout
+
+
+def test_preamble_budget_runs_on_main_plus_the_pr(tmp_path: Path) -> None:
+    repo = _preamble_repo(tmp_path)
+    for branch in ("a", "b"):
+        proc = _run_script(repo, "main~1", branch)
+        assert proc.returncode == 0, f"{branch} alone is under the ceiling: {proc.stdout}{proc.stderr}"
+        assert "preamble:" in proc.stdout
+    proc = _run_script(repo, "main", "b")
+    assert proc.returncode == _merge_result.REFUSED_RED
+    assert "preamble" in proc.stdout
+    assert "-byte ceiling" in proc.stdout
+
+
+def test_merge_tree_without_the_preamble_script_skips_the_step(tmp_path: Path) -> None:
+    repo = _specimen_repo(tmp_path)
+    proc = _run_script(repo, "main", "pr")
+    assert proc.returncode == _merge_result.REFUSED_RED
+    assert "F821" in proc.stdout
+    assert "preamble" not in proc.stdout
 
 
 def test_head_already_contains_base_skips_the_script(tmp_path: Path, monkeypatch) -> None:
