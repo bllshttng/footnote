@@ -76,13 +76,23 @@ echo "== baseline mode holds the exact finding set and ratchets downward =="
 FIXTURE_BASELINE="$TMP/fixture-baseline.txt"
 cat > "$FIXTURE_BASELINE" <<'EOF'
 # Human-readable fixture baseline.
-cli/src/fno/company/contracts.py:12: L1 core -> L2 roles / from fno.roles.models import ApprovalFloor
+cli/src/fno/company/contracts.py: L1 core -> L2 roles / from fno.roles.models import ApprovalFloor
 layer cycle: L1 core -> L2 roles -> L1 core
 EOF
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "unchanged baseline exits zero" || fail "baseline failed: $out"
 grep -q <<<"$out" 'baseline holds: 1 prohibited dependency and 1 cycle' \
     && ok "baseline pass names retained debt" || fail "retained debt hidden: $out"
+
+# A line MOVE above the import must not churn the baseline: the key drops the
+# line column, so the row survives the shift with no regeneration.
+{
+    for _ in {1..12}; do echo '# padding'; done
+    echo 'from fno.roles.models import ApprovalFloor'
+} > "$VIOLATION/cli/src/fno/company/contracts.py"
+out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "line move above the import keeps the baseline green" \
+    || fail "line-key churn: a comment insertion forced a regeneration: $out"
 
 printf '\nfrom fno.agents.events import emit\n' >> "$VIOLATION/cli/src/fno/company/contracts.py"
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
