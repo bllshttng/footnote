@@ -59,7 +59,7 @@ Live trials are an authorized, budgeted activity. This page describes the protoc
 1. The operator grants the trial: scope, budget in dollars, and the exact scenarios allowed to run with a paid worker lane.
 2. Run the live-trial cohorts only: `fno doctor evals run --task product-delivery-journey --cohort operator-effort-per-outcome --repeat 2 --provider <provider> --lane <resolved lane>`
 3. Keep the receipts: every row lands in the eval history with its lane fingerprint, duration and observed spend sources. A substituted lane is visible in the report.
-4. Record the operator active minutes from the demonstration protocol in the manifest `measurements` block, with unit and source, and commit the change.
+4. Record the operator active minutes from the demonstration protocol in the manifest `measurements` block. State the unit and source. Commit the change.
 5. Claims grow only as far as the receipts reach: a measured Footnote number, or an imported observation with provenance. Nothing else.
 
 ## What is deliberately absent
