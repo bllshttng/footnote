@@ -45,6 +45,7 @@
 // the macro expansion since `spawned_by_session` joined the contract.
 
 pub mod acceptance_evidence;
+pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
 mod agent_lock;
@@ -69,6 +70,7 @@ pub mod bash_census;
 #[path = "birth_guard_tests.rs"]
 mod birth_guard_tests;
 pub mod blueprint_judge;
+mod boot_revival;
 mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;
@@ -169,6 +171,7 @@ mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
+pub mod grok_ask;
 pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;

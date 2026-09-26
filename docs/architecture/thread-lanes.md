@@ -94,7 +94,7 @@ A spawn never refuses a flag because of the substrate. The carrier facts live in
 |---|---|---|---|---|---|
 | `--effort` | `turn/start.effort` | argv | argv where `carries` names it | no token | argv |
 | `--add-dir` | `state_dirs`, which becomes `turn/start.sandboxPolicy.writableRoots` | argv | argv where `carries` names it, else pane | pane | argv |
-| `--permission-mode` | `thread/start.sandbox` through `resolve_thread_posture` | argv | argv where `carries` names it, else pane | pane | claude only |
+| `--permission-mode` | `thread/start.sandbox` through `resolve_thread_posture` | argv | argv where `carries` names it, else pane | pane | claude, grok |
 | `--role` | pane (a route needs env the shared daemon cannot see) | carried | pane | pane | claude only |
 | `--agent`, `--tools`, `--deny-tools` | pane, which refuses (codex has no spelling) | argv | pane | pane | claude only |
 | `-- <tokens>` | `-c`/`--config key=value` to `thread/start.config`, `--add-dir dir` to `state_dirs`, any other token to pane | appended to the argv | appended to the keeper launch argv | pane | appended to the one-shot argv |

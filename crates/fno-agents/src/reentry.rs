@@ -34,6 +34,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::claude_ask::JobListing;
 use crate::state::{load_registry, MuxRef, Registry, RegistryEntry};
 
 /// Exit code for a refused re-entry: the evidence is named on stderr, no argv
@@ -43,11 +44,14 @@ pub const REENTRY_REFUSED_EXIT: i32 = 3;
 /// The transitions this resolver serves. One vocabulary so a plan's consumer
 /// can tell an attach (re-enter a live session) from a resume (relaunch a
 /// dead one) from a recover (operator-selected id) without re-deriving it.
+/// A revive is the mux tap: it attaches a running job and relaunches any
+/// other one first, then attaches, in one argv.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReentryTransition {
     Attach,
     Resume,
     Recover,
+    Revive,
 }
 
 impl ReentryTransition {
@@ -56,6 +60,7 @@ impl ReentryTransition {
             ReentryTransition::Attach => "attach",
             ReentryTransition::Resume => "resume",
             ReentryTransition::Recover => "recover",
+            ReentryTransition::Revive => "revive",
         }
     }
 
@@ -87,7 +92,7 @@ impl ReentryTransition {
 pub struct ReentryPlan {
     pub resolved: bool,
     pub transition: String,
-    /// "attach" | "respawn" | "resume" | "bg-resume". The transition is the
+    /// "attach" | "respawn" | "bg-resume". The transition is the
     /// caller's INTENT; this is what the plan actually does, and a consumer
     /// decides how to run it from here.
     pub mechanism: String,
@@ -430,17 +435,47 @@ pub fn resolve_reentry_with(
     } else {
         derived_short_id(&session_id)
     };
-    if short_id.is_empty() && transition == ReentryTransition::Attach {
-        return Err(format!(
-            "row {name:?} carries no transport key (short_id) and the session id derives none; claude attach has no target"
-        ));
-    }
-
     // Route evidence: a recorded path must still hold a route.
     if let Some(path) = entry.route_settings_path.as_deref() {
         if !path.is_empty() {
             validate_route_settings(path)?;
         }
+    }
+
+    // One binding read serves both the listing root and the config dir.
+    let binding = entry
+        .launch_account
+        .as_deref()
+        .filter(|id| *id != "default")
+        .map(account_binding);
+    // A revive of a running job IS an attach, so it takes the attach rules
+    // below; any other job relaunches first and takes the launch rules.
+    let listing = if transition == ReentryTransition::Attach || short_id.is_empty() {
+        JobListing::Unread
+    } else {
+        let root = binding.clone().and_then(|b| b.ok().flatten());
+        claude_home.listed_job(&short_id, root.as_deref().map(Path::new))
+    };
+    // Without the listing a live session cannot be told from a dead one, and
+    // a bg resume of a live one starts a copy the pane never stops.
+    if transition == ReentryTransition::Revive
+        && listing == JobListing::Unread
+        && !short_id.is_empty()
+    {
+        return Err(format!(
+            "row {name:?}: `claude agents --json --all` could not be read, so job {short_id} \
+             cannot be told live or dead; tap again once it answers"
+        ));
+    }
+    let transition = if transition == ReentryTransition::Revive && listing.is_running() {
+        ReentryTransition::Attach
+    } else {
+        transition
+    };
+    if short_id.is_empty() && transition == ReentryTransition::Attach {
+        return Err(format!(
+            "row {name:?} carries no transport key (short_id) and the session id derives none; claude attach has no target"
+        ));
     }
 
     // The account axis. Routed or non-Anthropic rows refuse on an unknown
@@ -462,7 +497,7 @@ pub fn resolve_reentry_with(
             ))
         }
         None | Some("default") => None,
-        Some(id) => match account_binding(id) {
+        Some(id) => match binding.unwrap_or_else(|| account_binding(id)) {
             // An account that resolves to NO config dir is an api-key lane:
             // its credential lives in env the secret-free binding never
             // carries, so a plan built here would launch WITHOUT the account's
@@ -525,28 +560,20 @@ pub fn resolve_reentry_with(
             argv.push("attach".into());
             argv.push(short_id.clone());
         }
-        ReentryTransition::Resume | ReentryTransition::Recover => {
-            // A mux row is a foreground session and always resumes on its
-            // pane. Background rows use `claude respawn` when their saved job
-            // state remains; otherwise `claude --bg --resume` restores the
-            // same id (measured on 2.1.272; a live session answers with a copy
-            // notice the launcher must refuse).
+        ReentryTransition::Resume | ReentryTransition::Recover | ReentryTransition::Revive => {
+            // A job `claude agents --json --all` lists restarts under
+            // `claude respawn`, running or stopped. An unlisted one, or an
+            // unreadable listing, comes back under its own id with
+            // `claude --bg --resume` (a live session answers with a copy
+            // notice the launcher refuses). A pane row takes the same arms:
+            // a revival never opens a foreground `claude --resume`.
             if short_id.is_empty() {
                 return Err(format!(
                     "row {name:?} derives no claude jobId from session {session_id}; \
                      no transport key for respawn or bg-resume"
                 ));
             }
-            if entry.mux.is_some() {
-                mechanism = "resume".to_string();
-                argv.push("claude".into());
-                argv.push("--resume".into());
-                argv.push(session_id.clone());
-            } else if claude_home
-                .jobs_dir_for(&short_id)
-                .join("state.json")
-                .is_file()
-            {
+            if matches!(listing, JobListing::Listed(_)) {
                 mechanism = "respawn".to_string();
                 argv.push("claude".into());
                 argv.push("respawn".into());
@@ -588,7 +615,7 @@ pub fn resolve_reentry_with(
     // attended resume. The explicit-token guard keeps a `--model`/`--effort`
     // an earlier arm added first (the pane-to-thread transition on this same
     // arm plans to carry the live writer's own axes).
-    if mechanism == "resume" || mechanism == "bg-resume" {
+    if mechanism == "bg-resume" {
         let projects_base = claude_config_dir
             .as_deref()
             .map(|d| Path::new(d).join("projects"))
@@ -630,6 +657,10 @@ pub fn resolve_reentry_with(
         }
     }
 
+    if transition == ReentryTransition::Revive {
+        argv = relaunch_then_attach(argv, &short_id);
+    }
+
     Ok(ReentryPlan {
         resolved: true,
         transition: transition.as_str().to_string(),
@@ -648,6 +679,20 @@ pub fn resolve_reentry_with(
         argv,
         env,
     })
+}
+
+/// One argv that runs the relaunch, then becomes `claude attach <short>`:
+/// the revive's pane shows the session it just brought back. The ids ride as
+/// positional arguments, never spliced into the script text.
+fn relaunch_then_attach(relaunch: Vec<String>, short_id: &str) -> Vec<String> {
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        r#""$@" && exec claude attach "$0""#.to_string(),
+        short_id.to_string(),
+    ];
+    argv.extend(relaunch);
+    argv
 }
 
 /// The model axes a reap receipt recorded, for a revival the row itself
@@ -737,9 +782,10 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
                 Some("attach") => transition = ReentryTransition::Attach,
                 Some("resume") => transition = ReentryTransition::Resume,
                 Some("recover") => transition = ReentryTransition::Recover,
+                Some("revive") => transition = ReentryTransition::Revive,
                 other => {
                     eprintln!(
-                        "reentry-plan: unknown --transition {other:?} (attach|resume|recover)"
+                        "reentry-plan: unknown --transition {other:?} (attach|resume|recover|revive)"
                     );
                     return 2;
                 }
@@ -790,26 +836,21 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
 mod tests {
     use super::*;
     use crate::claude_ask::ClaudeHome;
+    use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
     use crate::state::Registry;
 
     const SECRET: &str = "zai-secret-token";
 
-    /// A ClaudeHome over a throwaway home dir with `jobs/<short>/state.json`
-    /// staged: the one fact the respawn arm probes. Tests that expect a
-    /// respawn plan stage the id they resume; an empty home is the
-    /// job-state-gone case.
+    /// A claude home whose `claude agents --json --all` lists `shorts`: the
+    /// one fact the respawn arm reads. An empty listing is the unlisted case.
     fn staged_home(shorts: &[&str]) -> (tempfile::TempDir, ClaudeHome) {
         let dir = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(dir.path());
-        for short in shorts {
-            let jobs = home.jobs_dir_for(short);
-            std::fs::create_dir_all(&jobs).unwrap();
-            std::fs::write(
-                jobs.join("state.json"),
-                serde_json::json!({"state": "idle", "sessionId": "x"}).to_string(),
-            )
-            .unwrap();
-        }
+        let home = ClaudeHome::at(dir.path()).with_listing(ClaudeAgentsSnapshot::known(
+            shorts
+                .iter()
+                .map(|s| ClaudeAgentRow::new(s, Some("stopped")))
+                .collect(),
+        ));
         (dir, home)
     }
 
@@ -1591,7 +1632,7 @@ mod tests {
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
         e.launch_account = Some("default".into());
-        let (_tmp, home) = staged_home(&[]); // no jobs/<short>/state.json
+        let (_tmp, home) = staged_home(&[]); // not listed
         let plan = resolve_reentry_with(
             &reg(vec![e]),
             "gone",
@@ -1657,10 +1698,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reentry_plan_keeps_a_mux_row_on_its_pane_foreground_resume() {
-        // A mux row hosts a foreground session on its pane, so the restore
-        // route is the plain `claude --resume`, never a second bg job.
+    fn paned_plan(listed: &[&str]) -> ReentryPlan {
         let mut e = row("paned");
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
@@ -1669,8 +1707,8 @@ mod tests {
             session: "main".into(),
             pane_id: 0,
         });
-        let (_tmp, home) = staged_home(&[]);
-        let plan = resolve_reentry_with(
+        let (_tmp, home) = staged_home(listed);
+        resolve_reentry_with(
             &reg(vec![e]),
             "paned",
             ReentryTransition::Resume,
@@ -1679,12 +1717,104 @@ mod tests {
             &home,
             None,
         )
-        .unwrap();
-        assert_eq!(plan.mechanism, "resume");
+        .unwrap()
+    }
+
+    fn revive_with(listing: ClaudeAgentsSnapshot) -> Result<ReentryPlan, String> {
+        let mut e = row("tapped");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        let dir = tempfile::tempdir().unwrap();
+        let home = ClaudeHome::at(dir.path()).with_listing(listing);
+        resolve_reentry_with(
+            &reg(vec![e]),
+            "tapped",
+            ReentryTransition::Revive,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+    }
+
+    fn revive_plan(state: Option<&str>) -> ReentryPlan {
+        let rows = state
+            .map(|s| ClaudeAgentRow::new("9a1b2c3d", Some(s)))
+            .into_iter()
+            .collect();
+        revive_with(ClaudeAgentsSnapshot::known(rows)).unwrap()
+    }
+
+    #[test]
+    fn a_revive_refuses_when_the_listing_cannot_be_read() {
+        // A bg resume of a session that is in fact live starts a copy the
+        // pane never stops, so an unread listing refuses instead.
+        let err = revive_with(ClaudeAgentsSnapshot::unknown("timed out")).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn a_revive_attaches_a_running_job() {
+        for running in ["working", "blocked", "idle"] {
+            let plan = revive_plan(Some(running));
+            assert_eq!(plan.transition, "attach", "{running}");
+            assert_eq!(plan.argv, vec!["claude", "attach", "9a1b2c3d"], "{running}");
+        }
+    }
+
+    #[test]
+    fn a_revive_respawns_a_listed_dead_job_then_attaches() {
+        for dead in ["stopped", "failed", "done"] {
+            let plan = revive_plan(Some(dead));
+            assert_eq!(plan.transition, "revive", "{dead}");
+            assert_eq!(plan.mechanism, "respawn", "{dead}");
+            assert_eq!(
+                plan.argv,
+                vec![
+                    "sh",
+                    "-c",
+                    r#""$@" && exec claude attach "$0""#,
+                    "9a1b2c3d",
+                    "claude",
+                    "respawn",
+                    "9a1b2c3d",
+                ],
+                "{dead}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revive_bg_resumes_an_unlisted_job_then_attaches() {
+        let plan = revive_plan(None);
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(
+            &plan.argv[..7],
+            &[
+                "sh",
+                "-c",
+                r#""$@" && exec claude attach "$0""#,
+                "9a1b2c3d",
+                "claude",
+                "--bg",
+                "--resume",
+            ]
+        );
+        assert_eq!(plan.argv[7], "9a1b2c3d-eeee-ffff-0000-111122223333");
+    }
+
+    #[test]
+    fn reentry_plan_never_resumes_a_mux_row_as_a_foreground_pane() {
+        // A pane row the listing does not know comes back as a background
+        // job under its own id, never a foreground `claude --resume`.
+        let plan = paned_plan(&[]);
+        assert_eq!(plan.mechanism, "bg-resume");
         assert_eq!(
             plan.argv,
             vec![
                 "claude".to_string(),
+                "--bg".to_string(),
                 "--resume".to_string(),
                 "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
             ]
@@ -1692,35 +1822,17 @@ mod tests {
     }
 
     #[test]
-    fn reentry_plan_keeps_a_mux_row_on_resume_when_bg_job_state_remains() {
-        let mut e = row("paned");
-        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
-        e.short_id = "9a1b2c3d".into();
-        e.launch_account = Some("default".into());
-        e.mux = Some(MuxRef {
-            session: "main".into(),
-            pane_id: 0,
-        });
-        let (_tmp, home) = staged_home(&["9a1b2c3d"]);
-
-        let plan = resolve_reentry_with(
-            &reg(vec![e]),
-            "paned",
-            ReentryTransition::Resume,
-            None,
-            &binding_ok,
-            &home,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(plan.mechanism, "resume");
+    fn reentry_plan_respawns_a_listed_job_whatever_its_files_say() {
+        // `claude agents --json --all` lists the job, so it respawns. No
+        // file under jobs/ was staged: the listing alone decides.
+        let plan = paned_plan(&["9a1b2c3d"]);
+        assert_eq!(plan.mechanism, "respawn");
         assert_eq!(
             plan.argv,
             vec![
                 "claude".to_string(),
-                "--resume".to_string(),
-                "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+                "respawn".to_string(),
+                "9a1b2c3d".to_string(),
             ]
         );
     }
@@ -1730,7 +1842,7 @@ mod tests {
         // The recorded cwd is gone and no git worktree knows the session. The
         // transcript itself names the live directory; the plan must use it.
         let tmp = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(tmp.path());
+        let home = ClaudeHome::at(tmp.path()).with_listing(ClaudeAgentsSnapshot::known(vec![]));
         let live = tmp.path().join("live-dir");
         std::fs::create_dir_all(&live).unwrap();
         let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";

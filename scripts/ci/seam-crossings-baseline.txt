@@ -34,8 +34,6 @@ crossing	crates/fno-agents/src/loopcheck.rs	258	pub(crate) fn loopcheck_fno_bin(
 crossing	crates/fno-agents/src/loopcheck.rs	2074	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck/review_coverage_verb.rs	140	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/machine_mail.rs	158	let mut command = Command::new(crate::scrape::fno_bin());
-crossing	crates/fno-agents/src/pane_relaunch.rs	337	let mut command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/pane_relaunch.rs	559	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	596	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	687	let mut child = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/plans_dirs.rs	121	let output = std::process::Command::new("fno")
