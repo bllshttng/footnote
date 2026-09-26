@@ -18,11 +18,6 @@ Three rules keep it from guessing:
 - **Never live** -- a store row proves the session EXISTS, never that it is
   running, so the adopted row is ``orphaned``. Store membership must not
   resurrect a dead session into lane caps or live anycast (the lesson).
-- **Recently removed** -- a session ``fno agents rm`` removed inside the
-  grace window (``rm_tombstones.json`` beside the registry) is not adopted
-  back automatically: rm dropped the row, and re-adopting it under a fresh
-  short-id name blocked resume (x-976b). A tombstoned hit yields to a live
-  alternative; alone it refuses naming the rm.
 - **Project confinement** -- a store hit is adopted only into the CALLER's
   project. The probes scan machine-wide (a transcript store is global), and
   before this rule a bare handle from a foreign repo healed into scope and got
@@ -45,7 +40,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -56,11 +50,8 @@ from fno.harness_identity import claude_transport_short_id, session_handle_tier
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
-# `fno agents rm` stamps sessions it removes here (beside the registry, the
-# file the Rust daemon writes); a session removed within this window is not
-# re-adopted from its harness store. Without it, rm dropped the row and a
-# later resolve healed the same session straight back under a fresh
-# short-id name, and that adopted duplicate blocked resume (x-976b).
+# x-976b: `fno agents rm` stamps removed sessions in rm_tombstones.json beside
+# the registry; the healer refuses to re-adopt them inside this window.
 RM_TOMBSTONE_FILENAME = "rm_tombstones.json"
 RM_TOMBSTONE_GRACE_SECS = 86_400
 
@@ -499,6 +490,23 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     )
 
 
+def _recent_rm_tombstone(harness, session_id, registry_path) -> Optional[int]:
+    """The session's in-window rm stamp (epoch secs), else None."""
+    path = registry_path
+    if path is None:
+        from fno.paths import agents_registry_path
+        path = agents_registry_path()
+    try:
+        raw = json.loads((path.parent / RM_TOMBSTONE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    now = int(datetime.datetime.now().timestamp())
+    stamps = [r.get("removed_at") for r in raw if isinstance(r, dict)
+              and r.get("harness") == harness and r.get("session_id") == session_id]
+    return next((int(t) for t in stamps if isinstance(t, (int, float))
+                 and now - t <= RM_TOMBSTONE_GRACE_SECS), None)
+
+
 def adopt_store_hit(
     hit: StoreHit,
     registry_path: Optional[Path] = None,
@@ -524,6 +532,14 @@ def adopt_store_hit(
         register_existing_session,
     )
 
+    if _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
+        raise AgentResolutionError(
+            f"session {hit.session_id} ({hit.harness}) was removed by `fno agents rm` "
+            f"inside the grace window ({RM_TOMBSTONE_GRACE_SECS // 3600}h); it is not "
+            "re-adopted from the harness store. Re-spawn the work, or wait out the "
+            "window to adopt it deliberately.",
+            ambiguous=True,
+        )
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
@@ -587,53 +603,6 @@ def adopt_store_hit(
         )
 
 
-def _rm_tombstone_path(registry_path: Optional[Path]) -> Path:
-    path = registry_path
-    if path is None:
-        from fno.paths import agents_registry_path
-
-        path = agents_registry_path()
-    return path.parent / RM_TOMBSTONE_FILENAME
-
-
-def _recent_rm_tombstone(
-    harness: str, session_id: str, registry_path: Optional[Path]
-) -> Optional[int]:
-    """Epoch secs the session was rm'd, when that was inside the grace window.
-
-    ``None`` when the tombstone file is absent/unreadable, names a different
-    session, or every entry for this session is past the grace: adoption then
-    proceeds as before. An unreadable tombstone never blocks adoption -- the
-    file is rm's own output, so its absence is the common case.
-    """
-    try:
-        raw = json.loads(_rm_tombstone_path(registry_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(raw, list):
-        return None
-    now = int(time.time())
-    for row in raw:
-        if not isinstance(row, dict):
-            continue
-        if row.get("harness") != harness or row.get("session_id") != session_id:
-            continue
-        removed_at = row.get("removed_at")
-        if not isinstance(removed_at, (int, float)) or isinstance(removed_at, bool):
-            continue
-        if 0 <= now - removed_at <= RM_TOMBSTONE_GRACE_SECS:
-            return int(removed_at)
-    return None
-
-
-def _age_text(seconds: int) -> str:
-    if seconds < 3600:
-        return f"{max(seconds, 1)}s"
-    if seconds < 86_400:
-        return f"{seconds // 3600}h"
-    return f"{seconds // 86_400}d"
-
-
 def heal_from_harness_store(
     token: str, *, registry_path: Optional[Path] = None,
     scope_cwd: Optional[str] = None, cross_project: bool = False,
@@ -658,32 +627,6 @@ def heal_from_harness_store(
     from fno.agents.registry import AgentResolutionError
 
     hits = complete_store_hits(token)
-    if not hits:
-        return None
-    # rm's tombstone: a session the operator removed inside the grace window
-    # is not adopted back automatically (x-976b). A tombstoned hit yields to
-    # a live alternative; when it is the ONLY match the heal refuses naming
-    # the rm, so the operator sees the removal, not a bare not-found.
-    kept: list[StoreHit] = []
-    removed: list[tuple[StoreHit, int]] = []
-    for hit in hits:
-        removed_at = _recent_rm_tombstone(hit.harness, hit.session_id, registry_path)
-        if removed_at is None:
-            kept.append(hit)
-        else:
-            removed.append((hit, removed_at))
-    if not kept and removed:
-        hit, removed_at = removed[0]
-        age = _age_text(max(int(time.time()) - removed_at, 1))
-        raise AgentResolutionError(
-            f"token {token!r} matches {hit.session_id} ({hit.harness}), which "
-            f"`fno agents rm` removed {age} ago; sessions removed inside the "
-            f"grace window ({RM_TOMBSTONE_GRACE_SECS // 3600}h) are not "
-            "re-adopted from the harness store. Re-spawn the work, or wait "
-            "out the window to adopt it deliberately.",
-            ambiguous=True,
-        )
-    hits = kept
     if not hits:
         return None
     # Project confinement: adopt only a session in the caller's project, else

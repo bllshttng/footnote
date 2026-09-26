@@ -5619,31 +5619,7 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
-    // x-976b: the row is gone; stamp the tombstone so the harness-store
-    // healer does not adopt the same session back under a fresh short-id
-    // name (the adopted duplicate that then blocked resume). Any harness:
-    // the store fallback adopts claude transcripts by the same door. A
-    // failed write is an event, never a refused removal - the row is
-    // already gone and the operator was told it removed.
-    if let Some(session_id) = entry
-        .harness_session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty())
-    {
-        if let Err(tombstone_error) =
-            crate::rm_tombstone::record(&ctx.home, entry.harness_name(), session_id)
-        {
-            let _ = ctx.emitter.emit(
-                "rm_tombstone_failed",
-                &json!({
-                    "name": name,
-                    "session_id": session_id,
-                    "error": tombstone_error,
-                }),
-            );
-        }
-    }
+    rm_teardown::stamp_removed_session_tombstone(ctx, &entry, &name);
     // The row is gone from the registry: take its worktree, but only
     // as far as the reapable gate allows. The receipt rides the RESULT (the
     // operator's notice), deliberately NOT the event: agent_removed sits
