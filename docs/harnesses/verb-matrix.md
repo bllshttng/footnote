@@ -29,13 +29,13 @@ A cell is a projection, never a fresh measurement. The rule, in order:
 | law | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | mail | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | pr | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
-| reign | loop, spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent |
+| reign | loop, spawn | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | native |
 | review | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | setup | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | ship | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | ship-docs | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | speculate | subagent_dispatch | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
-| target | loop | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | absent |
+| target | loop | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | absent | native |
 | tdd | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | test-audit | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
 | think | - | native | native | `absent` | native | native | native | `unmeasured` | `unmeasured` | native | native |
@@ -45,4 +45,3 @@ A cell is a projection, never a fresh measurement. The rule, in order:
 The loop refusals the matrix quotes:
 
 - cursor-agent: refuses looping dispatch: loop_participation = "extension" with an empty loop_extension, so nothing invokes loop-check
-- grok: refuses looping dispatch: loop_participation = "extension" with an empty loop_extension, so nothing invokes loop-check
