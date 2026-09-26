@@ -180,7 +180,7 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             _ => return None,
         }
     }
-    (web || args.stop || args.status).then_some(args)
+    (web || args.stop || args.status || args.attention_api).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {

@@ -457,7 +457,13 @@ fn run_bounded(bin: PathBuf, args: &[&str], bound: Duration) -> Result<(bool, St
         .stdin(Stdio::null())
         .stdout(out_file)
         .stderr(Stdio::null());
-    let mut child = crate::process_admission::std_spawn(&mut command).map_err(|e| e.to_string())?;
+    let mut child = match crate::process_admission::std_spawn(&mut command) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&out_path);
+            return Err(e.to_string());
+        }
+    };
     let deadline = Instant::now() + bound;
     let status = loop {
         match child.try_wait() {

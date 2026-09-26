@@ -233,23 +233,30 @@ pub fn tick_sinks(
                 .push("sinks: budget spent, closes deferred".to_string());
             break;
         }
-        let (row, item_json) = {
-            let r = &state[&did];
-            (r.clone(), json!({}))
+        let Some(sink) = sinks.iter().find(|s| s.name == state[&did].sink) else {
+            // The sink left the config: its close can never post. Drop the
+            // row once instead of retrying it every beat forever.
+            let row = state.get(&did).cloned();
+            if let Some(row) = row {
+                state.entry(did).or_insert(row).status = "dropped".to_string();
+                dirty = true;
+                tick.dropped += 1;
+                tick.detail
+                    .push("sinks: a close row names a sink no longer configured".to_string());
+            }
+            continue;
         };
+        let row = state[&did].clone();
         let body = delivery_body(
-            sinks.iter().find(|s| s.name == row.sink),
+            Some(sink),
             &did,
             "item.closed",
             row.external_id.as_deref(),
-            None,
+            Some(&json!({"id": row.item_id})),
         );
-        let Some(headers) = sink_headers(sinks.iter().find(|s| s.name == row.sink)) else {
-            continue;
-        };
         let result = post.post(
-            &sink_url(sinks.iter().find(|s| s.name == row.sink)),
-            &headers,
+            &sink.url,
+            &sink_headers(Some(sink)).unwrap_or_default(),
             &body,
         );
         if result.delivered() {
@@ -274,7 +281,6 @@ pub fn tick_sinks(
                 row.sink, row.item_id
             ));
         }
-        let _ = item_json;
     }
 
     // item.opened: one delivery per (sink, item), deduped on the state.
@@ -457,27 +463,24 @@ fn delivery_body(
 /// (and a literal `view` button when a slot is free). A pin gets one
 /// `Done` action.
 pub fn ntfy_body(item: &AttentionItem, sink: &Sink, did: &str) -> String {
-    let base = sink
-        .answer_base_url
-        .as_deref()
-        .unwrap_or("http://127.0.0.1:8724");
+    // Without an answer_base_url there is no reachable door: the
+    // notification stays text-only, never buttons pointing at a loopback.
+    let Some(base) = sink.answer_base_url.as_deref() else {
+        return json!({
+            "topic": sink.topic.clone().unwrap_or_default(),
+            "title": item.title,
+            "message": if sink.full_body { full_message(item) } else { item.title.clone() },
+            "priority": if item.priority == "high" { "high" } else { "default" },
+        })
+        .to_string();
+    };
     let view_url = format!(
         "{}/v1/attention/items/{}",
         base.trim_end_matches('/'),
         item.id
     );
     let message = if sink.full_body {
-        let mut parts = vec![item.title.clone()];
-        if let Some(b) = &item.blocked_because {
-            parts.push(format!("Blocked because: {b}"));
-        }
-        if let Some(r) = &item.recommendation {
-            parts.push(format!("Recommended {}: {}", r.option, r.why));
-            if let Some(d) = &r.downside {
-                parts.push(format!("Downside: {d}"));
-            }
-        }
-        parts.join(" | ")
+        full_message(item)
     } else {
         item.title.clone()
     };
@@ -545,6 +548,21 @@ pub fn ntfy_body(item: &AttentionItem, sink: &Sink, did: &str) -> String {
     body.to_string()
 }
 
+/// The full-body message: title, blocked-because, recommendation, downside.
+fn full_message(item: &AttentionItem) -> String {
+    let mut parts = vec![item.title.clone()];
+    if let Some(b) = &item.blocked_because {
+        parts.push(format!("Blocked because: {b}"));
+    }
+    if let Some(r) = &item.recommendation {
+        parts.push(format!("Recommended {}: {}", r.option, r.why));
+        if let Some(d) = &r.downside {
+            parts.push(format!("Downside: {d}"));
+        }
+    }
+    parts.join(" | ")
+}
+
 /// The real post: one `curl` child, config on stdin, body from a 0600 temp
 /// file. Exit non-zero or a timeout reads as no status (transient).
 pub struct CurlPost;
@@ -580,7 +598,11 @@ impl HttpPost for CurlPost {
             .spawn()
             .and_then(|mut child| {
                 use std::io::Write;
-                let _ = child.stdin.take().unwrap().write_all(config.as_bytes());
+                // The piped stdin always takes; a None still closes cleanly
+                // instead of panicking inside the daemon beat.
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(config.as_bytes());
+                }
                 child.wait_with_output()
             });
         let _ = std::fs::remove_file(&body_path);
@@ -809,18 +831,6 @@ mod tests {
         assert!(loopback_reason("http://[::1]:8724/v1").is_some());
         assert!(loopback_reason("https://reach.tailnet-name.ts.net").is_none());
         assert!(loopback_reason("https://ntfy.sh").is_none());
-        // A config row with a loopback base refuses at load.
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.toml");
-        std::fs::write(
-            &cfg,
-            "[[attention.sinks]]\nname = \"phone\"\ntype = \"ntfy\"\nurl = \"https://ntfy.example\"\ntopic = \"t\"\ntoken_env = \"TOK\"\nanswer_base_url = \"http://127.0.0.1:8724\"\n",
-        )
-        .unwrap();
-        // load_sinks resolves config through config_lookup, which needs the
-        // env-rooted candidate chain; the pure rule above already pins the
-        // refusal, so this row only pins the loader's shape on a clean table.
-        let _ = cfg;
     }
 
     #[test]
