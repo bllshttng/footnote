@@ -263,7 +263,7 @@ fn ladder_run(argv: &[String], cwd: &str) -> (i32, String, String) {
 pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow], grace_secs: i64) {
     let now = crate::daemon::now_epoch_secs();
     for row in rows {
-        let held = nudge_pause_hold(home, row);
+        let held = merge_order_hold(home, &row.node);
         let state = load_state(home, &row.session_id);
         apply(
             home,
@@ -283,6 +283,10 @@ fn nudge_pause_hold(home: &AgentsHome, row: &OpenPrRow) -> bool {
     if merge_order_hold(home, &row.node) {
         return true;
     }
+    loop_pause_hold(home, row)
+}
+
+fn loop_pause_hold(home: &AgentsHome, row: &OpenPrRow) -> bool {
     let subject = crate::fleet_incident::Subject {
         session_ids: vec![row.session_id.clone()],
         node: Some(row.node.clone()),
@@ -333,9 +337,16 @@ pub fn apply(
     now: i64,
     runner: Runner,
 ) {
-    let pause_hold = merge_order_hold || nudge_pause_hold(home, row);
-    let (action, mut state, status) =
-        decide_with_read(row, state_param, pause_hold, grace_secs, now, &mut *runner);
+    let loop_pause = loop_pause_hold(home, row);
+    let (action, mut state, status) = decide_with_read(
+        row,
+        state_param,
+        merge_order_hold,
+        loop_pause,
+        grace_secs,
+        now,
+        &mut *runner,
+    );
     // The saved state read escalated and the decided state does not: activity
     // or a new red head reset the ladder, so the escalation's fleet task
     // closes. A task the ladder no longer argues for must not sit open.
@@ -904,6 +915,7 @@ fn decide_with_read(
     row: &OpenPrRow,
     state_param: &LadderState,
     merge_order_hold: bool,
+    loop_pause_hold: bool,
     grace_secs: i64,
     now: i64,
     runner: Runner,
@@ -912,7 +924,7 @@ fn decide_with_read(
         state: state_param.clone(),
         transcript_age_s: row.transcript_age_s,
         last_activity_at: row.transcript_age_s.map(|age| now.saturating_sub(age)),
-        merge_order_hold,
+        merge_order_hold: merge_order_hold || loop_pause_hold,
         grace_secs,
         now,
         live: row.live,
@@ -924,7 +936,7 @@ fn decide_with_read(
     // escalated row is due every pass. Read escalated rows once per grace if the
     // gh budget runs hot. A dead-worker row carries no PR: no read, no red
     // head - the node's open work is the whole reason for the nudge.
-    if !merge_order_hold && due(&input) && row.pr.is_some() {
+    if !loop_pause_hold && due(&input) && row.pr.is_some() {
         let s = read_status(row, runner);
         input.red_head = s.as_ref().ok().and_then(settled_red_head);
         status = Some(s);
@@ -947,8 +959,18 @@ pub fn plan_with(
     rows.iter()
         .map(|row| {
             let state = load_state(home, &row.session_id);
-            let held = nudge_pause_hold(home, row);
-            let (action, _, _) = decide_with_read(row, &state, held, grace_secs, now, &mut *runner);
+            let merge_order = merge_order_hold(home, &row.node);
+            let loop_paused = loop_pause_hold(home, row);
+            let action = decide_with_read(
+                row,
+                &state,
+                merge_order,
+                loop_paused,
+                grace_secs,
+                now,
+                &mut *runner,
+            )
+            .0;
             (row.id.clone(), action.as_str().to_string())
         })
         .collect()

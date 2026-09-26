@@ -1716,7 +1716,7 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let _env = AgentsHomeEnvGuard::set(home.path());
         let agents_home = crate::paths::AgentsHome::at(home.path());
-        let target = "territory:x-epic,x-child";
+        let target = "territory:x-child,x-epic";
         write_target_for_test(&agents_home, target, &["spawns", "loops"]);
         let cwd = Path::new(".");
         let matching = Subject {

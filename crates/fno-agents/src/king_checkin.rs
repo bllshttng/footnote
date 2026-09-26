@@ -4483,7 +4483,11 @@ mod tests {
             "line: {}",
             out[0]
         );
-        assert!(out[0].contains("merges proceed"), "line: {}", out[0]);
+        assert!(
+            out[0].contains("merges and loops proceed"),
+            "line: {}",
+            out[0]
+        );
         assert!(
             out.iter()
                 .all(|l| !l.contains("merges and dispatch are held")),
