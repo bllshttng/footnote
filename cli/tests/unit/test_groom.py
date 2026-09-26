@@ -756,6 +756,64 @@ def test_refresh_survives_a_corrupt_plist(tmp_path, monkeypatch):
     assert r["hour"] == G.GROOM_HOUR_DEFAULT
 
 
+# ── unchanged refresh must not re-register ─────────────────────────────────
+# macOS posts a background-activity notice on every launchd re-registration,
+# so a refresh whose rendered bytes match the installed plist must skip the
+# bootstrap entirely.
+
+
+def test_refresh_with_unchanged_bytes_skips_rebootstrapping(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/fno")
+    bounces: list = []
+    monkeypatch.setattr(
+        "fno.pr_watch._install.bounce", lambda **kw: bounces.append(kw) or ("ok", 0)
+    )
+
+    first = G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno")
+    second = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+
+    assert first["status"] == "installed"
+    assert second["status"] == "unchanged"
+    assert len(bounces) == 1, "the refresh must not re-register an unchanged agent"
+
+
+def test_refresh_still_reregisters_when_the_binary_changes(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/old/fno")
+    monkeypatch.setattr("shutil.which", lambda _: "/new/fno")
+    r = G.refresh_groom_agent(launch_agents_dir=tmp_path)
+
+    assert r["status"] == "installed"
+    assert "/new/fno" in (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+
+def test_default_groom_path_is_caller_independent(tmp_path, monkeypatch):
+    """No install_path -> fixed default, never the caller's environment."""
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: Path("/repo/footnote"))
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/fno")
+    monkeypatch.setattr("fno.pr_watch._install.bounce", lambda **kw: ("ok", 0))
+    monkeypatch.setenv(
+        "PATH", "/var/run/com.apple.security.cryptexd/codex.system/usr/bin"
+    )
+
+    G.install_groom_agent(launch_agents_dir=tmp_path, fno_binary="/bin/fno")
+    xml = (tmp_path / f"{G.GROOM_LABEL}.plist").read_text()
+
+    assert "cryptexd" not in xml
+
+
 # ── freshness predicate (x-1c7b) ────────────────────────────────────────────
 #
 # The alarm and the SessionStart fallback both read this, so its three states
