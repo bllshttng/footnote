@@ -130,7 +130,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "territory-verdict",
     "trace",
     "verify-evidence",
-    "verbs",
     "version",
     "wait",
 ];
@@ -700,8 +699,9 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
     }
 
-    // `verbs`: the native-verb roster render (see harness_verbs.rs doc).
-    if verb == "verbs" {
+    // `verbs`: hidden claim-style (matches!); the action list is
+    // shrink-only, so the harness-verbs skill teaches the spelling.
+    if matches!(verb, "verbs") {
         return fno_agents::harness_verbs::run_verbs(&args[1..]);
     }
 
