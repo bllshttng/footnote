@@ -7,7 +7,9 @@ docs/architecture/decision-record.md.
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 
 import typer
 
@@ -91,5 +93,9 @@ def record_command(ctx: typer.Context) -> None:
             err=True,
         )
         raise typer.Exit(3)
-    completed = subprocess.run([str(binary), "law-match", "record", *ctx.args])
+    # The verb keeps its one-JSON-request-on-stdin contract: the law-set argv
+    # rides the request, and a piped stdin rides along for --decision-file -.
+    stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
+    request = json.dumps({"mode": "record", "argv": list(ctx.args), "stdin": stdin_text})
+    completed = subprocess.run([str(binary), "law-match"], input=request, text=True)
     raise typer.Exit(completed.returncode)

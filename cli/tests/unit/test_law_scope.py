@@ -83,7 +83,7 @@ def test_the_shim_forwards_global_so_the_door_can_widen(
     monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
     monkeypatch.setattr(
         "subprocess.run",
-        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0),
+        lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
     )
 
     result = _run(
@@ -98,7 +98,11 @@ def test_the_shim_forwards_global_so_the_door_can_widen(
     )
 
     assert result.exit_code == 0, result.output
-    assert "--global" in seen["args"]
+    import json
+
+    request = json.loads(seen["input"])
+    assert request["mode"] == "record"
+    assert "--global" in request["argv"]
     assert index.exists()
 
 

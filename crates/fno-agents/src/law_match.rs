@@ -44,8 +44,23 @@ enum MatchRequest {
     Validate(ValidateRequest),
     #[serde(rename = "record-scope")]
     RecordScope(RecordScopeRequest),
+    /// The law write door: `argv` is the `fno inbox law set` command line and
+    /// `stdin` is the text `--decision-file -` reads. The answer is NOT a JSON
+    /// envelope - the door owns stdout (the decision id) and the process exit
+    /// code (0 recorded, 1 recorded-but-index-failed, 3 refused).
+    #[serde(rename = "record")]
+    Record(RecordDoorRequest),
     #[serde(rename = "scope-split")]
     ScopeSplit(ScopeSplitRequest),
+}
+
+/// The record door's request: the law-set argv plus the caller's stdin.
+#[derive(Deserialize)]
+struct RecordDoorRequest {
+    #[serde(default)]
+    argv: Vec<String>,
+    #[serde(default)]
+    stdin: String,
 }
 
 /// The law door's scope stamp: the recording project by default,
@@ -1319,7 +1334,7 @@ fn scope_split_answer_in(
 const WAIVER_SUBJECT_PREFIX: &str = "review-coverage-waiver";
 
 /// The law-set argv, parsed natively.
-struct RecordDoor {
+pub(crate) struct RecordDoor {
     subject: String,
     decision: Option<String>,
     decision_file: Option<String>,
@@ -1688,8 +1703,8 @@ fn door_refuse(message: &str) -> i32 {
 
 /// The door body, gate by gate in `record_command`'s order. Prints the
 /// decision id on stdout alone; every refusal and hint rides stderr.
-fn run_record_door(args: &[String]) -> i32 {
-    let (door, decision) = match record_door_preflight(args) {
+fn run_record_door(args: &[String], stdin_text: &str) -> i32 {
+    let (door, decision) = match record_door_preflight(args, stdin_text) {
         Ok(pair) => pair,
         Err(code) => return code,
     };
@@ -1707,7 +1722,7 @@ fn run_record_door(args: &[String]) -> i32 {
 /// that run before anyone asks who is calling. Split from the write so tests
 /// can drive the gated write with an injected authority (the real gate reads
 /// process ancestry and has no hermetic shape).
-fn record_door_preflight(args: &[String]) -> Result<(RecordDoor, String), i32> {
+fn record_door_preflight(args: &[String], stdin_text: &str) -> Result<(RecordDoor, String), i32> {
     let door = match parse_record_door(args) {
         Ok(d) => d,
         Err(usage) => {
@@ -1717,13 +1732,9 @@ fn record_door_preflight(args: &[String]) -> Result<(RecordDoor, String), i32> {
     };
     // The decision text: positional, a file, or stdin ('-').
     let decision: String = match door.decision_file.as_deref() {
-        Some("-") => {
-            let mut buf = String::new();
-            if std::io::stdin().read_to_string(&mut buf).is_err() {
-                return Err(door_refuse("could not read the decision from stdin"));
-            }
-            buf
-        }
+        // '-' reads the CALLER's stdin, which the transport (the `fno inbox
+        // law set` shim) carried in the request's stdin field.
+        Some("-") => stdin_text.to_string(),
         Some(path) => match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => return Err(door_refuse(&format!("could not read {path} ({e})"))),
@@ -1992,14 +2003,9 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split) | law-match record <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]..."
+            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate|record-scope|scope-split|record; record takes argv: the fno inbox law set command line, and stdin: the text --decision-file - reads)"
         );
         return 0;
-    }
-    // The record door: `law-match record` is the argv form; the JSON modes
-    // below keep the one-request-on-stdin contract.
-    if args.first().map(String::as_str) == Some("record") {
-        return run_record_door(&args[1..]);
     }
     if !args.is_empty() {
         eprintln!("fno-agents law-match: unexpected arguments; the request rides stdin");
@@ -2018,6 +2024,10 @@ pub fn run_law_match(args: &[String]) -> i32 {
         }
     };
     let answer = match req {
+        MatchRequest::Record(r) => {
+            // The door owns stdout and the exit code; no envelope here.
+            return run_record_door(&r.argv, &r.stdin);
+        }
         MatchRequest::Ask(r) => serde_json::to_string(&ask_answer(&r)).expect("serializes"),
         MatchRequest::Law(r) => {
             let near = near_law_lines(&r.law);
@@ -3290,6 +3300,8 @@ mod scope_tests {
     /// door test; the guard drops after the env restore.
     static DOOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // Field 2 is the env lock guard, held for its Drop and never read.
+    #[allow(dead_code)]
     struct DoorEnv(
         tempfile::TempDir,
         tempfile::TempDir,
@@ -3573,7 +3585,7 @@ mod scope_tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        match record_door_preflight(&argv) {
+        match record_door_preflight(&argv, "") {
             Err(code) => assert_eq!(code, 3),
             Ok(_) => panic!("placeholder must refuse"),
         }

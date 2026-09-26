@@ -15,6 +15,7 @@ is the thing refusing.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,7 @@ def test_shim_forwards_argv_to_the_record_door(
     monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/stub/fno-agents"))
     monkeypatch.setattr(
         "subprocess.run",
-        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0),
+        lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
     )
 
     result = _run(
@@ -129,8 +130,10 @@ def test_shim_forwards_argv_to_the_record_door(
     )
 
     assert result.exit_code == 0, result.output
-    argv = seen["args"]
-    assert argv[1:3] == ["law-match", "record"]
+    assert seen["args"][1:] == ["law-match"], seen["args"]
+    request = json.loads(seen["input"])
+    assert request["mode"] == "record"
+    argv = request["argv"]
     assert "merge-authority" in argv
     assert "Merges belong to the operator" in argv
     assert "--global" in argv
