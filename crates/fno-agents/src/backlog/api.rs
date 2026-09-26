@@ -258,14 +258,10 @@ fn decode_cursor(cursor: &str) -> Option<(i64, String)> {
 
 // -- reads -----------------------------------------------------------------
 
-/// Every row in store order, defaulted through `graph_store::read_rows`,
-/// with the claim store projected over the served word. The projection sits
-/// at the serve boundary, never inside the export the import-divergence
-/// check reads: the stored word there is the storage-fidelity contract.
+/// Every row in store order, defaulted through `graph_store::read_rows`
+/// (whose export already projects the claim store over the served word).
 fn read_rows(store: &Store) -> Result<Vec<Value>, ApiError> {
-    let mut rows = crate::graph_store::read_rows(&store.graph)?;
-    crate::backlog::nodes::project_claims(&mut rows).map_err(ApiError)?;
-    Ok(rows)
+    Ok(crate::graph_store::read_rows(&store.graph)?)
 }
 
 /// The pure read halves, over rows the caller already holds: the keeper

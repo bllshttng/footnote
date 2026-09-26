@@ -1234,11 +1234,14 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
         .into_iter()
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();
+    merged.append(&mut typed);
+    // One projection for every served row, typed and raw alike: a typed
+    // row carries the retired mirror's lock fields in its extras, so only
+    // a uniform pass serves the claim store's word everywhere.
     for (_, id, body) in &mut merged {
         let claim = node_claims.get(id).cloned().unwrap_or_default();
         nodes::project_claim_value(body, claim);
     }
-    merged.append(&mut typed);
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(merged.into_iter().map(|(_, _, row)| row).collect())
 }
