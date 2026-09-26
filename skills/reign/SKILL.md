@@ -106,7 +106,7 @@ Apply the first matching lever to each row, in this order:
 2. Run `fno backlog encounter <node> --evidence "what it cost"` to vote the node up. When evidence contradicts the filed priority, use `fno backlog update <node> --priority p1`. `p0` needs `--blocks-everything` and means the fleet is down.
 3. If no crown covers a row, start a new small epic. Do not grow a running epic. A vote or priority does not dispatch. See [A finding starts a new epic](#a-finding-starts-a-new-epic).
 4. If the row is the problem, run `fno backlog undefer` or `supersede`.
-5. Keep the check-in's named verb on the territory's top unplanned node: a blueprint subagent when the line reads `start /fno:blueprint subagent <id>`, straight `/fno:target <id>` when it reads `target-ready:`. This designs or builds work without a user request. The floor is `dispatch.blueprint_floor`; a lead may still blueprint one medium node by hand.
+5. Keep a worker on the territory's top unplanned node. Run the verb the line names: `start /fno:blueprint subagent <id>` or `target-ready: /fno:target <id>`. This designs or builds work without a user request. The floor is `dispatch.blueprint_floor`. A lead can still blueprint one medium node by hand.
 
 For each `start` or `target-ready` line, run the verb it names, in check-in order. Do not start nodes the check-in omits. Its list is the ceiling. A `skip` needs no action. The row records it. When a lever needs the user, run `fno inbox outstanding ask`.
 
