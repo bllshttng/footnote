@@ -74,12 +74,6 @@ type Referrer = (
 
 const REFERRERS: &[Referrer] = &[
     ("nodes", &[], &[], &[("session_id", None)]),
-    (
-        "node_claims",
-        &["harness"],
-        &[],
-        &[("harness_session", Some("harness"))],
-    ),
     ("node_dispatch", &[], &["model"], &[]),
     (
         "node_provenance",

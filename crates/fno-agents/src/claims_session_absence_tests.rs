@@ -42,6 +42,20 @@ fn claim_session_absent_releases_an_unexpired_node_claim_with_a_live_ambient_pid
 }
 
 #[test]
+fn claim_session_absent_releases_an_unexpired_pidless_task_claim() {
+    let now = now_ms();
+    let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));
+    rec.key = "task:x-t1:1.1".into();
+    rec.pid = None;
+    rec.pid_unavailable = true;
+    let witness: SessionWitness = &|_| SessionLiveness::Absent;
+    assert_eq!(
+        classify_with_basis_and_exclusivity(&rec, Some(now), &probe_pid, None, Some(witness)),
+        (ClaimState::Stale, basis::SESSION_ABSENT)
+    );
+}
+
+#[test]
 fn claim_session_absent_does_not_turn_unresolved_into_early_release() {
     let now = now_ms();
     let mut rec = session_record(dead_pid() as i32, now, Some(now + 3_600_000));

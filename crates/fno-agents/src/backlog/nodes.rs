@@ -1,13 +1,10 @@
 //! The node aggregate: the nodes row plus its single-row mirrors
-//! (node_claims, node_dispatch, node_provenance, supersessions), owned here
+//! (node_dispatch, node_provenance, supersessions), owned here
 //! (ruling 4: each aggregate's module owns its tables - no SQL against these
 //! outside this file).
 //!
-//! Two deliberate deviations from the v2 schema, both for lossless
-//! round-trips of legacy rows: node_claims.locked_by and
-//! node_provenance.source_kind are NOT NULL there but nullable here. Child
-//! aggregates (sessions, comments, encounters, pull requests) live in their
-//! own tables, whose rows cannot distinguish an absent JSON key from an
+//! Child aggregates (sessions, comments, encounters, pull requests) live in
+//! their own tables, whose rows cannot distinguish an absent JSON key from an
 //! empty array, so save() records the present child lists in the extras
 //! column under "child_lists_present" and load() trusts that marker; a
 //! primary pull request is marked "primary_pr" in the same list. The
@@ -33,18 +30,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-/// The tables this module owns, for the updated_at triggers.
-const TABLES: [&str; 6] = [
+/// The tables this module owns, for the updated_at triggers. node_claims is
+/// not here: the mirror table is retired, claims project from the holder
+/// store at read time, and ensure_table drops a v4 store's mirror on open.
+const TABLES: [&str; 5] = [
     "nodes",
     "nodes_raw",
-    "node_claims",
     "node_dispatch",
     "node_provenance",
     "supersessions",
 ];
 
-/// Schema 4. nodes and node_claims keep a wire `created_at` (a claim's is
-/// its lock time) and gain only updated_at; the other tables get both.
+/// Schema 4. nodes keeps a wire `created_at` and gains only updated_at; the
+/// other tables get both.
 pub fn ddl() -> String {
     let nodes_iso = [
         "created_at",
@@ -77,12 +75,6 @@ pub fn ddl() -> String {
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent_id);
 CREATE INDEX IF NOT EXISTS nodes_status ON nodes(status, project);
 CREATE INDEX IF NOT EXISTS nodes_archive ON nodes(archived_at);
-CREATE TABLE IF NOT EXISTS node_claims (
-  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  locked_by TEXT, harness TEXT REFERENCES harnesses(id),
-  harness_session TEXT REFERENCES agent_sessions(id), created_at TEXT{},
-  {}
-);
 CREATE TABLE IF NOT EXISTS node_dispatch (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   verb TEXT, brief TEXT, model TEXT REFERENCES models(id){}
@@ -109,8 +101,6 @@ CREATE TABLE IF NOT EXISTS nodes_raw (
   version INTEGER NOT NULL DEFAULT 0 CONSTRAINT nodes_raw_version_nonnegative CHECK (version >= 0){}
 );",
         updated("nodes"),
-        updated("node_claims"),
-        iso("node_claims", "created_at"),
         stamps("node_dispatch"),
         stamps("node_provenance"),
         stamps("supersessions"),
@@ -329,7 +319,288 @@ pub fn raw_rows(connection: &Connection) -> Result<Vec<(String, i64, Value)>, St
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(&ddl())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // The mirror table is retired: claims project from the holder store at
+    // read time, so a v4 store's node_claims (and any re-create) drops here
+    // on every open. The name can be a claims store's VIEW (claim_store's
+    // DDL) or a v4 mirror TABLE, and SQLite refuses a mismatched DROP, so
+    // the stored object type picks the statement.
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name = 'node_claims'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    match kind.as_deref() {
+        Some("view") => connection
+            .execute_batch("DROP VIEW IF EXISTS node_claims;")
+            .map_err(|error| error.to_string()),
+        Some("table") => connection
+            .execute_batch("DROP TABLE IF EXISTS node_claims;")
+            .map_err(|error| error.to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn claims_directory() -> Result<std::path::PathBuf, String> {
+    crate::claims::claims_dir_for(None).ok_or_else(|| {
+        "claim state is unavailable: claims path cannot be resolved from FNO_CLAIMS_ROOT or HOME"
+            .to_string()
+    })
+}
+
+fn list_node_claims(prefix: Option<&str>) -> Result<Vec<crate::claims::ClaimRecord>, String> {
+    let directory = claims_directory()?;
+    // The in-window listing, not the liveness-filtered one: a pid-less lease
+    // inside its window classifies Free and would otherwise vanish from the
+    // projection, leaving the node's holder of record unreadable.
+    crate::claims::list_in_window(&[directory], prefix)
+        .map_err(|error| format!("claim state is unavailable: {error}"))
+}
+
+fn project_claim(record: &crate::claims::ClaimRecord) -> Result<NodeClaim, String> {
+    let acquired_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(record.acquired_at)
+        .ok_or_else(|| {
+            format!(
+                "claim state is unavailable: acquired_at for {} is outside the RFC3339 range",
+                record.key
+            )
+        })?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let work = !record
+        .holder
+        .starts_with(crate::claims::BLUEPRINT_HOLDER_PREFIX);
+    Ok(NodeClaim {
+        locked_by: record
+            .session_id
+            .clone()
+            .or_else(|| Some(record.holder.clone())),
+        harness: record.harness.clone(),
+        harness_session: record.session_id.clone(),
+        locked_at: Some(acquired_at),
+        work,
+    })
+}
+
+fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
+    let all = node_claims_by_id()?;
+    Ok(all.get(node_id).cloned().unwrap_or_default())
+}
+
+/// The claims store's node records: the db is the holder source of truth
+/// (claim_store folds legacy lockfiles in on first open), so this is the
+/// primary projection source.
+fn node_claims_from_db() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
+    // Read-only leg: an absent claims db is an empty answer, never a
+    // creation. Opening the store here would mint graph.db at whatever
+    // claims root the process env names at this instant.
+    match crate::claim_store::database_path(None) {
+        Ok(path) if path.exists() => {}
+        _ => return Ok(Default::default()),
+    }
+    let connection = crate::claim_store::open(None)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT key, holder, schema_version, acquired_at, expires_at, pid,
+                    pid_unavailable, host, machine_id, reason, harness, session_id,
+                    pid_provenance, metadata
+             FROM claims WHERE key LIKE 'node:%'
+               AND (expires_at IS NULL OR expires_at > ?1)
+             ORDER BY key",
+        )
+        .map_err(|error| error.to_string())?;
+    let now = crate::claims::now_ms();
+    let mut claims = std::collections::HashMap::new();
+    struct Row {
+        key: String,
+        holder: String,
+        schema_version: u32,
+        acquired_at: i64,
+        expires_at: Option<i64>,
+        pid: Option<i32>,
+        pid_unavailable: bool,
+        host: String,
+        machine_id: Option<String>,
+        reason: Option<String>,
+        harness: Option<String>,
+        session_id: Option<String>,
+        pid_provenance: Option<String>,
+        metadata: String,
+    }
+    let mut rows = statement
+        .query_map(rusqlite::params![now], |row| {
+            Ok(Row {
+                key: row.get(0)?,
+                holder: row.get(1)?,
+                schema_version: row.get(2)?,
+                acquired_at: row.get(3)?,
+                expires_at: row.get(4)?,
+                pid: row.get(5)?,
+                pid_unavailable: row.get(6)?,
+                host: row.get(7)?,
+                machine_id: row.get(8)?,
+                reason: row.get(9)?,
+                harness: row.get(10)?,
+                session_id: row.get(11)?,
+                pid_provenance: row.get(12)?,
+                metadata: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    while let Some(row) = rows.next() {
+        let row = row.map_err(|error| error.to_string())?;
+        let record = crate::claims::ClaimRecord {
+            key: row.key,
+            holder: row.holder,
+            schema_version: row.schema_version,
+            acquired_at: row.acquired_at,
+            expires_at: row.expires_at,
+            pid: row.pid,
+            pid_unavailable: row.pid_unavailable,
+            host: row.host,
+            machine_id: row.machine_id,
+            reason: row.reason,
+            harness: row.harness,
+            session_id: row.session_id,
+            pid_provenance: row.pid_provenance,
+            metadata: serde_json::from_str(&row.metadata).unwrap_or_default(),
+        };
+        if let Some(node_id) = record.key.strip_prefix("node:") {
+            claims.insert(node_id.to_string(), project_claim(&record)?);
+        }
+    }
+    Ok(claims)
+}
+
+/// The claims map cached across read replies, busted on a write to the
+/// claims tree: every acquire, release, and import bumps a watched mtime
+/// (a file create or remove bumps the directory, an import bumps the db or
+/// its WAL), so a serving-hit holder is never stale, and the per-reply
+/// read_dir plus sqlite open collapses to three stats.
+struct ClaimsCache {
+    key: (
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+    ),
+    map: std::collections::HashMap<String, NodeClaim>,
+}
+
+type CacheKey = (
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+);
+
+fn claims_cache_key() -> CacheKey {
+    let dir = claims_directory().ok();
+    let stat = |p: std::path::PathBuf| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
+    let dir_mtime = dir.as_deref().and_then(|d| stat(d.to_path_buf()));
+    let db_mtime = dir.as_deref().map(|d| stat(d.join("graph.db")));
+    let wal_mtime = dir.as_deref().map(|d| stat(d.join("graph.db-wal")));
+    (
+        dir_mtime,
+        db_mtime.unwrap_or(None),
+        wal_mtime.unwrap_or(None),
+    )
+}
+
+pub(crate) fn node_claims_by_id() -> Result<std::collections::HashMap<String, NodeClaim>, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<ClaimsCache>>> =
+        std::sync::OnceLock::new();
+    let key = claims_cache_key();
+    let cached = CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cached.as_ref() {
+        if hit.key == key {
+            return Ok(hit.map.clone());
+        }
+    }
+    drop(cached);
+    // The lockfile scan is the liveness authority; the claims db enriches
+    // shared keys and covers readers that cannot scan (a fenced worktree
+    // build). A db row whose lockfile is gone was released or reaped out
+    // from under the import fold - the fold has no delete path - so the
+    // scan's key set bounds what projects. Either source failing degrades
+    // to what the other saw: this map feeds the read projection, and a
+    // claims outage must not take the board read with it - the selection
+    // and territory gates re-check liveness on their own and refuse closed
+    // there (list_strict, never this map).
+    let mut claims = node_claims_from_db().unwrap_or_default();
+    match list_node_claims(Some("node:")) {
+        Ok(records) => {
+            let mut live: std::collections::HashMap<String, NodeClaim> = Default::default();
+            for record in records {
+                if let Some(node_id) = record.key.strip_prefix("node:") {
+                    live.entry(node_id.to_string())
+                        .or_insert_with(|| project_claim(&record).unwrap_or_default());
+                }
+            }
+            claims.retain(|node_id, _| live.contains_key(node_id));
+            for (node_id, claim) in live {
+                claims.entry(node_id).or_insert(claim);
+            }
+        }
+        Err(_) => {}
+    }
+    *CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(ClaimsCache {
+        key,
+        map: claims.clone(),
+    });
+    Ok(claims)
+}
+
+fn set_node_claim(node: &mut Node, claim: NodeClaim) {
+    if claim.locked_by.is_some() || node.completed_at.is_none() {
+        node.session_id = claim.locked_by.clone();
+    }
+    node.claim = claim;
+}
+
+pub(crate) fn project_claims(rows: &mut [Value]) -> Result<(), String> {
+    let claims = node_claims_by_id()?;
+    for row in rows {
+        let Some(id) = crate::graph_store::entry_id(row).map(str::to_string) else {
+            continue;
+        };
+        let claim = claims.get(&id).cloned().unwrap_or_default();
+        project_claim_value(row, claim);
+    }
+    Ok(())
+}
+
+pub(crate) fn project_claim_value(row: &mut Value, claim: NodeClaim) {
+    let completed = row
+        .get("completed_at")
+        .is_some_and(|value| !value.is_null());
+    let session_id = claim.locked_by.clone();
+    let Some(object) = row.as_object_mut() else {
+        return;
+    };
+    for (field, value) in [
+        ("locked_by", claim.locked_by),
+        ("locked_by_harness", claim.harness),
+        ("locked_by_harness_session", claim.harness_session),
+        ("locked_at", claim.locked_at),
+    ] {
+        object.insert(
+            field.to_string(),
+            value.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
+    if session_id.is_some() || !completed {
+        object.insert(
+            "session_id".to_string(),
+            session_id.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
 }
 
 /// Upsert one node's row and its mirrors. The caller owns the transaction;
@@ -485,42 +756,6 @@ pub fn save(connection: &Connection, node: &Node) -> Result<(), String> {
             ],
         )
         .map_err(|error| error.to_string())?;
-    // The single-row mirrors upsert with a change guard, so an unchanged row
-    // is never rewritten; an absent mirror deletes its row.
-    let claim = &node.claim;
-    if claim.locked_by.is_some()
-        || claim.harness.is_some()
-        || claim.harness_session.is_some()
-        || claim.locked_at.is_some()
-    {
-        connection
-            .execute(
-                "INSERT INTO node_claims (node_id, locked_by, harness, harness_session, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(node_id) DO UPDATE SET locked_by = excluded.locked_by,
-                     harness = excluded.harness, harness_session = excluded.harness_session,
-                     created_at = excluded.created_at
-                 WHERE (node_claims.locked_by, node_claims.harness,
-                        node_claims.harness_session, node_claims.created_at)
-                   IS NOT (excluded.locked_by, excluded.harness, excluded.harness_session,
-                           excluded.created_at)",
-                params![
-                    node.id,
-                    claim.locked_by,
-                    claim.harness,
-                    claim.harness_session,
-                    claim.locked_at,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-    } else {
-        connection
-            .execute(
-                "DELETE FROM node_claims WHERE node_id = ?1",
-                params![node.id],
-            )
-            .map_err(|error| error.to_string())?;
-    }
     let dispatch = &node.dispatch;
     if dispatch.verb.is_some() || dispatch.brief.is_some() || dispatch.model.is_some() {
         connection
@@ -690,67 +925,105 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One node with its mirrors and child aggregates, or None when the id is
-/// unknown.
-pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT id, ordinal, slug, title, kind, status, priority, rank, project, cwd,
+/// The node columns both the single load and the batched export scan.
+const NODE_COLUMNS: &str = "id, ordinal, slug, title, kind, status, priority, rank, project, cwd,
                     domain, estimate, difficulty, description, plan_path, parent_id,
                     contained_in, superseded_by, caused_by, fixes_pr, ownership_defect,
                     created_at, touched_at, completed_at, completion_note, deferred_at,
                     deferred_reason, deferred_kind, queued_at, queued_reason, reopened_at,
                     reopened_reason, archived_at, session_id, has_brief, blocks_everything,
-                    cost_usd, vision_path, artifact_url, extras
-             FROM nodes WHERE id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-    let mut rows = statement
-        .query_map(params![id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<f64>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, Option<String>>(13)?,
-                row.get::<_, Option<String>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-                row.get::<_, Option<String>>(16)?,
-                row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<String>>(18)?,
-                row.get::<_, Option<i64>>(19)?,
-                row.get::<_, Option<String>>(20)?,
-                row.get::<_, Option<String>>(21)?,
-                row.get::<_, Option<String>>(22)?,
-                row.get::<_, Option<String>>(23)?,
-                row.get::<_, Option<String>>(24)?,
-                row.get::<_, Option<String>>(25)?,
-                row.get::<_, Option<String>>(26)?,
-                row.get::<_, Option<String>>(27)?,
-                row.get::<_, Option<String>>(28)?,
-                row.get::<_, Option<String>>(29)?,
-                row.get::<_, Option<String>>(30)?,
-                row.get::<_, Option<String>>(31)?,
-                row.get::<_, Option<String>>(32)?,
-                row.get::<_, Option<String>>(33)?,
-                row.get::<_, Option<i64>>(34)?,
-                row.get::<_, Option<i64>>(35)?,
-                row.get::<_, Option<f64>>(36)?,
-                row.get::<_, Option<String>>(37)?,
-                row.get::<_, Option<String>>(38)?,
-                row.get::<_, String>(39)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?;
+                    cost_usd, vision_path, artifact_url, extras";
+
+type NodeRowParts = (
+    String,         // id
+    i64,            // ordinal
+    String,         // slug
+    String,         // title
+    String,         // kind
+    String,         // status
+    String,         // priority
+    Option<f64>,    // rank
+    Option<String>, // project
+    Option<String>, // cwd
+    Option<String>, // domain
+    Option<String>, // estimate
+    Option<String>, // difficulty
+    Option<String>, // description
+    Option<String>, // plan_path
+    Option<String>, // parent_id
+    Option<String>, // contained_in
+    Option<String>, // superseded_by
+    Option<String>, // caused_by
+    Option<i64>,    // fixes_pr
+    Option<String>, // created_at
+    Option<String>, // touched_at
+    Option<String>, // completed_at
+    Option<String>, // completion_note
+    Option<String>, // deferred_at
+    Option<String>, // deferred_reason
+    Option<String>, // deferred_kind
+    Option<String>, // queued_at
+    Option<String>, // queued_reason
+    Option<String>, // reopened_at
+    Option<String>, // reopened_reason
+    Option<String>, // archived_at
+    Option<String>, // session_id
+    Option<String>, // archived_at
+    Option<i64>,    // has_brief
+    Option<i64>,    // blocks_everything
+    Option<f64>,    // cost_usd
+    Option<String>, // vision_path
+    Option<String>, // artifact_url
+    String,         // extras
+);
+
+fn map_base_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRowParts> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, i64>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, String>(5)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, Option<f64>>(7)?,
+        row.get::<_, Option<String>>(8)?,
+        row.get::<_, Option<String>>(9)?,
+        row.get::<_, Option<String>>(10)?,
+        row.get::<_, Option<String>>(11)?,
+        row.get::<_, Option<String>>(12)?,
+        row.get::<_, Option<String>>(13)?,
+        row.get::<_, Option<String>>(14)?,
+        row.get::<_, Option<String>>(15)?,
+        row.get::<_, Option<String>>(16)?,
+        row.get::<_, Option<String>>(17)?,
+        row.get::<_, Option<String>>(18)?,
+        row.get::<_, Option<i64>>(19)?,
+        row.get::<_, Option<String>>(20)?,
+        row.get::<_, Option<String>>(21)?,
+        row.get::<_, Option<String>>(22)?,
+        row.get::<_, Option<String>>(23)?,
+        row.get::<_, Option<String>>(24)?,
+        row.get::<_, Option<String>>(25)?,
+        row.get::<_, Option<String>>(26)?,
+        row.get::<_, Option<String>>(27)?,
+        row.get::<_, Option<String>>(28)?,
+        row.get::<_, Option<String>>(29)?,
+        row.get::<_, Option<String>>(30)?,
+        row.get::<_, Option<String>>(31)?,
+        row.get::<_, Option<String>>(32)?,
+        row.get::<_, Option<String>>(33)?,
+        row.get::<_, Option<i64>>(34)?,
+        row.get::<_, Option<i64>>(35)?,
+        row.get::<_, Option<f64>>(36)?,
+        row.get::<_, Option<String>>(37)?,
+        row.get::<_, Option<String>>(38)?,
+        row.get::<_, String>(39)?,
+    ))
+}
+
+/// The base-row parts into a Node plus the export's presence markers.
+fn base_from_parts(parts: NodeRowParts) -> Result<(Node, Map<String, Value>, Vec<String>), String> {
     let (
         node_id,
         ordinal,
@@ -792,10 +1065,7 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         vision_path,
         artifact_url,
         extras,
-    ) = match rows.next() {
-        Some(row) => row.map_err(|error| error.to_string())?,
-        None => return Ok(None),
-    };
+    ) = parts;
     let status = Status::parse(&status).map_err(|error| error.to_string())?;
     let priority = Priority::parse(&priority).map_err(|error| error.to_string())?;
     let ownership_defect = match ownership_defect {
@@ -884,46 +1154,54 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     };
     node.apply_residual(residual)
         .map_err(|error| error.to_string())?;
+
+    Ok((node, supersession_extras, child_lists_present))
+}
+
+/// One node with its mirrors and child aggregates, or None when the id is
+/// unknown.
+pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
+    load_with_claim(connection, id, None)
+}
+
+pub(crate) fn load_with_claim(
+    connection: &Connection,
+    id: &str,
+    claim: Option<NodeClaim>,
+) -> Result<Option<Node>, String> {
     let stored_costs = costs::load(connection, id)?;
+    let sql = format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1");
+    let mut statement = connection
+        .prepare_cached(&sql)
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement
+        .query_map(params![id], map_base_row)
+        .map_err(|error| error.to_string())?;
+    let parts = match rows.next() {
+        Some(row) => row.map_err(|error| error.to_string())?,
+        None => return Ok(None),
+    };
+    let (mut node, supersession_extras, child_lists_present) = base_from_parts(parts)?;
     if !stored_costs.is_empty() {
         node.costs = Some(stored_costs);
     }
-    let mut claim_statement = connection
-        .prepare(
-            "SELECT locked_by, harness, harness_session, created_at
-             FROM node_claims WHERE node_id = ?1",
-        )
-        .map_err(|error| error.to_string())?;
-    node.claim = claim_statement
-        .query_row(params![id], |row| {
-            Ok(NodeClaim {
-                locked_by: row.get(0)?,
-                harness: row.get(1)?,
-                harness_session: row.get(2)?,
-                locked_at: row.get(3)?,
-            })
-        })
-        .optional()
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default();
+    let claim = match claim {
+        Some(claim) => claim,
+        None => claim_for_node(id)?,
+    };
+    set_node_claim(&mut node, claim);
     let mut dispatch_statement = connection
-        .prepare("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
+        .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
         .map_err(|error| error.to_string())?;
     node.dispatch = dispatch_statement
-        .query_row(params![id], |row| {
-            Ok(Dispatch {
-                verb: row.get(0)?,
-                brief: row.get(1)?,
-                model: row.get(2)?,
-            })
-        })
+        .query_row(params![id], map_dispatch_row)
         .optional()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
     // The columns overlay what apply_residual parsed. request_origin and
     // origin_evidence fall back to the extras keys a schema-3 writer left.
     let mut provenance_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT source, source_kind, source_project, source_session_id, source_harness,
                     source_cwd, source_node_id, source_plan_path, source_inbox_msg,
                     spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
@@ -932,104 +1210,22 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         )
         .map_err(|error| error.to_string())?;
     let provenance_row = provenance_statement
-        .query_row(params![id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, Option<String>>(13)?,
-                row.get::<_, Option<String>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-            ))
-        })
+        .query_row(params![id], map_provenance_parts)
         .optional()
         .map_err(|error| error.to_string())?;
-    if let Some((
-        source,
-        source_kind,
-        source_project,
-        source_session_id,
-        source_harness,
-        source_cwd,
-        source_node_id,
-        source_plan_path,
-        source_inbox_msg,
-        spawned_by_session,
-        spawned_by_harness,
-        spawned_by_cwd,
-        think_session_id,
-        think_output_path,
-        request_origin,
-        origin_evidence,
-    )) = provenance_row
-    {
-        let request_origin = request_origin.or(node.provenance.request_origin.take());
-        let origin_evidence = origin_evidence.or(node.provenance.origin_evidence.take());
-        node.provenance = Provenance {
-            source,
-            source_kind,
-            source_project,
-            source_session_id,
-            source_harness,
-            source_cwd,
-            source_node_id,
-            source_plan_path,
-            source_inbox_msg,
-            spawned_by_session,
-            spawned_by_harness,
-            spawned_by_cwd,
-            think_session_id,
-            think_output_path,
-            origin_evidence,
-            request_origin,
-        };
-    }
+    apply_provenance(&mut node, provenance_row);
     let mut supersession_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
                     matched_surfaces
              FROM supersessions WHERE node_id = ?1",
         )
         .map_err(|error| error.to_string())?;
     node.supersession = supersession_statement
-        .query_row(params![id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })
+        .query_row(params![id], map_supersession_parts)
         .optional()
         .map_err(|error| error.to_string())?
-        .map(
-            |(successor, cause, reason, verified_at, evidence_pr, surfaces, matched_surfaces)| {
-                Supersession {
-                    successor,
-                    cause,
-                    reason,
-                    verified_at,
-                    evidence_pr,
-                    surfaces: surfaces.and_then(|text| serde_json::from_str(&text).ok()),
-                    matched_surfaces: matched_surfaces
-                        .and_then(|text| serde_json::from_str(&text).ok()),
-                    extras: supersession_extras,
-                }
-            },
-        );
+        .map(|parts| supersession_from_parts(parts, supersession_extras));
     // Child aggregates. The tables cannot tell an empty list from an absent
     // key, so the "child_lists_present" marker decides Some vs None.
     let present = |name: &str| child_lists_present.iter().any(|listed| listed == name);
@@ -1088,6 +1284,139 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     Ok(Some(node))
 }
 
+/// The provenance row read as parts; origin/request ride the residual.
+pub(crate) type ProvenanceParts = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// The supersessions row read as parts.
+pub(crate) type SupersessionParts = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
+fn map_dispatch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Dispatch> {
+    Ok(Dispatch {
+        verb: row.get(0)?,
+        brief: row.get(1)?,
+        model: row.get(2)?,
+    })
+}
+
+fn map_provenance_parts(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProvenanceParts> {
+    Ok((
+        row.get::<_, Option<String>>(0)?,
+        row.get::<_, Option<String>>(1)?,
+        row.get::<_, Option<String>>(2)?,
+        row.get::<_, Option<String>>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+        row.get::<_, Option<String>>(6)?,
+        row.get::<_, Option<String>>(7)?,
+        row.get::<_, Option<String>>(8)?,
+        row.get::<_, Option<String>>(9)?,
+        row.get::<_, Option<String>>(10)?,
+        row.get::<_, Option<String>>(11)?,
+        row.get::<_, Option<String>>(12)?,
+        row.get::<_, Option<String>>(13)?,
+        row.get::<_, Option<String>>(14)?,
+        row.get::<_, Option<String>>(15)?,
+    ))
+}
+
+fn map_supersession_parts(row: &rusqlite::Row<'_>) -> rusqlite::Result<SupersessionParts> {
+    Ok((
+        row.get::<_, Option<String>>(0)?,
+        row.get::<_, Option<String>>(1)?,
+        row.get::<_, Option<String>>(2)?,
+        row.get::<_, Option<String>>(3)?,
+        row.get::<_, Option<i64>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+        row.get::<_, Option<String>>(6)?,
+    ))
+}
+
+/// Overlay the provenance row on the residual-carried fields.
+fn apply_provenance(node: &mut Node, parts: Option<ProvenanceParts>) {
+    if let Some((
+        source,
+        source_kind,
+        source_project,
+        source_session_id,
+        source_harness,
+        source_cwd,
+        source_node_id,
+        source_plan_path,
+        source_inbox_msg,
+        spawned_by_session,
+        spawned_by_harness,
+        spawned_by_cwd,
+        think_session_id,
+        think_output_path,
+        request_origin,
+        origin_evidence,
+    )) = parts
+    {
+        // The columns are authoritative; a legacy row keeps whatever the
+        // extras fold already planted on the model.
+        let origin_evidence = origin_evidence.or(node.provenance.origin_evidence.take());
+        let request_origin = request_origin.or(node.provenance.request_origin.take());
+        node.provenance = Provenance {
+            source,
+            source_kind,
+            source_project,
+            source_session_id,
+            source_harness,
+            source_cwd,
+            source_node_id,
+            source_plan_path,
+            source_inbox_msg,
+            spawned_by_session,
+            spawned_by_harness,
+            spawned_by_cwd,
+            think_session_id,
+            think_output_path,
+            origin_evidence,
+            request_origin,
+        };
+    }
+}
+
+/// Build a Supersession from its row parts plus the residual extras.
+fn supersession_from_parts(parts: SupersessionParts, extras: Map<String, Value>) -> Supersession {
+    let (successor, cause, reason, verified_at, evidence_pr, surfaces, matched_surfaces) = parts;
+    Supersession {
+        successor,
+        cause,
+        reason,
+        verified_at,
+        evidence_pr,
+        surfaces: surfaces.and_then(|text| serde_json::from_str(&text).ok()),
+        matched_surfaces: matched_surfaces.and_then(|text| serde_json::from_str(&text).ok()),
+        extras,
+    }
+}
+
 fn parse_ownership_defect(text: &str) -> Result<OwnershipDefect, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let object = value
@@ -1137,6 +1466,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
         has_pr: bool,
         defect: Option<String>,
     }
+    let claims = node_claims_by_id()?;
     let mut statement = connection
         .prepare(
             "SELECT n.id, n.parent_id, n.status,
@@ -1145,10 +1475,6 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
                     n.superseded_by IS NOT NULL,
                     CASE WHEN n.completed_at LIKE 'deferred:%' THEN 1
                          ELSE n.deferred_at IS NOT NULL END,
-                    COALESCE((SELECT c.locked_by FROM node_claims c
-                              WHERE c.node_id = n.id), '') <> '',
-                    (SELECT c.created_at FROM node_claims c WHERE c.node_id = n.id),
-                    (SELECT c.locked_by FROM node_claims c WHERE c.node_id = n.id),
                     EXISTS(SELECT 1 FROM sessions s WHERE s.node_id = n.id
                            AND s.phase = 'execute' AND s.ended_at IS NULL),
                     EXISTS(SELECT 1 FROM pull_requests p WHERE p.node_id = n.id
@@ -1159,20 +1485,22 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let mut rows: Vec<Driver> = statement
         .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let claim = claims.get(&id).cloned().unwrap_or_default();
             Ok(Driver {
-                id: row.get(0)?,
+                id,
                 parent: row.get(1)?,
                 stored: row.get::<_, String>(2)?,
                 status: row.get(2)?,
                 completed: row.get::<_, i64>(3)? != 0,
                 superseded: row.get::<_, i64>(4)? != 0,
                 deferred: row.get::<_, i64>(5)? != 0,
-                locked: row.get::<_, i64>(6)? != 0,
-                locked_at: row.get(7)?,
-                holder: row.get(8)?,
-                open_do: row.get::<_, i64>(9)? != 0,
-                has_pr: row.get::<_, i64>(10)? != 0,
-                defect: row.get(11)?,
+                locked: claim.locked_by.is_some(),
+                locked_at: claim.locked_at,
+                holder: claim.locked_by,
+                open_do: row.get::<_, i64>(6)? != 0,
+                has_pr: row.get::<_, i64>(7)? != 0,
+                defect: row.get(8)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -1530,5 +1858,57 @@ mod tests {
         let loaded = load(&connection, "x-a").unwrap().unwrap();
         assert_eq!(loaded.sessions.unwrap().len(), 1);
         assert_eq!(loaded.relations.blocked_by, Some(vec!["x-a".to_string()]));
+    }
+
+    /// The forward drop: a store born at v4 carries the node_claims mirror,
+    /// and this module's open path (ensure_table) retires it while the
+    /// claims db keeps serving the holder records.
+    #[test]
+    fn ensure_table_drops_a_v4_store_node_claims_mirror() {
+        let connection = Connection::open_in_memory().unwrap();
+        for statement in [
+            crate::backlog::graph_meta_ddl(),
+            crate::backlog::entities::ddl(),
+            ddl(),
+            crate::backlog::schema_v4::v4_node_claims_ddl(),
+        ] {
+            connection.execute_batch(&statement).unwrap();
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO nodes (id, ordinal, slug, title, kind, status, priority,
+                        created_at, updated_at)
+                 VALUES ('x-1', 1, 'x1', 'one', 'feature', 'idea', 'p2',
+                         '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z');
+                 INSERT INTO node_claims (node_id, locked_by, created_at, updated_at)
+                 VALUES ('x-1', 'target-session:holder',
+                         '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z');",
+            )
+            .unwrap();
+        let before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 1, "fixture must carry the v4 mirror table");
+
+        ensure_table(&connection).unwrap();
+
+        let after: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_claims'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 0, "the mirror table must drop on open");
+        let node: i64 = connection
+            .query_row("SELECT COUNT(*) FROM nodes WHERE id = 'x-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(node, 1, "the node itself stays untouched");
     }
 }

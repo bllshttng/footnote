@@ -730,7 +730,6 @@ pub(crate) fn check_territory_cap(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
-    live: &[RegistryEntry],
     cap: u32,
 ) -> Result<(), String> {
     let mut warnings = Vec::new();
@@ -747,15 +746,21 @@ pub(crate) fn check_territory_cap(
         })
         .to_string());
     };
-    let count = live
-        .iter()
-        .filter(|r| {
-            r.node
-                .as_deref()
-                .map(|n| members.contains(n))
-                .unwrap_or(false)
-        })
-        .count();
+    let held = match crate::territory::live_node_claims() {
+        Ok(claims) => claims,
+        Err(crate::territory::TerritoryUnknown(reason)) => {
+            eprintln!("{reason}");
+            return Err(serde_json::json!({
+                "status": "refused",
+                "reason": "territory_unknown",
+                "node": node,
+                "max_live_per_territory": cap,
+                "detail": reason,
+            })
+            .to_string());
+        }
+    };
+    let count = crate::territory::live_held_in(&members, &held);
     if count as u32 >= cap {
         return Err(serde_json::json!({
             "status": "refused",
@@ -1436,13 +1441,10 @@ fn decide_gate(
         // overrunning its team, so the per-territory cap stays enforced
         // here - the one axis --force does not excuse.
         if let Some(node) = admitted_node.as_deref() {
-            let mut warnings = Vec::new();
-            let live = live_rows(registry_path, &mut warnings);
             if let Err(receipt) = check_territory_cap(
                 config_cwd,
                 registry_path,
                 &node,
-                &live,
                 agents_config::territory_max_live(config_cwd),
             ) {
                 eprintln!("{receipt}");
@@ -1861,7 +1863,6 @@ fn decide_gate(
                                     config_cwd,
                                     registry_path,
                                     &node,
-                                    &live,
                                     agents_config::territory_max_live(config_cwd),
                                 ) {
                                     guard.release();
@@ -4517,10 +4518,10 @@ MemAvailable:    8000000 kB\n";
     /// Snapshot-and-restore scope for the env vars a fixture pins: the
     /// original value (or its absence) is put back on drop, panic included,
     /// so a fixture cannot permanently discard an ambient pin.
-    struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    pub(super) struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvPin {
-        fn take(vars: &[&'static str]) -> Self {
+        pub(super) fn take(vars: &[&'static str]) -> Self {
             Self(
                 vars.iter()
                     .map(|var| (*var, std::env::var_os(var)))
@@ -4918,3 +4919,7 @@ mod spawn_gate_slot_tests;
 #[cfg(test)]
 #[path = "spawn_gate_blind_tests.rs"]
 mod spawn_gate_blind_tests;
+
+#[cfg(test)]
+#[path = "spawn_gate_territory_tests.rs"]
+mod spawn_gate_territory_tests;

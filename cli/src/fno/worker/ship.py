@@ -264,7 +264,6 @@ def ship(
     pr_action = action
     if node_id and pr_number:
         repo_root = os.getcwd()
-        owner = state.get("target_claim_holder")
         # The MANIFEST id leads and the branch is only a fallback, so pass it.
         # Without --node this resolves the node from `git branch --show-current`
         # alone: a branch not carrying the id binds nothing, and a reused or
@@ -273,8 +272,6 @@ def ship(
             "fno", "do", "pr", "bind-created", "--url", pr_url,
             "--repo", repo_root, "--node", node_id,
         ]
-        if isinstance(owner, str) and owner.strip():
-            bind_args.extend(["--owner", owner.strip()])
         repair_command = " ".join(bind_args)
         stamp = subprocess.run(
             bind_args,

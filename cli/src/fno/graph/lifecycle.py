@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, List, Optional
 
+import click
 import typer
 
 
@@ -66,12 +67,7 @@ def refuse_stray_update_flags(door_args: List[str]) -> None:
     revive a retired spelling (``--completed``) as a silent no-op."""
     strays = [a for a in door_args if a.startswith("-") and a.split("=", 1)[0] not in DOOR_FLAGS]
     if strays:
-        typer.echo(
-            f"Error: no such option: {strays[0]}. `fno backlog update` carries "
-            "one door per call: --status, --leave, and repeatable --set field=value "
-            "(legacy one-flag-per-field spellings are retired).",
-            err=True,
-        )
+        typer.echo(f"Error: no such option: {strays[0]}. Use fno agents claim acquire node:{click.get_current_context().params['task_id']} --holder <holder>.", err=True)
         raise typer.Exit(code=2)
 
 

@@ -157,44 +157,37 @@ def test_ac4_edge_provenance_survives_save_reload(tmp_path, monkeypatch):
     assert reloaded[0]["source_kind"] == "from_inbox"
 
 
-@pytest.mark.skip(
-    reason="known defect: --locked-by null re-derives the stale claim "
-    "identity instead of clearing; the write path must release the "
-    "claim-mirror row in the same transaction as the field write"
-)
-def test_us6_harness_stamp_written_and_cleared(tmp_path, monkeypatch):
-    """US6: `update --locked-by X --locked-by-harness ...` stamps the holder's
-    provider + harness UUID over a stale owner; --locked-by null clears all three."""
-    from typer.testing import CliRunner
-    import fno.graph.cli as C
+def test_successor_reacquire_projects_the_new_lockfile_holder(tmp_path, monkeypatch):
+    """AC13-EDGE: successor acquire replaces the released holder in the read
+    projection without a graph stamp."""
+    import os
+
+    from fno.claims.core import acquire_claim, release_claim
     from fno.graph.store import read_graph_strict
 
-    g = _make_graph(tmp_path, [{
-        "id": "ab-harnes01", "title": "t", "plan_path": "p.md",
-        "session_id": "stale-owner", "claimed_at": "2020-01-01T00:00:00Z",
-    }])
+    g = _make_graph(tmp_path, [{"id": "x-reacq001", "title": "t", "plan_path": "p.md"}])
     _patch_graph(monkeypatch, g)
-    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(root))
+    old = acquire_claim(
+        "node:x-reacq001", "target-session:old-session", pid=os.getpid(), root=root
+    )
+    assert release_claim(old.key, old.holder, root=root) is not None
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "new-session")
+    new = acquire_claim(
+        "node:x-reacq001",
+        "target-session:new-session",
+        pid=os.getpid(),
+        root=root,
+        reason="target start successor re-acquire",
+    )
 
-    r = CliRunner().invoke(C.cli, [
-        "update", "ab-harnes01", "--locked-by", "new-owner",
-        "--locked-by-harness", "claude", "--locked-by-harness-session", "uuid-9",
-    ])
-    assert r.exit_code == 0, r.output
-    node = read_graph_strict(g)[0]
-    assert node["locked_by"] == "new-owner"          # stale owner overwritten
-    assert node["session_id"] == "new-owner"          # mirror synced
-    assert node["locked_by_harness"] == "claude"
-    assert node["locked_by_harness_session"] == "uuid-9"
-    assert node["status"] == "in_progress"
-
-    r2 = CliRunner().invoke(C.cli, ["update", "ab-harnes01", "--locked-by", "null"])
-    assert r2.exit_code == 0, r2.output
-    cleared = read_graph_strict(g)[0]
-    assert cleared["locked_by"] is None
-    assert cleared["locked_by_harness"] is None
-    assert cleared["locked_by_harness_session"] is None
-    assert cleared["status"] == "ready"
+    row = read_graph_strict(g)[0]
+    assert row["locked_by"] == "new-session"
+    assert row["locked_by_harness_session"] == "new-session"
+    assert row["locked_at"] is not None
+    assert new.holder == "target-session:new-session"
+    assert new.reason == "target start successor re-acquire"
 
 
 # ---------------------------------------------------------------------------
@@ -1379,7 +1372,7 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
 
 def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
     """AC1-HP: a free node comes back claimed under blueprint-session:<id>,
-    and the open writes no session row and no status change."""
+    with its holder projected and no session row written."""
     import os
 
     from typer.testing import CliRunner
@@ -1408,6 +1401,9 @@ def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
     assert status["state"] == "live"
     assert status["holder"] == "blueprint-session:sess-open1"
     node = read_graph_strict(g)[0]
+    assert node["locked_by"] == "sess-open1"
+    assert node["locked_by_harness"] == "claude"
+    assert node["locked_by_harness_session"] == "sess-open1"
     assert node["status"] != "in_progress"
     assert node.get("sessions") in (None, [])
 
@@ -1604,9 +1600,9 @@ def test_cli_session_open_refuses_without_identity(tmp_path, monkeypatch):
     assert claim_status("node:x-open004")["state"] == "free"
 
 
-def test_cli_session_close_releases_blueprint_session_claim(tmp_path, monkeypatch):
-    """AC5-HP: open then close in one session releases the blueprint holder
-    and bounds the row with the claim's acquire time."""
+def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, monkeypatch):
+    """AC4-HP: intake and close succeed under the claim; close clears the
+    projected holder and leaves the plan-bound node ready."""
     from datetime import datetime, timezone
 
     from typer.testing import CliRunner
@@ -1614,24 +1610,42 @@ def test_cli_session_close_releases_blueprint_session_claim(tmp_path, monkeypatc
     from fno.claims.core import claim_status
     from fno.graph.store import read_graph_strict
 
-    g = _make_graph(tmp_path, [{"id": "x-open010", "title": "t", "plan_path": "p.md"}])
+    g = _make_graph(tmp_path, [{"id": "x-0be3010", "title": "t"}])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open10")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
 
-    opened = CliRunner().invoke(C.cli, ["session", "open", "x-open010", "--json"])
+    opened = CliRunner().invoke(C.cli, ["session", "open", "x-0be3010", "--json"])
     assert opened.exit_code == 0, opened.output
     acquired_at = json.loads(opened.output)["acquired_at"]
     expected_start = datetime.fromtimestamp(
         acquired_at / 1000, tz=timezone.utc
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    plan = tmp_path / "x-0be3010.md"
+    plan.write_text(
+        "---\ncreated: 2026-09-23T04:35\ndifficulty: low\n---\n"
+        "# Plan for the held node\n\n## Files to Modify\n\n"
+        "| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
+    )
+    from fno.cli import app
+
+    intake = CliRunner().invoke(
+        app,
+        ["backlog", "intake", str(plan), "--claims", "x-0be3010"],
+    )
+    assert intake.exit_code == 0, intake.output
+    held = read_graph_strict(g)[0]
+    assert held["status"] == "in_progress"
+    assert held["locked_by"] == "sess-open10"
+    assert held["plan_path"] == str(plan)
+
     closed = CliRunner().invoke(C.cli, [
-        "session", "close", "x-open010",
+        "session", "close", "x-0be3010",
         "--summary", "plan is ready",
-        "--launch", "/fno:target x-open010",
+        "--launch", "/fno:target x-0be3010",
         "--json",
     ])
 
@@ -1639,11 +1653,15 @@ def test_cli_session_close_releases_blueprint_session_claim(tmp_path, monkeypatc
     out = json.loads(closed.output)
     assert out["claim_released"] is True
     assert out["claim_holder"] == "blueprint-session:sess-open10"
-    assert claim_status("node:x-open010")["state"] == "free"
+    assert claim_status("node:x-0be3010")["state"] == "free"
     row = read_graph_strict(g)[0]["sessions"][0]
     assert row["phase"] == "blueprint"
     assert row["started_at"] == expected_start
     assert "ended_at" in row
+    after = read_graph_strict(g)[0]
+    assert after["status"] == "ready"
+    assert after["locked_by"] is None
+    assert after["locked_at"] is None
 
 
 def test_cli_session_close_leaves_foreign_blueprint_claim_intact(tmp_path, monkeypatch):

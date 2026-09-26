@@ -268,6 +268,14 @@ pub fn claim_path(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(claims_dir(key, root)?.join(format!("{}.lock", encode_key(key))))
 }
 
+pub(crate) fn recovery_lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.recovery.d"))
+}
+
 /// The claims DIRECTORY (`<root>/.fno/claims`) for an explicit root, else the
 /// global root. `None` when no root resolves (no `$FNO_CLAIMS_ROOT`, no
 /// `$HOME`) — callers sweep-read fail-open on that.
@@ -279,10 +287,9 @@ pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// The single-flight RECORD directory, beside the claims dir the latch locks
-/// in. It lives here, not in [`crate::single_flight`], for the reason the
-/// state-roots ratchet exists: this file is the one resolver that knows the
-/// `.fno/<store>` layout, and a path hand-built anywhere else is one no guard
-/// and no `$FNO_CLAIMS_ROOT` can reach.
+/// in. This file is the one resolver that knows the `.fno/<store>` layout, so
+/// a path hand-built elsewhere is one no guard and no `$FNO_CLAIMS_ROOT` can
+/// reach.
 pub(crate) fn flight_dir(root: &Path) -> PathBuf {
     root.join(FLIGHT_DIRNAME)
 }
@@ -314,6 +321,20 @@ pub fn list(
     root: Option<&Path>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
+    list_in(&claim_dirs(root), prefix, include_stale)
+}
+
+/// Enumerate claims for a reader that must distinguish a broken lockfile from
+/// an absent claim. Ordinary listings keep their records-only behavior.
+pub fn list_strict(
+    prefix: Option<&str>,
+    root: Option<&Path>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_strict(&claim_dirs(root), prefix, include_stale)
+}
+
+fn claim_dirs(root: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(global) = global_claims_root() {
         dirs.push(global.join(CLAIMS_DIRNAME));
@@ -321,7 +342,7 @@ pub fn list(
     if let Some(local) = root {
         dirs.push(local.join(CLAIMS_DIRNAME));
     }
-    list_in(&dirs, prefix, include_stale)
+    dirs
 }
 
 /// Scan VERBATIM directories. Spaces-era claims live directly at
@@ -335,6 +356,25 @@ pub fn list_in(
     list_in_result(dirs, prefix, include_stale).map(|(records, _)| records)
 }
 
+/// Scan claims like [`list_in`], but refuse a malformed lockfile whose encoded
+/// filename matches the requested key prefix.
+pub fn list_in_strict(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_result_with_policy(dirs, prefix, include_stale, true, false).map(|(records, _)| records)
+}
+
+/// The projection listing: in-window records plus the pid-less TTL leases a
+/// liveness classify reads Free. An expired claim must not project a holder.
+pub(crate) fn list_in_window(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_result_with_policy(dirs, prefix, false, true, true).map(|(records, _)| records)
+}
+
 /// Ok carries the records plus the directories whose `read_dir` succeeded,
 /// so a caller can tell a true empty from a scan that never reached a file.
 pub(crate) fn list_in_result(
@@ -342,6 +382,17 @@ pub(crate) fn list_in_result(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
+    list_in_result_with_policy(dirs, prefix, include_stale, false, false)
+}
+
+fn list_in_result_with_policy(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+    fail_on_corrupted: bool,
+    keep_leased_free: bool,
+) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
+    let encoded_prefix = prefix.map(encode_key);
     let mut seen_dirs = std::collections::BTreeSet::new();
     let mut read_dirs = Vec::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
@@ -368,16 +419,51 @@ pub(crate) fn list_in_result(
             let file_type = entry.file_type().map_err(|error| {
                 format!("claims root {} unreadable mid-scan: {error}", dir.display())
             })?;
-            if !file_type.is_file() || !entry.file_name().to_string_lossy().ends_with(".lock") {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if !file_name.ends_with(".lock") {
                 continue;
             }
-            let Ok(rec) = read_claim_file(&entry.path()) else {
-                // The list contract is records, not diagnostics. Corrupted
-                // rows are withheld exactly as an unreadable root is: they
-                // cannot authorize an apply pass.
+            let path = entry.path();
+            if !file_type.is_file() {
+                if fail_on_corrupted
+                    && encoded_prefix
+                        .as_deref()
+                        .is_none_or(|wanted| file_name.starts_with(wanted))
+                {
+                    return Err(format!("lockfile {} is not a regular file", path.display()));
+                }
                 continue;
+            }
+            let rec = match read_claim_file(&path) {
+                Ok(record) => record,
+                Err(ReadError::GoneAway) => continue,
+                Err(ReadError::Corrupted(error)) => {
+                    if fail_on_corrupted
+                        && encoded_prefix
+                            .as_deref()
+                            .is_none_or(|wanted| file_name.starts_with(wanted))
+                    {
+                        return Err(format!("lockfile {} unreadable: {error}", path.display()));
+                    }
+                    continue;
+                }
             };
-            if prefix.is_some_and(|wanted| !rec.key.starts_with(wanted)) {
+            let matches_prefix = prefix.is_none_or(|wanted| rec.key.starts_with(wanted));
+            let matches_filename_prefix = encoded_prefix
+                .as_deref()
+                .is_none_or(|wanted| file_name.starts_with(wanted));
+            if fail_on_corrupted && (matches_prefix || matches_filename_prefix) {
+                let expected_file_name = format!("{}.lock", encode_key(&rec.key));
+                if file_name.as_ref() != expected_file_name.as_str() {
+                    return Err(format!(
+                        "lockfile {} filename does not match key {}",
+                        path.display(),
+                        rec.key
+                    ));
+                }
+            }
+            if !matches_prefix {
                 continue;
             }
             let state = classify(&rec, None);
@@ -385,6 +471,12 @@ pub(crate) fn list_in_result(
                 ClaimState::Live => 0,
                 ClaimState::Suspect => 1,
                 ClaimState::Stale => 2,
+                ClaimState::Free
+                    if keep_leased_free
+                        && rec.expires_at.is_some_and(|expiry| expiry > now_ms()) =>
+                {
+                    1
+                }
                 ClaimState::Free | ClaimState::Corrupted => continue,
             };
             if !include_stale && priority > 1 {
@@ -712,351 +804,16 @@ pub fn process_create_time_ms(pid: i32) -> Option<i64> {
     }
 }
 
-/// The liveness reading beside its cause (mirrors
-/// `staleness._liveness_reading`). `probe` is injectable so tests and the
-/// parity harness can drive the Refused arm deterministically; the Python
-/// leg's equivalent seam is monkeypatching `_probe_create_time`.
-fn liveness_reading(rec: &ClaimRecord, probe: &dyn Fn(i32) -> PidProbe) -> (bool, &'static str) {
-    if rec.pid_unavailable {
-        return (false, basis::PID_UNAVAILABLE);
-    }
-    if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
-        return (false, basis::OFFHOST);
-    }
-    let Some(pid) = rec.pid else {
-        return (false, basis::PID_UNAVAILABLE);
-    };
-    match probe(pid) {
-        PidProbe::Created(create_ms) => {
-            // PID reuse: the current occupant of the pid slot started AFTER
-            // the claim was filed, so it is a different process.
-            if create_ms > rec.acquired_at {
-                (false, basis::PID_REUSE)
-            } else {
-                (true, basis::LIVE)
-            }
-        }
-        PidProbe::Absent => (false, basis::PID_ABSENT),
-        PidProbe::Refused => (false, basis::ACCESS_DENIED),
-    }
-}
+// The claim state ladder lives in claims_classify.rs (file budget); these
+// re-exports keep every `claims::` path callers use unchanged.
+#[path = "claims_classify.rs"]
+mod claims_classify;
 
-/// Is the claim's holder verifiably running? (mirrors `staleness.is_live`)
-/// False when: no pid was recorded, cross-machine, the pid is gone, the
-/// holder refuses inspection, or the current occupant of the pid slot
-/// started AFTER the claim was filed (PID reuse).
-fn is_live(rec: &ClaimRecord) -> bool {
-    liveness_reading(rec, &|pid| probe_pid(pid)).0
-}
-
-pub(crate) fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
-    match rec.expires_at {
-        Some(exp) => now >= exp,
-        None => false,
-    }
-}
-
-/// Compose liveness + expiry into a state (mirrors `staleness.classify`,
-/// INCLUDING the corroborated hybrid arm: an expired-TTL claim whose recorded
-/// pid is a live process on this host is still LIVE only when that pid was
-/// prover-proven at write time AND the record's harness forks per session - a
-/// suspended-but-alive session must not have its claim reclaimed by a peer,
-/// while a live FOREIGN pid (a chat app's app-server answering for the holder)
-/// must not make the lease permanent).
-///
-/// SUSPECT arm: a TTL claim still inside its window whose recorded pid
-/// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
-/// the respawned-worker case (supervisor pid died, session lives on): the TTL
-/// keeps protecting the slot, so acquire/dispatch treat it like `Live` (never
-/// steal), but the distinct state lets init/dispatch branch on it. Only TTL
-/// expiry frees the claim (-> `Stale`); pid death alone never does.
-///
-/// SUSPECT also covers the unreadable holder on a pid-liveness claim:
-/// a probe refusal means the process EXISTS and refuses inspection, so it is
-/// not a proof of death and must never free the claim on pid evidence.
-pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
-    classify_with_basis(rec, now, &|pid| probe_pid(pid)).0
-}
-
-/// `classify` beside its basis, with the pid probe injectable (mirrors
-/// `staleness.classify_with_basis`; the parity harness pins the vocabulary).
-/// The basis names WHY, one cause per way a verdict can arise: `live`,
-/// `ttl-expired`, or the liveness cause that failed (`offhost`,
-/// `pid-unavailable`, `pid-absent`, `access-denied`, `pid-reuse`).
-pub fn classify_with_basis(
-    rec: &ClaimRecord,
-    now: Option<i64>,
-    probe: &dyn Fn(i32) -> PidProbe,
-) -> (ClaimState, &'static str) {
-    classify_with_basis_and_exclusivity(rec, now, probe, None, None)
-}
-
-/// The pid verdict for a claim whose holder is one short-lived process.
-/// `gate:` keys read it at any age: the gate pid holds the mutex for the
-/// whole hold, so a dead pid means no holder. Other short-lived holders read
-/// it only at TTL expiry. Live keeps the claim; any pid cause except a
-/// refused probe frees it (Stale, reapable); a refusal falls through - a
-/// refusal is not proof of death. None = no verdict; off-host records,
-/// pid-less records, and refused probes keep the path they took before.
-fn pid_verdict(
-    rec: &ClaimRecord,
-    probe: &dyn Fn(i32) -> PidProbe,
-) -> Option<(ClaimState, &'static str)> {
-    if !is_same_machine(&rec.host, rec.machine_id.as_deref())
-        || rec.pid_unavailable
-        || rec.pid.is_none()
-    {
-        return None;
-    }
-    let (live, cause) = liveness_reading(rec, probe);
-    if live {
-        return Some((ClaimState::Live, cause));
-    }
-    if cause != basis::ACCESS_DENIED {
-        return Some((ClaimState::Stale, cause));
-    }
-    None
-}
-
-/// A pid the prover proved is the holder session's own process, on a harness
-/// where that process dies with the session. Both TTL arms trust it.
-fn proven_session_pid(rec: &ClaimRecord) -> bool {
-    rec.pid_provenance.as_deref() == Some("session-prover")
-        && pid_dies_with_session(rec.harness.as_deref())
-}
-
-/// Classify with optional sweep-time sibling evidence. `None` is the honest
-/// value for single-key reads; a full scan passes the PID exclusivity map's
-/// result for the record being classified. `session_witness` is the
-/// session-keyed liveness reader; `None` keeps the pid-only
-/// verdicts legacy records were characterized under.
-pub fn classify_with_basis_and_exclusivity(
-    rec: &ClaimRecord,
-    now: Option<i64>,
-    probe: &dyn Fn(i32) -> PidProbe,
-    pid_exclusive: Option<bool>,
-    session_witness: Option<SessionWitness<'_>>,
-) -> (ClaimState, &'static str) {
-    let now = now.unwrap_or_else(now_ms);
-    // The witness is consulted only for records that CARRY a session id; a
-    // blank stamp is absent, so legacy-shaped records never reach it.
-    let session_live = |witness: SessionWitness<'_>| -> Option<&'static str> {
-        rec.session_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|_| match witness(rec) {
-                SessionLiveness::Live(witness_basis) => Some(witness_basis),
-                SessionLiveness::Absent | SessionLiveness::Unresolved => None,
-            })
-    };
-    // A `dispatch:` pid can predate the worker's exec, so it waits for expiry.
-    // A gate pid never does, so it decides before the TTL ends.
-    if rec.key.starts_with("gate:") {
-        if let Some(verdict) = pid_verdict(rec, probe) {
-            return verdict;
-        }
-    }
-    // A blueprint-session claim is a lease on the PLANNING WINDOW, clock-only
-    // like a `review:branch:` hold: a native subagent planner shares its
-    // parent's pid and session id, so the hybrid arm and the witness would
-    // both heal the claim for the parent's whole life after a mid-flow
-    // TaskStop. The manual `claim release --holder` stays the fast path.
-    if rec.holder.starts_with(BLUEPRINT_HOLDER_PREFIX)
-        && now
-            >= rec
-                .expires_at
-                .unwrap_or(rec.acquired_at.saturating_add(BLUEPRINT_LEASE_MS))
-    {
-        return (ClaimState::Stale, basis::TTL_EXPIRED);
-    }
-    if is_expired(rec, now) {
-        // A review hold is a lease on the review; the holder's session answers another question.
-        if rec.key.starts_with("review:branch:") {
-            return (ClaimState::Stale, basis::TTL_EXPIRED);
-        }
-        // A lease whose holder is ONE SHORT-LIVED PROCESS reads its recorded
-        // pid as the verdict: `dispatch:` reservations and any lease its
-        // writer stamped `holder-process`. The session witness asks about the
-        // session that wrote the record, which outlives the process and must
-        // not heal its lease.
-        if rec.key.starts_with("dispatch:")
-            || rec.pid_provenance.as_deref() == Some("holder-process")
-        {
-            if let Some(verdict) = pid_verdict(rec, probe) {
-                return verdict;
-            }
-        }
-        // Corroborated hybrid: the pid keeps the claim Live only when it was
-        // proven to be the holder session's own process. Any other provenance
-        // (or a legacy record with no field) is Stale, as a pre-hybrid claim
-        // was: the TTL is a lease.
-        //
-        // The liveness reading is only load-bearing here for a prover-proven
-        // pid; every other expired claim is Stale on the clock alone, so the
-        // probe (a syscall per claim) is skipped on that path.
-        //
-        // The harness gate is what makes this true of RECORDS rather than of
-        // writers. A stamp is written by the process being judged, so a guard
-        // whose only evidence is that field is one field away from lying again
-        // - which is exactly how a record written under codex, where the stamp
-        // meant "the app-server is up", once read Live 3h45m past its TTL. The
-        // record's own `harness` is independent evidence, already on every
-        // record, so a pre-fix claim on disk and one from an older binary in a
-        // mixed-version fleet both get the correct verdict here.
-        if proven_session_pid(rec) {
-            let (live, cause) = liveness_reading(rec, probe);
-            if live {
-                if pid_exclusive == Some(false) {
-                    return (ClaimState::Suspect, basis::PID_SHARED);
-                }
-                return (ClaimState::Live, cause);
-            }
-        }
-        // Session witness. The recorded pid is a corpse after every
-        // harness resume, so pid arithmetic alone collapses UNKNOWN into a
-        // verdict - 1509 collapsed it into alive (nothing reapable, the reaper
-        // starved) and before it, into dead (a session that wrote 18 seconds
-        // earlier read provably dead). The witness is the third
-        // state's exit: a LIVE session heals the verdict, and an UNRESOLVED
-        // one reads Suspect only inside a bounded grace, then Stale -
-        // reapable by policy, never held for a proof that never arrives
-        // (the update:fno deadlock). A pid whose exclusivity demoted the
-        // hybrid arm still yields to the witness: session-keyed evidence
-        // outranks arithmetic on a number the resume already invalidated.
-        if let Some(witness) = session_witness {
-            // Records with NO session id never reach the witness: they keep
-            // byte-for-byte today's verdict, which every pre-change claim and
-            // the reaper counts the 1511 revert restored depend on.
-            if rec.session_id.as_deref().is_some_and(|s| !s.is_empty()) {
-                if rec.key.starts_with("node:")
-                    && is_same_machine(&rec.host, rec.machine_id.as_deref())
-                    && matches!(witness(rec), SessionLiveness::Absent)
-                {
-                    return (ClaimState::Stale, basis::SESSION_ABSENT);
-                }
-                if let Some(witness_basis) = session_live(witness) {
-                    return (ClaimState::Live, witness_basis);
-                }
-                if now < rec.expires_at.unwrap_or(now) + UNRESOLVED_GRACE_MS {
-                    return (ClaimState::Suspect, basis::TTL_EXPIRED_UNRESOLVED);
-                }
-                return (ClaimState::Stale, basis::TTL_EXPIRED_UNRESOLVED);
-            }
-        }
-        return (ClaimState::Stale, basis::TTL_EXPIRED);
-    }
-    // A lease whose holder is ONE SHORT-LIVED PROCESS reads its recorded pid
-    // at any age, not only at expiry: the flight gate and the post-merge
-    // sync hold their lease exactly as long as the process lives, so a
-    // provably dead pid frees it inside the TTL window instead of refusing
-    // every retry until expiry. A refused probe is not proof of death and
-    // falls through to the TTL-window arms below.
-    if rec.pid_provenance.as_deref() == Some(HOLDER_PROCESS) {
-        if let Some(verdict) = pid_verdict(rec, probe) {
-            return verdict;
-        }
-    }
-    let (live, cause) = liveness_reading(rec, probe);
-    if rec.expires_at.is_none() {
-        if live {
-            return (ClaimState::Live, cause);
-        }
-        // Unreadable is not provably dead: never free a claim on pid evidence
-        // we were refused.
-        if cause == basis::ACCESS_DENIED {
-            return (ClaimState::Suspect, cause);
-        }
-        return (ClaimState::Stale, cause);
-    }
-    // TTL claim, still inside its window: live pid => Live, dead/replaced pid
-    // => Suspect (TTL-protected, not stealable) - unless the session witness
-    // proves the holder: a resumed session's recorded pid is
-    // permanently dead, so without this heal the claim sits Suspect until the
-    // heartbeat lapses and the dead pid decides at expiry.
-    let witnessed = session_witness.and_then(|witness| {
-        rec.session_id
-            .as_deref()
-            .filter(|session| !session.is_empty())
-            .map(|_| witness(rec))
-    });
-    // The session's own live process outranks an Absent witness, in the same
-    // order as the expired arm. An ambient pid is only a neighbour, so it
-    // proves nothing and the witness still decides.
-    if live && proven_session_pid(rec) {
-        if pid_exclusive == Some(false) {
-            return (ClaimState::Suspect, basis::PID_SHARED);
-        }
-        return (ClaimState::Live, cause);
-    }
-    if rec.key.starts_with("node:")
-        && is_same_machine(&rec.host, rec.machine_id.as_deref())
-        && matches!(witnessed, Some(SessionLiveness::Absent))
-    {
-        return (ClaimState::Stale, basis::SESSION_ABSENT);
-    }
-    if live {
-        (ClaimState::Live, cause)
-    } else {
-        match witnessed {
-            Some(SessionLiveness::Live(witness_basis)) => (ClaimState::Live, witness_basis),
-            Some(SessionLiveness::Absent | SessionLiveness::Unresolved) | None => {
-                (ClaimState::Suspect, cause)
-            }
-        }
-    }
-}
-
-/// Classify one claim for a garbage-collection sweep. The bool is true only
-/// when the claim is provably dead from this host; otherwise the bucket names
-/// the reason it remains protected or opaque.
-pub fn classify_for_sweep(
-    rec: &ClaimRecord,
-    now: Option<i64>,
-    probe: &dyn Fn(i32) -> PidProbe,
-    pid_exclusive: Option<bool>,
-    session_witness: Option<SessionWitness<'_>>,
-) -> (bool, &'static str) {
-    let now = now.unwrap_or_else(now_ms);
-    let same_machine = is_same_machine(&rec.host, rec.machine_id.as_deref());
-    let unidentifiable = rec.machine_id.is_none();
-    if !same_machine && !(unidentifiable && is_expired(rec, now)) {
-        return (false, basis::OFFHOST);
-    }
-    let (state, _) =
-        classify_with_basis_and_exclusivity(rec, Some(now), probe, pid_exclusive, session_witness);
-    if state == ClaimState::Stale {
-        return (true, "");
-    }
-    (
-        false,
-        if state == ClaimState::Suspect {
-            "suspect"
-        } else {
-            "live"
-        },
-    )
-}
-
-/// Return sweep-time PID exclusivity keyed by the machine identity and pid.
-/// A false value means one prover-visible pid names more than one distinct
-/// holder; a single-key caller must pass `None` to classification because it
-/// has no sibling evidence from which to establish this property.
-pub fn pid_exclusivity(records: &[ClaimRecord]) -> std::collections::BTreeMap<(String, i32), bool> {
-    let mut holders: std::collections::BTreeMap<(String, i32), std::collections::BTreeSet<String>> =
-        std::collections::BTreeMap::new();
-    for rec in records {
-        let Some(pid) = rec.pid else { continue };
-        let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
-        holders
-            .entry((identity, pid))
-            .or_default()
-            .insert(rec.holder.clone());
-    }
-    holders
-        .into_iter()
-        .map(|(key, holders)| (key, holders.len() <= 1))
-        .collect()
-}
+pub use claims_classify::{
+    classify, classify_for_sweep, classify_with_basis, classify_with_basis_and_exclusivity,
+    pid_exclusivity,
+};
+pub(crate) use claims_classify::{classify_with_session_witness, is_expired, is_live};
 
 // ---------------------------------------------------------------------------
 // YAML read/write + atomic file ops
@@ -1205,21 +962,14 @@ fn denied_state_root(path: &Path) -> String {
 
 /// Path of the breadcrumb a mute worker leaves for the operator.
 ///
-/// `<repo>/.fno/` is chosen because it is the ONE place a denied worker can
-/// still write: the sandbox that took the state root left the repo writable.
-/// Everything else it normally speaks through - the claim store, the mail bus,
-/// the spawn mutex - lives under the root it just lost.
-///
-/// THIS WORKTREE, never the canonical checkout. A sandboxed worker runs in a
-/// linked worktree and is granted THAT directory; `canonical_repo_root` names
-/// the main worktree, which is outside the worker's sandbox, so a breadcrumb
-/// aimed there is dropped by the very failure it is reporting. It also has to
-/// match the Python twin, which resolves the current worktree; two different
-/// paths means two files and neither clearing the other.
-///
-/// Cached: `clear_state_root_breadcrumb` runs on EVERY successful claim
-/// create, including inside `recover_stale_locked` while that holds a
-/// cross-process mutex. Resolving a repo root there forks `git` each time.
+/// `<repo>/.fno/` is the ONE place a denied worker can still write: the
+/// sandbox that took the state root left the repo writable, while the claim
+/// store, mail bus, and spawn mutex all live under the root it just lost.
+/// THIS WORKTREE, never the canonical checkout: the sandbox granted the
+/// linked worktree, and the Python twin resolves the current worktree, so two
+/// different paths would mean two files neither clearing the other. Cached:
+/// the clear runs on EVERY successful claim create, and a resolve there
+/// forks `git` while recover_stale_locked holds a cross-process mutex.
 fn state_root_breadcrumb_path() -> Option<&'static Path> {
     static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
@@ -1618,6 +1368,19 @@ pub(crate) fn release_dir_mutex(lock_dir: &Path, token: &str) {
         lock_dir.display(),
         token
     );
+}
+
+/// Serialize a lockfile mutation with acquire's stale-recovery rename.
+pub(crate) fn with_recovery_lock<T>(
+    path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = recovery_lock_path(path);
+    let token = acquire_dir_mutex(&lock, RECOVERY_LOCK_MAX_WAIT, true)
+        .ok_or_else(|| format!("claim recovery mutex unavailable for {}", path.display()))?;
+    let result = operation();
+    release_dir_mutex(&lock, &token);
+    result
 }
 
 /// Set `path`'s mtime to `age` in the past. Best-effort: a failure (read-only
@@ -2163,6 +1926,18 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
 /// gone-away race (claim released between collision and read) retries from
 /// the top, bounded at [`ACQUIRE_MAX_ATTEMPTS`].
 pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
+    acquire_with_session_witness(key, holder, opts, None)
+}
+
+/// The claim verb supplies a lazy session witness for task leases. It is
+/// consulted when a pid-less thread claim is assessed, so absent sessions can
+/// release claims and live sessions can survive an expired lease.
+pub(crate) fn acquire_with_session_witness(
+    key: &str,
+    holder: &str,
+    opts: AcquireOpts,
+    session_witness: Option<SessionWitness<'_>>,
+) -> AcquireOutcome {
     if let Err(e) = validate_inputs(key, holder, opts.ttl_ms, opts.pid, opts.pid_unavailable) {
         return AcquireOutcome::Error(e);
     }
@@ -2212,11 +1987,17 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
 
         // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
         // still protects a respawned worker's slot, so we never reclaim it.
-        if !matches!(
-            classify(&existing, None),
-            ClaimState::Live | ClaimState::Suspect
-        ) {
-            match recover_stale(&path, key, holder, &opts, events_dir.as_deref()) {
+        let observed_state = classify_with_session_witness(&existing, session_witness);
+        if !matches!(observed_state, ClaimState::Live | ClaimState::Suspect) {
+            match recover_stale_observed(
+                &path,
+                key,
+                holder,
+                &opts,
+                events_dir.as_deref(),
+                &existing,
+                session_witness,
+            ) {
                 RecoverResult::Done(outcome) => return outcome,
                 RecoverResult::Retry => continue,
             }
@@ -2300,12 +2081,7 @@ fn idempotent_reacquire_guarded(
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
 ) -> RecoverResult {
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let recovery_lock = recovery_lock_path(path);
     let token = match std::fs::create_dir(&recovery_lock) {
         Ok(()) => stamp_owner(&recovery_lock),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2361,6 +2137,7 @@ enum RecoverResult {
 /// permanently: archive-by-rename and exclusive-create both arbitrate a winner
 /// on their own, so the mutex is a spurious-retry guard, not the correctness
 /// boundary.
+#[cfg(test)]
 fn recover_stale(
     path: &Path,
     key: &str,
@@ -2368,12 +2145,26 @@ fn recover_stale(
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
 ) -> RecoverResult {
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let expected = match read_claim_file(path) {
+        Ok(record) => record,
+        Err(ReadError::GoneAway) => return RecoverResult::Retry,
+        Err(ReadError::Corrupted(error)) => {
+            return RecoverResult::Done(AcquireOutcome::Error(error))
+        }
+    };
+    recover_stale_observed(path, key, holder, opts, events_dir, &expected, None)
+}
+
+fn recover_stale_observed(
+    path: &Path,
+    key: &str,
+    holder: &str,
+    opts: &AcquireOpts,
+    events_dir: Option<&Path>,
+    expected: &ClaimRecord,
+    session_witness: Option<SessionWitness<'_>>,
+) -> RecoverResult {
+    let recovery_lock = recovery_lock_path(path);
     let token = match std::fs::create_dir(&recovery_lock) {
         Ok(()) => stamp_owner(&recovery_lock),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2394,20 +2185,29 @@ fn recover_stale(
     };
 
     // Inside the mutex: release on ALL paths out.
-    let result = recover_stale_locked(path, key, holder, opts, events_dir);
+    let result = recover_stale_locked(
+        path,
+        key,
+        holder,
+        opts,
+        events_dir,
+        expected,
+        session_witness,
+    );
     release_dir_mutex(&recovery_lock, &token);
     result
 }
 
-/// The critical section of [`recover_stale`]: re-read (the holder may have
-/// changed or vanished while we grabbed the mutex), re-classify, then
-/// archive + exclusive-create.
+/// The critical section of [`recover_stale`]: re-read and re-classify under
+/// the recovery mutex, then archive + exclusive-create.
 fn recover_stale_locked(
     path: &Path,
     key: &str,
     holder: &str,
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
+    expected: &ClaimRecord,
+    session_witness: Option<SessionWitness<'_>>,
 ) -> RecoverResult {
     let new_claim = make_claim(key, holder, opts);
     let payload = match serialize_claim(&new_claim) {
@@ -2437,6 +2237,10 @@ fn recover_stale_locked(
         Ok(rec) => rec,
     };
 
+    if &existing != expected {
+        return RecoverResult::Retry;
+    }
+
     if existing.holder == holder {
         // Raced into the idempotent path while grabbing the mutex.
         return RecoverResult::Done(idempotent_reacquire(
@@ -2444,11 +2248,8 @@ fn recover_stale_locked(
         ));
     }
 
-    if matches!(
-        classify(&existing, None),
-        ClaimState::Live | ClaimState::Suspect
-    ) {
-        // Raced — now it's live (or a TTL-protected suspect); back off, no steal.
+    if classify_with_session_witness(&existing, session_witness) != ClaimState::Stale {
+        // Only a fresh stale verdict for this exact record authorizes archive.
         return RecoverResult::Done(AcquireOutcome::HeldByOther {
             holder: existing.holder,
             pid: existing.pid,
@@ -2501,34 +2302,53 @@ fn wait_for_recovery_release(recovery_lock: &Path, max_wait: Duration) {
 /// Release a claim we hold (mirrors `core.release_claim`, non-strict):
 /// missing file, different holder, and corrupted file are all silent success
 /// (releases are idempotent; a corrupted file is left for force-release).
+/// The recovery mutex keeps the holder check and unlink ordered with acquire.
 pub fn release(
     key: &str,
     holder: &str,
     root: Option<&Path>,
     events_dir: Option<&Path>,
 ) -> Result<(), String> {
+    release_with_receipt(key, holder, root, events_dir).map(|_| ())
+}
+
+/// Release a claim and return the exact record removed under the recovery
+/// mutex; a pre-read cannot stand in for it (the holder may have changed).
+pub(crate) fn release_with_receipt(
+    key: &str,
+    holder: &str,
+    root: Option<&Path>,
+    events_dir: Option<&Path>,
+) -> Result<Option<ClaimRecord>, String> {
     if key.is_empty() || holder.is_empty() {
         return Err("key and holder must be non-empty".into());
     }
     let path = claim_path(key, root)?;
-    let existing = match read_claim_file(&path) {
-        Ok(rec) => rec,
-        Err(ReadError::GoneAway) => return Ok(()),
-        Err(ReadError::Corrupted(_)) => return Ok(()),
-    };
-    if existing.holder != holder {
-        return Ok(());
+    // Nothing to serialize when the claim is absent: the mutex lives beside
+    // the lockfile and would fail a release in a never-claimed root.
+    if !path.exists() {
+        return Ok(None);
     }
-    let duration_ms = (now_ms() - existing.acquired_at).max(0);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    }
-    let mut data = common_event_data(&existing);
-    data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
-    emit_audit_event(events_dir, "claim_released", data);
-    Ok(())
+    with_recovery_lock(&path, || {
+        let existing = match read_claim_file(&path) {
+            Ok(rec) => rec,
+            Err(ReadError::GoneAway) => return Ok(None),
+            Err(ReadError::Corrupted(_)) => return Ok(None),
+        };
+        if existing.holder != holder {
+            return Ok(None);
+        }
+        let duration_ms = (now_ms() - existing.acquired_at).max(0);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        }
+        let mut data = common_event_data(&existing);
+        data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
+        emit_audit_event(events_dir, "claim_released", data);
+        Ok(Some(existing))
+    })
 }
 /// Inspect a single key (mirrors `core.claim_status`). Never errors: a
 /// missing file (or one that vanishes mid-read) is `Free`, an unreadable one
@@ -2664,12 +2484,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
         Err(ReadError::GoneAway) => return Ok(false),
         Err(ReadError::Corrupted(_)) => return Ok(false),
     };
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let recovery_lock = recovery_lock_path(&path);
     // A peer holding the mutex is mid-reclaim; back off (best-effort) rather
     // than race it. A missed renewal only shortens the lease. But a CORPSE here
     // would block every renewal until some other path cleared it, which is the

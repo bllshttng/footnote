@@ -98,7 +98,9 @@ def test_escalation_lands_in_the_scratch_journal_not_the_checkout(pinned, runner
     assert pinned["checkout"].read_bytes() == before
 
 
-def test_ask_writes_under_its_own_root_never_the_shared_pin(pinned, runner) -> None:
+def test_ask_writes_under_its_own_root_never_the_shared_pin(
+    pinned, runner, _door_binary_from_this_checkout
+) -> None:
     """`fno outstanding ask` is the other writer that reaches an operator
     surface, and it matters more than the mail escalation: `mail_escalation` is
     windowed by the fold's 24h `since` bound, so a fixture row ages out on its

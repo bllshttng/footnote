@@ -722,6 +722,30 @@ pub fn territory_cap(config_cwd: &Path) -> u32 {
         .unwrap_or(4)
 }
 
+/// Live and suspect node lockfiles are the single holder answer. `false`
+/// excludes claims proven stale; a failed directory scan stays unknown.
+fn live_node_claims_from(
+    directory: Option<std::path::PathBuf>,
+) -> Result<HashSet<String>, TerritoryUnknown> {
+    let directory = directory.ok_or_else(|| {
+        TerritoryUnknown("territory: claims path unavailable from FNO_CLAIMS_ROOT or HOME".into())
+    })?;
+    let records = crate::claims::list_in_strict(&[directory], Some("node:"), false)
+        .map_err(|error| TerritoryUnknown(format!("territory: claims unreadable: {error}")))?;
+    Ok(records
+        .into_iter()
+        .filter_map(|record| record.key.strip_prefix("node:").map(str::to_string))
+        .collect())
+}
+
+pub(crate) fn live_node_claims() -> Result<HashSet<String>, TerritoryUnknown> {
+    live_node_claims_from(crate::claims::claims_dir_for(None))
+}
+
+pub(crate) fn live_held_in(node_ids: &HashSet<String>, held: &HashSet<String>) -> usize {
+    node_ids.intersection(held).count()
+}
+
 /// One readout row per territory: scope, membership state, rung, kingless
 /// state, crown holder, mission, and live count against the cap. The
 /// projection the status payload, the hidden config
@@ -737,6 +761,12 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
             return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
         }
     };
+    let live_node_claims = match live_node_claims() {
+        Ok(claims) => claims,
+        Err(TerritoryUnknown(reason)) => {
+            return vec![json!({"membership": "unknown", "reason": reason, "cap": cap})]
+        }
+    };
     // One registry parse feeds holders and the owner rule alike.
     let crowns = live_crowns(registry_path).unwrap_or_default();
     let holders: HashMap<String, String> = crowns
@@ -744,9 +774,6 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
         .map(|c| (c.scope.clone(), c.holder.clone()))
         .collect();
     let entries = graph_entries(config_cwd).unwrap_or_default();
-    let live = crate::spawn_gate::live_rows(registry_path, &mut Vec::new());
-    let live_nodes: Vec<Option<&str>> = live.iter().map(|r| r.node.as_deref()).collect();
-
     // Exclusive membership: a node counts for the one live crown that owns
     // it - the deepest crown holding it, the same rule `node_owners` gives
     // the spawn gate and the court - so a worker can never cost two
@@ -779,13 +806,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
                 }
             }
             let live_count = if membership == "ok" {
-                Some(
-                    live_nodes
-                        .iter()
-                        .filter_map(|n| *n)
-                        .filter(|n| ids.contains(*n))
-                        .count(),
-                )
+                Some(live_held_in(&ids, &live_node_claims))
             } else {
                 None
             };
@@ -936,7 +957,7 @@ mod resolve_tests {
             let lock = crate::claims::test_env_lock()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let saved = ["FNO_CONFIG", "FNO_HOME"]
+            let saved = ["FNO_CONFIG", "FNO_HOME", "FNO_CLAIMS_ROOT"]
                 .iter()
                 .map(|var| (*var, std::env::var_os(var)))
                 .collect();
@@ -1013,6 +1034,7 @@ path = \"/repo/alpha\"
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
         std::env::set_var("FNO_HOME", tmp.path());
+        std::env::set_var("FNO_CLAIMS_ROOT", tmp.path());
         let (cwd, registry) =
             write_fixture(tmp.path(), BASE_CONFIG, graph_fixture(), registry_fixture());
         (tmp, cwd, registry)
@@ -1186,7 +1208,10 @@ path = "/repo/alpha"
     #[test]
     fn territory_rows_project_the_ac7_row_shape() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        // The live count reads claim lockfiles (the holder of record), so
+        // the fixture seeds the claim w-1's registry row implies.
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
         let rows = territory_rows(&cwd, &registry);
         assert_eq!(rows.len(), 2);
         let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
@@ -1288,7 +1313,10 @@ path = "/repo/alpha"
     #[test]
     fn territory_rows_count_each_worker_in_exactly_one_row() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        // Seed the claims the two live workers' registry rows imply.
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
+        acquire_node_claim(tmp.path(), "e-loose", Some(std::process::id()), None, false);
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
@@ -1317,10 +1345,119 @@ path = "/repo/alpha"
         );
     }
 
+    fn acquire_node_claim(
+        root: &Path,
+        node: &str,
+        pid: Option<u32>,
+        ttl_ms: Option<i64>,
+        pid_unavailable: bool,
+    ) -> crate::claims::ClaimRecord {
+        match crate::claims::acquire(
+            &format!("node:{node}"),
+            "target-session:test",
+            crate::claims::AcquireOpts {
+                pid,
+                ttl_ms,
+                pid_unavailable,
+                root: Some(root.to_path_buf()),
+                events_dir: Some(root.to_path_buf()),
+                ..Default::default()
+            },
+        ) {
+            crate::claims::AcquireOutcome::Acquired(record) => record,
+            other => panic!("node claim fixture failed: {other:?}"),
+        }
+    }
+
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn territory_rows_count_live_and_suspect_node_claims_not_registry_node_fields() {
+        let _env = env_guard();
+        let (tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "w-1", "status": "live", "node": null, "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+                 "pid": std::process::id()},
+                {"name": "w-2", "status": "live", "node": null, "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+                 "pid": std::process::id()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let live = acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
+        let suspect = acquire_node_claim(tmp.path(), "e-1", None, Some(60_000), true);
+        let stale = acquire_node_claim(tmp.path(), "e-loose", Some(reaped_pid()), None, false);
+        assert_eq!(
+            crate::claims::classify(&live, None),
+            crate::claims::ClaimState::Live
+        );
+        assert_eq!(
+            crate::claims::classify(&suspect, None),
+            crate::claims::ClaimState::Suspect
+        );
+        assert_eq!(
+            crate::claims::classify(&stale, None),
+            crate::claims::ClaimState::Stale
+        );
+
+        let rows = territory_rows(&cwd, &registry);
+        let crowned = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
+        assert_eq!(
+            crowned["live"], 2,
+            "live and suspect node claims count: {rows:?}"
+        );
+        assert_eq!(
+            loose["live"], 0,
+            "a stale node claim does not count: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_claim_store_makes_territory_count_unknown() {
+        let _env = env_guard();
+        let (tmp, cwd, registry) = fixture_env();
+        std::fs::create_dir_all(tmp.path().join(".fno")).unwrap();
+        std::fs::write(tmp.path().join(".fno/claims"), "not a directory").unwrap();
+
+        let rows = territory_rows(&cwd, &registry);
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "unknown store must not emit a zero row: {rows:?}"
+        );
+        assert_eq!(rows[0]["membership"], "unknown");
+        assert!(
+            rows[0]["reason"].as_str().unwrap().contains("claims"),
+            "{rows:?}"
+        );
+        assert!(rows[0]["live"].is_null(), "{rows:?}");
+    }
+
+    #[test]
+    fn missing_claim_root_is_unknown_not_zero() {
+        let error = live_node_claims_from(None).unwrap_err();
+        assert!(error.0.contains("claims path unavailable"), "{error:?}");
+    }
+
     #[test]
     fn a_non_epic_crown_scope_reads_unknown_while_others_stay_ok() {
         let _env = env_guard();
-        let (_tmp, cwd, registry) = fixture_env();
+        let (tmp, cwd, registry) = fixture_env();
+        acquire_node_claim(tmp.path(), "e-1a", Some(std::process::id()), None, false);
         std::fs::write(
             &registry,
             json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [

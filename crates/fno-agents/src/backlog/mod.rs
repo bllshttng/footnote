@@ -1207,6 +1207,11 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
+    // Project the external claim store once for the whole export: the claim
+    // is the holder of record, and the stored lock fields are the retired
+    // mirror. Loading each node through `nodes::load` would rescan every
+    // lockfile for every row.
+    let node_claims = nodes::node_claims_by_id()?;
     let mut statement = connection
         .prepare("SELECT id, ordinal FROM nodes ORDER BY ordinal, id")
         .map_err(|error| error.to_string())?;
@@ -1218,7 +1223,8 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     let mut typed: Vec<(i64, String, Value)> = Vec::new();
     for id in ids {
         let (id, ordinal) = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
+        let claim = node_claims.get(&id).cloned().unwrap_or_default();
+        let Some(node) = nodes::load_with_claim(&connection, &id, Some(claim))? else {
             return Err(format!("node {id} vanished mid-export"));
         };
         typed.push((ordinal, id, node.to_json()));
@@ -1229,6 +1235,13 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
         .map(|(id, ordinal, body)| (ordinal, id, body))
         .collect();
     merged.append(&mut typed);
+    // One projection for every served row, typed and raw alike: a typed
+    // row carries the retired mirror's lock fields in its extras, so only
+    // a uniform pass serves the claim store's word everywhere.
+    for (_, id, body) in &mut merged {
+        let claim = node_claims.get(id).cloned().unwrap_or_default();
+        nodes::project_claim_value(body, claim);
+    }
     merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(merged.into_iter().map(|(_, _, row)| row).collect())
 }
@@ -1498,9 +1511,10 @@ mod tests {
             .unwrap();
         assert_eq!(nodes_left, 1, "the surviving node stays");
         // The mirrors cascade with the node row; a pragma-less connection
-        // would strand these as orphans.
+        // would strand these as orphans. node_claims is absent by design:
+        // the claim mirror retires, and ensure_table drops the table on
+        // every open, so there is nothing left to strand.
         for table in [
-            "node_claims",
             "node_dispatch",
             "node_provenance",
             "supersessions",

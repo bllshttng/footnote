@@ -24,8 +24,7 @@ def _naming_real(cmd, **kw):
 _REAL_RUN = __import__("subprocess").run
 
 
-from fno import recovery
-from fno.events import validate
+from fno import recovery  # noqa: E402 - after capturing subprocess.run
 
 
 def _now() -> datetime:
@@ -1161,9 +1160,8 @@ class TestMissionComplete:
 
 
 class TestRedispatch:
-    """x-370f residual 1: failover respawn frees the dead session's claim via
-    ``fno agents claim release --force`` before spawning, skips an already-done node, and
-    bails to the nudge (False) when the claim cannot be freed."""
+    """Failover frees the dead session's claim before spawn; the child init
+    acquires its own lockfile claim."""
 
     def _cand(self):
         return recovery.Candidate(
@@ -1176,7 +1174,7 @@ class TestRedispatch:
         monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
 
     def _patch_run(self, monkeypatch, *, stop_rc=0, stop_out=b"", force_release_rc=0,
-                   spawn_rc=0, spawn_exc=None, stamp_rc=0, clear_rc=0):
+                   spawn_rc=0, spawn_exc=None):
         """Stub subprocess.run; record the (markered) calls for assertions."""
         from types import SimpleNamespace
         import subprocess as sp
@@ -1202,11 +1200,6 @@ class TestRedispatch:
                 if spawn_exc is not None:
                     raise spawn_exc
                 return SimpleNamespace(returncode=spawn_rc)
-            if cmd[:3] == ["fno-py", "backlog", "update"]:
-                owner = cmd[cmd.index("--locked-by") + 1]
-                return SimpleNamespace(
-                    returncode=clear_rc if owner == "null" else stamp_rc,
-                )
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(sp, "run", fake_run)
@@ -1227,6 +1220,12 @@ class TestRedispatch:
             None,
         )
 
+    @staticmethod
+    def _assert_no_graph_claim_writes(calls):
+        assert not any(
+            c[:3] == ["fno-py", "backlog", "update"] for c in calls
+        ), calls
+
     def test_force_release_before_spawn_happy_path(self, monkeypatch):
         # AC1-HP: stop -> release --force node:<id> -> canonical claude bg spawn.
         self._patch_resolve(monkeypatch)
@@ -1243,6 +1242,7 @@ class TestRedispatch:
         assert "--harness" in spawn_cmd and "claude" in spawn_cmd
         assert "--substrate" in spawn_cmd and "bg" in spawn_cmd
         assert "--cwd" in spawn_cmd and "/wt/x-370f" in spawn_cmd
+        self._assert_no_graph_claim_writes(calls)
 
     def test_stop_failure_skips_force_release_and_spawn(self, monkeypatch):
         # codex P2: a non-zero `fno agents stop` means the worker may still be
@@ -1253,7 +1253,7 @@ class TestRedispatch:
         assert not recovery._redispatch(self._cand())
         assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
-        assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
+        self._assert_no_graph_claim_writes(calls)
 
     def test_pane_refusal_runs_the_named_pane_kill_then_rotates(self, monkeypatch):
         # The daemon refuses `agents stop` on a pane row and NAMES the pane-kill
@@ -1281,14 +1281,13 @@ class TestRedispatch:
         assert fr is not None and spawn is not None
         assert kill < fr < spawn
 
-    def test_force_release_failure_skips_spawn(self, monkeypatch):
+    def test_claim_release_failure_skips_spawn(self, monkeypatch):
         # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, force_release_rc=1)
         assert not recovery._redispatch(self._cand())
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
-        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
-        assert clear is not None and calls[clear][-1] == "null"
+        self._assert_no_graph_claim_writes(calls)
 
     def test_done_node_not_redispatched(self, monkeypatch):
         # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
@@ -1302,20 +1301,10 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert not recovery._redispatch(self._cand())
-        owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
-        assert [c[-1] for c in owner_updates] == ["null"]
-        spawn = self._index_of(calls, ["agents", "spawn"])
-        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
-        assert spawn is not None and clear is not None and spawn < clear
+        assert self._index_of(calls, ["agents", "spawn"]) is not None
+        self._assert_no_graph_claim_writes(calls)
 
-    def test_spawn_failure_surfaces_corpse_clear_failure(self, monkeypatch, caplog):
-        self._patch_resolve(monkeypatch)
-        self._patch_run(monkeypatch, spawn_rc=1, clear_rc=1)
-
-        assert not recovery._redispatch(self._cand())
-        assert "could not clear dead owner for x-370f" in caplog.text
-
-    def test_spawn_timeout_after_stop_clears_corpse(self, monkeypatch):
+    def test_spawn_timeout_after_stop_does_not_write_a_graph_claim(self, monkeypatch):
         import subprocess
 
         self._patch_resolve(monkeypatch)
@@ -1325,32 +1314,17 @@ class TestRedispatch:
         )
 
         assert not recovery._redispatch(self._cand())
-        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
-        assert clear is not None and calls[clear][-1] == "null"
+        self._assert_no_graph_claim_writes(calls)
 
-    def test_successful_spawn_repoints_node_to_replacement(self, monkeypatch):
+    def test_successful_spawn_leaves_claim_acquisition_to_child_init(self, monkeypatch):
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
 
         assert recovery._redispatch(self._cand()) is True
 
         spawn = self._index_of(calls, ["agents", "spawn"])
-        stamp = self._index_of(calls, ["backlog", "update", "--locked-by"])
-        assert spawn is not None and stamp is not None and spawn < stamp
-        assert calls[stamp][3] == "x-370f"
-        # x-84b2: the replacement is rec-t-<node>-<short>, the recovery source.
-        assert calls[stamp][-2:] == ["--locked-by", "rec-t-370f-aaaa1111"]
-
-    def test_post_launch_stamp_failure_clears_corpse_and_returns_partial(
-        self, monkeypatch
-    ):
-        self._patch_resolve(monkeypatch)
-        calls = self._patch_run(monkeypatch, stamp_rc=1)
-
-        assert recovery._redispatch(self._cand()) == "partial"
-
-        owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
-        assert [c[-1] for c in owner_updates] == ["rec-t-370f-aaaa1111", "null"]
+        assert spawn is not None
+        self._assert_no_graph_claim_writes(calls)
 
     def test_spawn_failure_releases_lane_slot(self, monkeypatch):
         # Parallel G4: no replacement worker → the dead lane's dispatch-time
@@ -1401,8 +1375,7 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"]) is not None
-        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
-        assert clear is not None and calls[clear][-1] == "null"
+        self._assert_no_graph_claim_writes(calls)
 
 
 class TestReviveBgThread:

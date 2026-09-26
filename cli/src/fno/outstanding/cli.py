@@ -201,10 +201,12 @@ def ask(
     The leg is the Rust `question-intake` transport (law refusal, context
     parse, writes, receipt); this side keeps identity and the law-row read.
     """
+    from datetime import datetime, timezone
+
     from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import canonical_handle
     from fno.paths import project_log, questions_jsonl
-    from fno.rust_binary import verb_call
+    from fno.rust_binary import VerbUnavailable, verb_call
     from fno.text_or_file import read_text_arg
 
     question = read_text_arg(question, question_file, what="the question")
@@ -221,18 +223,54 @@ def ask(
         laws = []
         typer.echo(f"outstanding: live-law lookup failed ({exc}); recording anyway", err=True)
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
-    answer = verb_call(
-        "question-intake",
-        {
-            "question": question, "ask": ask, "options": option, "blocks": blocks,
-            "node": node, "subject": subject, "session_id": _session_id(),
-            "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
-            "storage_root": str(_storage_root()),
-            "index_path": str(questions_jsonl()),
-            "journal_path": str(project_log("events.jsonl")),
-            "display_name": display_name(),
-        },
-    )
+    payload = {
+        "question": question, "ask": ask, "options": option, "blocks": blocks,
+        "node": node, "subject": subject, "session_id": _session_id(),
+        "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
+        "storage_root": str(_storage_root()),
+        "index_path": str(questions_jsonl()),
+        "journal_path": str(project_log("events.jsonl")),
+        "display_name": display_name(),
+    }
+    try:
+        answer = verb_call("question-intake", payload)
+    except VerbUnavailable:
+        # No native door on this install: record the question in the project
+        # journal in the door's own envelope shape. A missing binary never
+        # loses an operator question.
+        import secrets
+
+        qid = f"q-{secrets.token_hex(4)}"
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "type": "operator_question",
+            "source": "target",
+            "data": {
+                "question_id": qid,
+                "question": question,
+                "ask": ask,
+                "options": option,
+                "blocks": blocks,
+                "node": node,
+                "subject": subject,
+                "session_id": payload["session_id"],
+                "cwd": payload["cwd"],
+                "asker": asker,
+                "display_name": payload["display_name"],
+            },
+        }
+        journal = project_log("events.jsonl")
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+        typer.echo(
+            f"outstanding: the question-intake door is unavailable on this install; "
+            f"recorded {qid} in the project journal. Clear it once answered: "
+            f"fno outstanding clear {qid}",
+            err=True,
+        )
+        typer.echo(qid)
+        return
     # Every human word rides the answer's lines, composed Rust-side.
     for line in answer.get("lines") or ():
         typer.echo(line, err=True)

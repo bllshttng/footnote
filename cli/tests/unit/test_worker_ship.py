@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -395,7 +394,7 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path, monkeypatch):
         MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
         MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
-        MagicMock(returncode=0, stdout="", stderr=""),                 # fno backlog update
+        MagicMock(returncode=0, stdout="", stderr=""),                 # fno do pr bind-created
     ]
 
     with patch("subprocess.run", mock_run), patch(

@@ -6,6 +6,8 @@
 
 use super::*;
 use serde_json::{json, Map, Value};
+use std::ffi::OsString;
+use std::sync::MutexGuard;
 use tempfile::TempDir;
 
 fn base_row(id: &str, title: &str, status: &str) -> Node {
@@ -62,12 +64,100 @@ fn arm(dir: &TempDir) -> Store {
     store
 }
 
-fn store_pair() -> (TempDir, TempDir, Store, Store) {
+/// A pinned empty claims root held for the caller's whole body: the claim
+/// projection rides the read, so an unpinned test would serve the
+/// operator's live claims or race a concurrent fixture's env.
+struct ClaimsRootPin {
+    _guard: MutexGuard<'static, ()>,
+    _root: TempDir,
+}
+
+impl ClaimsRootPin {
+    fn take() -> Self {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        Self {
+            _guard: guard,
+            _root: root,
+        }
+    }
+}
+
+fn store_pair() -> (ClaimsRootPin, TempDir, TempDir, Store, Store) {
+    let pin = ClaimsRootPin::take();
     let first_dir = TempDir::new().unwrap();
     let second_dir = TempDir::new().unwrap();
     let first_store = arm(&first_dir);
     let second_store = arm(&second_dir);
-    (first_dir, second_dir, first_store, second_store)
+    (pin, first_dir, second_dir, first_store, second_store)
+}
+
+/// A claims root pinned for the whole test body, with one live node claim:
+/// the holder of record reads from the claim store at parse time, so a
+/// claimed-filter or holder assertion needs this seeded, never the row's
+/// retired mirror fields.
+struct ClaimsFixture {
+    _guard: MutexGuard<'static, ()>,
+    _root: TempDir,
+    previous: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl ClaimsFixture {
+    fn new() -> Self {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let names = std::iter::once("FNO_CLAIMS_ROOT")
+            .chain(crate::claims::AMBIENT_IDENTITY_NAMES.iter().copied())
+            .chain(std::iter::once("CLAUDE_SESSION_ID"));
+        let mut previous = Vec::new();
+        for name in names {
+            previous.push((name, std::env::var_os(name)));
+            std::env::remove_var(name);
+        }
+        std::env::set_var("FNO_CLAIMS_ROOT", root.path());
+        std::env::set_var("CLAUDE_CODE_SESSION_ID", "s-1");
+        match crate::claims::acquire(
+            "node:ab-one",
+            "target-session:s-1",
+            crate::claims::AcquireOpts {
+                root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        ) {
+            crate::claims::AcquireOutcome::Acquired(_) => {}
+            other => panic!("fixture node claim failed: {other:?}"),
+        };
+        Self {
+            _guard: guard,
+            _root: root,
+            previous,
+        }
+    }
+}
+
+impl Drop for ClaimsFixture {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+fn claimed_store_pair() -> (ClaimsFixture, TempDir, TempDir, Store, Store) {
+    let claims = ClaimsFixture::new();
+    let first_dir = TempDir::new().unwrap();
+    let second_dir = TempDir::new().unwrap();
+    let first_store = arm(&first_dir);
+    let second_store = arm(&second_dir);
+    (claims, first_dir, second_dir, first_store, second_store)
 }
 
 fn scrub(value: &mut Value) {
@@ -109,12 +199,15 @@ fn transcript(store: &Store) -> String {
 
 #[test]
 fn api_node_finds_one_row() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_claims, _d1, _d2, first_store, second_store) = claimed_store_pair();
     for store in [&first_store, &second_store] {
         let one = node(store, "ab-one").unwrap().unwrap();
         assert_eq!(one.id, "ab-one");
         assert_eq!(one.title, "One");
-        assert_eq!(one.claim.locked_by.as_deref(), Some("holder-1"));
+        // The holder of record projects from the claim store (the row's own
+        // lock fields are the retired mirror), so the served holder is the
+        // seeded claim's session, not the fixture's stored mirror part.
+        assert_eq!(one.claim.locked_by.as_deref(), Some("s-1"));
         assert!(node(store, "ab-absent").unwrap().is_none());
     }
 }
@@ -123,7 +216,7 @@ fn api_node_finds_one_row() {
 fn api_nodes_pages_two_then_cursor_third() {
     // AC14-HP: first:2 over 3 matching rows returns 2 with a next page; the
     // end cursor resumes at the third.
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let filter = NodeFilter {
             project: Some("fno".into()),
@@ -161,7 +254,7 @@ fn api_nodes_pages_two_then_cursor_third() {
 
 #[test]
 fn api_nodes_first_none_returns_every_row() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let conn = nodes(store, &NodeFilter::default(), &Page::default()).unwrap();
         assert_eq!(conn.nodes.len(), 3, "archived hidden by default");
@@ -171,7 +264,7 @@ fn api_nodes_first_none_returns_every_row() {
 
 #[test]
 fn api_nodes_hides_archived_unless_included() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let page = Page {
             include_archived: true,
@@ -185,7 +278,7 @@ fn api_nodes_hides_archived_unless_included() {
 
 #[test]
 fn api_nodes_filters_by_state_and_status_words() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let filter = NodeFilter {
             state_type: Some("unstarted".into()),
@@ -214,7 +307,7 @@ fn api_nodes_filters_by_state_and_status_words() {
 
 #[test]
 fn api_nodes_filters_by_parent_label_claim_and_session() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_claims, _d1, _d2, first_store, second_store) = claimed_store_pair();
     for store in [&first_store, &second_store] {
         let cases: Vec<NodeFilter> = vec![
             NodeFilter {
@@ -257,7 +350,7 @@ fn api_nodes_filters_by_parent_label_claim_and_session() {
 
 #[test]
 fn api_nodes_orders_by_created_at() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let page = Page {
             order_by: OrderBy::CreatedAt,
@@ -271,7 +364,7 @@ fn api_nodes_orders_by_created_at() {
 
 #[test]
 fn api_version_reads_zero_then_counter() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let before = version(store).unwrap();
         assert!(before >= 0);
@@ -283,7 +376,7 @@ fn api_version_reads_zero_then_counter() {
 #[test]
 fn api_node_update_bumps_version_once() {
     // AC15-EDGE: one successful mutation, version grows by exactly one.
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let before = version(store).unwrap();
         let payload = node_update(
@@ -311,7 +404,7 @@ fn api_node_update_bumps_version_once() {
 fn api_failed_mutation_keeps_version() {
     // AC15-EDGE: a failed mutation answers success:false and the store's
     // counter does not move.
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let before = version(store).unwrap();
         let payload = node_update(
@@ -346,7 +439,7 @@ fn api_node_update_status_moves_through_the_patch_door() {
     // leaves the row and version untouched. Leaving a terminal row rewrites
     // the replacer's chain, a second-row edit the single-row API must not
     // do silently, so it refuses naming the owning door.
-    let (_d1, _d2, first_store, _second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, _second_store) = store_pair();
     let graph = _d1.path().join("graph.json");
     let mut entries: Vec<Value> = fixture_nodes().iter().map(Node::to_json).collect();
     entries.push(json!({
@@ -377,7 +470,7 @@ fn api_node_update_status_moves_through_the_patch_door() {
 
 #[test]
 fn api_node_create_appends_and_queries() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let before = version(store).unwrap();
         let payload = node_create(
@@ -415,7 +508,7 @@ fn api_node_create_appends_and_queries() {
 
 #[test]
 fn api_node_batch_update_moves_every_named_row() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let payload = node_batch_update(
             store,
@@ -448,7 +541,7 @@ fn api_node_batch_update_moves_every_named_row() {
 
 #[test]
 fn api_archive_unarchive_delete_roundtrip() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let payload = node_archive(store, "ab-two").unwrap();
         assert!(payload.success);
@@ -471,7 +564,7 @@ fn api_archive_unarchive_delete_roundtrip() {
 
 #[test]
 fn api_edge_label_and_note_mutations_agree() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let payload = relation_create(store, "ab-one", "ab-two", RelationType::Blocks).unwrap();
         assert!(payload.success);
@@ -516,7 +609,7 @@ fn api_edge_label_and_note_mutations_agree() {
 
 #[test]
 fn api_pr_session_dispatch_and_encounter_mutations_agree() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let payload = pull_request_attach(
             store,
@@ -636,6 +729,8 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
 fn api_runs_are_deterministic_across_store_instances() {
     // AC14-HP: the same scripted queries and mutations under each backend,
     // equal typed output (clock stamps scrubbed, everything else exact).
+    // store_pair pins an empty claims root, so the projection cannot let a
+    // concurrent fixture's claims decide one arm.
     fn script(store: &Store) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
         out.push(json!(node(store, "ab-one").unwrap().map(|n| n.to_json())));
@@ -687,7 +782,7 @@ fn api_runs_are_deterministic_across_store_instances() {
         out.iter_mut().for_each(scrub);
         out
     }
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     assert_eq!(
         serde_json::to_string(&script(&first_store)).unwrap(),
         serde_json::to_string(&script(&second_store)).unwrap(),
@@ -696,7 +791,7 @@ fn api_runs_are_deterministic_across_store_instances() {
 
 #[test]
 fn api_transcript_helper_agrees_before_mutations() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     let (a, b) = (transcript(&first_store), transcript(&second_store));
     assert_eq!(a, b);
 }
@@ -707,7 +802,7 @@ fn api_transcript_helper_agrees_before_mutations() {
 /// store reads (the AC8 pre-change-equality contract).
 #[test]
 fn api_pure_read_halves_equal_the_store_reads() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let store_rows = read_rows(store).unwrap();
         // rows: the round-tripped list.
@@ -756,7 +851,7 @@ fn api_cursor_decodes_roundtrip() {
 fn api_created_at_order_resumes_after_cursor() {
     // Regression: the resume scan assumed ordinal-ascending rows, which
     // breaks under OrderBy::CreatedAt; resume by row identity instead.
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         run_created_at_page(store);
     }
@@ -794,7 +889,7 @@ fn run_created_at_page(store: &Store) {
 fn api_comments_cursor_resumes_without_restart() {
     // Regression: the note cursor lacked its ':' separator, so every
     // resume decoded as None and restarted at the first row.
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         note_note(store, "note one");
         note_note(store, "note two");
@@ -846,7 +941,7 @@ fn page_two_asserts(store: &Store) {
 /// is visible to the next read (AC7).
 #[test]
 fn readers_follow_store_rows_reflect_mutations() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         let all = rows(store).unwrap();
         assert_eq!(all.len(), 4);
@@ -871,7 +966,7 @@ fn readers_follow_store_rows_reflect_mutations() {
 
 #[test]
 fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
-    let (_d1, _d2, first_store, _second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, _second_store) = store_pair();
     let store = &first_store;
     session_append(store, "ab-one", session_row("s-explicit")).unwrap();
     let payload = session_end(
@@ -931,7 +1026,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
 
 #[test]
 fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         pull_request_attach(
             store,
@@ -993,7 +1088,7 @@ fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
 
 #[test]
 fn primary_pr_stamp_stamps_an_unrecorded_primary() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         pull_request_attach(
             store,
@@ -1027,7 +1122,7 @@ fn primary_pr_stamp_stamps_an_unrecorded_primary() {
 
 #[test]
 fn primary_pr_stamp_refuses_a_number_or_url_mismatch() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         pull_request_attach(
             store,
@@ -1064,7 +1159,7 @@ fn primary_pr_stamp_refuses_a_number_or_url_mismatch() {
 
 #[test]
 fn primary_pr_stamp_never_overwrites_a_recorded_value() {
-    let (_d1, _d2, first_store, second_store) = store_pair();
+    let (_pin, _d1, _d2, first_store, second_store) = store_pair();
     for store in [&first_store, &second_store] {
         mutate(store, "seed-failed-primary", |entries| {
             entries.push(json!({

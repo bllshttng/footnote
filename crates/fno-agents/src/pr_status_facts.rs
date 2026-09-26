@@ -120,10 +120,10 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
     material.push_str(&hold_word);
     material.push('|');
 
-    // Every live merge-slot row in this repo's space: one store, the db the
-    // claim verb reads, so a take or a move rekeys every queued PR.
-    if let Ok(rows) = crate::claim_store::list_db(Some("merge-slot:"), false, None) {
-        material.push_str(rows.to_string().as_str());
+    // Every live merge-slot row in this repo's space: a take or a move rekeys
+    // the status fact used by every queued PR.
+    if let Ok(records) = crate::claim_store::list_repo_space("merge-slot:", false) {
+        material.push_str(&serde_json::to_string(&records).unwrap_or_default());
     }
     material.push('|');
 

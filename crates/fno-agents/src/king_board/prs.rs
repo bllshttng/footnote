@@ -331,27 +331,20 @@ pub(crate) fn read_pr_gates(
     // The merge slot is the fact that ORDERS this queue: name its
     // holder on every row, and when the holder's own row is absent (the
     // listing filter or a spent gate slice dropped it), carry a synthetic
-    // row so the queue names the PR every queued merge waits behind. One
-    // store: the space db the claim verb reads with no root.
-    match crate::claim_store::list_db(Some("merge-slot:"), false, None) {
-        Ok(rows_json) => {
-            // list_db answers {"rows": [...]}; each row carries the claim's
-            // key and holder, so the stamp names WHICH base's slot it is.
-            let slots: Vec<(u64, String)> = rows_json
-                .get("rows")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|r| {
-                            let holder = r.get("holder").and_then(Value::as_str)?;
-                            let pr = crate::authorized_merge::parse_slot_holder(holder)?;
-                            let key = r.get("key").and_then(Value::as_str).unwrap_or("");
-                            let base = key.strip_prefix("merge-slot:").unwrap_or(key);
-                            Some((pr, base.to_string()))
-                        })
-                        .collect()
+    // row so the queue names the PR every queued merge waits behind.
+    match crate::claim_store::list_repo_space("merge-slot:", false) {
+        Ok(records) => {
+            let slots: Vec<(u64, String)> = records
+                .iter()
+                .filter_map(|record| {
+                    let pr = crate::authorized_merge::parse_slot_holder(&record.holder)?;
+                    let base = record
+                        .key
+                        .strip_prefix("merge-slot:")
+                        .unwrap_or(&record.key);
+                    Some((pr, base.to_string()))
                 })
-                .unwrap_or_default();
+                .collect();
             for (holder, base) in &slots {
                 for row in rows.iter_mut() {
                     row.as_object_mut().map(|o| {

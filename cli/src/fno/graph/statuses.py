@@ -187,7 +187,7 @@ def is_stale_lock(task: dict) -> bool:
     # Preserve the historical malformed-value result for this compatibility
     # helper. Missing data remains false here; recompute_statuses uses the
     # diagnostic quality directly so both unreadable shapes preserve owners.
-    legacy_or_canonical = task.get("locked_at", task.get("claimed_at"))
+    legacy_or_canonical = task.get("locked_at") or task.get("claimed_at")
     return quality == "old" or (quality == "unreadable" and bool(legacy_or_canonical))
 
 
@@ -291,6 +291,21 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
         if strict:
             raise
         return set()
+
+
+def settle_released_node(node_id: str):
+    """The retired claim mirror stamped a released node back to its queue
+    state; this mutator keeps the transition a write. The commit pipeline
+    re-derives the final word (done, in_review, deferred, the ladder's
+    ready/idea), so it only has to move the stuck row."""
+    def _settle(entries):
+        for entry in entries:
+            if entry.get("id") == node_id and entry.get("status") == "in_progress":
+                entry["status"] = "ready"
+                break
+        return entries
+
+    return _settle
 
 
 def closed_worker_session_ids(entry: dict) -> set[str]:

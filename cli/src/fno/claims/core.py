@@ -1113,7 +1113,6 @@ def _legacy_release_claim(
     *,
     strict: bool = False,
     root: Optional[Path] = None,
-    sync_graph_mirror: bool = True,
 ) -> Optional["Claim"]:
     """Release a claim we hold.
 
@@ -1128,10 +1127,6 @@ def _legacy_release_claim(
         ``None`` in non-strict mode (indistinguishable from the three cases
         above - nothing was released, but WHY is not answerable from the
         return value alone), ``ClaimContended`` in strict mode.
-
-    ``sync_graph_mirror`` defaults to true for confirmed ``node:`` releases.
-    It runs the shared post-release mirror cleanup after the claim is gone;
-    callers releasing test or repo-local claims can disable it explicitly.
 
     The duration_held_ms field in the audit event is best-effort: read from
     acquired_at minus now. If the file disappears between read and unlink,
@@ -1181,11 +1176,6 @@ def _legacy_release_claim(
         except FileNotFoundError:
             return None
         emit_claim_released(existing, duration_ms=duration_ms)
-        if sync_graph_mirror and key.startswith("node:"):
-            _clear_lock_mirror_for_reaped(
-                [key[len("node:") :]],
-                claim_roots=[root] if root is not None else None,
-            )
         return existing
     finally:
         release_dir_mutex(recovery_lock, token)
@@ -1780,9 +1770,6 @@ def _legacy_reap_dead_claims(
     # means "gone from the store").
     contended = 0
     reap_failed: list[tuple[str, str]] = []
-    # Node ids whose claims this run archived (confirmed re-reads only), for
-    # the lock-mirror clear after the loop.
-    settled_nodes: list[str] = []
     # A shared PID remains shared for this sweep after one member is archived;
     # otherwise the survivor's fresh native read would become exclusive and
     # the apply pass would drain only the first member.
@@ -1943,8 +1930,6 @@ def _legacy_reap_dead_claims(
                             age_ms=max(0, ts - fresh.acquired_at),
                             basis=fresh_native.get("basis"),
                         )
-                        if fresh.key.startswith("node:"):
-                            settled_nodes.append(fresh.key[len("node:") :])
                     elif not entry.exists():
                         # archive_claim's idempotent short-circuit: the
                         # source was already fully cleared (a concurrent
@@ -1970,19 +1955,6 @@ def _legacy_reap_dead_claims(
             # Not provably dead. Bucket the reason for the report.
             kept[bucket] += 1
 
-    # The graph lock mirror for reaped node claims, cleared OUTSIDE the
-    # per-key recovery mutex (after the sweep loop) so the process's only
-    # lock ordering stays graph-then-claims. Without this, a reaped
-    # worker's node keeps `locked_by` until LOCK_TTL_HOURS staleness clears
-    # it lazily, reading `claimed` - held out of dispatch - for hours after
-    # the reap. Dry runs never write, so they never reach this either.
-    # Default sweeps only: an explicit --root sweep reads SOMEONE ELSE'S
-    # claims tree, and this process's graph has no ownership relationship to
-    # those node ids.
-    lock_mirror_cleared = 0
-    if apply and settled_nodes and roots is None:
-        lock_mirror_cleared = _clear_lock_mirror_for_reaped(settled_nodes)
-
     summary: dict[str, Any] = {
         "scanned": scanned,
         "reaped": reaped,
@@ -2000,97 +1972,11 @@ def _legacy_reap_dead_claims(
         "contended": contended,
         "reap_failed": reap_failed,
         "apply": apply,
-        "lock_mirror_cleared": lock_mirror_cleared,
         "roots": [str(d) for d in use_dirs],
     }
     if apply:
         emit_claim_reap_swept(summary)
     return summary
-
-
-def _clear_lock_mirror_for_reaped(
-    node_ids: list[str], *, claim_roots: Optional[list[Optional[Path]]] = None
-) -> int:
-    """Clear ``locked_by``/``locked_at`` on nodes after claim transitions.
-
-    Best-effort: a graph failure is a named stderr line and never fails the
-    sweep - the claim file is already gone, which is the load-bearing half.
-    Unconditional across done nodes too: a node closed before the closure
-    hook shipped keeps a mirror nothing else ever clears (statuses.py only
-    clears stale locks on non-terminal rungs). A node whose claim file is
-    BACK is skipped: a dispatcher can re-acquire in the window between this
-    sweep's archive and the clear, and wiping that fresh lock is the
-    second-worker disaster the whole reap doctrine exists to prevent.
-    Returns how many entries were touched.
-    """
-    import sys
-
-    from fno.graph import api as graph_api
-    from fno.graph.store import commit_rows_via_store
-    from fno.paths import graph_json
-    from fno.tracker import active_backend_name
-
-    if active_backend_name() != "graph":
-        # The locked_by mirror is graph-store state; under an external
-        # tracker backend there is no graph mirror to clear.
-        return 0
-
-    wanted = set(node_ids)
-    cleared: list[tuple[str, Optional[str]]] = []
-
-    # Read first, mutate only if a reaped node is actually in the graph: a
-    # sweep whose reaped ids match no graph row (tests, foreign repos) must
-    # not take the graph lock and rewrite a file it has no change for.
-    try:
-        rows = [
-            n.model_dump(by_alias=True)
-            for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
-        ]
-        present = {
-            e.get("id")
-            for e in rows
-            if isinstance(e, dict) and e.get("id") in wanted
-        }
-    except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
-        print(f"claim reap: lock-mirror read failed: {exc}", file=sys.stderr)
-        return 0
-    if not present:
-        return 0
-
-    def _clear(entries: list[dict]) -> list[dict]:
-        from fno.claims.io import node_has_live_claim
-
-        # commit_rows_via_store re-runs the mutator on a version conflict;
-        # rebuilt per attempt so retries never double-count.
-        cleared.clear()
-        for e in entries:
-            if not (isinstance(e, dict) and e.get("id") in wanted):
-                continue
-            key = f"node:{e['id']}"
-            if node_has_live_claim(key, claim_roots):
-                continue  # re-acquired between archive and this clear
-            cleared.append((str(e.get("id")), e.get("locked_by")))
-            e["locked_by"] = None
-            e["locked_at"] = None
-            e.pop("claimed_at", None)
-        return entries
-
-    try:
-        commit_rows_via_store(graph_json(), _clear)
-    except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
-        print(f"claim reap: lock-mirror clear failed: {exc}", file=sys.stderr)
-        return 0
-    # A lock silently removed is the same defect class as a lock silently not
-    # written: name each cleared node and its prior owner, and the verb that
-    # re-claims it. Only a committed clear may speak.
-    for cleared_id, prior_owner in cleared:
-        print(
-            f"claim reap: cleared locked_by={prior_owner!r} on {cleared_id} "
-            f"(no live claim lockfile; hold the node with: "
-            f"fno agents claim acquire node:{cleared_id})",
-            file=sys.stderr,
-        )
-    return len(cleared)
 
 
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
@@ -2225,7 +2111,6 @@ def release_claim(
     *,
     strict: bool = False,
     root: Optional[Path] = None,
-    sync_graph_mirror: bool = True,
 ) -> Optional[Claim]:
     if _legacy_claim_call(key, root):
         return _LEGACY_RELEASE_CLAIM(
@@ -2233,20 +2118,18 @@ def release_claim(
             holder,
             strict=strict,
             root=root,
-            sync_graph_mirror=sync_graph_mirror,
         )
-    del sync_graph_mirror
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     native_root = root or _configured_claim_root()
-    prior_payload = _native_claim("status", key, _native_root_flags(native_root))
+    prior_payload = _native_claim("status", key, _native_root_flags(native_root)) if strict else {}
     prior = None
     if prior_payload.get("state") not in {None, "free"} and prior_payload.get("holder"):
         prior = Claim.model_validate(prior_payload)
         if prior.holder != holder and strict:
             raise HolderMismatch(holder, prior.holder, key)
-    _native_claim("release", key, ["--holder", holder, *_native_root_flags(native_root)])
-    return prior if prior is not None and prior.holder == holder else None
+    receipt = _native_claim("release", key, ["--holder", holder, *_native_root_flags(native_root)])
+    return _native_claim_model(receipt) if receipt.get("released") is True else None
 
 
 def refresh_claim(

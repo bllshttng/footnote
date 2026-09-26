@@ -572,7 +572,6 @@ def bind_pr_rows(
     pr_number: int,
     pr_url: Optional[str],
     repo: Optional[str] = None,
-    owner: Optional[str] = None,
     rebind: bool = False,
 ) -> PrRowBindResult:
     """Validate and bind every PR claim as one graph-owned mutation.
@@ -635,7 +634,6 @@ def bind_pr_rows(
         nodes[nid] = node
 
     bindings: list[PrRowBinding] = []
-    clean_owner = owner.strip() if isinstance(owner, str) else ""
     for nid in claimed_ids:
         node = nodes[nid]
         # The claim line predates the release: skip it, bind the rest.
@@ -661,9 +659,6 @@ def bind_pr_rows(
             additional.append({"number": pr_number, "url": pr_url})
             node["additional_prs"] = additional
             action = "appended_additional"
-        if clean_owner and node_is_open(node):
-            node["locked_by"] = clean_owner
-            node["session_id"] = clean_owner
         bindings.append(PrRowBinding(nid, action))
 
     return PrRowBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)

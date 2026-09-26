@@ -12,7 +12,9 @@
 use serde_json::Value;
 #[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// `fno-agents claim <acquire|release|status|list> <key> [flags]` — a thin front
 /// over [`crate::claims`], the native lockfile-protocol implementation.
@@ -53,9 +55,6 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
     if op == "reap" {
         return run_claim_reap(&args[1..]);
-    }
-    if op == "export-lockfiles" {
-        return run_claim_export_lockfiles(&args[1..]);
     }
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
@@ -132,45 +131,37 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim acquire requires --holder");
                 return 2;
             };
-            if opts.root.is_some() {
-                return match crate::claims::acquire(&key, &holder, opts) {
-                    crate::claims::AcquireOutcome::Acquired(record) => {
-                        let mut payload = serde_json::to_value(&record)
-                            .unwrap_or_else(|_| Value::Object(Default::default()));
-                        if let Value::Object(map) = &mut payload {
-                            map.insert("outcome".into(), Value::String("acquired".into()));
-                        }
-                        println!("{payload}");
-                        0
-                    }
-                    crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "outcome": "held_by_other", "holder": holder,
-                                "pid": pid, "host": host,
-                            })
-                        );
-                        1
-                    }
-                    crate::claims::AcquireOutcome::Error(error) => {
-                        eprintln!("fno-agents: claim acquire failed: {error}");
-                        2
-                    }
+            let outcome = if key.starts_with("task:") {
+                let witness = |record: &crate::claims::ClaimRecord| {
+                    let (witness, _drain) = default_session_witness();
+                    witness(record)
                 };
-            }
-            match crate::claim_store::acquire_db(&key, &holder, &opts) {
-                Ok(payload)
-                    if payload.get("outcome").and_then(Value::as_str) == Some("held_by_other") =>
-                {
-                    println!("{payload}");
-                    1
-                }
-                Ok(payload) => {
+                let witness: crate::claims::SessionWitness<'_> = &witness;
+                crate::claims::acquire_with_session_witness(&key, &holder, opts, Some(witness))
+            } else {
+                crate::claims::acquire(&key, &holder, opts)
+            };
+            match outcome {
+                crate::claims::AcquireOutcome::Acquired(record) => {
+                    let mut payload = serde_json::to_value(&record)
+                        .unwrap_or_else(|_| Value::Object(Default::default()));
+                    if let Value::Object(map) = &mut payload {
+                        map.insert("outcome".into(), Value::String("acquired".into()));
+                    }
                     println!("{payload}");
                     0
                 }
-                Err(error) => {
+                crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "held_by_other", "holder": holder,
+                            "pid": pid, "host": host,
+                        })
+                    );
+                    1
+                }
+                crate::claims::AcquireOutcome::Error(error) => {
                     eprintln!("fno-agents: claim acquire failed: {error}");
                     2
                 }
@@ -181,31 +172,33 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim release requires --holder");
                 return 2;
             };
-            if opts.root.is_some() {
-                return match crate::claims::release(
-                    &key,
-                    &holder,
-                    opts.root.as_deref(),
-                    opts.events_dir.as_deref(),
-                ) {
-                    Ok(()) => {
-                        println!("{}", serde_json::json!({"outcome": "released", "key": key}));
-                        0
-                    }
-                    Err(error) => {
-                        eprintln!("fno-agents: claim release failed: {error}");
-                        2
-                    }
-                };
-            }
-            match crate::claim_store::release_db(
+            match crate::claims::release_with_receipt(
                 &key,
                 &holder,
                 opts.root.as_deref(),
                 opts.events_dir.as_deref(),
             ) {
-                Ok(payload) => {
-                    println!("{payload}");
+                Ok(Some(claim)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "released",
+                            "released": true,
+                            "key": key,
+                            "claim": claim,
+                        })
+                    );
+                    0
+                }
+                Ok(None) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "not_released",
+                            "released": false,
+                            "key": key,
+                        })
+                    );
                     0
                 }
                 Err(error) => {
@@ -223,42 +216,24 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim renew requires --ttl-ms");
                 return 2;
             };
-            if opts.root.is_some() {
-                return match crate::claims::renew(&key, &holder, ttl_ms, opts.root.as_deref()) {
-                    Ok(true) => {
-                        let (_, record) = crate::claims::status(&key, opts.root.as_deref());
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "outcome": "renewed", "refreshed": true, "claim": record,
-                            })
-                        );
-                        0
-                    }
-                    Ok(false) => {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "outcome": "unchanged", "refreshed": false, "key": key,
-                            })
-                        );
-                        0
-                    }
-                    Err(error) => {
-                        eprintln!("fno-agents: claim renew failed: {error}");
-                        2
-                    }
-                };
-            }
-            match crate::claim_store::renew_db(
-                &key,
-                &holder,
-                ttl_ms,
-                opts.root.as_deref(),
-                opts.events_dir.as_deref(),
-            ) {
-                Ok(payload) => {
-                    println!("{payload}");
+            match crate::claims::renew(&key, &holder, ttl_ms, opts.root.as_deref()) {
+                Ok(true) => {
+                    let (_, record) = crate::claims::status(&key, opts.root.as_deref());
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "renewed", "refreshed": true, "claim": record,
+                        })
+                    );
+                    0
+                }
+                Ok(false) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "unchanged", "refreshed": false, "key": key,
+                        })
+                    );
                     0
                 }
                 Err(error) => {
@@ -272,24 +247,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim force-release requires --reason");
                 return 2;
             };
-            if opts.root.is_some() {
-                return match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
-                    Ok(payload) => {
-                        println!("{payload}");
-                        0
-                    }
-                    Err(error) => {
-                        eprintln!("fno-agents: claim force-release failed: {error}");
-                        2
-                    }
-                };
-            }
-            match crate::claim_store::force_release_db(
-                &key,
-                reason,
-                opts.root.as_deref(),
-                opts.events_dir.as_deref(),
-            ) {
+            match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -301,24 +259,12 @@ pub fn run_claim(args: &[String]) -> i32 {
             }
         }
         "status" => {
-            if opts.root.is_some() {
-                let (state, record) = crate::claims::status(&key, opts.root.as_deref());
-                let payload = record
-                    .map(|record| claim_status_value(&record))
-                    .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
-                println!("{payload}");
-                return 0;
-            }
-            match crate::claim_store::status_db(&key, opts.root.as_deref()) {
-                Ok(payload) => {
-                    println!("{payload}");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("fno-agents: claim status failed: {error}");
-                    1
-                }
-            }
+            let (state, record) = crate::claims::status(&key, opts.root.as_deref());
+            let payload = record
+                .map(|record| claim_status_value(&record))
+                .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
+            println!("{payload}");
+            0
         }
         other => {
             eprintln!(
@@ -389,19 +335,17 @@ fn run_claim_reap(args: &[String]) -> i32 {
             }
         }
     }
-    if root.is_some() {
-        return match crate::claim_store::reap(root.as_deref(), apply) {
-            Ok(payload) => {
-                println!("{payload}");
-                0
-            }
-            Err(error) => {
-                eprintln!("fno-agents: claim reap failed: {error}");
-                1
-            }
-        };
-    }
-    match crate::claim_store::reap_db(root.as_deref(), apply) {
+    let (session_witness, _drain) = default_session_witness();
+    let recheck_witness = |record: &crate::claims::ClaimRecord| {
+        let (witness, _drain) = default_session_witness();
+        witness(record)
+    };
+    match crate::claim_store::reap_with_session_witness(
+        root.as_deref(),
+        apply,
+        Some(&session_witness),
+        Some(&recheck_witness),
+    ) {
         Ok(payload) => {
             println!("{payload}");
             0
@@ -413,40 +357,8 @@ fn run_claim_reap(args: &[String]) -> i32 {
     }
 }
 
-fn run_claim_export_lockfiles(args: &[String]) -> i32 {
-    let mut root: Option<PathBuf> = None;
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--root" => match it.next() {
-                Some(value) => root = Some(PathBuf::from(value)),
-                None => {
-                    eprintln!("fno-agents: claim export-lockfiles: --root requires a value");
-                    return 2;
-                }
-            },
-            "--json" | "-J" => {}
-            other => {
-                eprintln!("fno-agents: claim export-lockfiles: unknown flag {other}");
-                return 2;
-            }
-        }
-    }
-    match crate::claim_store::export_lockfiles(root.as_deref()) {
-        Ok(payload) => {
-            println!("{payload}");
-            0
-        }
-        Err(error) => {
-            eprintln!("fno-agents: claim export-lockfiles failed: {error}");
-            1
-        }
-    }
-}
-
 /// `fno-agents claim list [--prefix <prefix>] [--include-stale] [--root <dir>]`
-/// — return the same status-shaped rows as the Python list verb, after one
-/// native read of both global and repository claim roots.
+/// — return the same status-shaped lockfile rows as the Python list verb.
 fn run_claim_list(args: &[String]) -> i32 {
     let mut prefix: Option<String> = None;
     let mut root: Option<PathBuf> = None;
@@ -476,27 +388,15 @@ fn run_claim_list(args: &[String]) -> i32 {
             }
         }
     }
-    if root.is_some() {
-        let rows = match crate::claims::list(prefix.as_deref(), root.as_deref(), include_stale) {
-            Ok(rows) => rows,
-            Err(error) => {
-                eprintln!("fno-agents: claim list: {error}");
-                return 1;
-            }
-        };
-        let payload: Vec<Value> = rows.iter().map(claim_status_value).collect();
-        println!("{}", Value::Array(payload));
-        return 0;
-    }
-    let payload =
-        match crate::claim_store::list_db(prefix.as_deref(), include_stale, root.as_deref()) {
-            Ok(payload) => payload,
-            Err(e) => {
-                eprintln!("fno-agents: claim list: {e}");
-                return 1;
-            }
-        };
-    println!("{payload}");
+    let rows = match crate::claims::list(prefix.as_deref(), root.as_deref(), include_stale) {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("fno-agents: claim list: {error}");
+            return 1;
+        }
+    };
+    let payload: Vec<Value> = rows.iter().map(claim_status_value).collect();
+    println!("{}", Value::Array(payload));
     0
 }
 
@@ -520,7 +420,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
     let mut name: Option<String> = None;
     let mut session: Option<String> = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut _events_dir: Option<PathBuf> = None;
+    let mut events_dir: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -546,7 +446,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
                 }
             },
             "--events-dir" => match it.next() {
-                Some(v) => _events_dir = Some(PathBuf::from(v)),
+                Some(v) => events_dir = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("fno-agents: claim release-stopped: --events-dir requires a value");
                     return 2;
@@ -566,11 +466,14 @@ fn run_release_stopped(args: &[String]) -> i32 {
         eprintln!("fno-agents: claim release-stopped requires at least one --claims-dir");
         return 2;
     }
-    let root = dirs
-        .first()
-        .and_then(|dir| dir.parent())
-        .and_then(Path::parent);
-    match crate::claim_store::release_stopped(&name, session.as_deref(), root) {
+    match crate::claims::release_for_stopped_session(
+        &crate::claims::StoppedHolder {
+            name,
+            harness_session_id: session,
+        },
+        &dirs,
+        events_dir.as_deref(),
+    ) {
         Ok(receipt) => {
             println!(
                 "{}",
@@ -1302,6 +1205,100 @@ fn claim_sweep_payload(dir: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ClaimsRootRestore(Option<std::ffi::OsString>);
+
+    impl Drop for ClaimsRootRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+                None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+            }
+        }
+    }
+
+    fn with_claims_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = ClaimsRootRestore(std::env::var_os("FNO_CLAIMS_ROOT"));
+        std::env::set_var("FNO_CLAIMS_ROOT", root);
+        let result = f();
+        drop(restore);
+        result
+    }
+
+    #[test]
+    fn native_claim_status_without_root_uses_lockfiles() {
+        let temp = tempfile::TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "node:native-status-test";
+            assert!(matches!(
+                crate::claims::acquire(
+                    key,
+                    "target-session:test-session",
+                    crate::claims::AcquireOpts {
+                        pid: Some(std::process::id()),
+                        ..Default::default()
+                    }
+                ),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+
+            assert_eq!(
+                run_claim(&["status".into(), key.into(), "--json".into()]),
+                0
+            );
+            assert!(
+                !temp.path().join("graph.db").exists(),
+                "native status must read the lockfile store without opening SQLite"
+            );
+        });
+    }
+
+    #[test]
+    fn native_release_stopped_removes_a_gone_session_claim() {
+        let temp = tempfile::TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "node:stopped-lockfile-test";
+            assert!(matches!(
+                crate::claims::acquire(
+                    key,
+                    "target-session:stopped-session",
+                    crate::claims::AcquireOpts {
+                        pid: Some(dead_pid()),
+                        ..Default::default()
+                    }
+                ),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+            let claims_dir = crate::claims::claims_dir_for(Some(temp.path())).unwrap();
+            let path = crate::claims::claim_path(key, Some(temp.path())).unwrap();
+            assert!(path.exists());
+
+            assert_eq!(
+                run_claim(&[
+                    "release-stopped".into(),
+                    "--name".into(),
+                    "worker".into(),
+                    "--session".into(),
+                    "stopped-session".into(),
+                    "--claims-dir".into(),
+                    claims_dir.display().to_string(),
+                ]),
+                0
+            );
+            assert!(!path.exists(), "the stopped session's lockfile is released");
+        });
+    }
+
+    fn dead_pid() -> u32 {
+        let mut candidate = 999_999u32;
+        while unsafe { libc::kill(candidate as i32, 0) } == 0 {
+            candidate += 1;
+        }
+        candidate
+    }
 
     #[test]
     fn claim_session_absent_requires_a_readable_registry() {
