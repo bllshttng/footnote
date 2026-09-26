@@ -151,8 +151,12 @@ pub fn projection(rows: &[Value], manifest: &Value) -> Value {
                 ev.substituted += 1;
             }
             let verdict = classify(r, Some(bank_rev));
-            if verdict.rev_match == Some(false) {
-                rev_mismatch_rows += 1;
+            let r_rev = r.get("bank_rev").and_then(Value::as_str);
+            let no_provenance = !bank_rev.is_empty() && r_rev.is_none();
+            if verdict.rev_match == Some(false) || no_provenance {
+                if verdict.rev_match == Some(false) {
+                    rev_mismatch_rows += 1;
+                }
                 ev.unsupported += 1;
                 let idx = r.get("repeat_index").and_then(Value::as_u64).unwrap_or(0);
                 per_case.entry(idx).or_default().2 = true;

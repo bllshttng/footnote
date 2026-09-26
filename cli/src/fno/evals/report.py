@@ -60,30 +60,6 @@ def _native_summary(history_path: Path, stale_days: int) -> Optional[dict[str, A
     return payload if isinstance(payload, dict) else None
 
 
-def qualification_summary(
-    manifest_path: Path, history_path: Optional[Path] = None
-) -> Optional[dict[str, Any]]:
-    """One read of the native qualification projection (evals-trend stdin
-    qualification op); None when the door is unreachable. A missing history
-    file is valid input: the fold answers with every scenario missing. Never
-    raises, never re-folds."""
-    if history_path is None:
-        from fno import paths as _paths
-
-        history_path = _paths.evals_history()
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        payload = verb_call("evals-trend", {
-            "op": "qualification",
-            "history": str(history_path),
-            "qualification": str(manifest_path),
-        })
-    except VerbUnavailable:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 class GraduateError(ValueError):
     """The task cannot be graduated (not found, or not capability-tier)."""
 

@@ -4,8 +4,8 @@
   "release": {
     "product": "footnote",
     "footnote_version": "0.4.0",
-    "footnote_rev": "98ebf97d3285ecafe37cda6968f60b1c86636a1d",
-    "bank_rev": "98ebf97d3285ecafe37cda6968f60b1c86636a1d",
+    "footnote_rev": "3024d256af3b618ab2e2acd9ede48f047554632e",
+    "bank_rev": "3024d256af3b618ab2e2acd9ede48f047554632e",
     "declared_at": "2026-09-26"
   },
   "tool_versions": {

@@ -216,6 +216,25 @@ fn unrunnable_history_answers_all_missing_not_an_error() {
 }
 
 #[test]
+fn graded_rows_without_bank_rev_never_complete_a_pinned_case() {
+    // A pinned manifest demands provenance: a graded pass with no bank_rev
+    // has unknown origin and lands in the unsupported bucket, never a pass.
+    let mut row = qrow("install-first-use", 0, Some(true), REV);
+    row.as_object_mut().unwrap().remove("bank_rev");
+    let rows = vec![row, qrow("install-first-use", 1, Some(true), REV)];
+    let p = projection(&rows, &base_manifest());
+    assert_eq!(
+        scenario_field(&p, "install-first-use", "completed"),
+        json!(1)
+    );
+    assert_eq!(
+        scenario_field(&p, "install-first-use", "unsupported"),
+        json!(1)
+    );
+    assert_eq!(exit_code(&p), 4);
+}
+
+#[test]
 fn vacuous_manifest_never_reads_as_a_pass() {
     // No scenarios, no version pin, or no bank-rev pin is never conformance
     // complete: nothing declared can never read as qualified.
@@ -242,13 +261,6 @@ fn vacuous_manifest_never_reads_as_a_pass() {
 
 #[test]
 fn valid_manifest_with_full_conformance_still_passes_after_the_guard() {
-    let rows = vec![
-        qrow("install-first-use", 0, Some(true), REV),
-        qrow("install-first-use", 1, Some(true), REV),
-        qrow("delivery-evidence-failure", 0, Some(true), REV),
-        qrow("manifest 1 guard", 1, Some(true), REV), // wrong cohort, ignored
-    ];
-    // Rebuild the same full set minus the rogue row, then assert exit 0.
     let rows = vec![
         qrow("install-first-use", 0, Some(true), REV),
         qrow("install-first-use", 1, Some(true), REV),
