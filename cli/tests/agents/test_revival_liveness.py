@@ -38,10 +38,14 @@ def _fast_window(monkeypatch):
 
 
 def _arm(monkeypatch, *, uuid=SOURCE_UUID, transcript=None, state="blocked", stop=None):
-    """Fake the gate's readers. A callable reader gets the tick number
-    (counted by the state read, which the gate polls once per tick) and may
-    vary its answer, e.g. ``transcript=lambda n: path if n >= 1 else None``.
-    ``state=None`` reads as state.json being unreadable (OSError)."""
+    """Fake the gate's readers and its cleanup seams. A callable reader gets
+    the tick number (counted by the state read, which the gate polls once per
+    tick) and may vary its answer, e.g.
+    ``transcript=lambda n: path if n >= 1 else None``.
+    ``state=None`` reads as state.json being unreadable (OSError). The cleanup
+    is stubbed at the seams the gate actually uses - ``claude_stop`` and the
+    claims ``release-stopped`` op - so a test cannot pass while the real
+    cleanup would deadlock or no-op."""
     tick = {"n": 0}
 
     def _by_tick(value):
@@ -58,15 +62,23 @@ def _arm(monkeypatch, *, uuid=SOURCE_UUID, transcript=None, state="blocked", sto
     monkeypatch.setattr(reg, "_fork_transcript", lambda _u: _by_tick(transcript))
     monkeypatch.setattr(reg, "read_state_json", _state_read)
 
-    stops = {"n": 0}
+    cleanup = {"claude_stop": 0, "release": 0}
 
-    def _stop(name, **_k):
-        stops["n"] += 1
+    def _claude_stop(short_id, **_k):
+        cleanup["claude_stop"] += 1
         if stop is not None:
             raise stop
+        return 0, ""
 
-    monkeypatch.setattr("fno.agents.stop_release.stop_agent", _stop)
-    return stops
+    monkeypatch.setattr("fno.agents.harnesses.claude.claude_stop", _claude_stop)
+
+    def _run_op(op_args, _dirs):
+        cleanup["release"] += 1
+        assert op_args[:2] == ["release-stopped", "--name"]
+        return {"released": []}, None
+
+    monkeypatch.setattr("fno.claims.verdict.run_op", _run_op)
+    return cleanup
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +87,7 @@ def _arm(monkeypatch, *, uuid=SOURCE_UUID, transcript=None, state="blocked", sto
 
 
 def test_refuses_a_fork_that_never_wrote_a_transcript(tmp_path, monkeypatch) -> None:
-    stops = _arm(monkeypatch)
+    cleanup = _arm(monkeypatch)
     with pytest.raises(DispatchAskError) as ei:
         REAL_GATE("rev-agent", "deadbeef")
     msg = str(ei.value)
@@ -84,7 +96,9 @@ def test_refuses_a_fork_that_never_wrote_a_transcript(tmp_path, monkeypatch) -> 
     assert "transcript absent" in msg
     assert "'blocked'" in msg
     assert "spawn a fresh worker" in msg
-    assert stops == {"n": 1}
+    # The cleanup ran at the lock-free seams: the session stopped, the claims
+    # release-stopped op ran.
+    assert cleanup == {"claude_stop": 1, "release": 1}
 
 
 def test_refuses_when_state_stays_wedged_despite_a_transcript(
@@ -137,12 +151,14 @@ def test_an_unresolvable_session_id_refuses(monkeypatch) -> None:
 
 
 def test_a_failed_stop_is_named_not_swallowed(monkeypatch) -> None:
-    _arm(monkeypatch, uuid=None, state=None, stop=RuntimeError("boom"))
+    cleanup = _arm(monkeypatch, uuid=None, state=None, stop=RuntimeError("boom"))
     with pytest.raises(DispatchAskError) as ei:
         REAL_GATE("rev-agent", "deadbeef")
     msg = str(ei.value)
     assert "stop failed (boom)" in msg
     assert "still holds its slot" in msg
+    # The claims release still ran despite the stop failing.
+    assert cleanup == {"claude_stop": 1, "release": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +214,12 @@ def test_spawn_resume_exits_non_zero_when_the_fork_never_comes_up(
     # readers: the session record never appears, so proof never does.
     monkeypatch.setattr(reg, "revive_proof_or_refuse", REAL_GATE)
     monkeypatch.setattr(reg, "resolve_session_uuid", lambda _sid: None)
-    monkeypatch.setattr("fno.agents.stop_release.stop_agent", lambda name, **k: None)
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.claude_stop", lambda short_id, **k: (0, "")
+    )
+    monkeypatch.setattr(
+        "fno.claims.verdict.run_op", lambda op_args, dirs: {"released": []}
+    )
 
     result = CliRunner().invoke(
         agents_app,

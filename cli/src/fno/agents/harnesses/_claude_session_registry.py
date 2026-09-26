@@ -446,9 +446,10 @@ def revive_proof_or_refuse(
     Proof is a non-empty transcript for the fork's own session id and a job
     state outside the wedged pair. Success prints the verified transcript
     path, so the spawn receipt names a file that exists. Past the window the
-    fork is stopped and its claims released (the cleanup a manual stop
-    performs), then DispatchAskError raises naming the observed state, so a
-    fork that never started reads as the refusal it is and frees the slot.
+    fork's session is stopped and its claims released - at lock-free seams,
+    because the caller holds the per-agent flock - then DispatchAskError
+    raises naming the observed state, so a fork that never started reads as
+    the refusal it is and frees the slot.
     """
     deadline = time.monotonic() + FORK_LIVENESS_WINDOW_S
     transcript: Optional[Path] = None
@@ -472,13 +473,27 @@ def revive_proof_or_refuse(
         if time.monotonic() >= deadline:
             break
         time.sleep(FORK_LIVENESS_POLL_S)
-    from fno.agents.stop_release import stop_agent
+    # The caller holds the per-agent flock, so the stop verb's own lock
+    # acquisition would wait on ourselves and time out. Stop the session
+    # directly and release the claims the stop verb would have released; the
+    # row reconciles to stopped from roster truth.
+    from fno.agents.harnesses.claude import claude_stop
 
     try:
-        stop_agent(name)
+        claude_stop(short_id)
         stopped = "stopped the fork and released its claims"
     except Exception as exc:  # noqa: BLE001 - the refusal must still name the state
         stopped = f"stop failed ({exc}); the fork still holds its slot"
+    try:
+        from fno.claims.io import claims_dir, global_claims_dir
+        from fno.claims.verdict import run_op
+
+        run_op(
+            ["release-stopped", "--name", name],
+            [global_claims_dir(), claims_dir(None)],
+        )
+    except Exception:  # noqa: BLE001 - best effort; the refusal names the state
+        pass
     from fno.agents.dispatch import DispatchAskError
 
     raise DispatchAskError(
