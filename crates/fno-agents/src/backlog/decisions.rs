@@ -399,13 +399,10 @@ mod tests {
     fn decisions_import_rejects_an_orphan_node_reference() {
         let temp = TempDir::new().unwrap();
         let graph = temp.path().join("graph.json");
-        std::fs::write(
-            temp.path().join("decisions.jsonl"),
-            serde_json::to_string(&event("d-present")).unwrap() + "\n",
-        )
-        .unwrap();
-        let mut connection = connection();
-        crate::backlog::nodes::ensure_table(&connection).unwrap();
+        let mut connection = crate::backlog::open(&graph).unwrap();
+        connection
+            .execute("DELETE FROM graph_meta WHERE key = 'decisions_imported'", [])
+            .unwrap();
         let node = crate::backlog::model::Node::from_json(&serde_json::json!({
             "id": "x-node",
             "slug": "node",
@@ -417,12 +414,23 @@ mod tests {
         .unwrap();
         crate::backlog::nodes::save(&connection, &node).unwrap();
         connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        connection
             .execute(
                 "INSERT INTO node_decisions (node_id, event_id, seq)
                  VALUES ('x-node', 'd-missing', 0)",
                 [],
             )
             .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
+        std::fs::write(
+            temp.path().join("decisions.jsonl"),
+            serde_json::to_string(&event("d-present")).unwrap() + "\n",
+        )
+        .unwrap();
 
         let error = import_if_needed(&mut connection, &graph).unwrap_err();
 
