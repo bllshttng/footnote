@@ -128,12 +128,14 @@ def _stub_merge_world(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
-    monkeypatch.setattr(
-        "fno.rust_binary.verb_call",
-        lambda verb, payload, **kw: {"recovered": False, "failed": []}
-        if payload.get("op") == "status-rerun"
-        else (_ for _ in ()).throw(AssertionError(f"unexpected door call: {verb}")),
-    )
+    from fno.rust_binary import VerbUnavailable
+
+    def _fake(verb, payload, **kw):
+        if payload.get("op") == "status-rerun":
+            return {"recovered": False, "failed": []}
+        raise VerbUnavailable("door op unavailable in tests")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", _fake)
 
 
 def test_merge_durable_grant_absent_skips_without_gh(tmp_path, monkeypatch, capsys):

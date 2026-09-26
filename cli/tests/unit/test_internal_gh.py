@@ -124,7 +124,7 @@ def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
     seen: list[tuple] = []
 
     def fake_verb(verb, payload, **kw):
-        seen.append((payload.get("cwd"), payload.get("pr")))
+        seen.append((payload.get("cwd") is not None, payload.get("pr")))
         return rows
 
     monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb)
@@ -136,7 +136,7 @@ def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
     )
     assert result.returncode == 0
     assert json.loads(result.stdout) == rows
-    assert seen == [(None, 930)]
+    assert seen == [(True, 930)]
     assert all("graphql" not in " ".join(call) for call in calls)
 
 

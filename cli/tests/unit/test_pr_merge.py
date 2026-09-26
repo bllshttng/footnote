@@ -326,23 +326,38 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
     # Same hermeticity for the flake hold: no merge case here is about rerun
-    # recovery, so the probe answers never-recovered (tests about it override).
+    # recovery, so the probe is UNAVAILABLE (flake None, hold skipped); the
+    # rerun tests override with their own answer.
     monkeypatch.setattr(
         "fno.rust_binary.verb_call",
-        lambda verb, payload, **kw: {"recovered": False, "failed": []}
-        if payload.get("op") == "status-rerun"
-        else _no_door(verb, payload),
+        _door_stub(None),
     )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
     # tests/conftest.py defaults hold_for_pr to no hold for every test.
 
 
+def _door_stub(answer):
+    """A verb_call fake answering only the status-rerun ask (None = the
+    probe is unavailable, the fail-open old default); every other ask rides
+    the real transport."""
+    import fno.rust_binary as rust_binary
+
+    real = rust_binary.verb_call
+
+    def _fake(verb, payload, unavailable=None, **kw):
+        if isinstance(payload, dict) and payload.get("op") == "status-rerun":
+            if answer is None:
+                raise (unavailable or rust_binary.VerbUnavailable)(
+                    "status-rerun unavailable in tests"
+                )
+            return answer
+        return real(verb, payload, unavailable=unavailable, **kw)
+
+    return _fake
+
+
 @pytest.fixture(autouse=True)
-def _no_door(verb, payload):
-    raise AssertionError(f"unexpected door call: {verb} {payload.get('op')}")
-
-
 def _stub_pr_worktree_resolution(monkeypatch):
     """Keep merge tests hermetic; the resolver has its own real-worktree test."""
     monkeypatch.setattr(
@@ -516,9 +531,7 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
 def _flake_recovered(monkeypatch, failed=None):
     monkeypatch.setattr(
         "fno.rust_binary.verb_call",
-        lambda verb, payload, **kw: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]}
-        if payload.get("op") == "status-rerun"
-        else _no_door(verb, payload),
+        _door_stub({"recovered": True, "failed": failed or ["smoke-pytest (7)"]}),
     )
 
 

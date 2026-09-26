@@ -1215,15 +1215,14 @@ def _no_status_ci_door(monkeypatch):
     """
     import fno.rust_binary as rust_binary
 
-    class _DoorUnavailable(Exception):
-        pass
+    real_verb_call = rust_binary.verb_call
 
     def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
         op = payload.get("op") if isinstance(payload, dict) else None
         if op == "status-ci":
             return []
-        if op == "status-rerun":
-            return {"recovered": False, "failed": []}
-        raise _DoorUnavailable(f"{verb} {op} unavailable in tests")
+        raise (unavailable or rust_binary.VerbUnavailable)(
+            f"fno-agents {verb} {op} unavailable in tests"
+        )
 
     monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
