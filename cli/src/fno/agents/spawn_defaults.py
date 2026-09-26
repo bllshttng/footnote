@@ -1210,17 +1210,18 @@ def inject_spawn_defaults(
         # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
     # One node answer for the grid; the resolver owns the precedence.
-    node_id_present = _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
-    node = _flag_value(out[1:], "--node") or (env or {}).get("FNO_NODE") or None
-    if node is None:
+    _flag_node = _flag_value(out[1:], "--node")
+    _env_node = (env or {}).get("FNO_NODE") or None
+    node_id_present = _flag_node is not None or _env_node is not None
+    node = _flag_node or None
+    if _flag_node is None:
         try:
             from fno.rust_binary import VerbUnavailable, verb_call
-
             _slot = _seed_slot(list(out[1:]))
             _answer = verb_call("spawn-axes", {"spawn_node": {
                 "argv": list(out), "seed_index": (_slot[0] + 1) if _slot else None,
                 "seed_form": _slot[1] if _slot else None,
-                "flag_node": None, "env_node": None,
+                "flag_node": None, "env_node": _env_node,
             }}, VerbUnavailable)
             node = _answer.get("node") or None
         except Exception:  # noqa: BLE001 - the grid is advisory, as _grid_node

@@ -2526,6 +2526,39 @@ def test_payload_named_node_walks_the_profile_lanes(monkeypatch):
 
 
 @requires_rust
+def test_payload_outranks_ambient_fno_node_for_the_grid(monkeypatch):
+    """AC2 (grid arm): an ambient FNO_NODE never outranks the node the seed
+    names. The resolver answers with env passed in, and the payload node's
+    difficulty feeds the grid."""
+    _pin_capacity(monkeypatch)
+    import fno.rust_binary as rb
+
+    _real_verb_call = rb.verb_call
+    seen: dict = {}
+
+    def _pass_through(verb, payload, unavailable_cls, **kw):
+        if "spawn_node" in payload:
+            seen.update(payload["spawn_node"])
+            return {"node": "x-2", "source": "payload"}
+        return _real_verb_call(verb, payload, unavailable_cls, **kw)
+
+    monkeypatch.setattr(rb, "verb_call", _pass_through)
+    monkeypatch.setattr(
+        "fno.tracker.metadata.read_entries",
+        lambda _tag: [{"id": "x-2", "difficulty": "low", "priority": "p2"}],
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-2"],
+        settings=_slot_settings(_SLOT_ROWS, {"target": {"lanes": ["flash-x"]}}),
+        stderr=err,
+        env={"FNO_NODE": "x-1"},
+    )
+    assert seen["env_node"] == "x-1", "env rides into the resolver"
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+
+
+@requires_rust
 def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
     """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
     lanes; the policy is live on them."""

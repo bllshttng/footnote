@@ -104,12 +104,19 @@ fn scan_seed_node(text: &str) -> Option<String> {
     if !toks.first().is_some_and(|t| parse_verb_token(t).is_some()) {
         return None;
     }
-    toks.iter().skip(1).find_map(|tok| {
-        let word = tok
-            .trim_matches(|c: char| !c.is_alphanumeric())
-            .to_lowercase();
-        matches_node_id_shape(&word).then_some(word)
-    })
+    // The node slot is the argument right after the verb, once past a
+    // single modifier token. A quoted token opens free-text prose: the
+    // slot is a title, and no node-shaped word inside it binds.
+    toks.iter()
+        .skip(1)
+        .take(2)
+        .take_while(|tok| !tok.starts_with(['"', '\'']))
+        .find_map(|tok| {
+            let word = tok
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            matches_node_id_shape(&word).then_some(word)
+        })
 }
 
 /// The nodeless arm: read the seed's verb argument as the node the
@@ -855,6 +862,32 @@ mod tests {
             assert_eq!(out["node"], Value::Null, "{seed}");
             assert_eq!(out["source"], Value::Null, "{seed}");
         }
+    }
+
+    #[test]
+    fn a_quoted_title_never_binds_a_node_shaped_word() {
+        // Free text after the verb is a title, not a node slot: a
+        // node-shaped word inside it stays prose.
+        for seed in [
+            "/fno:target \"stop treating x-3333 as a node\"",
+            "/fno:target fix the x-3333 bug",
+            "/fno:target L \"add x-4444 later\"",
+        ] {
+            let out = resolved(resolve_payload(seed, Value::Null, Value::Null));
+            assert_eq!(out["node"], Value::Null, "{seed}");
+            assert_eq!(out["source"], Value::Null, "{seed}");
+        }
+    }
+
+    #[test]
+    fn the_scan_never_reaches_past_two_argument_slots() {
+        let out = resolved(resolve_payload(
+            "/fno:target ship the x-5555 change",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(out["node"], Value::Null);
+        assert_eq!(out["source"], Value::Null);
     }
 
     // --- node_source: refusals name the payload -------------------------- //
