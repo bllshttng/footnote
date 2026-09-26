@@ -631,18 +631,31 @@ pub fn mux_sweep_json(mux: &MuxSweep) -> Value {
 /// coverage gaps that bound the census itself (AC1-EDGE). A sweep that
 /// filtered its candidate set must show what it never looked at - the gap
 /// between the two counts is the only place a scoping bug reads from
-/// outside.
+/// outside. An unread registry makes the unjudged split unknown rather
+/// than zero: every session then lacks the Registry source, and a printed
+/// count would diagnose a scoping bug that never happened.
 fn inventory_text_lines(inv: &crate::gc_inventory::Inventory) -> String {
-    let unjudged = inv
-        .sessions
+    let registry_read_failed = inv
+        .incomplete
         .iter()
-        .filter(|s| !s.sources.contains(&crate::gc_inventory::Source::Registry))
-        .count();
-    let mut out = format!(
-        "session inventory: enumerated {} session(s), {} never judged (no registry row)\n",
-        inv.sessions.len(),
-        unjudged
-    );
+        .any(|(source, _)| source == "registry");
+    let mut out = if registry_read_failed {
+        format!(
+            "session inventory: enumerated {} session(s), never-judged count unknown (registry unreadable)\n",
+            inv.sessions.len()
+        )
+    } else {
+        let unjudged = inv
+            .sessions
+            .iter()
+            .filter(|s| !s.sources.contains(&crate::gc_inventory::Source::Registry))
+            .count();
+        format!(
+            "session inventory: enumerated {} session(s), {} never judged (no registry row)\n",
+            inv.sessions.len(),
+            unjudged
+        )
+    };
     for (source, reason) in &inv.incomplete {
         out.push_str(&format!(
             "session inventory (incomplete): {source}: {reason}\n"
@@ -1008,6 +1021,50 @@ mod tests {
         assert!(
             text.contains("session inventory (partial): transcript roots 2 of 3 readable"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn an_unread_registry_makes_the_unjudged_count_unknown_not_zero() {
+        // When the registry read fails, NO session carries the Registry
+        // source, so a printed count would read every session as never
+        // judged. The receipt says unknown instead of diagnosing a scoping
+        // bug that never happened.
+        let inv = crate::gc_inventory::Inventory {
+            sessions: vec![
+                inv_session(
+                    "claude",
+                    "66666666-6666-4666-8666-666666666666",
+                    &[crate::gc_inventory::Source::Store],
+                ),
+                inv_session(
+                    "codex",
+                    "77777777-7777-4777-8777-777777777777",
+                    &[crate::gc_inventory::Source::Mux],
+                ),
+            ],
+            incomplete: vec![(
+                "registry".to_string(),
+                "registry unreadable: permission denied".to_string(),
+            )],
+            ..Default::default()
+        };
+        let text = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&inv),
+            Some(&MuxSweep::Skipped),
+            false,
+            true,
+        );
+        assert!(
+            text.contains(
+                "session inventory: enumerated 2 session(s), never-judged count unknown (registry unreadable)"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("never judged"),
+            "no count may read as a measured zero: {text}"
         );
     }
 
