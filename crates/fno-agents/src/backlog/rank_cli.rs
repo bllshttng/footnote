@@ -218,48 +218,19 @@ fn project_key(e: &Value) -> String {
     }
 }
 
-/// `_find_node`: exact id first, then a unique short `ab-` prefix; ambiguity
-/// returns no match plus the stderr line python writes.
-fn find_rank_node(entries: &[Value], node_id: &str) -> (Option<usize>, Option<String>) {
-    if let Some(i) = entries.iter().position(|e| entry_id(e) == Some(node_id)) {
-        return (Some(i), None);
-    }
-    if node_id.starts_with("ab-") && node_id.len() < 11 {
-        let suffix = &node_id[3..];
-        let partial = (4..=7).contains(&suffix.len())
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
-        if partial {
-            let hits: Vec<usize> = entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| entry_id(e).map(|i| i.starts_with(node_id)).unwrap_or(false))
-                .map(|(i, _)| i)
-                .collect();
-            if hits.len() == 1 {
-                return (Some(hits[0]), None);
-            }
-            if hits.len() > 1 {
-                let ids: Vec<String> = hits
-                    .iter()
-                    .map(|&i| entry_id(&entries[i]).unwrap_or("?").to_string())
-                    .collect();
-                return (
-                    None,
-                    Some(format!(
-                        "[graph] ambiguous prefix '{node_id}' matches: {}",
-                        ids.join(", ")
-                    )),
-                );
-            }
-        }
-    }
-    (None, None)
-}
-
-/// python float repr: a whole f64 prints `4.0`, not `4`.
+/// python float repr: a whole f64 prints `4.0`, not `4`; the exponent bands
+/// (at or above 1e16, below 1e-4) print `1e+20` / `1e-05`.
 fn format_rank(r: f64) -> String {
+    if r != 0.0 && (r.abs() >= 1e16 || r.abs() < 1e-4) {
+        let s = format!("{r:e}");
+        return match s.split_once('e') {
+            Some((mantissa, exp)) => {
+                let n: i32 = exp.parse().unwrap_or(0);
+                format!("{mantissa}e{n:+03}")
+            }
+            None => s,
+        };
+    }
     if r.fract() == 0.0 {
         format!("{r:.1}")
     } else {
@@ -471,7 +442,7 @@ pub fn run(tail: &[String]) -> i32 {
             )
         };
 
-        let (node_idx, ambiguity) = find_rank_node(rows, &args.task_id);
+        let (node_idx, ambiguity) = crate::backlog_ready::find_node_index(rows, &args.task_id);
         if let Some(line) = ambiguity {
             stderr_lines.borrow_mut().push(line);
         }
@@ -544,7 +515,7 @@ pub fn run(tail: &[String]) -> i32 {
             action = "--bottom".to_string();
         } else {
             let raw_anchor = anchor_id.as_deref().unwrap_or_default();
-            let (anchor_idx, ambiguity) = find_rank_node(rows, raw_anchor);
+            let (anchor_idx, ambiguity) = crate::backlog_ready::find_node_index(rows, raw_anchor);
             if let Some(line) = ambiguity {
                 stderr_lines.borrow_mut().push(line);
             }
@@ -727,6 +698,9 @@ mod tests {
         assert_eq!(format_rank(-1.0), "-1.0");
         assert_eq!(format_rank(4.5), "4.5");
         assert_eq!(format_rank(4.25), "4.25");
+        assert_eq!(format_rank(1e20), "1e+20");
+        assert_eq!(format_rank(1e-5), "1e-05");
+        assert_eq!(format_rank(0.0001), "0.0001");
     }
 
     #[test]
@@ -779,9 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn find_rank_node_ambiguity_names_the_candidates() {
+    fn find_node_index_ambiguity_names_the_candidates() {
         let entries = vec![json!({"id": "ab-12345678"}), json!({"id": "ab-1234abcd"})];
-        let (hit, line) = find_rank_node(&entries, "ab-1234");
+        let (hit, line) = crate::backlog_ready::find_node_index(&entries, "ab-1234");
         assert!(hit.is_none());
         assert_eq!(
             line,
@@ -789,7 +763,7 @@ mod tests {
                 "[graph] ambiguous prefix 'ab-1234' matches: ab-12345678, ab-1234abcd".to_string()
             )
         );
-        let (hit, line) = find_rank_node(&entries, "ab-12345678");
+        let (hit, line) = crate::backlog_ready::find_node_index(&entries, "ab-12345678");
         assert_eq!(hit, Some(0));
         assert!(line.is_none());
     }

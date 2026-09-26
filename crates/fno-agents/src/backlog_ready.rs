@@ -1101,29 +1101,48 @@ pub(crate) fn descendants_of(entries: &[Value], parent_id: &str) -> BTreeSet<Str
 /// `_find_node`: exact id first, format-agnostic (resolve_id's first step:
 /// fixtures and legacy data use non-hex ids), then a unique short `ab-`
 /// prefix (4-7 hex in the suffix, `resolve_id`'s partial-prefix gate);
-/// malformed prefixes, ambiguity, and absence all read as no match.
-fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
-    if let Some(exact) = entries.iter().find(|e| entry_id(e) == Some(node_id)) {
-        return Some(exact);
+/// malformed prefixes, ambiguity, and absence all read as no match. The
+/// ambiguity arm also returns the stderr line python writes there, so a
+/// caller can reproduce its bytes.
+pub(crate) fn find_node_index(entries: &[Value], node_id: &str) -> (Option<usize>, Option<String>) {
+    if let Some(i) = entries.iter().position(|e| entry_id(e) == Some(node_id)) {
+        return (Some(i), None);
     }
     if node_id.starts_with("ab-") && node_id.len() < 11 {
         let suffix = &node_id[3..];
         let is_partial =
             (4..=7).contains(&suffix.len()) && suffix.chars().all(|c| c.is_ascii_hexdigit());
         if !is_partial {
-            return None;
+            return (None, None);
         }
-        let matches: Vec<&Value> = entries
+        let hits: Vec<usize> = entries
             .iter()
-            .filter(|e| entry_id(e).map(|i| i.starts_with(node_id)).unwrap_or(false))
+            .enumerate()
+            .filter(|(_, e)| entry_id(e).map(|i| i.starts_with(node_id)).unwrap_or(false))
+            .map(|(i, _)| i)
             .collect();
-        return if matches.len() == 1 {
-            matches.into_iter().next()
-        } else {
-            None
-        };
+        if hits.len() == 1 {
+            return (Some(hits[0]), None);
+        }
+        if hits.len() > 1 {
+            let ids: Vec<String> = hits
+                .iter()
+                .map(|&i| entry_id(&entries[i]).unwrap_or("?").to_string())
+                .collect();
+            return (
+                None,
+                Some(format!(
+                    "[graph] ambiguous prefix '{node_id}' matches: {}",
+                    ids.join(", ")
+                )),
+            );
+        }
     }
-    None
+    (None, None)
+}
+
+fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
+    find_node_index(entries, node_id).0.map(|i| &entries[i])
 }
 
 // ---------------------------------------------------------------------------
