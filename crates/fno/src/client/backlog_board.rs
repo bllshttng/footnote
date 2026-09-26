@@ -93,26 +93,6 @@ impl QueryState {
         }
         backlog_model::Query::from_pairs(&p)
     }
-
-    /// `priority=p1 · find: "mux"` style summary for the query line.
-    pub(crate) fn describe(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        let lanes = match self.lanes {
-            backlog_model::LanesBy::Project => "project",
-            backlog_model::LanesBy::Epic => "epic",
-            backlog_model::LanesBy::None => "none",
-        };
-        parts.push(format!("lanes: {lanes}"));
-        for (k, vals) in &self.sets {
-            if !vals.is_empty() {
-                parts.push(format!("{k}={}", vals.join(",")));
-            }
-        }
-        if let Some(q) = &self.q {
-            parts.push(format!("find: \"{q}\""));
-        }
-        parts.join(" · ")
-    }
 }
 
 /// The board overlay's state. One at a time; `None` on the View means the
@@ -1229,12 +1209,13 @@ fn move_row_list(b: &mut BoardView, down: bool) {
 }
 
 /// Move the column cursor (clamped to the six cells); the row clamps at
-/// render time.
+/// render time. In list mode the columns are display sub-headers, so the
+/// key does nothing.
 fn move_col(view: &mut View, right: bool) {
     let Some(b) = view.backlog_board.as_mut() else {
         return;
     };
-    if b.body.is_none() {
+    if b.query.view == backlog_model::View::List || b.body.is_none() {
         return;
     }
     let shown = b.layout.columns.len().saturating_sub(1);

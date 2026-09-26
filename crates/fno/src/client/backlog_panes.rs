@@ -57,11 +57,12 @@ pub(crate) fn paint(
         theme,
     );
     // The two panes: side by side at w >= 100, stacked below it. Under 16
-    // rows they drop their frames so each keeps at least 3 body rows.
+    // rows they drop their frames so each keeps at least 3 body rows; the
+    // unframed painter has no left offset, so a short-wide rect stacks too.
     let framed = panes_h >= 10;
-    let board_w = if w >= 100 { w * 55 / 100 } else { w };
+    let side_by_side = w >= 100 && framed;
+    let board_w = if side_by_side { w * 55 / 100 } else { w };
     let detail_w = w.saturating_sub(board_w);
-    let side_by_side = w >= 100;
     let (board_rect, detail_rect) = if side_by_side {
         (
             (top + bar_h, left, panes_h, board_w),
@@ -153,6 +154,8 @@ pub(crate) fn paint(
         let (ls, f) = node_detail::pane_lines(b, &node, sel, detail_inner_w);
         let scroll = b.detail.as_ref().map(|d| d.scroll).unwrap_or(0);
         let ls = ls.into_iter().skip(scroll).collect::<Vec<_>>();
+        // The follow index pointed at the pre-skip body.
+        let f = f.map(|i| i.saturating_sub(scroll));
         (ls, f)
     };
     let d_follow = if focus_pane { dfollow } else { None };

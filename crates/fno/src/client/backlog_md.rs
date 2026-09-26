@@ -19,8 +19,11 @@ fn render(text: &str, w: usize) -> Vec<BLine> {
     let mut out: Vec<BLine> = Vec::new();
     let src: Vec<&str> = text.lines().collect();
     let mut i = 0usize;
-    // Frontmatter: a leading `---` block folds to one meta line.
-    if src.first().is_some_and(|l| l.trim_end() == "---") {
+    // Frontmatter: a leading `---` block folds to one meta line. An
+    // unterminated block is not frontmatter; render the document as-is.
+    if src.first().is_some_and(|l| l.trim_end() == "---")
+        && src[1..].iter().any(|l| l.trim_end() == "---")
+    {
         i = 1;
         let mut n = 0usize;
         while i < src.len() && src[i].trim_end() != "---" {
