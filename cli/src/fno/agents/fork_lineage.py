@@ -75,8 +75,10 @@ def launch_overlay(account_id):
 def respawn_ok(src):
     """Whether the wake may `claude respawn` this row in place: only when the
     Rust reentry plan picks respawn, so a saved job that lost the route never
-    replays. An unavailable Rust owner never respawns; the fork rung below
-    runs with wake_route's route."""
+    replays. A missing row, or an unavailable Rust owner, never respawns; the
+    fork rung below runs with wake_route's route."""
+    if src is None:
+        return False
     try:
         answer = spawn_axes_call({"reentry_mechanism": {"name": src.name}})
     except SpawnAxesUnavailable:
