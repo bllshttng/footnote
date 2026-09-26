@@ -6,6 +6,7 @@ at ship time, 2h before their PR merged. These tests pin the writers shut.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -23,8 +24,7 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
     """Write a graph fixture whose node is the ledger entry's join target."""
     graph = home / ".fno" / "graph.json"
     graph.parent.mkdir(parents=True, exist_ok=True)
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {
@@ -40,16 +40,14 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
                 ]
             },
             indent=2,
-        ),
-        encoding="utf-8",
-    )
+        ))
     return graph
 
 
 def test_register_entry_leaves_graph_byte_identical(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A finalize ledger append must not write to graph.json at all.
+    """A finalize ledger append must not change the graph store.
 
     Two assertions, because either alone is weak. Byte-identity catches an
     in-process writer but is only as red as the subprocess it fails to spawn;
@@ -67,7 +65,7 @@ def test_register_entry_leaves_graph_byte_identical(
 
     plan_path = str(tmp_path / "plan.md")
     graph = _seed_graph(tmp_path, plan_path=plan_path)
-    before = graph.read_bytes()
+    before = read_graph_strict(graph)
 
     ledger = tmp_path / "ledger.json"
     monkeypatch.setattr(_register._paths, "ledger_json", lambda: ledger)
@@ -94,7 +92,7 @@ def test_register_entry_leaves_graph_byte_identical(
     )
 
     assert ledger.exists(), "the ledger append itself must still land"
-    assert graph.read_bytes() == before, "ledger append must not mutate graph.json"
+    assert read_graph_strict(graph) == before, "ledger append must not mutate graph store rows"
 
     graph_writes = [
         c for c in shelled if any("roadmap-tasks" in p or "--completed" in p for p in c)
@@ -139,7 +137,7 @@ def _seed(g: Path, entry: dict) -> None:
         row["completed_at"] = "2026-09-01T00:00:00Z"
     row.setdefault("title", entry.get("id", "node"))
     row.setdefault("slug", entry.get("id", "node"))
-    g.write_text(json.dumps({"entries": [row]}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": [row]}, indent=2) + "\n")
 
 
 def _node(g: Path, node_id: str) -> dict:
@@ -227,9 +225,10 @@ def test_compat_done_routing_refusal_is_not_retryable(done_graph, monkeypatch):
         "pr_number": 1140,
         "pr_url": "https://github.com/o/r/pull/1140",
     })
-    _throw = lambda n, **kw: (_ for _ in ()).throw(
-        ReconcileError("[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal")
-    )
+    def _throw(n, **kw):
+        raise ReconcileError(
+            "[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal"
+        )
     monkeypatch.setattr(done_cli, "_gh_query", _throw)
     import fno.graph.cli as graph_cli
 

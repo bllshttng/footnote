@@ -22,10 +22,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Temp home so ~/.fno/graph.json stays sandboxed
+# Temp home so the graph.db store stays sandboxed
 HOME_OVERRIDE="$TMP/home"
 mkdir -p "$HOME_OVERRIDE/.fno"
-echo '{"entries":[]}' > "$HOME_OVERRIDE/.fno/graph.json"
+printf '{"entries":[]}\n' | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$HOME_OVERRIDE/.fno/graph.json"
 INITIAL_ENTRY_COUNT=0
 
 # Inbox root
@@ -245,17 +245,19 @@ if errors:
 print('OK: lesson in acme-web inbox with reply_to=$MSG_A from fno')
 " <<< "$LIST_WEB2_JSON"
 
-# Step 7: Verify graph.json has zero new entries throughout the chain
+# Step 7: Verify graph.db has zero new entries throughout the chain
 echo ""
-echo "--- Step 7: verify graph.json unchanged (zero new nodes) ---"
-python3 -c "
-import json, sys
-graph = json.load(open('$HOME_OVERRIDE/.fno/graph.json'))
+echo "--- Step 7: verify graph.db unchanged (zero new nodes) ---"
+uv run --project "$CLI_DIR" python -c "
+import sys
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+graph = {'entries': read_graph_strict(Path('$HOME_OVERRIDE/.fno/graph.json'))}
 count = len(graph.get('entries', []))
 if count != $INITIAL_ENTRY_COUNT:
-    print('FAIL: graph.json has ' + str(count) + ' entries, expected $INITIAL_ENTRY_COUNT')
+    print('FAIL: graph.db has ' + str(count) + ' entries, expected $INITIAL_ENTRY_COUNT')
     sys.exit(1)
-print('OK: graph.json unchanged - ' + str(count) + ' entries (Q/A/lesson chain leaves no backlog nodes)')
+print('OK: graph.db unchanged - ' + str(count) + ' entries (Q/A/lesson chain leaves no backlog nodes)')
 "
 
 # Verify three messages exist across two inbox files

@@ -23,6 +23,7 @@ from fno.claims.core import reap_dead_claims, sweep_verdict
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.graph.store import commit_rows_via_store, read_graph_strict, release_node_claim_at_closure
+from tests.fixtures.graph_seed import seed_graph
 
 
 HOLDER = "target-session:sid-a"
@@ -63,7 +64,7 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": complete}) + "\n")
+    seed_graph(p, complete)
     return p
 
 

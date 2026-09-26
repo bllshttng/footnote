@@ -14,7 +14,6 @@ from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
 from fno.doctor_bash_census import bash_census_command
 from fno.doctor_footprint import footprint_command
-from fno.doctor_graph import graph_app
 from fno.doctor_lanes import lanes_command
 from fno.doctor_reclaim import reclaim_command
 from fno.evals.cli import evals_app
@@ -62,7 +61,6 @@ doctor_app.add_typer(bundle_app, name="bundle")
 doctor_app.add_typer(codemap_app, name="codemap")
 doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
-doctor_app.add_typer(graph_app, name="graph")
 doctor_app.command("lint")(lint)
 # Machine janitor for dev-built disk bloat; hidden, `fno help doctor --all`.
 doctor_app.command("reclaim", hidden=True)(reclaim_command)

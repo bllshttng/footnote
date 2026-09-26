@@ -197,7 +197,7 @@ fn row_key(row: &Value) -> (String, String) {
 /// lines only, the same source the Python reader reports.
 pub fn read_store_rows(graph: &Path, jsonl: &Path) -> Result<(Vec<Value>, usize), String> {
     let db = crate::backlog::database_path(graph);
-    let db_present = db.exists() || graph.exists();
+    let db_present = db.exists();
     // The journal's store counts as present: rows committed to decisions.db
     // never touch the file.
     let jsonl_present = jsonl.exists() || crate::event_store::store_path(jsonl).exists();

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.paths_testing import use_tmpdir
 
@@ -83,7 +84,12 @@ def _ident(graph: Path) -> tuple:
 def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> None:
     entries = [
         # idea, not intake: the typed model refuses intake as a status.
-        _entry(f"filler-{i}", type="feature", status="idea", project="web")
+        _entry(
+            f"filler-{i}",
+            type="feature",
+            status="idea",
+            project="web",
+        )
         for i in range(FILLER)
     ]
     entries.append(
@@ -99,15 +105,18 @@ def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> Non
     for i in range(CHILDREN):
         child = _entry(f"{SCOPE}-c{i}", type="feature", project="web", parent=SCOPE)
         if i < done_children:
-            child["status"] = "done"
+            child.update(
+                status="done",
+                completed_at="2026-01-01T00:00:00Z",
+                completion_note="fixture closure evidence",
+            )
         entries.append(child)
-    # A stale store never re-reads a rewritten seed: drop the db first so
-    # the next open imports the fresh rows (the rust stage_graph contract).
-    for suffix in ("db", "db-wal", "db-shm"):
-        stale = path.with_suffix(f".{suffix}")
-        if stale.exists():
-            stale.unlink()
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    if done_epic:
+        entries[FILLER].update(
+            completed_at="2026-01-01T00:00:00Z",
+            completion_note="fixture closure evidence",
+        )
+    seed_graph(path, entries)
 
 
 def _invoke_drain() -> tuple[int, dict, float]:
@@ -155,11 +164,11 @@ def test_repeat_fire_answers_inside_the_stopgate_budget_without_the_store(
 
 def test_graph_change_invalidates_the_row(graph):
     _invoke_drain()
-    _write_graph(graph, done_children=CHILDREN)  # children delivered, epic open
+    _write_graph(graph, done_children=CHILDREN - 1)  # cache sees one fewer open child
 
     exit_code, payload, _ = _invoke_drain()
     assert exit_code == 0
-    assert payload["undelivered"] == 1
+    assert payload["undelivered"] == 2
     assert "cached" not in payload
 
     _write_graph(graph, done_children=CHILDREN, done_epic=True)  # scope drained
@@ -271,22 +280,17 @@ def test_graph_memo_none_ident_reads_and_never_caches(graph, monkeypatch):
     assert wake._GRAPH_ENTRIES_MEMO["ident"] is None
 
 
-def test_sqlite_backend_keys_on_the_store_version(graph, monkeypatch):
+def test_graph_cache_keys_on_the_store_version(graph, monkeypatch):
     from fno.king import drain_cache
 
-    assert drain_cache.graph_ident(graph) is not None  # json backend: stat identity
+    initial = drain_cache.graph_ident(graph)
+    assert initial and initial[0] == "sqlite"
     import fno.graph.store as store
 
-    monkeypatch.setattr(
-        store,
-        "store_export_status",
-        lambda p: {"backend": "sqlite", "version": "v1"},
-    )
+    monkeypatch.setattr(store, "store_export_status", lambda p: {"version": "v1"})
     assert drain_cache.graph_ident(graph) == ("sqlite", "v1")
-    # The file's stat is irrelevant under sqlite: the version is the store.
-    monkeypatch.setattr(
-        store, "store_export_status", lambda p: {"backend": "sqlite"}
-    )
+    # No readable store version means no cache identity.
+    monkeypatch.setattr(store, "store_export_status", lambda p: {})
     assert drain_cache.graph_ident(graph) is None
     # An unreachable keeper names no identity at all: no cache may key on a
     # stat of a file the store does not serve.

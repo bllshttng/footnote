@@ -303,7 +303,7 @@ printf -- '---\nstatus: ready\n---\n# plan\n' > "$PLAN_FILE"
 mkdir -p "$TMP_PLAN/home/.fno"
 # The contained child is FIRST, which is the entry order adoption produces and
 # exactly what the old first-match resolver got wrong.
-cat > "$TMP_PLAN/home/.fno/graph.json" <<GRAPH
+cat <<GRAPH | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$TMP_PLAN/home/.fno/graph.json"
 {"entries": [
   {"id": "x-261c", "plan_path": "$PLAN_FILE", "contained_in": "x-6320"},
   {"id": "x-6320", "plan_path": "$PLAN_FILE"}
@@ -383,7 +383,7 @@ _ALL_TMPS+=("$TMP_AMB")
 AMB_PLAN="$TMP_AMB/amb-plan.md"
 printf -- '---\nstatus: ready\n---\n# plan\n' > "$AMB_PLAN"
 mkdir -p "$TMP_AMB/home/.fno"
-cat > "$TMP_AMB/home/.fno/graph.json" <<GRAPH
+cat <<GRAPH | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$TMP_AMB/home/.fno/graph.json"
 {"entries": [
   {"id": "x-aaaa", "plan_path": "$AMB_PLAN"},
   {"id": "x-bbbb", "plan_path": "$AMB_PLAN"}

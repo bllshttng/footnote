@@ -8,6 +8,7 @@ seam - an assertion that ``read_graph`` text disappeared is not evidence
 (plan Risk 3 / the king's census requirement).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -33,8 +34,7 @@ def external_store(tmp_path, monkeypatch):
 def contradictory_graph(tmp_path, monkeypatch):
     """A graph file whose every value CONTRADICTS the sidecar sentinels."""
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
             {"id": "n-000001", "title": "n-000001",
              "pr_number": 999, "pr_url": "https://graph/999",
              "cwd": "/graph-cwd", "size": "GRAPH-SIZE", "source_cwd": "/graph-src",
@@ -45,9 +45,7 @@ def contradictory_graph(tmp_path, monkeypatch):
              "cwd": "/graph-cwd", "size": None, "type": "feature",
              "priority": "p2", "status": "idea", "slug": "graph-slug-2",
              "title": "n-000002", "mission_active": False},
-        ]}),
-        encoding="utf-8",
-    )
+        ]}))
     # Patch the resolver, not _constants.GRAPH_JSON: monkeypatch teardown
     # concretizes that lazy attr, and a frozen value would poison every later
     # paths.graph_json redirect in the same process (sidecar._graph_store_path
@@ -185,13 +183,13 @@ def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):
     finding what they found before the migration."""
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": "ab-00000001", "slug": "ab-00000001", "title": "ab-00000001", "type": "feature",
          "priority": "p2", "status": "idea", "pr_number": 42, "cwd": "/repo",
          "size": "L"},
         {"id": "ab-00000002", "slug": "ab-00000002", "title": "ab-00000002", "type": "feature",
          "priority": "p2", "status": "idea"},
-    ]}), encoding="utf-8")
+    ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
 
     from fno.mail.job_address import _node_ids_for_pr

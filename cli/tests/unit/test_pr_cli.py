@@ -6,6 +6,7 @@ propagates its exit code (the old "forwards to pr-merge.sh" assertions are
 retired - the bash is gone).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import fcntl
@@ -199,16 +200,14 @@ def test_pr_list_exposes_open_node_binding_verdicts(monkeypatch, tmp_path):
     from fno import paths
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps(
+    seed_graph(graph_path, json.dumps(
             {
                 "entries": [
                     {"id": "x-1111", "status": "ready"},
                     {"id": "x-2222", "status": "ready", "pr_number": 931},
                 ]
             }
-        )
-    )
+        ))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     from fno.pr import _rest
@@ -474,7 +473,7 @@ def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_
     from fno import paths
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     result = runner.invoke(
@@ -492,7 +491,7 @@ def test_closure_trailer_bare_invocation_resolves_from_branch(monkeypatch, tmp_p
     import fno.pr.closure as closure_mod
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
     monkeypatch.setattr(
         closure_mod,
@@ -533,7 +532,7 @@ def test_closure_trailer_unresolvable_node_stays_silent(monkeypatch, tmp_path):
     from fno import paths
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     result = runner.invoke(app, ["do", "pr", "closure-trailer", "not-an-id"])

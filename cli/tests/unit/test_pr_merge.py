@@ -6,6 +6,7 @@ to reproduce against a live PR). Pins the JSON-line schema, the exit codes,
 and the stdout-vs-stderr routing the bash used.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import time
@@ -2048,9 +2049,7 @@ def test_populated_graph_closure_fetch_does_not_hold_the_merge(
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
     # One cwd-less entry: _cwd_in_this_repo passes cwd-less entries, so by_id
     # is non-empty and hold_for_pr pays the closure fetch instead of skipping.
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]})
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
@@ -2959,7 +2958,7 @@ def test_a_merged_additional_pr_is_stamped_merged(monkeypatch, tmp_path):
     do rows of a done, merged node. Unrecorded stays open everywhere -
     this is the recorder, never the assertion."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ba96",
         "status": "done",
         "merge_status": "merged",
@@ -2986,7 +2985,7 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
     url resolves to a different repo is never stamped, and neither is one
     whose slug cannot be resolved at all - unrecorded stays open."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-other",
         "status": "done",
         "merge_status": "merged",
@@ -3017,7 +3016,7 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
 def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_path):
     """A primary PR number collision skips the foreign node and stamps ours."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [
+    seed_graph(graph, json.dumps({"entries": [
         {
             "id": "x-other",
             "pr_number": 1060,
@@ -3044,7 +3043,7 @@ def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_p
 
 def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_path):
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ours",
         "pr_number": 1060,
         "pr_url": "https://github.com/o/r/pull/1060",
@@ -3063,7 +3062,7 @@ def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_p
 
 def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ours",
         "pr_number": 1060,
     }]}))
@@ -3083,7 +3082,7 @@ def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path)
     """A number matching no primary and no additional ref is a no-op: the
     sync never guesses a node."""
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [{
+    seed_graph(graph, json.dumps({"entries": [{
         "id": "x-ba96",
         "status": "done",
         "merge_status": "merged",
@@ -3210,7 +3209,7 @@ def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_p
         view_url="https://github.com/owner/repo/pull/42",
     )
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}))
+    seed_graph(graph, json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
     def fake(cmd, **kwargs):
@@ -3234,7 +3233,7 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
     import subprocess
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}))
+    seed_graph(graph, json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 

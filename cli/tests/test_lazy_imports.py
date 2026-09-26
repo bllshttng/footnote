@@ -518,13 +518,14 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
     """config's graph._constants import stays function-local: a top-level one makes
     `import fno.config` eagerly load the graph package during config's partial init,
     which freezes store.read_graph's GRAPH_JSON default to the ~/.fno fallback and
-    silently ignores a configured paths.graph_json (Codex P1). Regression guard:
-    with a graph_json override, config-first import must still resolve it."""
+    silently ignores a configured state_dir. Regression guard: with a state_dir
+    override, config-first import must still resolve the graph anchor."""
     import os
 
     cfg = tmp_path / "config.toml"
-    graph_json = tmp_path / "state" / "mygraph.json"
-    cfg.write_text(f'[paths]\ngraph_json = "{graph_json}"\n')
+    state_dir = tmp_path / "state"
+    graph_json = state_dir / "graph.json"
+    cfg.write_text(f'state_dir = "{state_dir}"\n')
 
     code = (
         "import fno.config, fno.graph, inspect\n"  # config-first (the risky order)
@@ -538,7 +539,7 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
         env={**os.environ, "FNO_CONFIG": str(cfg)},
     )
     assert result.returncode == 0, result.stderr
-    assert "mygraph.json" in result.stdout, (
+    assert str(graph_json) in result.stdout, (
         f"read_graph default froze to the fallback, not the configured path:\n{result.stdout}"
     )
 

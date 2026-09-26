@@ -29,6 +29,10 @@ impl Drop for Keeper {
     }
 }
 
+fn seed_empty_store(graph: &Path) {
+    fno_agents::graph_store::seed_rows(graph, &[]).unwrap();
+}
+
 fn short_home(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -136,7 +140,7 @@ fn ok_result(reply: Value) -> Value {
 fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
     let home = short_home("serve");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("serve-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -192,7 +196,7 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
 fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
     let home = short_home("lost-write");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("lost-write-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -245,7 +249,7 @@ fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
 fn keeper_keeps_serving_after_its_client_hangs_up() {
     let home = short_home("survive");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("survive-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -307,12 +311,12 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
     // instead of blocking the caller past the deadline.
     let home = short_home("wedge");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("wedge-test", &graph, &sock);
     wait_for_socket(&sock);
 
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -348,17 +352,19 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
 fn read_file_returns_the_bytes_load_graph_validates() {
     let home = short_home("bytes");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("bytes-test", &graph, &sock);
     wait_for_socket(&sock);
     let mut stream = UnixStream::connect(&sock).unwrap();
-    let result = ok_result(rpc(&mut stream, 1, "read_file", json!({})));
+    let entries = ok_result(rpc(&mut stream, 1, "read", json!({})))["entries"].clone();
+    let result = ok_result(rpc(&mut stream, 2, "read_file", json!({})));
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(result["bytes_b64"].as_str().unwrap())
         .unwrap();
-    let on_disk = std::fs::read(&graph).unwrap();
-    assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["entries"], entries);
+    assert!(!graph.exists(), "the JSON anchor is not persisted");
     assert!(
         result["sha256"].as_str().unwrap().starts_with("sqlite:"),
         "the version token labels the store it names"
@@ -376,7 +382,7 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
     // running on one socket, each holding a parsed 15MB graph.
     let home = short_home("seat");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     // Each racer's stderr lands in its own file: an unexpected exit names its
     // path (seat refusal, self-retire, bind failure) instead of a bare code.
@@ -451,7 +457,7 @@ fn keeper_holds_its_seat_lock() {
     // end of the if condition, before the guarded body ran).
     let home = short_home("seatlock");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("seatlock-test", &graph, &sock);
     wait_for_socket(&sock); // positive control: the keeper bound and serves
@@ -487,7 +493,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
     // new listener's) stays in place.
     let home = short_home("rebound");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let a_stderr = home.join("rebound-a.stderr");
     let mut a = Keeper {
@@ -554,7 +560,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
 fn a_keeper_on_a_rewritten_binary_self_retires_when_idle() {
     let home = short_home("drift");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let copy = home.join("worker-copy");
     std::fs::copy(WORKER_BIN, &copy).unwrap();
@@ -597,11 +603,11 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     // keeper answers kind busy inside lock_timeout and keeps serving.
     let home = short_home("busy");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("busy-test", &graph, &sock);
     wait_for_socket(&sock);
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -697,11 +703,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
             })
         })
         .collect();
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({ "entries": seed })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &seed).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper("race-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -836,9 +838,9 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         }
     }
 
-    // Each note node's final revision equals its successful write count: a
-    // reverted note write (clobbered by a stale whole-file publish) reads as
-    // a revision below the count of ok answers.
+    // Each acknowledged write must be present in the final revision. A write
+    // can commit before its transport outcome is reported, so the revision
+    // may exceed the count of successful replies but must never be lower.
     for (node, ok) in &note_out {
         let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
         let row = rows
@@ -846,8 +848,8 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();
         let revision = row["current_state"]["revision"].as_u64().unwrap();
-        assert_eq!(
-            revision, *ok,
+        assert!(
+            revision >= *ok,
             "node {node} answered ok {ok} times but its final revision is {revision}"
         );
     }
@@ -864,7 +866,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
 fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     let home = short_home("shutrace");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("shutrace-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -1023,21 +1025,13 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
 fn ready_board_mode_orders_every_entry_with_its_facts() {
     let home = short_home("board-mode");
     let graph = home.join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_vec(&json!({
-            "entries": [
-                {"id": "x-e", "status": "ready", "priority": "p1", "type": "epic"},
-                {"id": "x-c1", "status": "ready", "priority": "p2", "parent": "x-e"},
-                {"id": "x-c2", "status": "done", "priority": "p2", "parent": "x-e",
-                 "completed_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-loose", "status": "ready", "priority": "p1"},
-                {"id": "x-def", "status": "deferred", "priority": "p2"}
-            ]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id": "x-e", "slug": "x-e", "title": "epic", "status": "ready", "priority": "p1", "type": "epic"}),
+        json!({"id": "x-c1", "slug": "x-c1", "title": "child one", "status": "ready", "priority": "p2", "type": "feature", "parent": "x-e"}),
+        json!({"id": "x-c2", "slug": "x-c2", "title": "child two", "status": "done", "priority": "p2", "type": "feature", "parent": "x-e", "completed_at": "2026-09-01T00:00:00Z"}),
+        json!({"id": "x-loose", "slug": "x-loose", "title": "loose", "status": "ready", "priority": "p1", "type": "feature"}),
+        json!({"id": "x-def", "slug": "x-def", "title": "deferred", "status": "deferred", "priority": "p2", "type": "feature"}),
+    ]).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper("board-mode", &graph, &sock);
     wait_for_socket(&sock);
@@ -1105,7 +1099,7 @@ fn ready_board_mode_orders_every_entry_with_its_facts() {
 fn ready_board_mode_refuses_when_claims_are_unreadable() {
     let home = short_home("board-claims");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let claims_root = home.join("claims-root");
     std::fs::create_dir_all(claims_root.join(".fno")).unwrap();
     // A regular file where read_dir expects a directory: ENOTDIR, the

@@ -45,7 +45,6 @@ FIELD_META: dict[str, Meta] = {
     "plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
     "plans_filename": Meta("advanced", "Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name.", default_source="default"),
     "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
-    "paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
     "paths.ledger_json": Meta("never", "Override path to ledger.json."),
     "paths.evals_history": Meta("never", "Override path to the evals-history.jsonl bank-run ledger."),
     "paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),
@@ -127,6 +126,7 @@ FIELD_META: dict[str, Meta] = {
         "Age (days) before an unmoved ready node is quarantined from selection.",
     ),
     "backlog.epic_max_open_children": Meta("advanced", "Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install."),
+    "backlog.max_open_ideas": Meta("advanced", "Most unplanned, machine-filed ideas one nearest-epic or project scope may hold (default 25; 0 is off). Operator asks are never capped. The graph store reads it from the config.toml beside graph.json."),
     "backlog.id_prefix": Meta(
         "always", "Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).",
         question="Backlog node-ID prefix?", default_source="repo-slug",

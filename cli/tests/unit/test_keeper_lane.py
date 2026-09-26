@@ -113,11 +113,10 @@ def test_a_store_keeper_on_a_sqlite_graph_is_reapable(monkeypatch) -> None:
     assert "backend=sqlite" in reason
 
 
-def test_legality_reads_both_sides_before_it_reaps(monkeypatch) -> None:
-    """A sqlite db with a json rollback config (or an unreadable config) is
-    the designed rollback state, never a leak."""
+def test_legality_fails_closed_when_the_default_store_is_unknown(monkeypatch) -> None:
+    """An unreadable default store is never treated as a proven leak."""
     monkeypatch.setattr(kl, "store_backend_of", lambda g: "sqlite")
-    monkeypatch.setattr(kl, "graph_read_source", lambda: "json")
+    monkeypatch.setattr(kl, "graph_read_source", lambda: "unknown")
     verdict, _ = kl.keeper_verdict(
         _obs(lane="store", graph=Path("/state/graph.json"), sock_state=kl.LISTENER)
     )

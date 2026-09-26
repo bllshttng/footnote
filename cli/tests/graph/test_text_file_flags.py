@@ -7,6 +7,7 @@ from the file and is stored unharmed.
 Filter: `fno doctor test cli/tests/graph/test_text_file_flags.py`
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -25,7 +26,7 @@ BODY = 'note with "quotes" and\na newline\n'
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    seed_graph(g, json.dumps({"entries": []}))
     monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     return g
 

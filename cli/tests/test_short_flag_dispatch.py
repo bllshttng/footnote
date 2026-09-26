@@ -18,6 +18,7 @@ one short-vs-long parity proof per previously-untested risk):
   prior CLI test of any kind).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -70,7 +71,6 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -84,7 +84,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
     """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
         {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",

@@ -720,7 +720,7 @@ def _run_tick(
     # existing no-graph degrade for the same daemon). graph_entries is the
     # tick's one ident-keyed memo: sweep discovery and king_wake share a
     # single real read of the 15 MB store instead of queueing on it twice.
-    entries = graph_entries(gpath) if gpath.exists() else []
+    entries = graph_entries(gpath)
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)

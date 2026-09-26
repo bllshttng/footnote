@@ -1,5 +1,6 @@
 """Typer CliRunner tests for the fno agents claim CLI surface."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -534,7 +535,7 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-dotest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-dotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -573,7 +574,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-hotest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-hotest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -641,7 +642,7 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-acqtest", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-acqtest", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -677,7 +678,7 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
         monkeypatch.delenv(m, raising=False)
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-acqrel", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-acqrel", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -710,8 +711,10 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
               "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
         monkeypatch.delenv(m, raising=False)
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "%s", "title": "t", '
-                 '"domain": "code", "project": "p"}]}\n' % node_id)
+    seed_graph(
+        g,
+        [{"id": node_id, "title": "t", "domain": "code", "project": "p"}],
+    )
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
     return g
 
@@ -833,7 +836,7 @@ def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-do-2")
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": [{"id": "ab-dotest2", "title": "t", '
+    seed_graph(g, '{"entries": [{"id": "ab-dotest2", "title": "t", '
                  '"domain": "code", "project": "p"}]}\n')
     monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
 
@@ -1182,7 +1185,7 @@ def _write_claim_file(key, *, expires_at):
 
     from fno.claims.hostid import machine_id
     from fno.claims.io import claim_path, serialize_claim
-    from fno.claims.types import Claim, now_ms
+    from fno.claims.types import Claim
 
     # The verdict reads PID reuse when the pid's create time EXCEEDS
     # acquired_at, so pin acquired_at a beat after THIS process's birth: the

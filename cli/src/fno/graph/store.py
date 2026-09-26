@@ -1033,26 +1033,7 @@ def read_file_bytes(path: Path) -> bytes:
 
 
 def _read_json(path: Path) -> list[dict]:
-    """Raw read of a JSON entries file through the keeper's byte read.
-
-    Raises GraphCorruptError on JSON parse failure OR when the root value is
-    not a JSON object. A missing file or a valid file with no/empty entries
-    key returns [] -- those are NOT corruption.
-    """
-    path = Path(path)
-    if not path.exists():
-        return []
-    raw = read_file_bytes(path)
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GraphCorruptError(str(path)) from exc
-    if not isinstance(data, dict):
-        raise GraphCorruptError(str(path))
-    entries = data.get("entries", [])
-    if not isinstance(entries, list):
-        raise GraphCorruptError(str(path))
-    return entries
+    return _read_snapshot(_client_for(Path(path)))[1]
 
 
 def _graph_lock_path(path: Path) -> Path:
@@ -1118,8 +1099,6 @@ def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
 
 
 def store_export_status(path: Path) -> dict:
-    """The keeper's backend/version row, no entries: the identity surface
-    for derived caches. Empty dict on any failure, never a guess."""
     try:
         return _client_for(Path(path)).request("export_status", {})
     except Exception:  # noqa: BLE001 - identity is an optimization; the read owns correctness
@@ -1127,11 +1106,7 @@ def store_export_status(path: Path) -> dict:
 
 
 def served_store_path(path: Path) -> Path:
-    """The store file the keeper served this read from: graph.db on the
-    sqlite backend, the json mirror only on the json rollback default."""
-    if store_export_status(path).get("backend") == "sqlite":
-        return path.with_suffix(".db")
-    return path
+    return path.with_suffix(".db")
 
 
 def read_archive_entries(path: Path | None = None) -> list[dict]:

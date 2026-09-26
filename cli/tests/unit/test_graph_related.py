@@ -7,6 +7,7 @@ survive the next build). It is navigational only: it must never reach
 ``_status``, dispatch eligibility, or selection order.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -47,12 +48,10 @@ def _node(node_id: str, **over) -> dict:
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(
-        json.dumps(
+    seed_graph(g, json.dumps(
             {"entries": [_node("x-aaaa"), _node("x-bbbb"), _node("x-cccc")]}, indent=2
         )
-        + "\n"
-    )
+        + "\n")
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
