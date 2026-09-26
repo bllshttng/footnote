@@ -14,7 +14,7 @@
 //! the taxonomy.
 //!
 //! Anti-silence: state words on stdout, one per line (`ok`, `filed:<id>`,
-//! `folded:<id>`, `suppressed:<id>`, `would-file:<shape>`,
+//! `folded:<id>`, `suppressed:<id>`, `served:<shape>`, `would-file:<shape>`,
 //! `insufficient: <reason>`). A sweep whose positive control (the shipped
 //! fixture specimens) classifies to nothing emits nothing and says
 //! `insufficient: control failed`, so a broken classifier can never read as
@@ -217,97 +217,105 @@ pub fn fingerprint(content: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Verb hints: the census brief section 4 remedy per shape, verified against
-// the live CLI surface on 2026-09-11. A node that says which verb and which
+// Remedies: the census brief section 4 remedy per shape, verified against
+// the live CLI surface on 2026-09-14. A node that says which verb and which
 // flag is a blueprint input; a node that says "agents write scripts" is noise.
 // ---------------------------------------------------------------------------
 
-/// (shape, title, hint, difficulty). Difficulty: low = a flag/lint on an
-/// existing verb, medium = a new verb or none.
-const VERB_HINTS: &[(&str, &str, &str, &str)] = &[
-    ("longtext_arg", "Long text through a positional arg",
-     "flags missing on existing verbs: --body-file on mail send/reply, --details-file on backlog idea/update/note, --prompt-file on spawn/ask (rank 3)", "low"),
-    ("fno_wrap_json", "Wrap an fno verb to parse its output",
-     "JSON-stdout contract: every -J verb prints exactly one document, [] on empty; documented envelope keys; --timeout on mail send/ask (rank 1)", "low"),
-    ("ci_probe", "CI state for a commit, main, or PR",
-     "no verb today: fno do ci status <sha|main|pr> --watch is the asked remedy; do pr status is PR-keyed and carries no per-check names (rank 4)", "medium"),
-    ("pr_threads", "PR review threads: list, reply, resolve",
-     "no verb today: fno do pr threads list|reply|resolve (rank 11)", "medium"),
-    ("gate_wait", "Wait for the spawn gate, then spawn",
-     "existing (hidden): fno agents gate-status -J already prints the gate reading; still missing: spawn --wait polling the gate probe (rank 8)", "low"),
-    ("liveness", "Is this worker alive",
-     "no verb today: fno agents liveness <handle> -J with transcript mtime + pid and a self-row positive control (rank 2)", "medium"),
-    ("transcript", "Transcript search and tail",
-     "existing: fno agents list -J carries observed_model; still missing: peek --grep across transcripts (rank 9)", "low"),
-    ("events", "Events journal query",
-     "flag: --last / field-exclude on doctor event find; fno review prior-head as the named verb the review skill calls (rank 7)", "low"),
-    ("file_patch", "Programmatic source patch",
-     "none: harness bypass-mode policy, not an fno cause", "medium"),
-    ("git_wrap", "Git in a worktree",
-     "none: worktree Bash isolation; doc remedy in worktree-mechanics", "medium"),
-    ("test_lint", "Test or lint runner with an honest exit",
-     "flag: fno doctor test --log <path> that writes EXIT=<rc> itself, unflattened (rank 5)", "low"),
-    ("pr_state", "PR state for several PRs",
-     "existing: fno do pr info and fno do pr list already answer this (cause two)", "low"),
-    ("graph", "Graph read: subtree walk or batch status",
-     "no verb today: fno backlog tree <id> -J [--status !done] (rank 10)", "medium"),
-    ("fno_internal", "Import fno internals to probe one function",
-     "none: one-off probe targeting code under change", "medium"),
-    ("vault_doc", "Vault doc append", "none: vault writes", "medium"),
-    ("config", "Config probe", "none: one-off", "medium"),
-    ("copy_for_diff", "Copy a file at a revision to compare sides",
-     "no verb today: fno do show <rev>:<path> and fno do diff <rev-a> <rev-b> -- <path>, worktree-Bash safe (rank 12)", "medium"),
-];
-
-fn verb_hint(shape: &str) -> (&'static str, &'static str, &'static str) {
-    VERB_HINTS
-        .iter()
-        .find(|(s, ..)| *s == shape)
-        .map(|(_, t, h, d)| (*h, *d, *t))
-        .unwrap_or((
-            "no verb: unknown recurring shape; see the census brief",
-            "medium",
-            "Recurring scratch shape",
-        ))
+/// A help call whose output matches `pattern` once the remedy has shipped.
+struct Probe {
+    argv: &'static [&'static str],
+    pattern: &'static str,
 }
 
-/// Shapes whose remedy names a leaf HIDDEN from the curated menu. Before
-/// filing, the sweep re-probes `fno help <group> --all` (which lists hidden
-/// leaves; `fno <group> --help` does not), so a node never claims a verb is
-/// missing when it ships hidden - two of the census brief's four flag ranks
-/// were already built when the detector was written (2026-09-11 correction
-/// from the plan). If the probe cannot confirm the leaf, the fallback
-/// line below is filed instead and the difficulty rises to medium.
-const HIDDEN_PROBES: &[(&str, &str, &str, &str)] = &[
-    (
-        "gate_wait",
-        "agents",
-        "gate-status",
-        "no verb today: fno agents spawn --wait <duration> polling the gate's own probe; the gate trigger value is not exposed (rank 8)",
-    ),
-];
-
-fn hidden_probe(shape: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    HIDDEN_PROBES
-        .iter()
-        .find(|(s, ..)| *s == shape)
-        .map(|(_, g, l, fb)| (*g, *l, *fb))
+struct Remedy {
+    shape: &'static str,
+    title: &'static str,
+    hint: &'static str,
+    /// low = a flag/lint on an existing verb, medium = a new verb or none.
+    difficulty: &'static str,
+    /// Only a shape with a missing fno remedy may file a node. The rest are
+    /// report-only: they still emit `scratch_shape_observed` rows.
+    fileable: bool,
+    probe: Option<Probe>,
 }
 
-/// True when the leaf shows up in the group's full (hidden-inclusive) help.
-fn hidden_verb_present(
-    fno: &mut dyn FnMut(&[&str]) -> Result<String, String>,
-    group: &str,
-    leaf: &str,
-) -> bool {
-    match fno(&["help", group, "--all"]) {
-        Ok(out) => {
-            // Built per call, not via the module macro: the pattern names a
-            // probe argument, so a shared call-site static would pin the
-            // first leaf ever probed here.
-            let re = Regex::new(&format!("(?im)^\\s*{}\\s", regex::escape(leaf))).ok();
-            re.is_some_and(|re| re.is_match(&out))
+macro_rules! remedy {
+    ($shape:literal, $title:literal, $hint:literal, $difficulty:literal, report_only) => {
+        Remedy { shape: $shape, title: $title, hint: $hint, difficulty: $difficulty, fileable: false, probe: None }
+    };
+    ($shape:literal, $title:literal, $hint:literal, $difficulty:literal, [$($argv:literal),+], $pattern:literal) => {
+        Remedy {
+            shape: $shape, title: $title, hint: $hint, difficulty: $difficulty, fileable: true,
+            probe: Some(Probe { argv: &[$($argv),+], pattern: $pattern }),
         }
+    };
+}
+
+const REMEDIES: &[Remedy] = &[
+    remedy!("longtext_arg", "Long text through a positional arg",
+        "existing: --body-file on mail send/reply and backlog note, --details-file on backlog idea/update, --prompt-file on agents spawn", "low", report_only),
+    remedy!("fno_wrap_json", "Wrap an fno verb to parse its output",
+        "JSON-stdout contract: every -J verb prints exactly one document, [] on empty; documented envelope keys; --timeout on mail send/ask (rank 1)", "low",
+        ["agents", "mail", "send", "--help"], r"--timeout\b"),
+    remedy!("ci_probe", "CI state for a commit, main, or PR",
+        "no verb today: fno do ci status <sha|main|pr> --watch is the asked remedy; do pr status is PR-keyed and carries no per-check names (rank 4)", "medium",
+        ["help", "do", "--all"], r"(?im)^\s*ci\s"),
+    remedy!("pr_threads", "PR review threads: list, reply, resolve",
+        "no verb today: fno do pr threads list|reply|resolve (rank 11)", "medium",
+        ["do", "pr", "--help"], r"(?im)^\s*threads\s"),
+    remedy!("gate_wait", "Wait for the spawn gate, then spawn",
+        "existing: agents spawn --wait; hidden agents gate-status", "low", report_only),
+    remedy!("liveness", "Is this worker alive",
+        "no verb today: fno agents liveness <handle> -J with transcript mtime + pid and a self-row positive control (rank 2)", "medium",
+        ["help", "agents", "--all"], r"(?im)^\s*liveness\s"),
+    remedy!("transcript", "Transcript search and tail",
+        "existing: agents peek --grep with -A/--all", "low", report_only),
+    remedy!("events", "Events journal query",
+        "flag: --last / field-exclude on doctor event find; fno review prior-head as the named verb the review skill calls (rank 7)", "low",
+        ["doctor", "event", "find", "--help"], r"--last\b"),
+    remedy!("file_patch", "Programmatic source patch",
+        "none: harness bypass-mode policy, not an fno cause", "medium", report_only),
+    remedy!("git_wrap", "Git in a worktree",
+        "none: worktree Bash isolation; doc remedy in worktree-mechanics", "medium", report_only),
+    remedy!("test_lint", "Test or lint runner with an honest exit",
+        "existing: fno doctor test --log and fno test --log write EXIT=<rc> as the last line", "low", report_only),
+    remedy!("pr_state", "PR state for several PRs",
+        "existing: fno do pr info and fno do pr list already answer this (cause two)", "low", report_only),
+    remedy!("graph", "Graph read: subtree walk or batch status",
+        "no verb today: fno backlog tree <id> -J [--status !done] (rank 10)", "medium",
+        ["help", "backlog", "--all"], r"(?im)^\s*tree\s"),
+    remedy!("fno_internal", "Import fno internals to probe one function",
+        "none: one-off probe targeting code under change", "medium", report_only),
+    remedy!("vault_doc", "Vault doc append", "none: vault writes", "medium", report_only),
+    remedy!("config", "Config probe", "none: one-off", "medium", report_only),
+    remedy!("copy_for_diff", "Copy a file at a revision to compare sides",
+        "no verb today: fno do show <rev>:<path> and fno do diff <rev-a> <rev-b> -- <path>, worktree-Bash safe (rank 12)", "medium",
+        ["help", "do", "--all"], r"(?im)^\s*show\s"),
+];
+
+const UNKNOWN_REMEDY: Remedy = remedy!(
+    "unknown",
+    "Recurring scratch shape",
+    "no verb: unknown recurring shape; see the census brief",
+    "medium",
+    report_only
+);
+
+fn remedy(shape: &str) -> &'static Remedy {
+    REMEDIES
+        .iter()
+        .find(|r| r.shape == shape)
+        .unwrap_or(&UNKNOWN_REMEDY)
+}
+
+/// True only when the probe call succeeds and its output matches. A failed
+/// call reads as not served: a broken probe must never hide a missing remedy.
+fn remedy_served(fno: &mut dyn FnMut(&[&str]) -> Result<String, String>, probe: &Probe) -> bool {
+    match fno(probe.argv) {
+        // Built per call, not via the module macro: a shared call-site
+        // static would pin the first pattern ever compiled here.
+        Ok(out) => Regex::new(probe.pattern).is_ok_and(|re| re.is_match(&out)),
         Err(_) => false,
     }
 }
@@ -465,15 +473,15 @@ pub fn blob_hashes(repo_root: &Path, paths: &[&Path]) -> HashMap<PathBuf, String
 // Journal + graph reads (the dedupe index)
 // ---------------------------------------------------------------------------
 
-/// The committed rows of an events journal, tolerant per-line parse kept for
-/// the folded shapes the consolidation decisions read.
-fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(lines) = crate::loopcheck::event_lines(path) else {
-        return Vec::new();
-    };
-    lines
+/// The full history through the store: the journal ingested into its
+/// events.db, so no row is lost to a rotation. One 8 MB generation alone
+/// forgets observed pairs within about a day.
+fn read_journal(path: &Path) -> Vec<serde_json::Value> {
+    let _ = crate::event_store::import_all(path);
+    crate::event_store::query_events(path, &crate::event_store::EventQuery::default())
+        .unwrap_or_default()
         .iter()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|r| serde_json::from_str(&r.line).ok())
         .collect()
 }
 
@@ -504,75 +512,83 @@ fn observed_pairs(
     set
 }
 
-struct FiledRow {
-    node_id: String,
-    ts: chrono::DateTime<chrono::FixedOffset>,
-    #[allow(dead_code)]
-    outcome: String,
+fn parse_utc(v: Option<&serde_json::Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(v?.as_str()?)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
-/// Newest `scratch_shape_filed` row per shape.
-fn newest_filed(events: &[serde_json::Value]) -> HashMap<String, FiledRow> {
-    let mut map: HashMap<String, FiledRow> = HashMap::new();
-    for e in events {
-        if e.get("type").and_then(|v| v.as_str()) != Some("scratch_shape_filed") {
-            continue;
-        }
-        let Some(ts) = event_ts(e) else { continue };
-        let Some(data) = e.get("data") else { continue };
-        let (Some(shape), Some(node)) = (
-            data.get("shape").and_then(|v| v.as_str()),
-            data.get("node_id").and_then(|v| v.as_str()),
-        ) else {
-            continue;
-        };
-        let row = FiledRow {
-            node_id: node.to_string(),
-            ts,
-            outcome: data
-                .get("outcome")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        };
-        match map.get(shape) {
-            Some(existing) if existing.ts >= ts => {}
-            _ => {
-                map.insert(shape.to_string(), row);
-            }
-        }
-    }
-    map
+/// The `origin_evidence` value every sweep node carries. The graph holds this
+/// key, so the filing index survives a journal rotation and a node rename.
+fn origin_key(shape: &str) -> String {
+    format!("scratch-shape:{shape}")
 }
 
-/// id -> (status, completed_at) for every node in the graph store. Read-only; the
-/// sweep never mutates the graph (node birth goes through `fno backlog idea`,
-/// the one seam crossing). Through the backend switch: under sqlite the file
-/// is a frozen mirror whose misses refile closed work. Unreadable reads as
-/// the empty map, the same soft failure as before.
-fn node_statuses(graph: &Path) -> HashMap<String, (String, Option<String>)> {
-    let mut map = HashMap::new();
+struct KeyedNode {
+    id: String,
+    status: String,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The newest of `created_at` and every `progress_notes[].ts`.
+    last_write: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// origin key -> every graph node carrying a `scratch-shape:` key. Read-only;
+/// the sweep never mutates the graph (node birth goes through `fno backlog
+/// idea`, the one seam crossing). Through the backend switch: under sqlite the
+/// file is a frozen mirror whose misses refile closed work, so rows come from
+/// the store reader, never a raw mirror read.
+fn keyed_nodes(graph: &Path) -> HashMap<String, Vec<KeyedNode>> {
+    let mut map: HashMap<String, Vec<KeyedNode>> = HashMap::new();
     let Ok(rows) = crate::graph_store::read_rows(graph) else {
         return map;
     };
     for node in &rows {
-        let (Some(id), Some(status)) = (
+        let (Some(id), Some(status), Some(key)) = (
             node.get("id").and_then(|v| v.as_str()),
             node.get("status").and_then(|v| v.as_str()),
+            node.get("origin_evidence")
+                .and_then(|v| v.as_str())
+                .filter(|k| k.starts_with("scratch-shape:")),
         ) else {
             continue;
         };
-        map.insert(
-            id.to_string(),
-            (
-                status.to_string(),
-                node.get("completed_at")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            ),
-        );
+        let notes = node
+            .get("progress_notes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .map(|n| parse_utc(n.get("ts")));
+        let last_write = std::iter::once(parse_utc(node.get("created_at")))
+            .chain(notes)
+            .flatten()
+            .max();
+        map.entry(key.to_string()).or_default().push(KeyedNode {
+            id: id.to_string(),
+            status: status.to_string(),
+            completed_at: parse_utc(node.get("completed_at")),
+            last_write,
+        });
     }
     map
+}
+
+/// A live keyed node folds (newest first); a closed one completed inside the
+/// window suppresses; an older closed one refiles with `--caused-by`.
+fn resolve_filing(nodes: &[KeyedNode], cut: chrono::DateTime<chrono::Utc>) -> Filing {
+    if let Some(live) = nodes
+        .iter()
+        .filter(|n| is_live_status(&n.status))
+        .max_by_key(|n| n.last_write)
+    {
+        return Filing::Fold(live.id.clone(), live.last_write);
+    }
+    let closed_at = |n: &KeyedNode| n.completed_at.or(n.last_write);
+    match nodes.iter().max_by_key(|n| closed_at(n)) {
+        None => Filing::File(None),
+        // No readable close time: suppress, filing a duplicate is worse.
+        Some(n) if closed_at(n).is_none_or(|t| t >= cut) => Filing::Suppress(n.id.clone()),
+        Some(n) => Filing::File(Some(n.id.clone())),
+    }
 }
 
 fn is_live_status(status: &str) -> bool {
@@ -683,7 +699,7 @@ fn rfc3339(t: SystemTime) -> String {
 
 /// The sweep proper. Returns state lines for stdout (the caller prints
 /// them); `emit` is skipped under `--dry-run`. `fno` is the one seam
-/// crossing (node birth + the hidden-leaf probe), injectable for tests.
+/// crossing (node birth + the remedy probe), injectable for tests.
 pub fn run_sweep(
     paths: &SweepPaths,
     opts: &SweepOpts,
@@ -756,13 +772,11 @@ pub fn run_sweep(
         }
     }
 
-    // Fold to (job, shape) pairs, emit the new ones, dedupe on the journal.
-    let now_utc = chrono::Utc::now();
-    let cut = now_utc - chrono::Duration::days(opts.window_days);
-    let events = read_events(&paths.journal);
-    let already = observed_pairs(&events, cut);
-    let mut new_pairs = Vec::new();
-    for pair in pairs {
+    // Emit only the pairs the journal does not remember. The threshold counts
+    // every walked pair: the walk already covers the window by file mtime.
+    let cut = chrono::Utc::now() - chrono::Duration::days(opts.window_days);
+    let already = observed_pairs(&read_journal(&paths.journal), cut);
+    for pair in &pairs {
         if already.contains(&(pair.shape.to_string(), pair.job_id.clone())) {
             continue;
         }
@@ -775,23 +789,23 @@ pub fn run_sweep(
                     "job_id": pair.job_id,
                     "path": pair.specimens.first().map(|(_, p)| p.clone()).unwrap_or_default(),
                     "lines": pair.files,
-                    "verb_hint": verb_hint(pair.shape).0,
+                    "verb_hint": remedy(pair.shape).hint,
                     "first_seen": rfc3339(pair.first_mtime),
                     "last_seen": rfc3339(pair.last_mtime),
                     "monitor": pair.monitors > 0,
                 }),
             );
         }
-        new_pairs.push(pair);
     }
 
-    // Threshold: distinct jobs per shape in the window; rank by jobs then files.
+    // Threshold: distinct jobs per fileable shape; rank by jobs then files.
     let mut by_shape: HashMap<&str, Vec<&Pair>> = HashMap::new();
-    for pair in &new_pairs {
+    for pair in &pairs {
         by_shape.entry(pair.shape).or_default().push(pair);
     }
     let mut candidates: Vec<(&str, usize, usize)> = by_shape
         .iter()
+        .filter(|(shape, _)| remedy(shape).fileable)
         .map(|(shape, ps)| (*shape, ps.len(), ps.iter().map(|p| p.files).sum()))
         .filter(|(_, jobs, _)| *jobs >= opts.threshold)
         .collect();
@@ -804,44 +818,37 @@ pub fn run_sweep(
         return lines;
     }
 
-    // Re-read the journal: the observed rows this run just wrote are part of
-    // the filed-node resolution window too.
-    let events = read_events(&paths.journal);
-    let filed = newest_filed(&events);
-    let statuses = node_statuses(&paths.graph);
+    let keyed = keyed_nodes(&paths.graph);
     let mut filed_this_run = 0usize;
 
     for (shape, jobs, files_n) in &candidates {
-        let resolution = match filed.get(*shape) {
-            None => Filing::File(None),
-            Some(row) => match statuses.get(&row.node_id) {
-                Some((status, completed_at)) if !is_live_status(status) => {
-                    if filed_within(&row.ts, completed_at.as_deref(), cut) {
-                        Filing::Suppress(row.node_id.clone())
-                    } else {
-                        Filing::File(Some(row.node_id.clone()))
-                    }
-                }
-                Some(_) => Filing::Fold(row.node_id.clone()),
-                // A filed row naming a node the graph no longer holds: the
-                // graph read is the authority on liveness; nothing to fold
-                // onto, so treat as unfiled.
-                None => Filing::File(None),
-            },
-        };
+        let r = remedy(shape);
+        let title = format!("{} recurs: {jobs} jobs wrote it", r.title);
+        let resolution = keyed
+            .get(&origin_key(shape))
+            .map_or(Filing::File(None), |nodes| resolve_filing(nodes, cut));
         match resolution {
-            Filing::Fold(node) => {
+            Filing::Fold(node, last_write) => {
                 if opts.dry_run {
                     // A fold mutates the target node; under --dry-run the
                     // sweep calls nothing, so the fold prints nothing.
                     continue;
                 }
-                let (hint, _, title) = verb_hint(shape);
-                let details = details_body(shape, *jobs, *files_n, &new_pairs, hint);
+                // Fold only on new evidence, so a same-day re-run or a run
+                // right after a rotation adds no empty note.
+                let newest = pairs
+                    .iter()
+                    .filter(|p| p.shape == *shape)
+                    .map(|p| chrono::DateTime::<chrono::Utc>::from(p.last_mtime))
+                    .max();
+                if matches!((newest, last_write), (Some(m), Some(w)) if m <= w) {
+                    continue;
+                }
+                let details = details_body(shape, *jobs, *files_n, &pairs, r.hint);
                 match fno(&[
                     "backlog",
                     "idea",
-                    &format!("{title} recurs: {jobs} jobs wrote it"),
+                    &title,
                     "--wave-of",
                     &node,
                     "--difficulty",
@@ -870,81 +877,52 @@ pub fn run_sweep(
                 if filed_this_run >= MAX_FILES_PER_SWEEP {
                     continue; // waits for tomorrow; prints nothing by contract
                 }
-                let (mut hint, mut difficulty, title) = verb_hint(shape);
-                if let Some((group, leaf, fallback)) = hidden_probe(shape) {
-                    if hidden_verb_present(fno, group, leaf) {
-                        // hint already names the hidden leaf; stays low.
-                    } else {
-                        hint = fallback;
-                        difficulty = "medium";
-                    }
+                if r.probe.as_ref().is_some_and(|p| remedy_served(fno, p)) {
+                    lines.push(format!("served:{shape}"));
+                    continue;
                 }
-                let details = details_body(shape, *jobs, *files_n, &new_pairs, hint);
+                let details = details_body(shape, *jobs, *files_n, &pairs, r.hint);
+                let key = origin_key(shape);
                 let mut argv = vec![
-                    "backlog".to_string(),
-                    "idea".to_string(),
-                    format!("{title} recurs: {jobs} jobs wrote it"),
-                    "-p".to_string(),
-                    "p1".to_string(),
-                    "--source-kind".to_string(),
-                    "from_observation".to_string(),
-                    "--difficulty".to_string(),
-                    difficulty.to_string(),
-                    "--domain".to_string(),
-                    "code".to_string(),
-                    "-d".to_string(),
-                    details.clone(),
+                    "backlog",
+                    "idea",
+                    &title,
+                    "-p",
+                    "p1",
+                    "--source-kind",
+                    "from_observation",
+                    "--origin-evidence",
+                    &key,
+                    // Skips the text-similarity fold offer: the origin key,
+                    // not a shared body, decides which node a shape owns.
+                    "--separate",
+                    "--difficulty",
+                    r.difficulty,
+                    "--domain",
+                    "code",
+                    "-d",
+                    &details,
                 ];
                 if let Some(old) = &caused_by {
-                    argv.push("--caused-by".to_string());
-                    argv.push(old.clone());
+                    argv.extend(["--caused-by", old]);
                 }
-                argv.push("-J".to_string());
-                let argv_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
-                match fno(&argv_ref) {
-                    Ok(stdout) => {
-                        let mut node = receipt_node(&stdout);
-                        if node.is_none() {
-                            // The dedup net offered a fold choice instead of
-                            // minting: fold onto its candidate like the
-                            // skill-diff lane does.
-                            if let Some(candidate) = receipt_candidate(&stdout) {
-                                let fold_title = format!("{title} recurs: {jobs} jobs wrote it");
-                                let fold_argv = vec![
-                                    "backlog",
-                                    "idea",
-                                    fold_title.as_str(),
-                                    "--wave-of",
-                                    candidate.as_str(),
-                                    "--difficulty",
-                                    "low",
-                                    "-d",
-                                    details.as_str(),
-                                    "-J",
-                                ];
-                                if let Ok(out2) = fno(&fold_argv) {
-                                    node = receipt_node(&out2).or(Some(candidate));
-                                } else {
-                                    node = Some(candidate);
-                                }
-                            }
-                        }
-                        if let Some(id) = node {
-                            filed_this_run += 1;
-                            emit_filed(
-                                emit,
-                                shape,
-                                &id,
-                                "filed",
-                                *jobs,
-                                *files_n,
-                                caused_by.as_deref(),
-                            );
-                            lines.push(format!("filed:{id}"));
-                        } else {
-                            lines
-                                .push(format!("insufficient: unreadable idea receipt for {shape}"));
-                        }
+                argv.push("-J");
+                match fno(&argv).map(|stdout| receipt_node(&stdout)) {
+                    Ok(Some(id)) => {
+                        filed_this_run += 1;
+                        emit_filed(
+                            emit,
+                            shape,
+                            &id,
+                            "filed",
+                            *jobs,
+                            *files_n,
+                            caused_by.as_deref(),
+                        );
+                        lines.push(format!("filed:{id}"));
+                    }
+                    Ok(None) => {
+                        lines.push(format!("insufficient: unreadable idea receipt for {shape}"))
                     }
                     Err(_) => lines.push(format!("insufficient: idea call failed for {shape}")),
                 }
@@ -959,20 +937,8 @@ pub fn run_sweep(
 
 enum Filing {
     File(Option<String>),
-    Fold(String),
+    Fold(String, Option<chrono::DateTime<chrono::Utc>>),
     Suppress(String),
-}
-
-fn filed_within(
-    filed_ts: &chrono::DateTime<chrono::FixedOffset>,
-    completed_at: Option<&str>,
-    cut: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    let completed = completed_at
-        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
-        .map(|t| t.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| filed_ts.with_timezone(&chrono::Utc));
-    completed >= cut
 }
 
 fn details_body(shape: &str, jobs: usize, files: usize, pairs: &[Pair], hint: &str) -> String {
@@ -1040,19 +1006,6 @@ fn receipt_node(stdout: &str) -> Option<String> {
     obj.get("id").and_then(|v| v.as_str()).map(str::to_string)
 }
 
-/// The near-duplicate candidate a `choice_required` receipt offers.
-fn receipt_candidate(stdout: &str) -> Option<String> {
-    let obj = last_json_object(stdout)?;
-    if obj.get("outcome").and_then(|v| v.as_str()) != Some("choice_required") {
-        return None;
-    }
-    obj.get("candidates")?
-        .get(0)?
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-}
-
 fn last_json_object(stdout: &str) -> Option<serde_json::Value> {
     // Reverse scan: the receipt is the LAST stdout block, and an earlier
     // object (or a nested one) can parse from a prefix only when the JSON
@@ -1071,7 +1024,7 @@ fn last_json_object(stdout: &str) -> Option<serde_json::Value> {
 
 pub fn run_report(journal: &Path, window_days: i64, json_out: bool) -> String {
     let cut = chrono::Utc::now() - chrono::Duration::days(window_days);
-    let events = read_events(journal);
+    let events = read_journal(journal);
     struct Row {
         files: usize,
         jobs: HashSet<String>,
@@ -1148,10 +1101,7 @@ pub fn run_report(journal: &Path, window_days: i64, json_out: bool) -> String {
                 })
             })
             .collect();
-        return format!(
-            "{}",
-            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".into())
-        );
+        return serde_json::to_string_pretty(&out).unwrap_or_else(|_| "[]".into());
     }
     let mut out = String::from("shape                files jobs monitors first_seen            last_seen             filed\n");
     for (shape, r) in ranked {
@@ -1276,7 +1226,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 dry_run: s.dry_run,
             };
             // The one seam crossing: `fno` launches for node birth + the
-            // hidden-leaf probe. The caller does not own the decision the
+            // remedy probe. The caller does not own the decision the
             // answer feeds, which is the kind docs/architecture/rust-python-seam.md
             // names legitimate.
             let mut fno = |argv: &[&str]| -> Result<String, String> {
@@ -1323,7 +1273,7 @@ pub fn run_cli(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::events::EventEmitter;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     fn repo_root() -> Option<PathBuf> {
@@ -1359,32 +1309,30 @@ mod tests {
         path
     }
 
-    /// A fake `fno`: records every argv, answers `help` from
-    /// `help_has_gate`, and mints wave/filed receipts.
+    /// A fake `fno`: records every argv, answers every help call (`help ...`
+    /// or `... --help`) from a settable result, and mints wave/filed receipts.
     #[derive(Clone)]
     struct FakeFno {
         log: Rc<RefCell<Vec<Vec<String>>>>,
-        help_has_gate: Rc<Cell<bool>>,
+        help: Rc<RefCell<Result<String, String>>>,
     }
     impl FakeFno {
         fn new() -> Self {
             FakeFno {
                 log: Rc::new(RefCell::new(Vec::new())),
-                help_has_gate: Rc::new(Cell::new(true)),
+                help: Rc::new(RefCell::new(Ok(
+                    "Commands:\n  status   Print a status.\n".to_string()
+                ))),
             }
         }
         fn runner(&self) -> impl FnMut(&[&str]) -> Result<String, String> + '_ {
             let log = self.log.clone();
-            let gate = self.help_has_gate.clone();
+            let help = self.help.clone();
             move |argv: &[&str]| -> Result<String, String> {
                 log.borrow_mut()
                     .push(argv.iter().map(|s| s.to_string()).collect());
-                if argv.first() == Some(&"help") {
-                    return Ok(if gate.get() {
-                        "fno agents full command surface\n\nCommands:\n  gate-status            Print the spawn gate's read-only capacity reading.\n  spawn                  Spawn a worker.\n".to_string()
-                    } else {
-                        "fno agents full command surface\n\nCommands:\n  spawn                  Spawn a worker.\n".to_string()
-                    });
+                if argv.first() == Some(&"help") || argv.contains(&"--help") {
+                    return help.borrow().clone();
                 }
                 if argv.first() == Some(&"backlog") && argv.get(1) == Some(&"idea") {
                     if let Some(i) = argv.iter().position(|a| *a == "--wave-of") {
@@ -1399,6 +1347,19 @@ mod tests {
         fn calls(&self) -> Vec<Vec<String>> {
             self.log.borrow().clone()
         }
+        fn idea_calls(&self) -> Vec<Vec<String>> {
+            self.calls()
+                .into_iter()
+                .filter(|c| c.get(1).map(String::as_str) == Some("idea"))
+                .collect()
+        }
+    }
+
+    fn flag<'a>(argv: &'a [String], name: &str) -> Option<&'a str> {
+        argv.iter()
+            .position(|a| a == name)
+            .and_then(|i| argv.get(i + 1))
+            .map(String::as_str)
     }
 
     fn sweep_paths(tmp: &Path) -> SweepPaths {
@@ -1430,8 +1391,13 @@ mod tests {
             .count()
     }
 
+    fn ts_offset(minutes: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::minutes(minutes))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
     fn now_ts() -> String {
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ts_offset(0)
     }
 
     fn filed_row(shape: &str, node: &str, ts: String, outcome: &str) -> serde_json::Value {
@@ -1456,6 +1422,23 @@ mod tests {
         let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(path, text).unwrap();
     }
+
+    fn seed_graph(path: &Path, nodes: &[serde_json::Value]) {
+        std::fs::write(path, json!({ "entries": nodes }).to_string()).unwrap();
+    }
+
+    /// Three jobs, one copy of `content` each.
+    fn seed_jobs(tmp: &Path, stem: &str, ext: &str, content: &str, jobs: &[&str]) {
+        for job in jobs {
+            write(
+                &tmp.join("jobs"),
+                &format!("{job}/tmp/{stem}_{job}.{ext}"),
+                content,
+            );
+        }
+    }
+
+    const JOBS3: &[&str] = &["j1", "j2", "j3"];
 
     const LONGTEXT: &str = "#!/usr/bin/env bash\nfno agents mail send t-x9 --kind inbox --body <<'BODY'\nlong body line\nBODY\n";
     const GATE_WAIT: &str = "#!/usr/bin/env python3\nimport os, time\n# wait for the load gate, then spawn\nwhile os.getloadavg()[0] > 88:\n    time.sleep(60)\n";
@@ -1574,15 +1557,9 @@ mod tests {
     }
 
     #[test]
-    fn sweep_files_once_past_threshold() {
+    fn sweep_files_a_keyed_separate_node_once_past_threshold() {
         let tmp = temp_root("files");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let paths = sweep_paths(&tmp);
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
@@ -1590,103 +1567,132 @@ mod tests {
         let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
         assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
 
-        let calls = fake.calls();
-        let idea: Vec<_> = calls
-            .iter()
-            .filter(|c| c.get(1).map(String::as_str) == Some("idea"))
-            .collect();
-        assert_eq!(idea.len(), 1, "one idea call, got {calls:?}");
-        let c = idea[0];
-        assert_eq!(
-            c.iter()
-                .position(|a| a == "-p")
-                .map(|i| &c[i + 1])
-                .map(String::as_str),
-            Some("p1")
-        );
-        assert_eq!(
-            c.iter()
-                .position(|a| a == "--source-kind")
-                .map(|i| &c[i + 1])
-                .map(String::as_str),
-            Some("from_observation")
+        let idea = fake.idea_calls();
+        assert_eq!(idea.len(), 1, "one idea call, got {:?}", fake.calls());
+        let c = &idea[0];
+        assert_eq!(flag(c, "-p"), Some("p1"));
+        assert_eq!(flag(c, "--source-kind"), Some("from_observation"));
+        assert_eq!(flag(c, "--origin-evidence"), Some("scratch-shape:ci_probe"));
+        assert!(c.contains(&"--separate".to_string()), "got {c:?}");
+        assert!(
+            fake.calls().iter().any(|c| c == &["help", "do", "--all"]),
+            "the remedy probe runs before filing: {:?}",
+            fake.calls()
         );
         assert_eq!(journal_count(&paths.journal, "scratch_shape_observed"), 3);
-        assert_eq!(journal_count(&paths.journal, "scratch_shape_filed"), 1);
-        // Idempotent second run the same day: pairs are recorded, nothing re-fires.
-        let mut runner2 = fake.runner();
+        assert_eq!(journal_count(&paths.journal, "\"outcome\":\"filed\""), 1);
+
+        // The graph now holds the keyed node, written after every file: a
+        // second run the same day has no new evidence and calls nothing.
+        seed_graph(
+            &paths.graph,
+            &[
+                json!({"id": "x-filed9", "status": "idea", "origin_evidence": "scratch-shape:ci_probe", "created_at": ts_offset(1)}),
+            ],
+        );
+        let fake2 = FakeFno::new();
+        let mut runner2 = fake2.runner();
         let lines2 = run_sweep(&paths, &opts(3), Some(&emit), &mut runner2);
         assert_eq!(
             lines2,
             vec!["ok"],
             "second run must be idempotent, got {lines2:?}"
         );
+        assert!(fake2.calls().is_empty(), "got {:?}", fake2.calls());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn sweep_folds_when_a_live_node_holds_the_shape() {
+    fn sweep_folds_new_evidence_onto_the_live_keyed_node() {
         let tmp = temp_root("folds");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let paths = sweep_paths(&tmp);
-        seed_journal(
-            &paths.journal,
-            &[filed_row("longtext_arg", "x-live1", now_ts(), "seeded")],
-        );
-        std::fs::write(
+        seed_graph(
             &paths.graph,
-            r#"{"entries":[{"id":"x-live1","status":"idea"}]}"#,
-        )
-        .unwrap();
+            &[
+                json!({"id": "x-live1", "status": "idea", "origin_evidence": "scratch-shape:ci_probe", "created_at": ts_offset(-2 * 24 * 60)}),
+            ],
+        );
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();
         let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
-        assert!(lines.iter().any(|l| l == "folded:x-live1"), "got {lines:?}");
-        let idea: Vec<_> = fake
-            .calls()
-            .into_iter()
-            .filter(|c| c.get(1).map(String::as_str) == Some("idea"))
-            .collect();
+        assert_eq!(lines, vec!["folded:x-live1"], "got {lines:?}");
+        let idea = fake.idea_calls();
+        assert_eq!(idea.len(), 1, "got {idea:?}");
+        assert_eq!(flag(&idea[0], "--wave-of"), Some("x-live1"));
         assert!(
-            idea.iter().all(|c| !c.contains(&"-p".to_string())),
+            !idea[0].contains(&"-p".to_string()),
             "fold carries no -p: {idea:?}"
         );
-        assert!(idea
-            .iter()
-            .any(|c| c.contains(&"--wave-of".to_string()) && c.contains(&"x-live1".to_string())));
+        assert_eq!(journal_count(&paths.journal, "\"outcome\":\"folded\""), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_folds_nothing_without_new_evidence() {
+        let tmp = temp_root("stale-fold");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        seed_graph(
+            &paths.graph,
+            &[json!({
+                "id": "x-live1", "status": "ready",
+                "origin_evidence": "scratch-shape:ci_probe",
+                "created_at": ts_offset(-2 * 24 * 60),
+                "progress_notes": [{"ts": ts_offset(60), "text": "wave"}],
+            })],
+        );
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["ok"], "got {lines:?}");
+        assert!(fake.idea_calls().is_empty(), "got {:?}", fake.calls());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_ignores_a_journal_row_the_graph_does_not_key() {
+        // The fold hijack: the journal says the shape was filed on a node
+        // whose origin is some other shape. The graph key decides.
+        let tmp = temp_root("hijack");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        seed_journal(
+            &paths.journal,
+            &[filed_row("ci_probe", "x-7577", now_ts(), "filed")],
+        );
+        seed_graph(
+            &paths.graph,
+            &[json!({"id": "x-7577", "status": "in_progress", "created_at": ts_offset(-60)})],
+        );
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
+        assert!(
+            fake.idea_calls()
+                .iter()
+                .all(|c| flag(c, "--wave-of").is_none()),
+            "got {:?}",
+            fake.calls()
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn sweep_suppresses_a_recently_done_node() {
         let tmp = temp_root("suppress");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let paths = sweep_paths(&tmp);
-        seed_journal(
-            &paths.journal,
-            &[filed_row("longtext_arg", "x-done1", now_ts(), "filed")],
-        );
-        std::fs::write(
+        seed_graph(
             &paths.graph,
-            format!(
-                "{{\"entries\":[{{\"id\":\"x-done1\",\"status\":\"done\",\"completed_at\":\"{}\"}}]}}",
-                now_ts()
-            ),
-        )
-        .unwrap();
+            &[
+                json!({"id": "x-done1", "status": "done", "origin_evidence": "scratch-shape:ci_probe", "completed_at": now_ts()}),
+            ],
+        );
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();
@@ -1703,43 +1709,23 @@ mod tests {
     #[test]
     fn sweep_files_anew_when_the_done_node_is_past_the_window() {
         let tmp = temp_root("refile");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let paths = sweep_paths(&tmp);
-        let old = (chrono::Utc::now() - chrono::Duration::days(60))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        seed_journal(
-            &paths.journal,
-            &[filed_row("longtext_arg", "x-old1", old.clone(), "filed")],
-        );
-        std::fs::write(
+        seed_graph(
             &paths.graph,
-            format!(
-                "{{\"entries\":[{{\"id\":\"x-old1\",\"status\":\"done\",\"completed_at\":\"{}\"}}]}}",
-                old
-            ),
-        )
-        .unwrap();
+            &[
+                json!({"id": "x-old1", "status": "done", "origin_evidence": "scratch-shape:ci_probe", "completed_at": ts_offset(-60 * 24 * 60)}),
+            ],
+        );
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();
         let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
         assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
-        let idea = fake
-            .calls()
-            .into_iter()
-            .find(|c| c.get(1).map(String::as_str) == Some("idea"))
-            .expect("idea call");
+        let idea = fake.idea_calls();
         assert_eq!(
-            idea.iter()
-                .position(|a| a == "--caused-by")
-                .map(|i| idea[i + 1].clone()),
-            Some("x-old1".to_string()),
+            flag(&idea[0], "--caused-by"),
+            Some("x-old1"),
             "refile must carry --caused-by: {idea:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1748,13 +1734,7 @@ mod tests {
     #[test]
     fn sweep_below_threshold_is_ok_with_observed_rows_only() {
         let tmp = temp_root("below");
-        for job in ["j1", "j2"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, &["j1", "j2"]);
         let paths = sweep_paths(&tmp);
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
@@ -1768,35 +1748,119 @@ mod tests {
     }
 
     #[test]
-    fn sweep_caps_one_file_per_run_and_rotates() {
+    fn sweep_counts_pairs_the_journal_already_remembers() {
+        let tmp = temp_root("allpairs");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        seed_journal(
+            &paths.journal,
+            &[
+                observed_row("ci_probe", "j1", now_ts()),
+                observed_row("ci_probe", "j2", now_ts()),
+            ],
+        );
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
+        assert_eq!(
+            journal_count(&paths.journal, "scratch_shape_observed"),
+            3,
+            "only the unremembered pair is emitted"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_reads_observed_pairs_from_the_rotated_journal() {
+        let tmp = temp_root("rotated");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        seed_journal(
+            &tmp.join("events.jsonl.1"),
+            &JOBS3
+                .iter()
+                .map(|j| observed_row("ci_probe", j, now_ts()))
+                .collect::<Vec<_>>(),
+        );
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        // Store counting includes the seeded generation, so the assertion is
+        // the delta: no row is emitted again for a remembered pair.
+        let before = journal_count(&paths.journal, "scratch_shape_observed");
+        let lines = run_sweep(&paths, &opts(4), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["ok"], "got {lines:?}");
+        assert_eq!(
+            journal_count(&paths.journal, "scratch_shape_observed"),
+            before,
+            "a remembered pair is never emitted again"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_never_files_a_report_only_shape() {
+        let Some(fix) = fixtures_dir() else { return };
+        // One appended line keeps the copy from matching the fixture's repo
+        // blob, which would classify it `copy_for_diff`.
+        let content = std::fs::read_to_string(fix.join("file_patch/fix1.py")).expect("fixture")
+            + "\n# authored copy\n";
+        let tmp = temp_root("reportonly");
+        seed_jobs(&tmp, "patch", "py", &content, JOBS3);
+        let paths = sweep_paths(&tmp);
+        let fake = FakeFno::new();
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["ok"], "got {lines:?}");
+        assert!(fake.calls().is_empty(), "got {:?}", fake.calls());
+        assert_eq!(journal_count(&paths.journal, "scratch_shape_observed"), 3);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_prints_served_when_the_remedy_shipped() {
+        let tmp = temp_root("served");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        let fake = FakeFno::new();
+        *fake.help.borrow_mut() = Ok("Commands:\n  ci       CI state for a sha.\n".to_string());
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["served:ci_probe"], "got {lines:?}");
+        assert!(fake.idea_calls().is_empty(), "got {:?}", fake.calls());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_files_with_the_table_hint_when_the_probe_fails() {
+        let tmp = temp_root("probe-err");
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        let paths = sweep_paths(&tmp);
+        let fake = FakeFno::new();
+        *fake.help.borrow_mut() = Err("fno help: boom".to_string());
+        let emit = EventEmitter::new(paths.journal.clone(), "agents");
+        let mut runner = fake.runner();
+        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
+        assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
+        let idea = fake.idea_calls();
+        let details = flag(&idea[0], "-d").unwrap_or_default();
+        assert!(
+            details.contains(remedy("ci_probe").hint),
+            "details carry the table hint: {details}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sweep_caps_one_file_per_run() {
         let tmp = temp_root("cap");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/gate_{job}.py"),
-                GATE_WAIT,
-            );
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/ci_{job}.sh"),
-                CI_PROBE,
-            );
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/live_{job}.py"),
-                LIVENESS,
-            );
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/tr_{job}.py"),
-                TRANSCRIPT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
+        seed_jobs(&tmp, "live", "py", LIVENESS, JOBS3);
+        seed_jobs(&tmp, "mail", "sh", LONGTEXT, JOBS3);
         let paths = sweep_paths(&tmp);
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
@@ -1804,91 +1868,56 @@ mod tests {
         let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
         let filed: Vec<_> = lines.iter().filter(|l| l.starts_with("filed:")).collect();
         assert_eq!(filed.len(), 1, "one file per run, got {lines:?}");
+        assert_eq!(fake.idea_calls().len(), 1, "got {:?}", fake.calls());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn dry_run_calls_nothing_and_names_would_file_shapes() {
         let tmp = temp_root("dryrun");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let paths = sweep_paths(&tmp);
-        seed_journal(
-            &paths.journal,
-            &[filed_row("longtext_arg", "x-live1", now_ts(), "seeded")],
-        );
-        std::fs::write(
+        seed_graph(
             &paths.graph,
-            r#"{"entries":[{"id":"x-live1","status":"idea"}]}"#,
-        )
-        .unwrap();
+            &[
+                json!({"id": "x-live1", "status": "idea", "origin_evidence": "scratch-shape:ci_probe", "created_at": ts_offset(-60)}),
+            ],
+        );
+        let dry = SweepOpts {
+            threshold: 3,
+            window_days: 28,
+            dry_run: true,
+        };
         let fake = FakeFno::new();
         let emit = EventEmitter::new(paths.journal.clone(), "agents");
         let mut runner = fake.runner();
-        let lines = run_sweep(
-            &paths,
-            &SweepOpts {
-                threshold: 3,
-                window_days: 28,
-                dry_run: true,
-            },
-            Some(&emit),
-            &mut runner,
-        );
-        // longtext_arg holds a live node, so it would fold and prints
-        // nothing; no other shape runs, so the list is empty except `ok`.
-        assert_eq!(
-            lines,
-            vec!["ok"],
-            "a dry run folds onto a live node silently, got {lines:?}"
-        );
+        let lines = run_sweep(&paths, &dry, Some(&emit), &mut runner);
+        // ci_probe holds a live node, so it would fold and prints nothing.
+        assert_eq!(lines, vec!["ok"], "got {lines:?}");
         assert!(
             fake.calls().is_empty(),
             "dry run must call no fno verb at all: {:?}",
             fake.calls()
         );
         assert_eq!(journal_count(&paths.journal, "scratch_shape_observed"), 0);
-        assert_eq!(journal_count(&paths.journal, "scratch_shape_filed"), 1);
 
-        // Without the live node, every file candidate names itself.
+        // Without the live node, every fileable candidate names itself and
+        // the report-only shapes stay silent.
         let tmp2 = temp_root("dryrun2");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp2.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-            write(
-                &tmp2.join("jobs"),
-                &format!("{job}/tmp/gate_{job}.py"),
-                GATE_WAIT,
-            );
-        }
+        seed_jobs(&tmp2, "ci", "sh", CI_PROBE, JOBS3);
+        seed_jobs(&tmp2, "live", "py", LIVENESS, JOBS3);
+        seed_jobs(&tmp2, "mail", "sh", LONGTEXT, JOBS3);
+        seed_jobs(&tmp2, "gate", "py", GATE_WAIT, JOBS3);
+        seed_jobs(&tmp2, "tr", "py", TRANSCRIPT, JOBS3);
         let paths2 = sweep_paths(&tmp2);
         let fake2 = FakeFno::new();
         let emit2 = EventEmitter::new(paths2.journal.clone(), "agents");
         let mut runner2 = fake2.runner();
-        let lines2 = run_sweep(
-            &paths2,
-            &SweepOpts {
-                threshold: 3,
-                window_days: 28,
-                dry_run: true,
-            },
-            Some(&emit2),
-            &mut runner2,
-        );
-        assert!(
-            lines2.contains(&"would-file:longtext_arg".to_string()),
-            "got {lines2:?}"
-        );
-        assert!(
-            lines2.contains(&"would-file:gate_wait".to_string()),
+        let mut lines2 = run_sweep(&paths2, &dry, Some(&emit2), &mut runner2);
+        lines2.sort();
+        assert_eq!(
+            lines2,
+            vec!["would-file:ci_probe", "would-file:liveness"],
             "got {lines2:?}"
         );
         assert!(
@@ -1916,13 +1945,7 @@ mod tests {
     #[test]
     fn control_failure_blocks_everything() {
         let tmp = temp_root("nocontrol");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/mail_{job}.sh"),
-                LONGTEXT,
-            );
-        }
+        seed_jobs(&tmp, "ci", "sh", CI_PROBE, JOBS3);
         let mut paths = sweep_paths(&tmp);
         paths.fixtures_dir = Some(tmp.join("no-such-fixtures"));
         let fake = FakeFno::new();
@@ -1942,86 +1965,34 @@ mod tests {
     }
 
     #[test]
-    fn hidden_verb_probe_names_the_verb_instead_of_filing_no_verb() {
-        // The 2026-09-11 correction banked as an acceptance case: the remedy
-        // leaf ships hidden, `fno help agents --all` lists it (the curated
-        // `fno agents --help` does not), so the filed node names the verb at
-        // low difficulty rather than a "no verb" at medium.
-        let tmp = temp_root("hidden");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp.join("jobs"),
-                &format!("{job}/tmp/wait_{job}.py"),
-                GATE_WAIT,
+    fn remedy_table_covers_every_rule_and_probes_every_fileable_row() {
+        for rule in RULES {
+            assert_eq!(
+                remedy(rule.name).shape,
+                rule.name,
+                "no remedy row for {}",
+                rule.name
             );
         }
-        let paths = sweep_paths(&tmp);
-        let fake = FakeFno::new();
-        let emit = EventEmitter::new(paths.journal.clone(), "agents");
-        let mut runner = fake.runner();
-        let lines = run_sweep(&paths, &opts(3), Some(&emit), &mut runner);
-        assert_eq!(lines, vec!["filed:x-filed9"], "got {lines:?}");
-        let idea = fake
-            .calls()
-            .into_iter()
-            .find(|c| c.get(1).map(String::as_str) == Some("idea"))
-            .expect("idea call");
-        let details = &idea[idea.iter().position(|a| a == "-d").unwrap() + 1];
-        assert!(
-            details.contains("gate-status"),
-            "hint must name the hidden verb: {details}"
-        );
-        assert!(
-            details.contains("existing (hidden)"),
-            "hint must mark it existing: {details}"
-        );
-        assert_eq!(
-            idea.iter()
-                .position(|a| a == "--difficulty")
-                .map(|i| idea[i + 1].as_str()),
-            Some("low")
-        );
-
-        // The verb is gone (or the probe cannot confirm): the fallback remedy
-        // files at medium, never claiming the hidden verb.
-        let tmp2 = temp_root("hidden-gone");
-        for job in ["j1", "j2", "j3"] {
-            write(
-                &tmp2.join("jobs"),
-                &format!("{job}/tmp/wait_{job}.py"),
-                GATE_WAIT,
+        for r in REMEDIES {
+            assert_eq!(
+                r.fileable,
+                r.probe.is_some(),
+                "{}: fileable rows carry a probe",
+                r.shape
             );
+            if let Some(p) = &r.probe {
+                assert!(
+                    Regex::new(p.pattern).is_ok(),
+                    "{}: probe pattern compiles",
+                    r.shape
+                );
+            }
         }
-        let paths2 = sweep_paths(&tmp2);
-        let fake2 = FakeFno::new();
-        fake2.help_has_gate.set(false);
-        let emit2 = EventEmitter::new(paths2.journal.clone(), "agents");
-        let mut runner2 = fake2.runner();
-        let lines2 = run_sweep(&paths2, &opts(3), Some(&emit2), &mut runner2);
-        assert_eq!(lines2, vec!["filed:x-filed9"], "got {lines2:?}");
-        let idea2 = fake2
-            .calls()
-            .into_iter()
-            .find(|c| c.get(1).map(String::as_str) == Some("idea"))
-            .expect("idea call");
-        let details2 = &idea2[idea2.iter().position(|a| a == "-d").unwrap() + 1];
         assert!(
-            !details2.contains("gate-status"),
-            "retired leaf must not be claimed: {details2}"
+            !remedy("no-such-shape").fileable,
+            "an unknown shape never files"
         );
-        assert!(
-            details2.contains("no verb today"),
-            "fallback names the true state: {details2}"
-        );
-        assert_eq!(
-            idea2
-                .iter()
-                .position(|a| a == "--difficulty")
-                .map(|i| idea2[i + 1].as_str()),
-            Some("medium")
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::remove_dir_all(&tmp2);
     }
 
     #[test]
@@ -2046,14 +2017,28 @@ mod tests {
     }
 
     #[test]
-    fn node_statuses_follows_the_backend_switch() {
+    fn report_reads_the_rotated_journal_too() {
+        let tmp = temp_root("report-rotated");
+        let journal = tmp.join("events.jsonl");
+        seed_journal(
+            &tmp.join("events.jsonl.1"),
+            &[observed_row("ci_probe", "j1", now_ts())],
+        );
+        seed_journal(&journal, &[observed_row("ci_probe", "j2", now_ts())]);
+        let json = run_report(&journal, 28, true);
+        assert!(json.contains("\"jobs\": 2"), "got {json}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn keyed_nodes_follow_the_backend_switch() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         // A row the import can represent: from_json requires slug, type and
         // priority, and a row it refuses is skipped, so the flip drops it.
         std::fs::write(
             &graph,
-            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"}]}"#,
+            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2","origin_evidence":"scratch-shape:ci_probe"}]}"#,
         )
         .unwrap();
         crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
@@ -2070,16 +2055,15 @@ mod tests {
         )
         .unwrap();
 
-        let statuses = node_statuses(&graph);
+        let keyed = keyed_nodes(&graph);
+        let empty: Vec<KeyedNode> = Vec::new();
+        let rows = keyed.get("scratch-shape:ci_probe").unwrap_or(&empty);
         assert_eq!(
-            statuses.get("x-new").map(|(s, _)| s.as_str()),
-            Some("ready"),
-            "the store-only node must resolve"
+            rows.len(),
+            1,
+            "the pre-flip keyed node must survive the flip"
         );
-        assert_eq!(
-            statuses.get("x-old").map(|(s, _)| s.as_str()),
-            Some("ready"),
-            "the pre-flip node must survive the flip"
-        );
+        assert_eq!(rows[0].id, "x-old", "the store reader must resolve it");
+        assert_eq!(rows[0].status, "ready");
     }
 }
