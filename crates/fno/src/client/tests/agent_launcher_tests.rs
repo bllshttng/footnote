@@ -10,7 +10,6 @@ use super::*;
 use crate::proto::agent_launch::{AgentLaunchUpdate, LaunchState};
 use ratatui_core::buffer::Buffer as RtBuffer;
 use ratatui_core::layout::Rect as RtRect;
-use ratatui_core::style::Modifier;
 
 struct WireVersionFixture(std::path::PathBuf);
 
@@ -195,21 +194,25 @@ fn tab_walks_the_field_order() {
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // With one configured provider the provider chip is hidden, so Harness ->
-    // Model -> Project -> Permission -> Placement -> ExtraFlags -> Message.
+    // With one configured provider the provider tab is absent, so the bar
+    // is Harness -> Model -> Project -> Mode -> Where -> Flags -> Message:
+    // six tabs land on Message, and the next one wraps to Harness.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
         Focus::Message,
-        "six visible fields reach Message"
+        "six visible tabs reach Message"
     );
-    // The next tab reaches Launch.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
     });
-    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Launch);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Harness,
+        "the tab bar wraps"
+    );
 }
 
 #[test]
@@ -261,19 +264,21 @@ fn submit_refuses_unavailable_harness_pre_wire_with_draft_intact() {
         ("hermes", false, true),
     ]);
     sync_catalog(&mut v);
-    // Select the not-installed one: claude -> gemini -> hermes via Right on
-    // the harness field.
+    // Point the draft at the not-installed one; the submission door refuses
+    // it AT SUBMIT with its own reason (the body lists selectable rows only).
+    if let Some(l) = v.launcher.as_mut() {
+        let idx = l
+            .draft
+            .harnesses
+            .iter()
+            .position(|h| h == "hermes")
+            .unwrap();
+        l.draft.harness_idx = idx;
+        l.focus = Focus::Message;
+    }
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[C\x1b[C", &mut sock).await;
-    });
-    assert_eq!(v.launcher.as_ref().unwrap().draft.harness(), "hermes");
-    // Enter on Launch: refused BEFORE any wire message, with the reason.
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Launch;
-    }
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
     });
@@ -345,22 +350,20 @@ fn unknown_outcome_blocks_retry_until_dismiss() {
         v.launcher.as_ref().unwrap().phase,
         Phase::Unknown { .. }
     ));
-    // The attempt is remembered BEYOND the dock (close + reopen).
+    // The attempt is remembered BEYOND the sheet (close + reopen).
     close(&mut v);
     open(&mut v);
-    assert!(v.launch_attempt.is_some(), "attempt outlives the dock");
-    // Dismiss is the explicit action that resolves the block; the draft
-    // survives and launch is possible again.
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Dismiss;
-    }
+    assert!(v.launch_attempt.is_some(), "attempt outlives the sheet");
+    // Esc is the explicit cancel while pending: the block resolves, the
+    // draft survives, the sheet stays open, and launch is possible again.
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
     });
     assert!(matches!(v.launcher.as_ref().unwrap().phase, Phase::Editing));
+    assert!(v.launcher.is_some(), "the canceling Esc does not close");
 }
 
 #[test]
@@ -394,111 +397,6 @@ fn launched_pane_update_returns_the_focus_pane_and_the_seed_note() {
     assert_eq!(v.launcher.as_ref().unwrap().armed, None);
 }
 
-#[test]
-fn chip_row_paints_fields_and_launch_on_one_row() {
-    let mut v = view_with_launcher();
-    let mut choices = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, _) = &mut choices {
-        rows[0].models = vec![
-            super::agent_launcher::ModelChoice {
-                name: "anthropic/claude-sonnet".into(),
-                model: "anthropic/claude-sonnet".into(),
-                route: String::new(),
-                provider: Some("anthropic".into()),
-                verdict: "ok".into(),
-            },
-            super::agent_launcher::ModelChoice {
-                name: "zai/glm".into(),
-                model: "zai/glm".into(),
-                route: String::new(),
-                provider: Some("zai".into()),
-                verdict: "ok".into(),
-            },
-        ];
-    }
-    v.launcher_catalog = Some(choices);
-    sync_catalog(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 120, 3);
-    let rects = l.dock_layout_rects(&v, area);
-    let labels: Vec<(String, u16)> = rects
-        .chips
-        .iter()
-        .filter(|(_, _, r)| r.y == area.y)
-        .map(|(_, s, r)| (s.clone(), r.x))
-        .collect();
-    let row_text: String = labels.iter().map(|(s, x)| format!("{s}@{x} ")).collect();
-    assert!(
-        row_text.contains("claude@")
-            && row_text.contains("provider@")
-            && row_text.contains("default@")
-            && row_text.contains("flags@"),
-        "harness, provider, model, and flags have separate chips: {row_text}"
-    );
-    let launch_x = labels
-        .iter()
-        .find(|(s, _)| s.starts_with("Launch"))
-        .map(|(_, x)| *x);
-    let Some(launch_x) = launch_x else {
-        panic!("launch chip on the primary row: {row_text}");
-    };
-    let after: Vec<_> = labels.iter().filter(|(_, x)| *x > launch_x).collect();
-    assert!(after.is_empty(), "nothing right of Launch: {row_text}");
-}
-
-#[test]
-fn chips_paint_in_the_popup_control_vocabulary() {
-    // Change 2: the popup's control grammar, not raw DIM (a dim word reads
-    // as a caption). Unfocused chips are filled Body blocks (INVERSE under
-    // the terminal theme), the focused chip is the BodySel cut-out, Launch
-    // wears the esc-chip role, adjacent chips sit a default-styled blank
-    // column apart, and every picker chip ends in the dropdown caret.
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Model;
-    }
-    let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 80, 3);
-    let rects = l.dock_layout_rects(&v, area);
-    let mut buf = RtBuffer::empty(area);
-    l.paint(&v, &mut buf, area);
-    for (f, _, r) in &rects.chips {
-        let focused = *f == Focus::Model;
-        assert!(
-            !buf[(r.x, r.y)].modifier.contains(Modifier::DIM),
-            "chip {f:?} must not read as a dim caption"
-        );
-        assert_eq!(
-            buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED),
-            !focused,
-            "chip {f:?} filled-block vs focused cut-out"
-        );
-        if super::agent_launcher::is_picker_chip(*f) {
-            let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
-            assert_eq!(last, "\u{25be}", "picker chip {f:?} ends in the caret");
-        }
-        if *f == Focus::ExtraFlags && focused {
-            let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
-            assert_eq!(last, "\u{2502}", "the flags field shows its text cursor");
-        }
-    }
-    // Adjacent same-row chips are separated by one default-styled column.
-    for pair in rects.chips.windows(2) {
-        let (f0, _, r0) = (&pair[0].0, &pair[0].1, pair[0].2);
-        let (f1, _, r1) = (&pair[1].0, &pair[1].1, pair[1].2);
-        if r0.y == r1.y {
-            let gap_x = r0.x + r0.width;
-            assert!(gap_x < r1.x, "chips {f0:?} and {f1:?} need a gap column");
-            let gap = &buf[(gap_x, r0.y)];
-            assert!(
-                gap.modifier.is_empty(),
-                "the gap column between {f0:?} and {f1:?} stays default-styled"
-            );
-        }
-    }
-}
 #[test]
 fn footer_names_the_lifecycle_and_the_refusal_reason() {
     let mut v = view_with_launcher();
@@ -562,57 +460,6 @@ fn wrapped_cursor_lands_on_the_row_holding_the_char() {
 }
 
 #[test]
-fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
-    let mut v = view_with_launcher();
-    v.term = (24, 80);
-    // A 120-character line wraps to 4 rows at the editor's 38 wrap columns
-    // (40 minus the prompt gutter): the bar grows to 1 chip + 4 message +
-    // 1 hint + 1 lifecycle = 7 and shrinks when it clears.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.message = "x".repeat(120);
-    }
-    let l = v.launcher.as_ref().unwrap();
-    let (total, editor) = l.dock_layout(60, 40);
-    assert_eq!((total, editor), (7, 4), "grows with wrapped rows");
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.message.clear();
-    }
-    let l = v.launcher.as_ref().unwrap();
-    assert_eq!(
-        l.dock_layout(60, 40),
-        (4, 1),
-        "clearing gives the rows back"
-    );
-    // 800 characters against a 30-row panel: capped at a third (editor 7,
-    // total 10) and the window holds the cursor row.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.message = "y".repeat(20 * 40);
-    }
-    let l = v.launcher.as_ref().unwrap();
-    let (total, editor) = l.dock_layout(30, 40);
-    assert_eq!((total, editor), (10, 7), "capped at a third of the panel");
-    let area = RtRect::new(0, 0, 40, 10);
-    let rects = l.dock_layout_rects(&v, area);
-    let (cur_row, _) =
-        super::agent_launcher::wrapped_cursor(&l.draft.message, l.draft.cursor_chars, 38);
-    assert!(
-        cur_row >= rects.start_chunk && cur_row < rects.start_chunk + rects.editor_rows,
-        "window holds the cursor row: cur {cur_row}, start {}, rows {}",
-        rects.start_chunk,
-        rects.editor_rows
-    );
-}
-
-#[test]
-fn dock_layout_floors_at_one_editor_line_on_tiny_panels() {
-    let mut v = view_with_launcher();
-    v.term = (24, 80);
-    let l = v.launcher.as_ref().unwrap();
-    // 8 rows: cap = 8/3 - chips - hint - lifecycle floored to 1.
-    assert_eq!(l.dock_layout(8, 40), (4, 1));
-}
-
-#[test]
 fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
@@ -632,14 +479,12 @@ fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
     );
     // Arm-released Unknown: the exact state the old gate leaked through.
     assert_eq!(v.launcher.as_ref().unwrap().armed, None);
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Launch;
-    }
+    // ^j (the launch key) is inert until the operator cancels explicitly.
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\n", &mut sock).await;
     });
     assert!(matches!(
         v.launcher.as_ref().unwrap().phase,
@@ -648,11 +493,11 @@ fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
     assert!(sock.is_empty(), "nothing went on the wire: {sock:?}");
 }
 
-/// A Starting attempt whose update is lost must stay escapable: the
-/// Dismiss row is reachable during Submitting and returns the dock to
-/// Editing (retry then arms a fresh id, one attempt each).
+/// A Starting attempt whose update is lost must stay escapable: Esc during
+/// Submitting cancels the attempt and returns the sheet to Editing (retry
+/// then arms a fresh id, one attempt each).
 #[test]
-fn submitting_dock_offers_dismiss_and_recovers_to_editing() {
+fn submitting_sheet_offers_cancel_and_recovers_to_editing() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
@@ -660,21 +505,11 @@ fn submitting_dock_offers_dismiss_and_recovers_to_editing() {
         l.armed = Some(1);
         l.phase = Phase::Submitting { request_id: 1 };
     }
-    // The dismiss chip exists while starting.
-    let l = v.launcher.as_ref().unwrap();
-    let rects = l.dock_layout_rects(&v, RtRect::new(0, 0, 40, 3));
-    assert!(
-        rects.chips.iter().any(|(f, _, _)| *f == Focus::Dismiss),
-        "dismiss chip reachable while starting"
-    );
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Dismiss;
-    }
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
     });
     assert!(matches!(v.launcher.as_ref().unwrap().phase, Phase::Editing));
     assert_eq!(v.launcher.as_ref().unwrap().armed, None);
@@ -691,29 +526,21 @@ fn degraded_catalog_reprobes_on_reopen() {
 }
 
 #[test]
-fn launcher_mouse_clicks_launch_and_submits() {
+fn launcher_click_on_a_tab_switches_to_it() {
     let mut v = view_with_launcher();
-    v.sideline_full = true;
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let pw = v.term.1 as usize;
-    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
-    let body = 24 - chrome;
-    let (total, _) = l.dock_layout(body, pw - 1);
-    let top = body - total;
-    let area = RtRect::new(0, top as u16, (pw - 1) as u16, total as u16);
-    let rects = l.dock_layout_rects(&v, area);
-    let (launch_y, launch_x) = rects
-        .chips
+    let sl = l.sheet_layout(&v).unwrap();
+    let (_, r) = *sl
+        .tabs
         .iter()
-        .find(|(f, _, _)| *f == Focus::Launch)
-        .map(|(_, _, r)| (r.y, r.x))
-        .unwrap();
+        .find(|(f, _)| *f == Focus::Message)
+        .expect("the Message tab is in the bar");
     let rep = crate::mouse::MouseReport {
         kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: launch_y,
-        col: launch_x,
+        row: sl.origin.0 + 1 + r.y,
+        col: sl.origin.1 + 1 + r.x,
         shift: false,
     };
     let sock: Vec<u8> = Vec::new();
@@ -723,296 +550,13 @@ fn launcher_mouse_clicks_launch_and_submits() {
         let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
             .await
             .unwrap();
-        assert!(consumed, "a click on the Launch chip is consumed");
+        assert!(consumed, "a click on the sheet is consumed");
     });
-    assert!(
-        matches!(v.launcher.as_ref().unwrap().phase, Phase::Submitting { .. }),
-        "submit path ran"
-    );
-    assert!(!sock.is_empty(), "request went on the wire");
-}
-
-#[test]
-fn launcher_mouse_motion_over_choice_keeps_picker_open_without_committing() {
-    let mut v = view_with_launcher();
-    v.sideline_full = true;
-    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
-    sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
-
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let row = picker
-        .popup
-        .rows
-        .iter()
-        .position(
-            |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "codex"),
-        )
-        .unwrap();
-    let target = picker
-        .popup
-        .targets()
-        .iter()
-        .position(|(ri, _)| *ri == row)
-        .unwrap();
-    let rendered = picker.popup.render(v.term);
-    let (line_idx, line) = rendered
-        .lines
-        .iter()
-        .enumerate()
-        .find(|(_, line)| line.hits.iter().any(|(hit, _, _)| *hit == target))
-        .unwrap();
-    let col = line
-        .hits
-        .iter()
-        .find(|(hit, _, _)| *hit == target)
-        .map(|(_, col, _)| *col)
-        .unwrap();
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Move,
-        row: (rendered.origin.0 + line_idx) as u16,
-        col: (rendered.origin.1 + col) as u16,
-        shift: false,
-    };
-    let mut sock = Vec::new();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        assert!(
-            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-                .await
-                .unwrap()
-        );
-    });
-    let launcher = v.launcher.as_ref().unwrap();
-    assert!(launcher.picker.is_some(), "hover leaves the dropdown open");
     assert_eq!(
-        launcher.draft.harness(),
-        "claude",
-        "hover never commits a row"
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Message,
+        "the click landed on the Message tab"
     );
-    assert_eq!(launcher.picker.as_ref().unwrap().popup.sel, target);
-    let click = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        ..rep
-    };
-    rt.block_on(async {
-        assert!(
-            super::agent_launcher::launcher_mouse(&mut v, click, &mut sock)
-                .await
-                .unwrap()
-        );
-    });
-    let launcher = v.launcher.as_ref().unwrap();
-    assert!(launcher.picker.is_none(), "a left click commits and closes");
-    assert_eq!(launcher.draft.harness(), "codex", "the clicked row commits");
-}
-
-#[test]
-fn launcher_mouse_left_click_outside_closes_picker() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: 0,
-        col: 79,
-        shift: false,
-    };
-    let mut sock = Vec::new();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        assert!(
-            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-                .await
-                .unwrap()
-        );
-    });
-    assert!(v.launcher.as_ref().unwrap().picker.is_none());
-}
-
-#[test]
-fn launcher_picker_selection_fills_the_footer_widened_row() {
-    let mut v = view_with_launcher();
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
-
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let rendered = picker.popup.render(v.term);
-    let selected = rendered
-        .lines
-        .iter()
-        .find(|line| line.roles.contains(&crate::theme::Role::BodySel))
-        .expect("selected option line");
-    let selected_cells = selected
-        .roles
-        .iter()
-        .filter(|role| **role == crate::theme::Role::BodySel)
-        .count();
-    assert_eq!(
-        selected_cells,
-        rendered.width - 2,
-        "highlight fills the inner box"
-    );
-    assert_eq!(
-        selected.hits.first().map(|(_, _, width)| *width),
-        Some(rendered.width - 2),
-        "the click target uses the same full row width"
-    );
-}
-
-#[test]
-fn launcher_mouse_click_uses_popup_target_to_find_the_model_row() {
-    let mut v = view_with_launcher();
-    let mut rows = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(choices, _) = &mut rows {
-        choices[0].models = vec![
-            super::agent_launcher::ModelChoice {
-                name: "unavailable".into(),
-                model: "offline-model".into(),
-                route: "closed/offline-model".into(),
-                provider: Some("closed".into()),
-                verdict: "not-installed".into(),
-            },
-            super::agent_launcher::ModelChoice {
-                name: "qwen/qwen3-coder".into(),
-                model: "qwen/qwen3-coder".into(),
-                route: "openrouter/qwen/qwen3-coder".into(),
-                provider: super::agent_launcher::provider_from_route("openrouter/qwen/qwen3-coder"),
-                verdict: "ok".into(),
-            },
-        ];
-    }
-    v.launcher_catalog = Some(rows);
-    sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
-
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let row = picker
-        .popup
-        .rows
-        .iter()
-        .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "qwen/qwen3-coder"))
-        .unwrap();
-    let target = picker
-        .popup
-        .targets()
-        .iter()
-        .position(|(ri, _)| *ri == row)
-        .unwrap();
-    assert_ne!(
-        row, target,
-        "disabled options make row and target indexes differ"
-    );
-    let rendered = picker.popup.render(v.term);
-    let (line_idx, col) = rendered
-        .lines
-        .iter()
-        .enumerate()
-        .find_map(|(line_idx, line)| {
-            line.hits
-                .iter()
-                .find(|(hit, _, _)| *hit == target)
-                .map(|(_, col, _)| (line_idx, *col))
-        })
-        .unwrap();
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: (rendered.origin.0 + line_idx) as u16,
-        col: (rendered.origin.1 + col) as u16,
-        shift: false,
-    };
-    let mut sock = Vec::new();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        assert!(
-            super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-                .await
-                .unwrap()
-        );
-    });
-    let launcher = v.launcher.as_ref().unwrap();
-    assert!(launcher.picker.is_none());
-    assert_eq!(
-        launcher.draft.model_row.as_deref(),
-        Some("qwen/qwen3-coder")
-    );
-    assert_eq!(launcher.draft.provider, "openrouter");
-}
-
-#[test]
-fn launcher_mouse_click_on_footer_is_unconsumed() {
-    let mut v = view_with_launcher();
-    v.sideline_full = true;
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    let pw = v.term.1 as usize;
-    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
-    let body = 24 - chrome;
-    let (total, _) = l.dock_layout(body, pw - 1);
-    let top = body - total;
-    let footer_row = (top + total - 1) as u16;
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: footer_row,
-        col: 5,
-        shift: false,
-    };
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(!consumed, "the footer row is never the dock's");
-    });
-}
-
-#[test]
-fn launcher_mouse_click_in_message_rect_focuses_the_editor() {
-    let mut v = view_with_launcher();
-    v.sideline_full = true;
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
-    sync_catalog(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    let pw = v.term.1 as usize;
-    let chrome = v.sideline_top() + v.bottom_row_is_chrome() as usize;
-    let body = 24 - chrome;
-    let (total, _) = l.dock_layout(body, pw - 1);
-    let top = body - total;
-    let area = RtRect::new(0, top as u16, (pw - 1) as u16, total as u16);
-    let rects = l.dock_layout_rects(&v, area);
-    let rep = crate::mouse::MouseReport {
-        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
-        row: rects.message.y,
-        col: rects.message.x,
-        shift: false,
-    };
-    let sock: Vec<u8> = Vec::new();
-    let mut sock = sock;
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
-            .await
-            .unwrap();
-        assert!(consumed, "a click in the message rect is consumed");
-    });
-    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
 }
 
 #[test]
@@ -1070,47 +614,21 @@ fn caret_survives_chip_truncation() {
 }
 
 #[test]
-fn chips_carry_values_not_labels() {
-    // A single configured provider has no provider chip to dead-end on.
+fn the_values_strip_carries_choices_not_labels() {
     let mut v = view_with_launcher();
-    let mut one_provider = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, _) = &mut one_provider {
-        rows[0].models.push(super::agent_launcher::ModelChoice {
-            name: "anthropic/claude-sonnet".into(),
-            model: "anthropic/claude-sonnet".into(),
-            route: String::new(),
-            provider: Some("anthropic".into()),
-            verdict: "ok".into(),
-        });
-    }
-    v.launcher_catalog = Some(one_provider);
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
-    let l = v.launcher.as_ref().unwrap();
-    let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
-    let joined = texts.join(" | ");
-    for want in ["claude", "default", "flags", "claude decides", "thread"] {
-        assert!(
-            texts.iter().any(|t| t.contains(want)),
-            "want {want:?} in {joined}"
-        );
+    let strip = v.launcher.as_ref().unwrap().values_strip();
+    for want in ["claude", "default", "thread", "claude decides"] {
+        assert!(strip.contains(want), "want {want:?} in {strip:?}");
     }
-    assert!(
-        texts.iter().all(|t| !t.contains(": ")),
-        "no field labels anywhere: {joined}"
-    );
-    assert!(!l
-        .chip_texts(&v)
-        .iter()
-        .any(|(focus, _)| *focus == Focus::Provider));
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Provider;
-    assert!(!super::agent_launcher::open_picker(&mut l, &v));
 }
 
 #[test]
-fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
-    // The model picker lists the current harness default and that harness's
-    // configured rows; choosing a row pins its model and provider.
+fn model_tab_lists_catalog_rows_and_picking_one_pins_the_row() {
+    // The Model tab body lists the current harness default and that
+    // harness's configured rows; committing a row pins its model, provider
+    // and route together.
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
     if let CatalogOutcome::Ok(choices, _) = &mut rows {
@@ -1135,16 +653,8 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     sync_catalog(&mut v);
     let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Model;
-    assert!(
-        super::agent_launcher::open_picker(&mut l, &v),
-        "picker opens"
-    );
-    v.launcher = Some(l);
-    let l = v.launcher.as_ref().unwrap();
-    let picker = l.picker.as_ref().unwrap();
-    let labels: Vec<String> = picker
-        .popup
-        .rows
+    let (body, actions) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
+    let enabled: Vec<String> = body
         .iter()
         .filter_map(|r| match r {
             crate::popup::PopupRow::Entry { label, enabled, .. } if *enabled => Some(label.clone()),
@@ -1152,51 +662,30 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
         })
         .collect();
     assert!(
-        labels.contains(&"harness default".to_string())
-            && labels.contains(&"qwen3-coder".to_string()),
-        "model picker lists the default + configured routing rows: {labels:?}"
+        enabled.contains(&"harness default".to_string())
+            && enabled.contains(&"qwen3-coder".to_string()),
+        "the Model tab lists the default + configured rows: {enabled:?}"
     );
-    // Pick the OpenRouter route: model and provider come from the configured row.
-    let target = picker
-        .popup
-        .rows
+    // Commit the OpenRouter route straight off the body.
+    let target = body
         .iter()
         .position(
             |r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "qwen3-coder"),
         )
         .unwrap();
-    let target_idx = picker
-        .popup
-        .targets()
-        .iter()
-        .position(|(ri, _)| *ri == target)
-        .unwrap();
-    let mut l = v.launcher.as_mut().unwrap();
-    l.picker.as_mut().unwrap().popup.select(target_idx);
-    let action = l
-        .picker
-        .as_ref()
-        .unwrap()
-        .actions
-        .get(target)
-        .cloned()
-        .flatten();
-    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action.unwrap(), 0);
-    v.launcher = Some(l.clone());
-    let l = v.launcher.as_ref().unwrap();
-    assert!(l.picker.is_none(), "commit closes the picker");
+    let action = actions.get(target).cloned().flatten().unwrap();
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
     assert_eq!(l.draft.model, "qwen/qwen3-coder");
     assert_eq!(l.draft.model_row.as_deref(), Some("qwen3-coder"));
     assert_eq!(l.draft.provider, "openrouter");
 
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    // The pick lands in the recent section at the top of the body.
+    let (body, _) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
     assert!(matches!(
-        l.picker.as_ref().unwrap().popup.rows.first(),
+        body.first(),
         Some(crate::popup::PopupRow::Header(section)) if section == "recent"
     ));
-    assert!(l.picker.as_ref().unwrap().popup.rows.iter().any(
+    assert!(body.iter().any(
         |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "qwen3-coder")
     ));
 }
@@ -1214,44 +703,26 @@ fn provider_and_model_choices_come_from_configured_rows() {
     sync_catalog(&mut v);
 
     let mut l = v.launcher.take().unwrap();
-    assert!(l
-        .chip_texts(&v)
-        .iter()
-        .any(|(focus, _)| *focus == Focus::Provider));
     l.focus = Focus::Provider;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    let provider_row = l
-        .picker
-        .as_ref()
-        .unwrap()
-        .popup
-        .rows
+    let (body, actions) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
+    let provider_row = body
         .iter()
         .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter"))
         .unwrap();
-    assert!(l.picker.as_ref().unwrap().popup.rows.iter().all(|row| {
+    assert!(body.iter().all(|row| {
         !matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "zai")
     }));
-    let action = l.picker.as_ref().unwrap().actions[provider_row]
-        .clone()
-        .unwrap();
+    let action = actions[provider_row].clone().unwrap();
     super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
     assert_eq!(l.draft.provider, "openrouter");
 
     l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    let model_row = l
-        .picker
-        .as_ref()
-        .unwrap()
-        .popup
-        .rows
+    let (body, actions) = super::agent_launcher::tab_body_rows(&l, &v.launcher_catalog, &v.backlog);
+    let model_row = body
         .iter()
         .position(|row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "openrouter/qwen/qwen3-coder"))
         .unwrap();
-    let action = l.picker.as_ref().unwrap().actions[model_row]
-        .clone()
-        .unwrap();
+    let action = actions[model_row].clone().unwrap();
     super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
     let request = l.draft.request(3);
     assert_eq!(request.harness, "opencode");
@@ -1298,13 +769,57 @@ fn account_rows_supply_model_and_provider_options() {
     }
     v.launcher_catalog = Some(catalog);
     sync_catalog(&mut v);
-    assert!(v
-        .launcher
-        .as_ref()
-        .unwrap()
-        .chip_texts(&v)
-        .iter()
-        .any(|(focus, _)| *focus == Focus::Provider));
+    let l = v.launcher.as_ref().unwrap();
+    let sl = l.sheet_layout(&v).unwrap();
+    assert!(
+        sl.tabs.iter().any(|(f, _)| *f == Focus::Provider),
+        "two providers give the bar a Provider tab"
+    );
+}
+
+/// The regression that forced the tab rewrite: the unavailable row's LABEL
+/// used to be ellipsized to fit the long error hint, so "model list
+/// unavailable" never reached the screen in CI. Labels stay whole; the
+/// hint truncates instead; the selection spans the full inner width.
+#[test]
+fn model_tab_label_survives_a_long_hint_and_selects_full_width() {
+    let mut v = view_with_launcher();
+    let mut choices = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(rows, models_err) = &mut choices {
+        *models_err =
+            Some("account records unavailable: Usage: fno-py config get [OPTIONS] {key}".into());
+        let _ = rows;
+    }
+    v.launcher_catalog = Some(choices);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Model;
+    }
+    let l = v.launcher.as_ref().unwrap();
+    let (body, _) = super::agent_launcher::tab_body_rows(l, &v.launcher_catalog, &v.backlog);
+    assert!(body.iter().any(
+        |row| matches!(row, crate::popup::PopupRow::Entry { label, .. } if label == "model list unavailable")
+    ));
+    let sl = l.sheet_layout(&v).unwrap();
+    let inner_w = sl.framed_w.saturating_sub(2);
+    let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+    let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
+    let mut label_seen = false;
+    for (_, r) in &sl.row_rects {
+        let text: String = (0..inner_w)
+            .map(|x| cells[(oy + r.y as usize) * cols + ox + r.x as usize + x].c)
+            .collect();
+        if text.contains("model list unavailable") {
+            label_seen = true;
+        }
+    }
+    assert!(label_seen, "the unavailable label renders whole");
+    // The selection is a FULL-WIDTH rect: it spans the sheet's whole inner
+    // width (the old popover styled only the row's content width).
+    let r = sl.selected.expect("a list body always has a selection");
+    assert_eq!(r.width as usize, inner_w, "the selection spans the body");
 }
 
 #[test]
@@ -1326,15 +841,12 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
         Some("routing inventory unavailable".into()),
     ));
     sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Model;
+    }
     let l = v.launcher.as_ref().unwrap();
-    let picker = l.picker.as_ref().unwrap();
-    let disabled: Vec<&str> = picker
-        .popup
-        .rows
+    let (rows, _) = super::agent_launcher::tab_body_rows(l, &v.launcher_catalog, &v.backlog);
+    let disabled: Vec<&str> = rows
         .iter()
         .filter_map(|r| match r {
             crate::popup::PopupRow::Entry {
@@ -1345,9 +857,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
             _ => None,
         })
         .collect();
-    let enabled: Vec<&str> = picker
-        .popup
-        .rows
+    let enabled: Vec<&str> = rows
         .iter()
         .filter_map(|r| match r {
             crate::popup::PopupRow::Entry {
@@ -1396,19 +906,13 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
     });
     let draft = &v.launcher.as_ref().unwrap().draft;
     assert!(draft.extra_flags.starts_with("--agent abc"));
-    let texts: Vec<_> = v
-        .launcher
-        .as_ref()
-        .unwrap()
-        .chip_texts(&v)
-        .into_iter()
-        .map(|(_, text)| text)
-        .collect();
-    assert!(texts
-        .iter()
-        .any(|text| text.starts_with("flags --agent abc")));
+    let strip = v.launcher.as_ref().unwrap().values_strip();
+    assert!(
+        strip.contains("--agent abc"),
+        "the flags value rides the values strip: {strip:?}"
+    );
 
-    v.launcher.as_mut().unwrap().focus = Focus::Launch;
+    v.launcher.as_mut().unwrap().focus = Focus::Message;
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
     });
@@ -1443,17 +947,12 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Placement;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Placement;
+    }
     let l = v.launcher.as_ref().unwrap();
-    let labels: Vec<String> = l
-        .picker
-        .as_ref()
-        .unwrap()
-        .popup
-        .rows
+    let (rows, _) = super::agent_launcher::tab_body_rows(l, &v.launcher_catalog, &v.backlog);
+    let labels: Vec<String> = rows
         .iter()
         .filter_map(|r| match r {
             crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
@@ -1483,10 +982,10 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     v.launcher = Some(l.clone());
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.placement_portal, 2);
-    let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
+    let strip = l.values_strip();
     assert!(
-        texts.iter().any(|t| t.contains("thread split beside")),
-        "the chip shows the picked view: {texts:?}"
+        strip.contains("thread split beside"),
+        "the values strip shows the picked view: {strip:?}"
     );
 }
 
@@ -1497,55 +996,50 @@ fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
     let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 80, 5);
-    let rects = l.dock_layout_rects(&v, area);
-    let mut buf = RtBuffer::empty(area);
-    l.paint(&v, &mut buf, area);
-    let glyph: String = (0..2)
-        .map(|x| {
-            buf[(rects.message.x + x, rects.message.y)]
-                .symbol()
-                .to_string()
-        })
-        .collect();
+    let sl = l.sheet_layout(&v).unwrap();
+    let inner_w = sl.framed_w.saturating_sub(2) as usize;
+    let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+    let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
+    let marker = (0..2)
+        .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
+        .collect::<String>();
     assert!(
-        glyph.contains('\u{276f}'),
-        "prompt marker painted: {glyph:?}"
+        marker.contains('\u{276f}'),
+        "prompt marker painted: {marker:?}"
     );
-    let row: String = (0..40)
-        .map(|x| buf[(x, rects.message.y)].symbol().to_string())
+    let row: String = (0..inner_w)
+        .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
         .collect();
     assert!(
         row.contains("/fno:target <node> or a task"),
         "placeholder on an empty draft: {row:?}"
     );
     // Typing replaces the placeholder and keeps the marker.
-    if let Some(l) = v.launcher.as_mut() {
-        l.focus = Focus::Message;
-    }
     type_message(&mut v, "ship it");
     let l = v.launcher.as_ref().unwrap();
-    let mut buf = RtBuffer::empty(area);
-    l.paint(&v, &mut buf, area);
-    let row: String = (0..40)
-        .map(|x| buf[(x, rects.message.y)].symbol().to_string())
+    let sl = l.sheet_layout(&v).unwrap();
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+    let row: String = (0..inner_w)
+        .map(|x| cells[(oy + sl.message.y as usize) * cols + ox + x].c)
         .collect();
     assert!(row.contains("ship it"), "draft paints: {row:?}");
     assert!(!row.contains("/fno:target"), "placeholder gone: {row:?}");
 }
 
 #[test]
-fn typing_in_an_open_picker_filters_the_rows() {
-    // The harness picker narrows its configured choices in place; the query
-    // stays visible in the title and Backspace widens the list again.
+fn typing_on_a_list_tab_filters_the_body() {
+    // The harness tab narrows its configured choices in place; Backspace
+    // widens the list again and clearing restores every row.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1553,48 +1047,37 @@ fn typing_in_an_open_picker_filters_the_rows() {
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"cod", &mut sock).await;
     });
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let labels: Vec<&str> = picker
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels, vec!["codex"], "the query narrows the rows");
-    assert!(picker.popup.chrome.title.contains("filter: cod"));
+    let read = |v: &View| -> Vec<String> {
+        let l = v.launcher.as_ref().unwrap();
+        let (rows, _) = super::agent_launcher::tab_body_rows(l, &v.launcher_catalog, &v.backlog);
+        rows.iter()
+            .filter_map(|r| match r {
+                crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        read(&v),
+        vec!["codex"],
+        "the query narrows the body: {:?}",
+        read(&v)
+    );
+    assert_eq!(
+        v.launcher.as_ref().unwrap().filter,
+        "cod",
+        "the query is live"
+    );
     // Backspace once: the query `co` still narrows to codex.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f], &mut sock).await;
     });
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let still: Vec<&str> = picker
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(still, vec!["codex"], "`co` still filters: {still:?}");
+    assert_eq!(read(&v), vec!["codex"], "`co` still filters");
     // Clearing the query fully restores every row.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
     });
-    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-    let labels: Vec<&str> = picker
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels.len(), 2, "widened: {labels:?}");
+    assert_eq!(read(&v).len(), 2, "widened");
 }
 
 #[test]
@@ -1603,10 +1086,6 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
-    let mut l = v.launcher.take().unwrap();
-    l.focus = Focus::Harness;
-    assert!(super::agent_launcher::open_picker(&mut l, &v));
-    v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1615,16 +1094,12 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"co", &mut sock).await;
     });
     {
-        let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
-        assert_eq!(picker.filter, "co", "the query is live");
-        assert_eq!(
-            picker.popup.rows.len(),
-            1,
-            "narrowed to one row: {:?}",
-            picker.popup.rows
-        );
-        let (ri, _) = picker.popup.selected().unwrap();
-        let action = picker.actions.get(ri).cloned().flatten();
+        let l = v.launcher.as_ref().unwrap();
+        assert_eq!(l.filter, "co", "the query is live");
+        let (rows, actions) =
+            super::agent_launcher::tab_body_rows(l, &v.launcher_catalog, &v.backlog);
+        assert_eq!(rows.len(), 1, "narrowed to one row: {rows:?}");
+        let action = actions.first().cloned().flatten();
         assert!(
             matches!(
                 action,
@@ -1637,7 +1112,6 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x0d], &mut sock).await;
     });
     let l = v.launcher.as_ref().unwrap();
-    assert!(l.picker.is_none(), "Enter commits and closes the picker");
     assert_eq!(l.draft.harness(), "codex", "the highlighted row committed");
 }
 
