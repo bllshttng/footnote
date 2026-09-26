@@ -35,6 +35,7 @@ pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod title_gate;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};
