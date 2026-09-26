@@ -25,6 +25,7 @@ from fno.tracker import (
 from fno.tracker import sidecar as sidecar_mod
 from fno.tracker.sidecar import Sidecar, load, save
 from fno.graph.store import read_graph_strict
+from tests.fixtures.graph_seed import seed_graph
 
 
 def _write_graph(path: Path, entries: list[dict]) -> Path:
@@ -38,7 +39,7 @@ def _write_graph(path: Path, entries: list[dict]) -> Path:
         if row["status"] == "done" and not row.get("completed_at"):
             row["completed_at"] = "2026-09-01T00:00:00Z"
         complete.append(row)
-    path.write_text(json.dumps({"entries": complete}), encoding="utf-8")
+    seed_graph(path, complete)
     return path
 
 

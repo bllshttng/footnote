@@ -20,6 +20,7 @@ import re
 import pytest
 import typer
 from typer.testing import CliRunner
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.agents.history import history_command
 from fno.agents.registry import AgentEntry
@@ -75,7 +76,7 @@ def _paths(tmp_path, rows: list[dict], receipts: list[dict]):
     ledger = tmp_path / "ledger.json"
     graph = tmp_path / "graph.json"
     ledger.write_text(json.dumps({"entries": rows}))
-    graph.write_text(json.dumps(GRAPH))
+    seed_graph(graph, GRAPH["entries"])
     home = tmp_path / "agents-home"
     if receipts:
         (home / "reap-receipts").mkdir(parents=True)
@@ -95,7 +96,7 @@ def _paths(tmp_path, rows: list[dict], receipts: list[dict]):
 def history(tmp_path, monkeypatch, capsys):
     def _install(rows=ROWS, receipts: list[dict] | None = None, entries=None, graph=None):
         if graph is not None:
-            (tmp_path / "graph.json").write_text(json.dumps(graph))
+            seed_graph(tmp_path / "graph.json", graph["entries"])
         monkeypatch.setattr(
             "fno.agents.history._paths", _paths(tmp_path, rows, receipts or [])
         )
@@ -316,7 +317,7 @@ def test_whoami_ledger_hidden_but_working(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     graph = tmp_path / "graph.json"
     ledger.write_text(json.dumps({"entries": ROWS}))
-    graph.write_text(json.dumps(GRAPH))
+    seed_graph(graph, GRAPH["entries"])
 
     class _P:
         ledger_json = staticmethod(lambda: ledger)

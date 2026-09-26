@@ -653,8 +653,8 @@ REAL_BIN="$REAL_TMP/bin"
 mkdir -p "$REAL_REPO/.fno" "$REAL_BIN"
 git init -q "$REAL_REPO"
 git -C "$REAL_REPO" checkout -q -b feature/x-a166-real
-printf '{"entries":[{"id":"x-a166","status":"ready","title":"live node","priority":"p1","type":"feature","blocked_by":[],"locked_by":null,"session_id":null,"pr_number":null,"pr_url":null}]}\n' > "$REAL_GRAPH"
-printf '[paths]\ngraph_json = "%s"\n' "$REAL_GRAPH" > "$REAL_CONFIG"
+printf '{"entries":[{"id":"x-a166","status":"ready","title":"live node","priority":"p1","type":"feature","blocked_by":[],"locked_by":null,"session_id":null,"pr_number":null,"pr_url":null}]}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$REAL_GRAPH"
+printf 'state_dir = "%s"\n' "$REAL_TMP" > "$REAL_CONFIG"
 cat > "$REAL_BIN/fno" <<EOF
 #!/usr/bin/env bash
 exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
@@ -662,9 +662,8 @@ EOF
 chmod +x "$REAL_BIN/fno"
 payload="$(jq -cn --arg cwd "$REAL_REPO" '{cwd:$cwd,session_id:"owner-session",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | PATH="$REAL_BIN:$PATH" FNO_CONFIG="$REAL_CONFIG" CODEX_THREAD_ID= CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
-# The store owns the rows now; graph.json is only the seed mirror, so the
-# bind lands in graph.db and the read comes back through the keeper.
-row_json="$(uv run --project "$REPO_ROOT/cli" python -c "import json; from fno.graph.store import read_graph_strict; print(json.dumps(read_graph_strict('$REAL_GRAPH')[0]))")"
+# The bind lands in graph.db and the read comes back through the keeper.
+row_json="$(uv run --project "$REPO_ROOT/cli" python -c "import json; from pathlib import Path; from fno.graph.store import read_graph_strict; print(json.dumps(read_graph_strict(Path('$REAL_GRAPH'))[0]))")"
 if [[ "$rc" -eq 0 && "$(jq -r '.status' <<<"$row_json")" == in_review \
       && "$(jq -r '.pr_number' <<<"$row_json")" == 42 \
       && "$(jq -r '.locked_by' <<<"$row_json")" == owner-session ]]; then

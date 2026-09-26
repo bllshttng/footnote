@@ -12,7 +12,7 @@
 //! subject plus node, the 2000-character cut, the id mint, the dual write
 //! (project journal fatal, index best-effort) and the render-position
 //! receipt. The exit CODE lives in the answer (the transport always exits 0
-//! once the request parsed, the `law-match` shape); refusal MESSAGES stay
+//! once the request parsed, the question-intake shape); refusal MESSAGES stay
 //! in the shim, which owns the user's name.
 
 use crate::paths::AgentsHome;

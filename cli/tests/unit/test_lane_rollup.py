@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 import fno.graph.cli as gcli
 from fno.claims.lanes import acquire_lane_slot
+from tests.fixtures.graph_seed import seed_graph
 
 _runner = CliRunner()
 
@@ -27,24 +28,15 @@ def claims_root(tmp_path, monkeypatch):
 @pytest.fixture
 def graph(tmp_path, monkeypatch):
     path = tmp_path / "graph.json"
-    path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "id": "x-aaaa",
-                        "slug": "alpha-work",
-                        "title": "Alpha work",
-                        "type": "feature",
-                        "priority": "p2",
-                        "status": "in_progress",
-                        "domain": "code",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    seed_graph(path, [{
+        "id": "x-aaaa",
+        "slug": "alpha-work",
+        "title": "Alpha work",
+        "type": "feature",
+        "priority": "p2",
+        "status": "in_progress",
+        "domain": "code",
+    }])
     monkeypatch.setattr(gcli, "_graph_path", lambda: path)
     return path
 

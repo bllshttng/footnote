@@ -592,6 +592,39 @@ mod tests {
         path
     }
 
+    /// Snapshot-and-restore scope for env vars a test pins; the original
+    /// value (or its absence) is put back on drop, panic included.
+    struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvPin {
+        fn take(vars: &[&'static str]) -> Self {
+            Self(
+                vars.iter()
+                    .map(|var| (*var, std::env::var_os(var)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvPin {
+        fn drop(&mut self) {
+            for (var, saved) in &self.0 {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
+    /// The graph store the resolver reads lives at `$FNO_HOME/graph.json`
+    /// (SQLite beside it); `paths.graph_json` no longer redirects it.
+    fn pin_home(dir: &Path) -> EnvPin {
+        let pin = EnvPin::take(&["FNO_HOME"]);
+        std::env::set_var("FNO_HOME", dir.join("home"));
+        pin
+    }
+
     fn generation_setup(dir: &Path, registry_rows: &[Value]) -> (PathBuf, PathBuf) {
         let manifest = dir.join("kings/x-root.md");
         fs::create_dir_all(manifest.parent().unwrap()).unwrap();
@@ -613,15 +646,22 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(
+        crate::graph_store::seed_rows(
             &graph,
-            serde_json::json!({
-                "entries": [
-                    entry("x-root", "", "2026-09-18T01:00:00Z", serde_json::json!({"type": "epic", "project": "fno"})),
-                    entry("x-delivery", "x-root", "2026-09-18T01:14:01Z", serde_json::json!({"project": "fno", "status": "ready"})),
-                ]
-            })
-            .to_string(),
+            &[
+                entry(
+                    "x-root",
+                    "",
+                    "2026-09-18T01:00:00Z",
+                    serde_json::json!({"type": "epic", "project": "fno"}),
+                ),
+                entry(
+                    "x-delivery",
+                    "x-root",
+                    "2026-09-18T01:14:01Z",
+                    serde_json::json!({"project": "fno", "status": "ready"}),
+                ),
+            ],
         )
         .unwrap();
         let registry = dir.join("registry.json");
@@ -791,11 +831,12 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(dir.join("home")).unwrap();
-        fs::write(
-            dir.join("home/graph.json"),
-            "{\"entries\": [{\"id\": \"x-root\", \"type\": \"epic\"}]}",
+        crate::graph_store::seed_rows(
+            &dir.join("home/graph.json"),
+            &[serde_json::json!({"id": "x-root", "type": "epic"})],
         )
         .unwrap();
+        let _home = pin_home(&dir);
         let inputs = resolve_verdict_inputs(
             &dir,
             Some("x-root"),
@@ -816,6 +857,7 @@ mod tests {
         let dir = tmp("holder-generation-start");
         let (manifest, registry) =
             generation_setup(&dir, &[inherited_holder_row("2026-09-17T22:47:08Z")]);
+        let _home = pin_home(&dir);
         let inputs =
             resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
                 .expect("the holder generation makes the split measurable");
@@ -838,6 +880,7 @@ mod tests {
         std::env::remove_var("FNO_CONFIG");
         let dir = tmp("missing-holder-generation");
         let (manifest, registry) = generation_setup(&dir, &[]);
+        let _home = pin_home(&dir);
         let inputs =
             resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
                 .expect("a missing holder row keeps the manifest split");
@@ -856,6 +899,7 @@ mod tests {
         let dir = tmp("later-holder-generation-start");
         let (manifest, registry) =
             generation_setup(&dir, &[inherited_holder_row("2026-09-20T00:00:00Z")]);
+        let _home = pin_home(&dir);
         let inputs =
             resolve_verdict_inputs(&dir, Some("x-root"), Some(&manifest), &registry, pinned_now)
                 .expect("the earlier manifest timestamp bounds the generation");

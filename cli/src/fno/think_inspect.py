@@ -512,13 +512,7 @@ def build_receipt(
 
     repo = Path(repo).resolve()
     settings = load_settings_for_repo(repo)
-    graph_override = settings.paths.graph_json
-    graph_path = (
-        resolve_configured_path(graph_override, project_root=repo, settings=settings)
-        if graph_override is not None
-        else resolve_configured_path(settings.state_dir, project_root=repo, settings=settings)
-        / "graph.json"
-    )
+    graph_path = resolve_configured_path(settings.state_dir, project_root=repo, settings=settings) / "graph.json"
     archive_path = graph_path.parent / "graph-archive.json"
     configured_plans_path = resolve_configured_path(
         settings.plans_dir,

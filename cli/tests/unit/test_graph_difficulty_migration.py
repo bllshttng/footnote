@@ -6,6 +6,7 @@ with equal bands, so those are the machine-created shape); a DIVERGENT pair
 or a garbage band with no canonical field is refused, never guessed at.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """A fresh empty graph.json; same patch surface as the integration fixture."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -40,7 +41,7 @@ def _seed(g: Path, n: int) -> list[str]:
         {"id": f"x-{i:04x}", "title": f"legacy {i}", "model_tier": "high" if i % 2 else "medium"}
         for i in range(n)
     ]
-    g.write_text(json.dumps({"entries": entries}))
+    seed_graph(g, json.dumps({"entries": entries}))
     return [e["id"] for e in entries]
 
 
@@ -77,7 +78,7 @@ def test_migrate_difficulty_dry_run_apply_then_empty(tmp_graph):
 
 
 def test_migrate_difficulty_refuses_divergent_pairs(tmp_graph):
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-0001", "model_tier": "high", "difficulty": "low"},
     ]}))
     for argv in (
@@ -94,7 +95,7 @@ def test_migrate_difficulty_refuses_divergent_pairs(tmp_graph):
 def test_migrate_difficulty_survives_null_history(tmp_graph):
     """A hand-edited row can carry `difficulty_history: null`; setdefault
     returns that null and .append dies with AttributeError. `or []` instead."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-0002", "model_tier": "high", "difficulty_history": None},
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
@@ -110,7 +111,7 @@ def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
     normalize_difficulty every other writer runs: case variants fold, and a
     value that is not a band is refused by id instead of migrated verbatim
     under a success receipt."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-0003", "model_tier": "HIGH"},
         {"id": "x-0004", "model_tier": "turbo"},
     ]}))
@@ -138,7 +139,7 @@ def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
 def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
     """x-baef round-3: a non-string model_tier (hand-edit) gets the designed
     by-id exit-2 refusal, not an AttributeError traceback from strip()."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-0005", "model_tier": 3},
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
@@ -152,7 +153,7 @@ def test_migrate_difficulty_refuses_garbage_canonical_band(tmp_graph):
     needs-decision, never drainable - draining blessed the invalid band with
     a success receipt, and once model_tier is gone no sweep names the row
     again while every later difficulty writer exits 2 on it."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-000a", "difficulty": "turbo", "model_tier": 7},
         {"id": "x-000b", "difficulty": "turbo", "model_tier": "high"},
     ]}))
@@ -171,7 +172,7 @@ def test_migrate_difficulty_drains_machine_leftovers(tmp_graph):
     equal bands, so same-band pairs are what machine-created leftovers look
     like and the migration drains them; a garbage retired key under a live
     difficulty drops without a band judgment. Only a divergent pair refuses."""
-    tmp_graph.write_text(json.dumps({"entries": [
+    seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "x-0006", "model_tier": "high", "difficulty": "high"},
         {"id": "x-0007", "model_tier": "high", "difficulty": "low"},
         {"id": "x-0008", "model_tier": 3, "difficulty": "low"},

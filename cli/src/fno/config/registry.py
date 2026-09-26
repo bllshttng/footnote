@@ -45,7 +45,6 @@ FIELD_META: dict[str, Meta] = {
     "plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
     "plans_filename": Meta("advanced", "Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name.", default_source="default"),
     "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
-    "paths.graph_json": Meta("never", "Override path to the backlog graph.json."),
     "paths.ledger_json": Meta("never", "Override path to ledger.json."),
     "paths.evals_history": Meta("never", "Override path to the evals-history.jsonl bank-run ledger."),
     "paths.briefs_dir": Meta("never", "Override path to the sidecar briefs dir."),

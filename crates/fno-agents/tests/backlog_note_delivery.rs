@@ -18,11 +18,7 @@ fn fixture(id: &str, status: &str) -> serde_json::Value {
 }
 
 fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(path, entries).unwrap();
 }
 
 /// The landed rows, read from the store: graph.json is a frozen mirror
@@ -119,7 +115,7 @@ fn note_captured(args: &[&str], body: &str) -> (i32, String, String) {
 fn corrupt_graph_names_the_read_failure_never_absence() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(&graph, "{").unwrap();
+    std::fs::write(fno_agents::backlog::database_path(&graph), "{").unwrap();
     let g = graph_arg(&graph);
     let (code, stdout, stderr) = note_captured(
         &[g[0].as_str(), g[1].as_str(), "t-1", "body", "--quiet"],

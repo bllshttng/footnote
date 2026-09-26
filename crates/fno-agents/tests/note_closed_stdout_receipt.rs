@@ -24,11 +24,7 @@ fn fixture_node(id: &str) -> serde_json::Value {
 fn a_closed_stdout_pipe_neither_loses_the_note_nor_fails_the_verb() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&serde_json::json!({ "entries": [fixture_node("t-pipe")] })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[fixture_node("t-pipe")]).unwrap();
 
     let mut fds = [0 as libc::c_int; 2];
     unsafe { assert_eq!(libc::pipe(fds.as_mut_ptr()), 0) };
@@ -66,9 +62,12 @@ fn a_closed_stdout_pipe_neither_loses_the_note_nor_fails_the_verb() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let raw = std::fs::read_to_string(&graph).unwrap();
+    let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
     assert!(
-        raw.contains("the ruling that must survive"),
-        "note lost, graph now: {raw}"
+        rows[0][fno_agents::backlog::node_state::STATE_KEY]["body"]
+            .as_str()
+            .unwrap()
+            .contains("the ruling that must survive"),
+        "note lost, graph now: {rows:?}"
     );
 }

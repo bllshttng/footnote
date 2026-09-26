@@ -6,6 +6,7 @@ new:  append a new ab- entry without a plan file (for non-code tasks).
 Uses typer.testing.CliRunner with monkey-patched GRAPH_JSON.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -44,7 +45,7 @@ def _seed(g: Path, entries: list[dict]) -> None:
         if row["status"] == "done" and not row.get("completed_at"):
             row["completed_at"] = "2026-09-01T00:00:00Z"
         complete.append(row)
-    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": complete}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:

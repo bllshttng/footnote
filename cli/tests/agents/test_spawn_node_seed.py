@@ -7,6 +7,7 @@ sources, an unencoded node refuses before any peer exists, and a typed message
 wins over the node.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -451,9 +452,7 @@ def _rust_graph(tmp_path, monkeypatch):
     """Point the binary's own store read (FNO_HOME -> graph.json) at a fixture
     naming x-1, so the nodeless derive arm resolves it without the machine."""
     monkeypatch.setenv("FNO_HOME", str(tmp_path))
-    (tmp_path / "graph.json").write_text(
-        json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8"
-    )
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": [{"id": "x-1"}]}))
 
 
 def _stub_verb_seq(monkeypatch, answers):

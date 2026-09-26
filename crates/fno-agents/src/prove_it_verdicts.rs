@@ -513,8 +513,7 @@ mod tests {
 
     fn write_graph(dir: &Path, entries: &[Value]) -> PathBuf {
         let path = dir.join("graph.json");
-        std::fs::write(&path, serde_json::json!({"entries": entries}).to_string())
-            .expect("write graph");
+        graph_store::seed_rows(&path, entries).expect("seed graph.db");
         path
     }
 
@@ -1075,15 +1074,14 @@ mod tests {
     }
 
     #[test]
-    fn read_defaulted_reads_the_written_graph_back() {
-        // Positive control for the fixture writer: the same read_defaulted the
-        // verb uses must see the entries the test wrote.
+    fn read_rows_reads_the_seeded_store() {
+        // The verb's store reader sees rows seeded through graph.db.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_graph(
             dir.path(),
             &[json!({"id": "x-aaa", "plan_path": "/p/a.md"})],
         );
-        let entries = graph_store::read_defaulted(&path, false).expect("read");
+        let entries = graph_store::read_rows(&path).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entry_id(&entries[0]), Some("x-aaa"));
     }

@@ -131,7 +131,6 @@ class PathsBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    graph_json: Optional[str] = None
     ledger_json: Optional[str] = None
     evals_history: Optional[str] = None
     briefs_dir: Optional[str] = None
@@ -152,7 +151,6 @@ class PathsBlock(BaseModel):
     spaces_dir: Optional[str] = None
 
     @field_validator(
-        "graph_json",
         "ledger_json",
         "evals_history",
         "briefs_dir",

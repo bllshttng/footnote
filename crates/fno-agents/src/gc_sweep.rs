@@ -4929,10 +4929,10 @@ mod tests {
         assert_eq!(session["ended_by"], "reap-sweep");
         assert!(plan_stale_do_rows(&home).is_empty());
 
-        let sha_before = graph_store::file_content_version(&path);
+        let version_before = crate::backlog::version(&path).unwrap();
         let (settled, _) = settle_stale_do_rows(&home);
         assert!(settled.is_empty());
-        assert_eq!(graph_store::file_content_version(&path), sha_before);
+        assert_eq!(crate::backlog::version(&path).unwrap(), version_before);
         std::fs::remove_dir_all(&base).ok();
     }
 

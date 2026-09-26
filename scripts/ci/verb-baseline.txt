@@ -89,7 +89,6 @@ inbox day end
 inbox day start
 inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
-inbox law set
 inbox notify
 inbox operator ack
 inbox operator list
@@ -110,7 +109,6 @@ king init
 king manifest-path
 king shape
 king term
-law set
 lint
 loops
 loops resume-all

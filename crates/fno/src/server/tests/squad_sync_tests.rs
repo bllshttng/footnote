@@ -245,6 +245,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         rows: Vec::new(),
         branches: HashMap::new(),
         tails: HashMap::new(),
+        ctx: HashMap::new(),
         read_ok: true,
     });
     assert_eq!(
@@ -256,6 +257,7 @@ fn daemon_fold_reaps_absent_spawned_names_only_on_a_good_read() {
         rows: Vec::new(),
         branches: HashMap::new(),
         tails: HashMap::new(),
+        ctx: HashMap::new(),
         read_ok: false,
     });
     assert_eq!(

@@ -119,37 +119,23 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
         }
     }
 
-    if graph.exists() {
-        let text = std::fs::read_to_string(graph).map_err(|error| error.to_string())?;
-        if !text.trim().is_empty() {
-            let document: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{} is invalid JSON: {error}", graph.display()))?;
-            if let Some(entries) = document.get("entries").and_then(Value::as_array) {
-                for entry in entries {
-                    let Some(node_id) = entry.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(decisions) = entry.get("decisions").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    for (position, reference) in decisions.iter().enumerate() {
-                        let Some(event_id) = reference.get("decision_id").and_then(Value::as_str)
-                        else {
-                            return Err(format!(
-                                "decisions import: node {node_id} decision at position {} has no decision_id",
-                                position + 1
-                            ));
-                        };
-                        if !event_exists(&transaction, event_id)? {
-                            return Err(format!(
-                                "decisions import: node {node_id} references missing decision {event_id}"
-                            ));
-                        }
-                        attach_node(&transaction, node_id, event_id)?;
-                    }
-                }
-            }
-        }
+    let orphan: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT nd.node_id, nd.event_id
+             FROM node_decisions nd
+             LEFT JOIN decisions d ON d.event_id = nd.event_id
+             WHERE d.event_id IS NULL
+             ORDER BY nd.node_id, nd.event_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("decisions import: cannot validate node references: {error}"))?;
+    if let Some((node_id, event_id)) = orphan {
+        return Err(format!(
+            "decisions import: node {node_id} references missing decision {event_id}"
+        ));
     }
 
     super::stamp_meta(&transaction, "decisions_imported", "1")?;
@@ -329,18 +315,6 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
     Ok(event_id.to_string())
 }
 
-fn event_exists(connection: &Connection, event_id: &str) -> Result<bool, String> {
-    connection
-        .query_row(
-            "SELECT 1 FROM decisions WHERE event_id = ?1",
-            params![event_id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string())
-}
-
 fn attach_subject(connection: &Connection, event: &Value, event_id: &str) -> Result<(), String> {
     let Some(node_id) = event
         .get("data")
@@ -425,23 +399,41 @@ mod tests {
     fn decisions_import_rejects_an_orphan_node_reference() {
         let temp = TempDir::new().unwrap();
         let graph = temp.path().join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::json!({
-                "entries": [{
-                    "id": "x-node",
-                    "decisions": [{"decision_id": "d-missing"}]
-                }]
-            })
-            .to_string(),
-        )
+        let mut connection = crate::backlog::open(&graph).unwrap();
+        connection
+            .execute(
+                "DELETE FROM graph_meta WHERE key = 'decisions_imported'",
+                [],
+            )
+            .unwrap();
+        let node = crate::backlog::model::Node::from_json(&serde_json::json!({
+            "id": "x-node",
+            "slug": "node",
+            "title": "Node",
+            "type": "feature",
+            "status": "ready",
+            "priority": "p2"
+        }))
         .unwrap();
+        crate::backlog::nodes::save(&connection, &node).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO node_decisions (node_id, event_id, seq)
+                 VALUES ('x-node', 'd-missing', 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
         std::fs::write(
             temp.path().join("decisions.jsonl"),
             serde_json::to_string(&event("d-present")).unwrap() + "\n",
         )
         .unwrap();
-        let mut connection = connection();
 
         let error = import_if_needed(&mut connection, &graph).unwrap_err();
 

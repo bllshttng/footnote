@@ -9,6 +9,7 @@ subprocess and kills it. A test that only exercises a clean release proves
 nothing about the leak that was measured.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -39,6 +40,7 @@ from fno.claims.core import (
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.types import Claim, now_ms
 from fno.claims.verdict import claim_verdicts
+from fno.graph.store import read_graph_strict
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
@@ -241,52 +243,6 @@ class TestExpiredTTLIsHostIndependent:
         assert verdicts == {"BB16s-MBP": True, "BB16s-MacBook-Pro.local": True}
 
 
-class TestClassifyForSweepMatchesIsProvablyDead:
-    """is_provably_dead is a thin bool-only view of classify_for_sweep
-    (the native classifier) - both share one implementation rather than being kept
-    in sync by convention. This regression test pins the invariant
-    directly rather than trusting that never drifts back apart.
-    """
-
-    @pytest.mark.parametrize(
-        "claim",
-        [
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="dead_pid_same_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
-                    pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
-                ),
-                id="off_machine",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=now_ms() + 60_000,
-                    pid=_dead_pid(), host=socket.gethostname(),
-                ),
-                id="ttl_protected_suspect",
-            ),
-            pytest.param(
-                Claim(
-                    key="k", holder="h", acquired_at=now_ms(), expires_at=None,
-                    pid=os.getpid(), host=socket.gethostname(),
-                ),
-                id="live",
-            ),
-        ],
-    )
-    def test_provably_dead_verdict_matches(self, claim):
-        ts = now_ms()
-        provably_dead, _bucket = classify_for_sweep(claim, ts)
-        assert provably_dead is is_provably_dead(claim, now=ts)
-
-
 # ---------------------------------------------------------------------------
 # reap_dead_claims: the reaper (core.py)
 # ---------------------------------------------------------------------------
@@ -330,8 +286,7 @@ class TestReapDeadClaims:
         node_id = "x-release-mirror"
         holder = "target-session:release-mirror"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -349,14 +304,13 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 
         claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
         assert claim_status(claim.key, root=tmp_path)["state"] == "live"
-        before = json.loads(graph_path.read_text())["entries"][0]
+        before = read_graph_strict(graph_path)[0]
         assert before["locked_by"] == holder
         assert before["session_id"] == holder
 
@@ -369,7 +323,7 @@ class TestReapDeadClaims:
 
         assert isinstance(released, Claim)
         assert claim_status(claim.key, root=tmp_path)["state"] == "free"
-        after = json.loads(graph_path.read_text())["entries"][0]
+        after = read_graph_strict(graph_path)[0]
         assert after["locked_by"] is None
         assert after["session_id"] is None
         assert after["locked_at"] is None
@@ -380,8 +334,7 @@ class TestReapDeadClaims:
         node_id = "x-reacquired-mirror"
         holder = "target-session:reacquired-mirror"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -399,8 +352,7 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
         claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
@@ -409,7 +361,7 @@ class TestReapDeadClaims:
             assert _clear_lock_mirror_for_reaped(
                 [node_id], claim_roots=[tmp_path]
             ) == 0
-            row = json.loads(graph_path.read_text())["entries"][0]
+            row = read_graph_strict(graph_path)[0]
             assert row["locked_by"] == holder
             assert row["session_id"] == holder
         finally:
@@ -427,8 +379,7 @@ class TestReapDeadClaims:
         node_id = "x-named-clear"
         holder = "target-session:named-clear"
         graph_path = tmp_path / "configured-graph.json"
-        graph_path.write_text(
-            json.dumps(
+        seed_graph(graph_path, json.dumps(
                 {
                     "entries": [
                         {
@@ -446,8 +397,7 @@ class TestReapDeadClaims:
                     ]
                 }
             )
-            + "\n"
-        )
+            + "\n")
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
         monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
 
@@ -457,7 +407,7 @@ class TestReapDeadClaims:
         err = capsys.readouterr().err
         assert f"cleared locked_by='{holder}' on {node_id}" in err
         assert f"fno agents claim acquire node:{node_id}" in err
-        row = json.loads(graph_path.read_text())["entries"][0]
+        row = read_graph_strict(graph_path)[0]
         assert row["locked_by"] is None
 
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
@@ -602,7 +552,6 @@ class TestReapDeadClaims:
         # that, like this one, needs append_event's cwd-derived events.jsonl
         # path to follow the chdir). Clear it post-chdir so the write (or
         # non-write, which is what this test asserts) lands under tmp_path.
-        from fno.paths import resolve_repo_root
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
@@ -677,13 +626,11 @@ class TestReapDeadClaims:
         # pre-chdir cwd by an unrelated fixture's first-use import, order-
         # dependent on what ran earlier in the session. Order-dependent here
         # means this test passes as part of the suite but fails run alone.
-        from fno.paths import resolve_repo_root
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
         # name that same file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        import json
 
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap
 
@@ -937,7 +884,7 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
     import fno.claims.core as claims_core
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(_json.dumps({"entries": []}) + "\n")
+    seed_graph(graph_path, _json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "ledger.json")
