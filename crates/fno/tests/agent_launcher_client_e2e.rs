@@ -353,7 +353,10 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
     type_and_settle(&mut h, b"\x1b");
     type_and_settle(&mut h, b"\x1b");
     let screen = h.wait_screen(10, |s| !s.contains("new agent"));
-    assert!(!screen.contains("new agent"), "the composer closes: {screen}");
+    assert!(
+        !screen.contains("new agent"),
+        "the composer closes: {screen}"
+    );
 }
 
 #[test]
