@@ -1,4 +1,4 @@
-//! `fno-agents backlog-update` : the one patch door for stored node
+//! `fno-agents backlog update` : the one patch door for stored node
 //! fields, status included. Status is never a stored input - the derivation
 //! ladder rewrites it from facts on every write - so `--status X` changes the
 //! facts that derive X, recomputes, and refuses unless the readback agrees.
@@ -1114,13 +1114,13 @@ pub fn render_text(receipt: &PatchReceipt) -> String {
     lines.join("\n")
 }
 
-/// `fno-agents backlog-update`: exit 0 applied or unchanged, 2 refused, 1
+/// `fno-agents backlog update`: exit 0 applied or unchanged, 2 refused, 1
 /// usage or store error.
 pub fn run_update(args: &[String]) -> i32 {
     let (req, graph, json_out) = match parse_args(args) {
         Ok(parsed) => parsed,
         Err((code, message)) => {
-            eprintln!("fno-agents backlog-update: {message}");
+            eprintln!("fno-agents backlog update: {message}");
             return code;
         }
     };
