@@ -60,11 +60,17 @@ def _native_summary(history_path: Path, stale_days: int) -> Optional[dict[str, A
     return payload if isinstance(payload, dict) else None
 
 
-def _native_qualification(history_path: Path, manifest_path: Path) -> Optional[dict[str, Any]]:
-    """The native qualification projection (fno-agents evals-trend, stdin
-    qualification op); None when the door is unreachable or answers a
-    non-dict. A missing history file is valid input: the fold answers with
-    every scenario missing, which is the honest nothing-ran report."""
+def qualification_summary(
+    manifest_path: Path, history_path: Optional[Path] = None
+) -> Optional[dict[str, Any]]:
+    """One read of the native qualification projection (evals-trend stdin
+    qualification op); None when the door is unreachable. A missing history
+    file is valid input: the fold answers with every scenario missing. Never
+    raises, never re-folds."""
+    if history_path is None:
+        from fno import paths as _paths
+
+        history_path = _paths.evals_history()
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
@@ -76,20 +82,6 @@ def _native_qualification(history_path: Path, manifest_path: Path) -> Optional[d
     except VerbUnavailable:
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def qualification_summary(
-    manifest_path: Path,
-    history_path: Optional[Path] = None,
-) -> Optional[dict[str, Any]]:
-    """One read of the release qualification projection: the declared
-    expected set joined against eval history by the native fold. None when
-    the native door is unreachable; never raises, never re-folds."""
-    if history_path is None:
-        from fno import paths as _paths
-
-        history_path = _paths.evals_history()
-    return _native_qualification(history_path, manifest_path)
 
 
 class GraduateError(ValueError):
