@@ -140,11 +140,13 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
-/// The sideline footer's `+ new` and `☰ menu` labels (US4). The menu
+/// The sideline footer's `+ new` and `menu` labels (US4). The menu
 /// button rides the existing new-workspace footer row's right edge when the
-/// panel is wide enough (see [`View::footer_menu_range`]).
+/// panel is wide enough (see [`View::footer_menu_range`]). ASCII only: the
+/// former `☰` is an ambiguous-width glyph some terminals render wide, which
+/// displaced that row's whole line (the screenshot review's stray fragments).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
-const FOOTER_MENU: &str = "☰ menu";
+const FOOTER_MENU: &str = "menu";
 /// How long a pending prefix chord waits before the hint bar paints.
 /// Zero: the bar paints at once; `prefix+?` shows the full table.
 const HINT_DELAY: Duration = Duration::ZERO;

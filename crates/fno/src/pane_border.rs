@@ -59,8 +59,6 @@ pub enum Part {
     Border,
     /// The pane's name inside the top-left tab.
     Name,
-    /// The focused tab's `▐`/`▌` caps (absent when unfocused).
-    Cap,
     /// The status glyph (`●`, `▲`, ...).
     Glyph,
     /// The status word (`Work`, `Input`, ...).
@@ -163,31 +161,28 @@ fn bottom_left(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
 }
 
 /// The bottom-right ctx span: ` ctx 49% `, then one fill cell before the
-/// corner (the mock's `─╯`).
-fn bottom_right(f: &EdgeFields) -> Vec<(char, Part)> {
+/// corner (the mock's `─╯`). Step 1 of the drop ladder drops it whole.
+fn bottom_right(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
     let mut row = Vec::new();
-    if let Some(c) = f.ctx {
-        seg(&mut row, &format!(" ctx {c} "), Part::Ctx);
-        row.push(('─', Part::Border));
+    if step < 1 {
+        if let Some(c) = f.ctx {
+            seg(&mut row, &format!(" ctx {c} "), Part::Ctx);
+            row.push(('─', Part::Border));
+        }
     }
     row
 }
 
-/// The name tab: `▐ name ▌` focused, `─ name ─` otherwise, both the same
-/// width so focus never moves the drop step or the grip.
-fn tab(name: &str, focused: bool) -> Vec<(char, Part)> {
+/// The name tab: `─ name ─`, the title set into the rule (the btop look the
+/// operator picked over the herdr caps). Focus changes the tab's COLOR, never
+/// its shape, so focus never moves the drop step or the grip.
+fn tab(name: &str) -> Vec<(char, Part)> {
     let mut row = Vec::new();
-    row.push((
-        if focused { '▐' } else { '─' },
-        if focused { Part::Cap } else { Part::Border },
-    ));
+    row.push(('─', Part::Border));
     row.push((' ', Part::Border));
     seg(&mut row, name, Part::Name);
     row.push((' ', Part::Border));
-    row.push((
-        if focused { '▌' } else { '─' },
-        if focused { Part::Cap } else { Part::Border },
-    ));
+    row.push(('─', Part::Border));
     row
 }
 
@@ -202,7 +197,7 @@ fn tab(name: &str, focused: bool) -> Vec<(char, Part)> {
 /// bottom edge walks 0, 1 (drop ctx), 2 (drop the branch), 5 (ellipsize the
 /// node). Each edge stops at the first step that fits; a narrow top edge
 /// never costs the bottom edge its ctx.
-pub fn edges(f: &EdgeFields, r: Rect, grip: bool, focused: bool) -> Edges {
+pub fn edges(f: &EdgeFields, r: Rect, grip: bool) -> Edges {
     let w = r.cols as usize;
     let inner = w - 2; // between the corners
                        // Grip placement mirrors client grip_span: the centre 3 cells.
@@ -250,7 +245,7 @@ pub fn edges(f: &EdgeFields, r: Rect, grip: bool, focused: bool) -> Edges {
     let name_max = tab_room.saturating_sub(4).max(1);
     let top = {
         let mut row = vec![('╭', Part::Border)];
-        row.extend(tab(&fit_ellipsis(f.name, name_max), focused));
+        row.extend(tab(&fit_ellipsis(f.name, name_max)));
         if let Some(g) = g0 {
             let used = cols_of(&row) - 1;
             for _ in used..g - 1 {
@@ -277,31 +272,37 @@ pub fn edges(f: &EdgeFields, r: Rect, grip: bool, focused: bool) -> Edges {
     };
 
     // -- bottom edge ----------------------------------------------------
-    // No grip on the bottom edge: left span, fill, right span.
-    let ctx = bottom_right(f);
+    // No grip on the bottom edge: left span, fill, right span. The ladder
+    // drops whole spans: step 1 the ctx span, step 2 the branch; whatever
+    // survives is ellipsized to the room left (fit_row).
     let mut bottom_step = 0;
+    let mut left = bottom_left(f, 0);
+    let mut ctx = bottom_right(f, 0);
     let mut found = false;
-    // `1` before the left span (the mock's `╰─`), `1` after the ctx cell.
-    let fixed = 1 + cols_of(&ctx);
     for step in [0usize, 1, 2] {
         let cand = bottom_left(f, step);
-        let need = 1 + cols_of(&cand) + cols_of(&ctx);
-        if need <= inner {
+        let cctx = bottom_right(f, step);
+        // `1` before the left span (the mock's `╰─`).
+        if 1 + cols_of(&cand) + cols_of(&cctx) <= inner {
             bottom_step = step;
+            left = cand;
+            ctx = cctx;
             found = true;
             break;
         }
     }
     if !found {
-        // Even the bare node cannot sit beside the ctx span: drop the branch
-        // AND the ctx and cut the node (the plan's steps 2 and 5 together).
+        // Even the bare node span cannot sit on its own: name the deepest
+        // drop and let fit_row cut it to whatever room is left.
         bottom_step = 2;
+        left = bottom_left(f, 2);
+        ctx = Vec::new();
     }
-    let node_max = inner.saturating_sub(fixed).max(1);
+    let node_max = inner.saturating_sub(1 + cols_of(&ctx)).max(1);
     let bottom = {
         let mut row = vec![('╰', Part::Border)];
         row.push(('─', Part::Border));
-        row.extend(fit_row(&bottom_left(f, bottom_step), node_max));
+        row.extend(fit_row(&left, node_max));
         let used = cols_of(&row) - 1;
         for _ in used..inner - cols_of(&ctx) {
             row.push(('─', Part::Border));
@@ -368,14 +369,14 @@ mod tests {
     // AC2-HP
     #[test]
     fn full_fields_lay_out_both_edges_on_step_zero() {
-        let e = edges(&full(), rect(100, 12), false, true);
+        let e = edges(&full(), rect(100, 12), false);
         let top = s(&e.top);
-        assert!(top.starts_with("╭▐ king-5317-succeed-g3 ▌─"), "{top}");
+        assert!(top.starts_with("╭─ king-5317-succeed-g3 ─"), "{top}");
         assert!(top.ends_with(" ● Work · opus-5 ╮"), "{top}");
         assert_eq!(cols_of(&e.top), 100);
         let bottom = s(&e.bottom);
         assert!(
-            bottom.starts_with("╰─ node7 · main ─") && bottom.ends_with(" ctx 49% ─╯"),
+            bottom.starts_with("╰─ node7 · main  ─") && bottom.ends_with(" ctx 49% ─╯"),
             "{bottom}"
         );
         assert_eq!(cols_of(&e.bottom), 100);
@@ -387,7 +388,7 @@ mod tests {
     fn bottom_drops_ctx_first_when_only_it_overflows() {
         // 24 cols: the ctx span (9) plus node (15) plus 2 fixed fill = 26 > 22
         // inner, and nothing else can give: ctx drops.
-        let e = edges(&full(), rect(24, 12), false, true);
+        let e = edges(&full(), rect(24, 12), false);
         assert_eq!(e.bottom_step, 1, "{:?}", s(&e.bottom));
         assert!(!s(&e.bottom).contains("49%"));
         assert!(s(&e.bottom).contains("node7 · main"));
@@ -395,14 +396,14 @@ mod tests {
 
     #[test]
     fn bottom_drops_branch_next() {
-        // 20 cols with a 7-char node: ` x-abc12 ` (9) plus ctx (10) plus the
-        // `╰─` (2) = 21 > 18 inner; dropping ctx, the branch still cannot sit
-        // (` · main ` spans 9), so the span falls to the bare node.
+        // 16 cols with a 7-char node: step 1 (ctx dropped) still needs
+        // ` x-abc12 · main ` plus the `╰─` = 17 of 14 inner, so the branch
+        // drops too and the bare node span rides alone.
         let f = EdgeFields {
             node: Some("x-abc12"),
             ..full()
         };
-        let e = edges(&f, rect(20, 12), true, true);
+        let e = edges(&f, rect(16, 12), true);
         assert_eq!(e.bottom_step, 2, "{:?}", s(&e.bottom));
         assert!(s(&e.bottom).contains(" x-abc12 "), "{:?}", s(&e.bottom));
         assert!(!s(&e.bottom).contains("main"), "{:?}", s(&e.bottom));
@@ -411,10 +412,11 @@ mod tests {
 
     #[test]
     fn bottom_ellipsizes_the_node_last() {
-        // 10 cols: even the bare node span cannot fit; it cuts to `…`.
-        let e = edges(&full(), rect(10, 12), false, true);
+        // 9 cols: even the bare node span cannot fit (`╰─` plus ` node7 `
+        // needs 9 of 7 inner); it cuts to `…`.
+        let e = edges(&full(), rect(9, 12), false);
         assert!(s(&e.bottom).contains('…'), "{:?}", s(&e.bottom));
-        assert_eq!(cols_of(&e.bottom), 10);
+        assert_eq!(cols_of(&e.bottom), 9);
     }
 
     #[test]
@@ -422,7 +424,7 @@ mod tests {
         // 40 cols: the full tab (25) plus the full status span (17) needs 43
         // of 38 inner cells; dropping the model frees 9 and the whole name
         // survives.
-        let e = edges(&full(), rect(40, 12), false, true);
+        let e = edges(&full(), rect(40, 12), false);
         assert_eq!(e.top_step, 3, "{:?}", s(&e.top));
         assert!(s(&e.top).contains("● Work"), "{:?}", s(&e.top));
         assert!(!s(&e.top).contains("opus-5"), "{:?}", s(&e.top));
@@ -435,8 +437,9 @@ mod tests {
 
     #[test]
     fn top_drops_the_word_next_glyph_survives() {
-        // 35 cols: ` ● Work ` beside the full tab needs 34 of 33 inner.
-        let e = edges(&full(), rect(35, 12), false, true);
+        // 33 cols: the full tab (23) plus ` ● Work ` (8) plus the separator
+        // needs 32 of 31 inner; dropping the word frees 5 and the glyph stays.
+        let e = edges(&full(), rect(33, 12), false);
         assert_eq!(e.top_step, 4, "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert!(!s(&e.top).contains("Work"), "{:?}", s(&e.top));
@@ -449,23 +452,19 @@ mod tests {
 
     #[test]
     fn top_cuts_the_name_last() {
-        // 30 cols: even the bare glyph cannot sit beside the full tab; the
-        // word drops AND the name is cut (step 5, the last resort).
-        let e = edges(&full(), rect(30, 12), false, true);
+        // 28 cols: even the bare glyph cannot sit beside the full tab; the
+        // word drops AND the name is cut (the last resort: name_max 18).
+        let e = edges(&full(), rect(28, 12), false);
         assert_eq!(e.top_step, 4, "{:?}", s(&e.top));
-        assert!(
-            s(&e.top).contains("king-5317-succeed-g…"),
-            "{:?}",
-            s(&e.top)
-        );
+        assert!(s(&e.top).contains("king-5317-succeed-…"), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
-        assert_eq!(cols_of(&e.top), 30);
+        assert_eq!(cols_of(&e.top), 28);
     }
 
     #[test]
     fn top_ellipsizes_the_name_at_the_floor() {
         // 20 cols WITH a grip: the tab zone is 6, the name gets 2 => `k…`.
-        let e = edges(&full(), rect(20, 12), true, true);
+        let e = edges(&full(), rect(20, 12), true);
         assert!(s(&e.top).contains("k…"), "{:?}", s(&e.top));
         assert!(s(&e.top).contains('●'), "{:?}", s(&e.top));
         assert_eq!(cols_of(&e.top), 20);
@@ -475,24 +474,19 @@ mod tests {
     fn only_top_overflow_keeps_ctx_on_the_bottom() {
         // 34 cols: the tab (25) + status (17) cannot both fit, but the bottom
         // edge has room for everything.
-        let e = edges(&full(), rect(34, 12), false, true);
+        let e = edges(&full(), rect(34, 12), false);
         assert!(e.top_step > 0, "{:?}", s(&e.top));
         assert_eq!(e.bottom_step, 0, "{:?}", s(&e.bottom));
         assert!(s(&e.bottom).contains("49%"));
     }
 
-    // AC2-FOCUS
+    // AC2-FOCUS: focus is paint-side color only, so the geometry carries no
+    // focus input at all - the tab is byte-identical either way.
     #[test]
-    fn focus_swaps_the_caps_never_the_width() {
-        let on = edges(&full(), rect(60, 12), true, true);
-        let off = edges(&full(), rect(60, 12), true, false);
-        assert_eq!(s(&on.top).replace('▐', "─").replace('▌', "─"), s(&off.top));
-        assert_eq!(on.top_step, off.top_step);
-        assert!(on
-            .top
-            .iter()
-            .any(|(c, p)| *p == Part::Cap && (*c == '▐' || *c == '▌')));
-        assert!(!off.top.iter().any(|(_, p)| *p == Part::Cap));
+    fn the_tab_shape_never_carries_focus() {
+        let e = edges(&full(), rect(60, 12), true);
+        assert!(!e.top.iter().any(|(c, _)| *c == '▐' || *c == '▌'));
+        assert!(s(&e.top).starts_with("╭─ king-5317-succeed-g3 ─"));
     }
 
     // AC2-ERR
@@ -502,7 +496,7 @@ mod tests {
             name: "k".repeat(200).leak(),
             ..full()
         };
-        let e = edges(&long, rect(40, 12), true, true);
+        let e = edges(&long, rect(40, 12), true);
         assert_eq!(cols_of(&e.top), 40);
         assert_eq!(s(&e.top).chars().next(), Some('╭'));
         assert_eq!(s(&e.top).chars().last(), Some('╮'));
@@ -511,10 +505,13 @@ mod tests {
             name: "패널프레임테스트 라벨",
             ..full()
         };
-        let e = edges(&cjk, rect(30, 12), false, true);
-        assert_eq!(cols_of(&e.top), 30);
+        // 29 cols: the 21-col CJK name plus its tab costs 25 and the glyph
+        // span ` ●` needs 2 more of 27 inner, so the name cuts to 20 and
+        // takes the ellipsis.
+        let e = edges(&cjk, rect(29, 12), false);
+        assert_eq!(cols_of(&e.top), 29);
         assert!(s(&e.top).contains('…'));
-        assert_eq!(cols_of(&e.bottom), 30);
+        assert_eq!(cols_of(&e.bottom), 29);
     }
 
     // AC3-HP
@@ -528,9 +525,9 @@ mod tests {
             branch: None,
             ctx: None,
         };
-        let e = edges(&bare, rect(40, 12), false, true);
+        let e = edges(&bare, rect(40, 12), false);
         let top = s(&e.top);
-        assert!(top.starts_with("╭▐ zsh ▌─") && top.ends_with('╮'), "{top}");
+        assert!(top.starts_with("╭─ zsh ─") && top.ends_with('╮'), "{top}");
         assert_eq!(cols_of(&e.top), 40);
         assert_eq!(s(&e.bottom), format!("╰{}╯", "─".repeat(38)));
     }

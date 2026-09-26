@@ -374,14 +374,16 @@ impl View {
             branch: meta.and_then(|m| m.branch.as_deref()),
             ctx: meta.and_then(|m| m.ctx.as_deref()),
         };
-        let laid = crate::pane_border::edges(&fields, rect, has_grip, focused_pane);
+        let laid = crate::pane_border::edges(&fields, rect, has_grip);
         let (border_fg, border_flags) = if focused_pane {
             (self.theme.accent, 0)
         } else {
             (Color::Default, cell_flags::DIM)
         };
+        // The name rides the rule: focused = accent bold, dim otherwise. No
+        // fill and no caps - focus reads through the border color alone.
         let name_style = if focused_pane {
-            (self.theme.accent, cell_flags::INVERSE | cell_flags::BOLD)
+            (self.theme.accent, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };
@@ -394,7 +396,6 @@ impl View {
                     _ => dim,
                 },
                 Part::Name => name_style,
-                Part::Cap => (self.theme.accent, 0),
                 // Glyph and word wear the lattice fg exactly as the sideline
                 // paints them: accent only on Blocked, flags on the glyph.
                 Part::Glyph => match status {

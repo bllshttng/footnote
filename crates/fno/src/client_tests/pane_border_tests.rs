@@ -117,7 +117,7 @@ fn pane_border_renders_the_focused_frame() {
     let top = &lines[1];
     let seg = |a: usize, b: usize| top[a..b].iter().collect::<String>();
     // Focused tab with caps, cut to the 14-cell zone beside the grip.
-    assert!(seg(64, 99).contains("▐ pane-b-… ▌"), "{top:?}");
+    assert!(seg(64, 99).contains("─ pane-b ─"), "{top:?}");
     // Status on the right zone.
     assert!(seg(64, 99).contains("● Work"), "{top:?}");
     // Rounded corners.
@@ -141,7 +141,10 @@ fn pane_border_keeps_a_divider_beside_an_unframed_pane() {
     // origin and the seam beside it stays a real divider.
     let v = narrow_pair();
     let frame = v.compose();
-    let row1: Vec<char> = (0..frame.cols as usize).map(|c| frame.cells[c].c).collect();
+    // Row 1 of the screen: row 0 is the tab bar.
+    let row1: Vec<char> = (0..frame.cols as usize)
+        .map(|c| frame.cells[frame.cols as usize + c].c)
+        .collect();
     assert_eq!(row1[28], 'a', "the narrow pane's row 0 at its rect origin");
     assert_eq!(row1[47], '│', "the seam keeps its glyph");
     assert_eq!(row1[48], '╭', "the framed neighbour owns its own border");
@@ -156,7 +159,7 @@ fn pane_border_renders_a_metaless_pane_as_shell() {
     let top: String = (64..99)
         .map(|c| frame.cells[frame.cols as usize + c].c)
         .collect();
-    assert!(top.contains("▐ shell ▌"), "{top}");
+    assert!(top.contains("─ shell ─"), "{top}");
     assert!(
         !top.contains("49%") && !top.contains("main") && !top.contains("n-abc12"),
         "{top}"
@@ -174,7 +177,9 @@ fn pane_border_diff_only_the_top_edge_moves() {
     let a = v1.compose();
     let b = v2.compose();
     let mut moved = Vec::new();
-    for r in 0..a.rows as usize {
+    // Row 0 is the tab bar: its rollup glyph reads the agent's badge by
+    // design (US4), so only the pane area below it proves the frame diff.
+    for r in 1..a.rows as usize {
         for c in 28..a.cols as usize {
             if a.cells[r * a.cols as usize + c] != b.cells[r * a.cols as usize + c] {
                 moved.push(r);
@@ -233,7 +238,6 @@ fn pane_border_renders_before_after_dumps() {
                 cols: w,
             },
             w >= 40,
-            true,
         );
         println!("=== edges at {w} cols (grip {}) ===", w >= 40);
         println!("{}", e.top.iter().map(|(c, _)| c).collect::<String>());
