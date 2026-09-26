@@ -10,7 +10,7 @@
 //! observations, undeclared types, and every always-audit shape still
 //! insert one ordinary row each.
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 
 use super::{hex, insert_v2_row, RowInput};
@@ -292,7 +292,7 @@ fn flush_pending_window(
     ty: &str,
     subject: &str,
 ) -> Result<(), String> {
-    let (window_started, window_finished, last_ts_ms, last_line): (i64, i64, i64, String) = tx
+    let (window_started, window_finished, last_ts_ms, last_line): (i64, i64, i64, String) = match tx
         .query_row(
             "SELECT s.window_started_ms, s.window_finished_ms, p.ts_ms, p.line
              FROM event_observation_state s
@@ -304,7 +304,13 @@ fn flush_pending_window(
             params![scope_key, ty, subject],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .map_err(|e| e.to_string())?;
+        .optional()
+        .map_err(|e| e.to_string())?
+    {
+        Some(row) => row,
+        // Nothing pending: the window closes with no summary to write.
+        None => return Ok(()),
+    };
     let count = pending_count(tx, scope_key, ty, subject);
     let mut value: serde_json::Value = serde_json::from_str(&last_line)
         .map_err(|e| format!("pending observation line is not JSON: {e}"))?;

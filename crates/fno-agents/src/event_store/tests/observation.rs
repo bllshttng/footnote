@@ -302,3 +302,34 @@ fn unavailable_observation_state_is_an_explicit_failure() {
         .unwrap();
     assert_eq!(guards, 1, "no row was added beyond the first");
 }
+
+#[test]
+fn flush_with_nothing_pending_closes_the_window_without_a_summary() {
+    // A transition followed by a fingerprint change (or a heartbeat-expired
+    // poll) with zero suppressed occurrences: the flush is a silent no-op,
+    // never an error, and the new observation lands as an ordinary
+    // transition.
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let mk = |ts: &str, tool: &str| {
+        json!({"ts": ts, "type": "guard_decision", "source": "hook",
+               "data": {"guard": "git-protection", "decision": "allow", "tool": tool}})
+    };
+    let first =
+        append_envelope(&live, &mk("2026-09-10T12:00:00Z", "Bash").to_string(), None).unwrap();
+    assert!(first.inserted);
+    let second =
+        append_envelope(&live, &mk("2026-09-10T12:01:00Z", "Edit").to_string(), None).unwrap();
+    assert!(second.inserted, "the changed poll inserts as a transition");
+    assert!(!second.suppressed);
+    // Heartbeat expiry with nothing pending is the same no-op.
+    let third =
+        append_envelope(&live, &mk("2026-09-10T12:20:00Z", "Edit").to_string(), None).unwrap();
+    assert!(third.inserted);
+    let rows = query_events(&live, &EventQuery::default()).unwrap();
+    assert_eq!(rows.len(), 3, "three transitions, no summary row: {rows:?}");
+    assert!(
+        rows.iter().all(|r| !r.line.contains("occurrence_count")),
+        "no summary row exists: {rows:?}"
+    );
+}
