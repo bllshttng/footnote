@@ -1509,7 +1509,7 @@ def install(
     m.install(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+        install_path=m.default_agent_path(_resolve_fno_binary()),
         interval=_interval,
         dry_run=dry_run,
         activate=not no_activate,
@@ -1541,7 +1541,7 @@ def refresh() -> None:
     msg, _rc = m.refresh_watcher(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+        install_path=m.default_agent_path(_resolve_fno_binary()),
         interval=settings.pr_watch.interval_seconds,
         defer_when_ticking=True,
         caller="refresh",
@@ -1607,10 +1607,11 @@ def heal() -> None:
         msg, rc = m.refresh_watcher(
             launch_agents_dir=_LAUNCH_AGENTS_DIR,
             fno_binary=_resolve_fno_binary(),
-            install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+            install_path=m.default_agent_path(_resolve_fno_binary()),
             interval=settings.pr_watch.interval_seconds,
             defer_when_ticking=True,
             caller="heal",
+            force_bounce=True,  # a dead verdict re-registers; that is the cure
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:
@@ -1636,7 +1637,7 @@ def ensure_watcher_activated() -> str:
     return m.ensure_activated(
         launch_agents_dir=_LAUNCH_AGENTS_DIR,
         fno_binary=_resolve_fno_binary(),
-        install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+        install_path=m.default_agent_path(_resolve_fno_binary()),
         interval=load_settings().pr_watch.interval_seconds,
     )
 

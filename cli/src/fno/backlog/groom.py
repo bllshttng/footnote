@@ -469,8 +469,9 @@ _GROOM_PLIST = """\
     <string>groom</string>
   </array>
 
-  <!-- launchd launches with a minimal PATH; capture install-time PATH so
-       fno / gh / claude resolve without a login shell. -->
+  <!-- launchd launches with a minimal PATH; fixed install-location PATH
+       (default_agent_path) so fno / gh / claude resolve without a login shell
+       and the rendered bytes never depend on who ran the refresh. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -552,7 +553,7 @@ def install_groom_agent(
     import shutil
     import sys
 
-    from fno.pr_watch._install import bounce
+    from fno.pr_watch._install import _write_if_changed, bounce, default_agent_path
 
     if sys.platform != "darwin":
         return {
@@ -563,7 +564,12 @@ def install_groom_agent(
 
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
-    install_path = install_path if install_path is not None else os.environ.get("PATH", "")
+    # Caller-independent default: a PATH captured from the caller's environment
+    # re-renders different bytes per harness, and macOS posts a notice on every
+    # re-registration.
+    install_path = (
+        install_path if install_path is not None else default_agent_path(fno_binary)
+    )
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.
@@ -579,16 +585,22 @@ def install_groom_agent(
 
     plist_path = launch_agents_dir / f"{GROOM_LABEL}.plist"
     try:
-        launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(
-            render_groom_plist(
-                fno_binary=fno_binary,
-                install_path=install_path,
-                hour=hour,
-                workdir=workdir,
-            ),
-            encoding="utf-8",
+        plist_text = render_groom_plist(
+            fno_binary=fno_binary,
+            install_path=install_path,
+            hour=hour,
+            workdir=workdir,
         )
+        if not _write_if_changed(plist_path, plist_text):
+            # Identical bytes: skipping the bootstrap skips a launchd
+            # re-registration, which is what costs the user a macOS notice.
+            return {
+                "status": "unchanged",
+                "plist": str(plist_path),
+                "hour": hour,
+                "workdir": workdir,
+                "detail": "rendered plist matches installed; not re-registered",
+            }
     except OSError as exc:
         return {"status": "failed", "detail": f"write {plist_path}: {exc}"}
 

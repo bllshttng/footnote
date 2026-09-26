@@ -12,7 +12,9 @@ Design constraints (locked):
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
     Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
-  - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
+  - PATH rendered from fixed install locations (default_agent_path), never the
+    caller's environment: a caller-dependent PATH re-renders different bytes on
+    every refresh, and macOS posts a notice on every re-registration
 """
 
 from __future__ import annotations
@@ -94,8 +96,9 @@ _PLIST_TEMPLATE = """\
     <string>tick</string>
   </array>
 
-  <!-- launchd launches with a minimal PATH.  Capture install-time PATH so
-       gh / claude / uv are resolvable without a login shell. -->
+  <!-- launchd launches with a minimal PATH.  Fixed install-location PATH
+       (default_agent_path) so gh / claude / uv are resolvable without a login
+       shell and the rendered bytes never depend on who ran the refresh. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -151,6 +154,48 @@ def _xml_escape(value: str) -> str:
 # ---------------------------------------------------------------------------
 # PATH augmentation
 # ---------------------------------------------------------------------------
+
+
+_SYSTEM_PATH_ENTRIES = ["/usr/local/bin", "/usr/bin", "/bin"]
+
+
+def default_agent_path(fno_binary: str = "fno") -> str:
+    """Caller-independent PATH for rendered launchd plists.
+
+    Capturing the caller's ``$PATH`` made every refresh re-render different
+    bytes (a Codex caller bakes its own cryptexd entry), and macOS posts a
+    background-activity notice on every re-registration. launchd only needs to
+    resolve fno, gh, claude and uv, so derive the entries from fixed install
+    locations; nothing is read from the caller's environment.
+    """
+    entries: list[str] = []
+    if "/" in fno_binary:
+        entries.append(str(Path(fno_binary).parent))
+    for entry in [
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        *_SYSTEM_PATH_ENTRIES,
+    ]:
+        if entry not in entries:
+            entries.append(entry)
+    return ":".join(entries)
+
+
+def _write_if_changed(plist_path: Path, plist_text: str) -> bool:
+    """Write the plist only when the rendered bytes differ from disk.
+
+    launchd posts a background-activity notice on every re-registration, so
+    rewriting identical bytes would cost the user a macOS notice for nothing.
+    Returns True when the file was written.
+    """
+    try:
+        if plist_path.read_text(encoding="utf-8") == plist_text:
+            return False
+    except OSError:
+        pass  # absent or unreadable: write it
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_text, encoding="utf-8")
+    return True
 
 
 def _augment_path(install_path: str) -> str:
@@ -449,6 +494,7 @@ def refresh_watcher(
     interval: int = 600,
     defer_when_ticking: bool = False,
     caller: str = "unknown",
+    force_bounce: bool = False,
 ) -> tuple[str, int]:
     """Re-render the plist onto the current binary, then bounce. Post-update hook.
 
@@ -460,6 +506,12 @@ def refresh_watcher(
     by ``fno do pr watch refresh`` at the tail of ``fno doctor update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
+
+    Rendered bytes identical to the installed plist skip both the write and
+    the bounce: launchd posts a background-activity notice on every
+    re-registration, so an unchanged refresh must not re-register.
+    ``force_bounce=True`` overrides the skip when the job is already reported
+    dead or wedged - re-bootstrapping is then the cure, not the noise.
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     try:
@@ -469,10 +521,11 @@ def refresh_watcher(
             install_path=install_path,
             interval=interval,
         )
-        launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(plist_text, encoding="utf-8")
+        changed = _write_if_changed(plist_path, plist_text)
     except OSError as exc:
         return (f"failed to write plist {plist_path}: {exc}", 1)
+    if not changed and not force_bounce:
+        return (f"plist unchanged; not re-registered ({caller})", 0)
     return bounce(
         plist_path=plist_path, defer_when_ticking=defer_when_ticking, caller=caller
     )

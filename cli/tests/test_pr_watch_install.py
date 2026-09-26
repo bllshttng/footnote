@@ -2104,3 +2104,94 @@ def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
     result = CliRunner().invoke(app, ["pr-watch", "refresh"])
     assert result.exit_code == 0
     assert "Heal: armed; never ran" in result.stdout, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# An unchanged refresh must not re-register the agent
+# (launchd posts a macOS background-activity notice on every re-registration)
+# ---------------------------------------------------------------------------
+
+
+def test_default_agent_path_ignores_the_caller_environment(tmp_home, monkeypatch):
+    """Two callers with different PATHs derive the same launchd PATH."""
+    m = _install()
+    monkeypatch.setenv(
+        "PATH", "/var/run/com.apple.security.cryptexd/codex.system/usr/bin"
+    )
+    codex_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+    monkeypatch.setenv("PATH", "/Users/claude/only/bin")
+    claude_view = m.default_agent_path("/Users/x/.local/bin/fno-py")
+
+    assert codex_view == claude_view
+    assert "/opt/homebrew/bin" in codex_view and "/usr/bin" in codex_view
+
+
+def test_refresh_unchanged_skips_write_and_bounce(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            install_path="/usr/bin:/bin",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        interval=600,
+    )
+
+    assert rc == 0 and "unchanged" in msg
+    assert bounces == [], "an unchanged refresh must not re-register the agent"
+
+
+def test_refresh_changed_reregisters(tmp_home, tmp_launch_agents, monkeypatch):
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist>stale</plist>")
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        interval=600,
+    )
+
+    assert rc == 0 and len(bounces) == 1
+    assert "stale" not in plist.read_text()
+
+
+def test_refresh_force_bounce_reregisters_an_unchanged_plist(
+    tmp_home, tmp_launch_agents, monkeypatch
+):
+    """A dead/wedged verdict needs the re-bootstrap even with identical bytes."""
+    m = _install()
+    plist = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist.write_text(
+        m.render_plist(
+            launch_agents_dir=tmp_launch_agents,
+            fno_binary="/usr/local/bin/fno",
+            install_path="/usr/bin:/bin",
+            interval=600,
+        )
+    )
+    bounces: list = []
+    monkeypatch.setattr(m, "bounce", lambda **kw: bounces.append(kw) or ("bounced", 0))
+
+    msg, rc = m.refresh_watcher(
+        launch_agents_dir=tmp_launch_agents,
+        fno_binary="/usr/local/bin/fno",
+        install_path="/usr/bin:/bin",
+        interval=600,
+        force_bounce=True,
+    )
+
+    assert rc == 0 and len(bounces) == 1
