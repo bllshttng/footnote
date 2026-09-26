@@ -62,6 +62,9 @@ if [[ -f "$AGY_HOOK" ]]; then
         STUB_AGY_AGENTS="${TMP_DIR}/fno-agents-agy-stub"
         cat > "$STUB_AGY_AGENTS" <<STUB
 #!/usr/bin/env bash
+# state path routes through FNO_AGENTS_BIN now (x-271c); refuse it so the
+# env dump stays exclusive to the loop-check child this test pins.
+if [ "\$1" = "state" ]; then exit 1; fi
 env > "$AGY_DUMP"
 printf '{"decision":"allow","termination_reason":"DonePRGreen","message":"ok"}\n'
 exit 0

@@ -5540,7 +5540,6 @@ async fn handle_rm_with(
     }
     // Orphaned entries are removed with no subprocess action (AC8-FR); the
     // distinction is surfaced in the event for the operator's audit trail.
-    let was_orphaned = entry.status == AgentStatus::Orphaned;
     // Surface a removal-write failure rather than reporting removed:true while
     // the entry still persists (silent-failure review): a force-rm has already
     // killed the worker, so a swallowed write leaves a dangling row pointing at
@@ -5567,6 +5566,8 @@ async fn handle_rm_with(
     // mode). Nor can it report WHICH rows it dropped, so the identity match
     // above is also the only defense against dropping more than the one row
     // this request resolved -- checked below.
+    // Stamp BEFORE the removal publishes: a racing resolver must never see row-gone-but-no-tombstone.
+    let tombstone_error = rm_teardown::stamp_removed_session_tombstone(&ctx.home, &entry);
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| {
@@ -5692,8 +5693,7 @@ async fn handle_rm_with(
         "pane_session": pane_session,
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        // a confirmed pane stop's detail (pane killed, pid gone)
-        // rides here because `Removed` carries no reason of its own.
+        // a confirmed pane stop's detail rides here: `Removed` carries no reason.
         "pane_reason": pane_stop_detail.as_deref().or(pane_outcome.reason()),
         "worktree_receipt": worktree_receipt,
         "actor": audit.actor,
@@ -5702,9 +5702,9 @@ async fn handle_rm_with(
         "worktree_touched": worktree_touched,
         "worktree_outcome": worktree_outcome,
         "reclaimed_bytes": reclaimed_bytes,
-        "event_written": event_error.is_none(),
-        "event_reason": event_error,
-        "was_orphaned": was_orphaned,
+        "event_written": event_error.is_none(), "event_reason": event_error,
+        "tombstone_written": tombstone_error.is_none(), "tombstone_reason": tombstone_error,
+        "was_orphaned": entry.status == AgentStatus::Orphaned,
     });
     let mut response = Response::ok(req.id, result);
     release_stopped_claims_into(

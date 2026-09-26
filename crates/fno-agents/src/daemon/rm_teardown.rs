@@ -9,6 +9,7 @@
 
 use super::{Ctx, InterruptOutcome};
 use crate::codex_thread::stop_settle_bound;
+use crate::state::RegistryEntry;
 
 /// Interrupt the codex thread's in-flight turn, shut the actor down, and
 /// drop it from the map. Shared by the stop verb and rm: the caller that
@@ -93,4 +94,23 @@ pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Stamp the tombstone BEFORE the registry row is published absent, so a
+/// resolver racing this rm can never observe row-gone-but-no-tombstone and
+/// heal the session back under a fresh short-id name (the adopted duplicate
+/// that then blocked resume). Any harness: the store fallback adopts claude
+/// transcripts by the same door. A failed write rides the rm receipt
+/// (`tombstone_reason`), never refuses the removal. `None` when nothing was
+/// stamped (no session id) or the write landed; `Some` carries the error.
+pub(crate) fn stamp_removed_session_tombstone(
+    home: &crate::paths::AgentsHome,
+    entry: &RegistryEntry,
+) -> Option<String> {
+    let session_id = entry
+        .harness_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())?;
+    crate::rm_tombstone::record(home, entry.harness_name(), session_id).err()
 }

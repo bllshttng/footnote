@@ -18,7 +18,7 @@ DEFAULT_MAX_ENTRIES = 20
 def entries_for_scope(scope: str, *, faqs_dir: Path | None = None, max_entries: int = DEFAULT_MAX_ENTRIES) -> list[str]:
     """This scope's FAQ entries, oldest (by mtime) first, capped. Degrades to []."""
     from fno.paths import king_faqs_dir
-    from fno.plan._stamp import parse_frontmatter
+    from fno.state.io import read_frontmatter
 
     directory = faqs_dir if faqs_dir is not None else king_faqs_dir()
     try:
@@ -29,7 +29,7 @@ def entries_for_scope(scope: str, *, faqs_dir: Path | None = None, max_entries: 
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-            fields, _raw, _rest = parse_frontmatter(text)
+            fields, _body = read_frontmatter(path)
         except (OSError, ValueError):
             continue
         if fields.get("scope") == scope:

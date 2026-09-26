@@ -70,22 +70,11 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 def test_backlog_find_native_help_registers() -> None:
     """`backlog find --help` is the native binary's now; the flag decl still
     parses and the surface answers."""
-    import os as _os
-    import subprocess as _sp
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    proc = _sp.run(
-        [str(binary), "backlog", "find", "--help"],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Usage" in proc.stdout + proc.stderr
+    code, out, err = run_native("backlog", "find", "--help")
+    assert code == 0, err
+    assert "Usage" in out + err
 
 
 @pytest.fixture
@@ -106,36 +95,29 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _native_find(*args: str) -> tuple[int, str, str]:
-    import os as _os
-    import subprocess as _sp
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    proc = _sp.run(
-        [str(binary), "backlog", "find", *args],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    return proc.returncode, proc.stdout, proc.stderr
+    return run_native("backlog", "find", *args)
 
 
 def test_backlog_find_short_flags_match_long(tmp_graph: Path) -> None:
-    """AC4: `backlog find -p X -s Y -J` is byte-identical to the long form."""
+    """AC4: `backlog find -p X -s Y -d Z -J` is byte-identical to the long form.
+
+    The Phase 2 lowercase table's find pin moved here with the find port:
+    the native binary owns the surface, so the -p/-s/-d decls are readable
+    only at this door.
+    """
     seed_graph(tmp_graph, json.dumps({"entries": [
         {"id": "ab-sf000001", "title": "Short flag rollout", "status": "done",
          "domain": "code", "project": "fno"},
         {"id": "ab-sf000002", "title": "Unrelated thing", "status": "ready",
-         "domain": "code", "project": "other"},
+         "domain": "docs", "project": "other"},
     ]}) + "\n")
     long_code, long_out, long_err = _native_find(
-        "rollout", "--project", "fno", "--status", "done", "--json",
+        "rollout", "--project", "fno", "--status", "done", "--domain", "code", "--json",
     )
     short_code, short_out, _short_err = _native_find(
-        "rollout", "-p", "fno", "-s", "done", "-J",
+        "rollout", "-p", "fno", "-s", "done", "-d", "code", "-J",
     )
     assert long_code == 0, long_err
     assert short_code == long_code

@@ -49,7 +49,6 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
     _session_provenance,
 )
 from fno.graph.node_builder import register as _register_node_builder
-from fno.graph.rank import cmd_rank as _cmd_rank
 from fno.graph.api import cmd_version as _cmd_version
 # The roster renderer lives in its own module: this file is shrink-only and
 # the provenance change touches it. The alias keeps the historical name
@@ -1936,7 +1935,7 @@ def cmd_decompose(
         # child_plan_path below - DO NOT mutate it. For the set-expected
         # shell-out only, resolve a relative base against the epic's project
         # root (its stored cwd) so a decompose run from a subdirectory still
-        # locates the doc on disk; fno.plan._stamp resolves relative paths against
+        # locates the doc on disk; the writer resolves relative paths against
         # the process cwd, which would otherwise false-"missing" and skip
         # writing the count (reintroducing early graduation).
         if base and not os.path.isabs(base):
@@ -2345,9 +2344,9 @@ def cmd_decompose(
             if think_spawn_on_decompose_wave0(
                 project_root=Path(epic_cwd_box[0]) if epic_cwd_box[0] else None
             ):
-                from fno.plan._rollup import compute_waves
+                from fno.plan._project import plan_docs
 
-                wave_by_id, _ = compute_waves(epic_resolved_id, list(by_id.values()))
+                wave_by_id = (plan_docs("waves", epic_id=epic_resolved_id) or {}).get("wave_by_id", {})
                 wave0_ids = {cid for cid, w in wave_by_id.items() if w == 0}
             for cid in spec_ids:
                 child = by_id.get(cid)
@@ -3443,13 +3442,12 @@ def cmd_update(
     linked_size: Optional[str] = None
     if plan_path is not None:
         try:
-            from fno.graph._intake import normalize_size, repo_root
-            from fno.plan._stamp import read_plan_file
+            from fno.graph._intake import _read_plan_frontmatter, normalize_size, repo_root
 
             pp = Path(plan_path)
             if not pp.is_absolute():
                 pp = Path(repo_root()) / pp
-            _, fm, _ = read_plan_file(pp)
+            fm = _read_plan_frontmatter(str(pp))
             linked_size = normalize_size(fm.get("size"))
         except Exception:
             linked_size = None
@@ -7207,58 +7205,20 @@ def _stamp_and_graduate_plan(
     """Best-effort: stamp a plan ``shipped`` (when a ship URL is known) then graduate.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    import subprocess
-
-    def _run(verb_args: list[str]):
-        try:
-            # sys.executable + ``-m fno.plan._stamp``: run the stamp under the
-            # same interpreter/venv as fno so it sees the same deps, and avoid
-            # failing where the binary is named "python".
-            return subprocess.run(
-                [sys.executable, "-m", "fno.plan._stamp", *verb_args],
-                check=False,
-                capture_output=True,
-                text=True,
-                # Bound the stamp so a hung subprocess never blocks a node close
-                # (gemini, PR #474). A timeout raises and is caught below ->
-                # treated as a failed run, non-fatal.
-                timeout=30,
-            )
-        except Exception as e:  # spawn failure / timeout: warn, treat as a failed run
-            typer.echo(
-                f"warning: fno.plan._stamp {verb_args[0]} failed to run: {e}",
-                err=True,
-            )
-            return None
+    from fno.plan._project import plan_docs
 
     stamped_shipped = False
     if url:
         sid = session_id or "backlog-close"
-        res = _run(["stamp", "--plan-path", plan_path, "--session-id", sid, "--url", url])
-        if res is None:
-            return False
-        if res.returncode != 0:
-            typer.echo(
-                f"warning: fno.plan._stamp stamp exited {res.returncode}"
-                f"{f' - stderr: {res.stderr.strip()}' if res.stderr else ''}",
-                err=True,
-            )
+        res = plan_docs("stamp", plan_path=plan_path, session_id=sid, urls=[url])
+        if res is None or res["exit"]:
             return False
         stamped_shipped = True
 
-    res = _run(["graduate", "--plan-path", plan_path])
-    if res is None:
+    res = plan_docs("graduate", plan_path=plan_path)
+    if res is None or res["exit"]:
         # A successful stamp already recorded the ship; report that win even if
         # the graduate spawn failed.
-        return stamped_shipped
-    if res.returncode != 0:
-        # Surface the script's own error so a broken stamp run is diagnosable
-        # instead of silently eaten.
-        typer.echo(
-            f"warning: fno.plan._stamp graduate exited {res.returncode}"
-            f"{f' - stderr: {res.stderr.strip()}' if res.stderr else ''}",
-            err=True,
-        )
         return stamped_shipped
     return True
 
@@ -7272,37 +7232,10 @@ def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, 
     """Authoritatively write expected_url_count=count onto a plan's frontmatter.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    import subprocess
+    from fno.plan._project import plan_docs
 
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "fno.plan._stamp",
-                "set-expected",
-                "--plan-path",
-                plan_path,
-                "--count",
-                str(count),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return "ok", ""
-        # Exit 3 == base doc absent: benign (cannot be stamped at ship either).
-        if result.returncode == 3:
-            return "skipped", result.stderr.strip()
-        # Any other non-zero means the module ran but could not write a doc it
-        # could see (malformed frontmatter, etc.) - the real degradation.
-        return "failed", result.stderr.strip() or f"exit {result.returncode}"
-    except Exception as e:  # noqa: BLE001 - report any spawn failure to the caller
-        # A spawn failure is indeterminate: unlike an absent doc it does not
-        # prove the doc is unstampable at ship, so treat it as a surfaced
-        # failure rather than a silent skip.
-        return "failed", f"set-expected spawn failed: {e}"
+    res = plan_docs("set_expected", plan_path=plan_path, count=count)
+    return (res["status"], res["message"].strip()) if res else ("failed", "graph store unavailable")
 
 
 # -- gh cross-check helpers (injectable for tests) --
@@ -9407,10 +9340,10 @@ def _reconcile_once(
             # direct-finalize rung's full row supersedes it via the collapse
             # rule. Best-effort: never aborts the close (AC1-ERR).
             try:
-                from fno.cost._register import upsert_ledger_pr
+                from fno.cost._register import ledger_project_for, upsert_ledger_pr
 
                 _led_node = _find_node(post_entries, record.node_id)
-                _led_project = (_led_node or {}).get("project")
+                _led_project = ledger_project_for(_led_node)
                 # The graph node already carries the durable per-phase
                 # provenance (sessions[] with harness + session_id); hand it to
                 # the backstop so a created row never lands session-less.
@@ -9425,7 +9358,7 @@ def _reconcile_once(
                     record.pr_url,
                     _led_project,
                     record.merged_at,
-                    node_sessions=_led_sessions,
+                    node_sessions=_led_sessions, plan_path=record.plan_path,
                 )
             except Exception as _led_exc:  # noqa: BLE001 - never abort the close
                 typer.echo(
@@ -10170,7 +10103,6 @@ def cmd_migrate_updated_at(
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
-cli.command("rank")(_cmd_rank)
 
 
 # -- archive --

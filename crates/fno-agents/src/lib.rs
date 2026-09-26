@@ -62,6 +62,7 @@ pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
 pub mod attention_http;
+pub mod attention_reply;
 pub mod attention_route;
 pub mod authorized_merge;
 pub mod backlog;
@@ -150,7 +151,6 @@ pub mod evals_trend;
 pub mod event_store;
 pub mod events;
 pub mod events_limits;
-pub mod events_store;
 pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
@@ -265,6 +265,7 @@ pub mod paths;
 pub mod pending_session_row;
 pub mod phase_close;
 pub mod pi;
+pub mod plan_doc;
 pub mod planning_lane;
 pub mod plans_dirs;
 pub mod plugin_install;
@@ -312,6 +313,7 @@ pub mod review_freshness;
 pub mod review_summary;
 pub mod revive_proof;
 pub mod rm_receipt;
+pub mod rm_tombstone;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
@@ -1174,16 +1176,18 @@ mod tests {
             }
         }
 
-        // The five allowed files: production binary repair (install_verify),
-        // a production dir mode (paths), two dir-mode restores in tests
-        // (claims, operator_turns), and the bin test target that cannot see a
-        // cfg(test) lib fn (client_tests).
+        // The allowed files: production binary repair (install_verify), a
+        // production dir mode (paths), two dir-mode restores in tests
+        // (claims, operator_turns), the bin test target that cannot see a
+        // cfg(test) lib fn (client_tests), and the plan writer's production
+        // mode-preserve on its atomic plan-file replace (plan_doc/codec).
         const ALLOWED: &[(&str, usize)] = &[
             ("install_verify.rs", 1),
             ("paths.rs", 1),
             ("king_board/claims.rs", 1),
             ("operator_turns.rs", 1),
             ("client_tests.rs", 2),
+            ("plan_doc/codec.rs", 1),
         ];
         let allowed_counts: std::collections::HashMap<&str, usize> =
             ALLOWED.iter().copied().collect();

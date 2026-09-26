@@ -161,6 +161,9 @@ pub fn run(args: &[String]) -> i32 {
         // The search ladder is native; the FTS cache and the external
         // backend reads forward from inside.
         "find" => super::find_cli::run(resolved.tail),
+        // The lane pin is native: id gate, operator fence, lane/epic scoping
+        // and midpoint arithmetic over the single-row write seam.
+        "rank" => super::rank_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }

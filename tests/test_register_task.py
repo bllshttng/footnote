@@ -622,6 +622,91 @@ def test_main_legacy_still_rejects_missing_session_id():
             sys.argv = orig_argv
 
 
+# ── derive_phases: post-collapse derivation (x-6aa0) ─────────────────────────
+
+
+def _post_collapse_state(**overrides):
+    """A manifest as the control-plane collapse writes it: no input_type and
+    no completion-gate booleans, only the input shape and the skip flags."""
+    state = {
+        "input": "x-6aa0",
+        "plan_path": None,
+        "no_external": False,
+        "no_docs": False,
+        "no_ship": False,
+        "no_browser": False,
+    }
+    state.update(overrides)
+    return state
+
+
+def test_derive_phases_node_input_build_run_never_plan_only():
+    # x-6aa0: a node-input do/review/ship run recorded phases ["think", "plan"]
+    # (dead gate keys + input_type defaulting to "idea"), the fold's plan-only
+    # discriminator then read the row planned, and the fidelity gate wedged the
+    # stop gate until merge. The row must carry build phases instead.
+    completed, skipped = register_task.derive_phases(_post_collapse_state(), pr_number=2605)
+    assert "execute" in completed
+    assert "ship" in completed
+    assert "think" not in completed
+    assert "plan" not in completed
+    assert "think" in skipped and "plan" in skipped
+
+
+def test_derive_phases_idea_input_records_think_plan():
+    # A bare-idea run thinks and plans in-session: those phases are real.
+    completed, _ = register_task.derive_phases(_post_collapse_state(input="add user auth"))
+    assert "think" in completed and "plan" in completed
+
+
+def test_derive_phases_plan_path_skips_think_plan():
+    completed, skipped = register_task.derive_phases(
+        _post_collapse_state(input="docs/plans/auth", plan_path="docs/plans/auth")
+    )
+    assert "think" in skipped and "plan" in skipped
+    assert "think" not in completed and "plan" not in completed
+
+
+def test_derive_phases_no_ship_flag_skips_ship():
+    completed, skipped = register_task.derive_phases(
+        _post_collapse_state(no_ship=True), pr_number=None
+    )
+    assert "ship" in skipped
+    assert "ship" not in completed
+
+
+def test_derive_phases_skip_flags_record_skipped():
+    _, skipped = register_task.derive_phases(
+        _post_collapse_state(no_external=True, no_docs=True), pr_number=None
+    )
+    assert "external" in skipped and "docs" in skipped
+
+
+def test_build_entry_node_input_row_not_planned_in_the_fold():
+    # End-to-end against the consumer that wedged: the row build_entry writes
+    # for a shipped node-input run must never satisfy the fold's
+    # plan-only discriminator.
+    from fno.scoreboard.fold import _is_planned_row
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sid = "20260926T203805Z-cl94622-e9d44b"
+        _write_ship_artifact(root, sid, 2605)
+        orig_git = register_task.git_cmd
+        orig_gh = register_task._pr_number_from_gh
+        register_task.git_cmd = lambda *a: (str(root) if a[:1] == ("rev-parse",) else "")
+        register_task._pr_number_from_gh = lambda cwd: None
+        try:
+            entry = register_task.build_entry(
+                _post_collapse_state(session_id=sid), "tid"
+            )
+        finally:
+            register_task.git_cmd = orig_git
+            register_task._pr_number_from_gh = orig_gh
+        assert entry["pr_number"] == 2605
+        assert not _is_planned_row(entry)
+
+
 def _run_standalone() -> int:
     failed = 0
     for name, fn in list(globals().items()):
