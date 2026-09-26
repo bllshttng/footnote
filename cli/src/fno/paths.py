@@ -719,6 +719,9 @@ STATE_FILES: tuple[StateFile, ...] = (
 
 def state_dir() -> Path:
     """Return the state directory (default: ~/.fno/)."""
+    carrier = os.environ.get("FNO_STATE_DIR")
+    if carrier:
+        return _guard_state_path(Path(os.path.expanduser(carrier)).resolve())
     settings = _settings()
     return _guard_state_path(_resolve(settings.state_dir))
 
@@ -756,10 +759,16 @@ def github_cli_proxy_dir() -> Path:
 def locks_dir() -> Path:
     """Advisory-lock sidecar directory (``~/.fno/locks``).
 
-    Deliberately config-free (``$HOME`` only, no settings load). The plan-doc lock is keyed by the plan's resolved path,
+    Deliberately config-free (``$HOME``/``FNO_STATE_DIR`` only, no settings load). The plan-doc lock is keyed by the plan's resolved path,
     so the two fno writers only need to agree on this directory; a config
     ``state_dir`` override deliberately does NOT move it (moving it would desync
-    the config-loading append side from the config-free stamp side)."""
+    the config-loading append side from the config-free stamp side). The
+    ``FNO_STATE_DIR`` carrier does: it needs no config load, so both writers
+    still agree under it, and ``seal_state_root`` pins it around a forwarded
+    HOME so the lock does not strand under the account's home."""
+    carrier = os.environ.get("FNO_STATE_DIR")
+    if carrier:
+        return Path(os.path.expanduser(carrier)) / "locks"
     return Path.home() / ".fno" / "locks"
 
 

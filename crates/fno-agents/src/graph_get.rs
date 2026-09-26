@@ -28,13 +28,21 @@ pub(crate) fn entry_status<'a>(entry: &'a Value) -> &'a str {
     entry.get(STATUS_KEY).and_then(Value::as_str).unwrap_or("?")
 }
 
-/// `graph.json`'s default location: `$FNO_HOME/graph.json`, else
-/// `$HOME/.fno/graph.json`. Mirrors the FNO_HOME-first resolution every other
-/// client-side verb in this crate uses (see `finalize::append_corrections_pointer`).
-/// Does not read `config.paths.graph_json` - a batch convenience read is not
-/// where a config-driven relocation belongs, and `--graph` covers a test or an
+/// `graph.json`'s default location: `$FNO_STATE_DIR/graph.json`, else
+/// `$FNO_HOME/graph.json`, else `$HOME/.fno/graph.json`. `FNO_STATE_DIR` first:
+/// it is the root `fno.paths.state_dir` resolves, and `seal_state_root` pins it
+/// around a forwarded HOME, so a sealed Rust child reads the graph its parent
+/// wrote. Mirrors the FNO_HOME-first resolution every other client-side verb in
+/// this crate uses (see `finalize::append_corrections_pointer`). Does not read
+/// `config.paths.graph_json` - a batch convenience read is not where a
+/// config-driven relocation belongs, and `--graph` covers a test or an
 /// operator override in the meantime.
 pub(crate) fn default_graph_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_STATE_DIR") {
+        if !v.is_empty() {
+            return PathBuf::from(v).join("graph.json");
+        }
+    }
     if let Some(v) = std::env::var_os("FNO_HOME") {
         return PathBuf::from(v).join("graph.json");
     }
@@ -189,6 +197,61 @@ pub fn run_graph_get(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn the_state_dir_carrier_outranks_fno_home_for_the_default_graph() {
+        let _guard = env_lock();
+        let prior_state = std::env::var_os("FNO_STATE_DIR");
+        let prior_home = std::env::var_os("FNO_HOME");
+        std::env::set_var("FNO_STATE_DIR", "/pinned-state");
+        std::env::set_var("FNO_HOME", "/pinned-home");
+
+        assert_eq!(
+            default_graph_path(),
+            PathBuf::from("/pinned-state").join("graph.json")
+        );
+
+        match (prior_state, prior_home) {
+            (s, h) => {
+                match s {
+                    Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+                    None => std::env::remove_var("FNO_STATE_DIR"),
+                }
+                match h {
+                    Some(v) => std::env::set_var("FNO_HOME", v),
+                    None => std::env::remove_var("FNO_HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_the_state_dir_carrier_fno_home_still_wins() {
+        let _guard = env_lock();
+        let prior_state = std::env::var_os("FNO_STATE_DIR");
+        let prior_home = std::env::var_os("FNO_HOME");
+        std::env::remove_var("FNO_STATE_DIR");
+        std::env::set_var("FNO_HOME", "/pinned-home");
+
+        assert_eq!(
+            default_graph_path(),
+            PathBuf::from("/pinned-home").join("graph.json")
+        );
+
+        match prior_state {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+        match prior_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
+    }
 
     fn write_graph(entries: &[Value]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
