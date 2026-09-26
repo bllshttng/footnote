@@ -152,24 +152,13 @@ impl View {
         } else {
             self.display_rows_with_depths()
         };
-        // The docked new-agent composer takes the bottom rows while open in
-        // BOTTOM mode; in sheet mode the sideline paints untouched (the
-        // sheet is an overlay drawn by the client's overlay chain), and the
-        // passive court block yields to an active editor.
+        // The new-agent composer is a centered sheet overlay now, in every
+        // surface: the sideline paints untouched (the sheet is drawn by the
+        // client's overlay chain), and the passive court block yields to an
+        // active editor.
         let chrome_rows = self.bottom_row_is_chrome() as usize;
-        let dock_len = if agent_launcher::form_mode(self) == agent_launcher::Mode::Bottom {
-            self.launcher
-                .as_ref()
-                .map_or(0, |l| l.dock_layout(rows - chrome_rows, text_w).0)
-        } else {
-            0
-        };
-        let (block_rows, block_lines) = if dock_len > 0 {
-            (0, Vec::new())
-        } else {
-            self.court_block_layout(rows)
-        };
-        let list_rows = rows.saturating_sub(block_rows + dock_len);
+        let (block_rows, block_lines) = self.court_block_layout(rows);
+        let list_rows = rows.saturating_sub(block_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
         // the terminal minus the bottom chrome row; the widget area must
         // answer to the same height, or the render-time scroll lands the
@@ -216,19 +205,6 @@ impl View {
             // The render-adjusted state IS the truth: persist it so the hit
             // tests and the confirm anchor read the offset that painted.
             self.sideline_state.set(st);
-        }
-        // The docked composer paints into the SAME Buffer, pinned above the
-        // bottom chrome row. On a panel too small for even the chip rows the
-        // painter clips; the dock never hides while open.
-        if dock_len > 0 {
-            if let Some(l) = &self.launcher {
-                let top = (rows - chrome_rows).saturating_sub(dock_len);
-                l.paint(
-                    self,
-                    &mut buf,
-                    RtRect::new(0, top as u16, text_w as u16, dock_len as u16),
-                );
-            }
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
         // Per-row overlays the widget cannot express: the full-width rows
@@ -1026,7 +1002,7 @@ pub(super) async fn show_composer(
     }
     // The sheet's minimum is 12 rows; nothing opens and the bottom row says
     // why - the refusal the too-narrow sidebar used to give.
-    if agent_launcher::form_mode(show) == agent_launcher::Mode::Sheet && show.term.0 < 12 {
+    if show.term.0 < 12 {
         if was_none {
             agent_launcher::close(show);
         }
