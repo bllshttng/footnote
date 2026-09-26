@@ -2264,6 +2264,39 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     })
 }
 
+/// One migration pass over claude rows whose `short_id` is a byte-copy of
+/// the session uuid (the register path once wrote it that way): the
+/// transport key is the uuid's own leading 8-hex segment, and a full uuid
+/// refuses `claude attach`. Rewrites ONLY `short_id` - name, aliases and
+/// crown fields are untouched - under the registry lock, skips the write
+/// entirely when nothing matches, and never touches a short id that is an
+/// independent transport key (not a copy of the row's own session id).
+pub fn heal_full_uuid_short_ids(path: &Path) -> Result<usize, StateError> {
+    let mut healed = 0usize;
+    update_registry(path, |registry| {
+        for entry in registry.entries.iter_mut() {
+            if entry.harness.as_deref() != Some("claude")
+                || entry.mux.is_some()
+                || entry.short_id.len() <= 8
+            {
+                continue;
+            }
+            let Some(session) = entry.harness_session_id.as_deref() else {
+                continue;
+            };
+            if entry.short_id != session {
+                continue;
+            }
+            let lead = session.split('-').next().unwrap_or(session);
+            if lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit()) {
+                entry.short_id = lead.to_ascii_lowercase();
+                healed += 1;
+            }
+        }
+    })?;
+    Ok(healed)
+}
+
 /// Read-modify-write the registry under an exclusive lock, publishing the
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never

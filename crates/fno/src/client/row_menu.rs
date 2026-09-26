@@ -47,6 +47,7 @@ pub(super) fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         // below, so the two menus read as one system; the verbs differ because
         // the operations do (move a running pane vs. place a new one).
         add(entry("→", "Focus"), &[MenuAction::Focus]);
+        add(entry("◫", "Open in portal..."), &[MenuAction::PortalPicker]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(PopupRow::Rule, &[]);
@@ -93,6 +94,7 @@ pub(super) fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::NewTab],
         );
+        add(entry("◫", "Open in portal..."), &[MenuAction::PortalPicker]);
         add(PopupRow::Rule, &[]);
         // 2x2 spatial grid: Left/Right on top, Up/Down below (the cell you pick
         // IS the direction). Glyphs are half-block squares; a non-nerd-font
@@ -114,6 +116,7 @@ pub(super) fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("✉", "Mail"), &[MenuAction::Mail]);
+        add(entry("◫", "Open in portal..."), &[MenuAction::PortalPicker]);
         if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
             add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
         }
@@ -184,5 +187,41 @@ mod tests {
 
     fn test_anchor() -> Anchor {
         Anchor::At { row: 4, col: 4 }
+    }
+
+    #[test]
+    fn a_live_row_menu_offers_open_in_portal_and_an_exited_one_does_not() {
+        // The portal CHOICE lives where placement lives: both live row
+        // shapes offer the picker entry; an exited row (nothing left to
+        // show in a portal) does not.
+        let menu = build_row_menu(&portal_row(None), test_anchor());
+        assert!(
+            menu.popup.rows.iter().any(|r| matches!(
+                r,
+                PopupRow::Entry { label, .. } if label == "Open in portal..."
+            )),
+            "a live pane row offers the portal picker"
+        );
+        let mut paneless = focus_agent(3);
+        paneless.pane_id = None;
+        paneless.attach_id = Some("deadbee1".into());
+        let menu = build_row_menu(&paneless, test_anchor());
+        assert!(
+            menu.popup.rows.iter().any(|r| matches!(
+                r,
+                PopupRow::Entry { label, .. } if label == "Open in portal..."
+            )),
+            "a live paneless row offers the portal picker"
+        );
+        let mut dead = focus_agent(3);
+        dead.exited = true;
+        let menu = build_row_menu(&dead, test_anchor());
+        assert!(
+            !menu.popup.rows.iter().any(|r| matches!(
+                r,
+                PopupRow::Entry { label, .. } if label == "Open in portal..."
+            )),
+            "an exited row offers no portal picker"
+        );
     }
 }

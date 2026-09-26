@@ -4603,6 +4603,7 @@ mod tests {
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         };
         r.cause = Some("fleet_stop".to_string());
         r.line = format!(
@@ -4718,6 +4719,7 @@ mod tests {
             arm_value: None,
             reader: None,
             starved: false,
+            retries: Vec::new(),
         };
         kw.cause = Some("tick_overdue".to_string());
         kw.line = format!(
