@@ -1059,7 +1059,7 @@ fn parse_check_flags(rest: &[String]) -> Result<(bool, &str), i32> {
     Ok((as_json, scope))
 }
 
-fn check_json(verdict: &Verdict, scope: &str) -> Value {
+fn check_json(verdict: &Verdict, scope: &str) -> serde_json::Value {
     let (state, generation, reason, holds, admits) = match verdict {
         Verdict::Clear(record) => (
             "clear",
