@@ -1209,7 +1209,6 @@ def inject_spawn_defaults(
         # --yolo/-Y are the same knob as --permission-mode; the filter must
         # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
-    # One node answer for the grid; the resolver owns the precedence.
     _flag_node = _flag_value(out[1:], "--node")
     _env_node = (env or {}).get("FNO_NODE") or None
     node_id_present = _flag_node is not None or _env_node is not None
