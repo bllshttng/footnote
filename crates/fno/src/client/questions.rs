@@ -128,10 +128,17 @@ pub(super) fn paint_block(
 
 /// The question row a click landed on, by sideline row: `Some(id)`.
 pub(super) fn hit_at(view: &View, term_rows: usize, row: u16) -> Option<String> {
+    if std::env::var_os("FNO_MUX_MOUSE_TRACE").is_some() {
+        eprintln!(
+            "questions hit_at: row={row} term_rows={term_rows} fold={:?} ",
+            view.questions_fold.as_ref().map(|f| f.items.len())
+        );
+    }
     let (n, _lines, ids) = block_rows(view, term_rows)?;
     let court = view.court_block_layout(term_rows).0;
     let start = term_rows.saturating_sub(court + n);
-    let r = (row as usize).checked_sub(start)?;
+    // Line 0 of the block is the header; the ids align to the body rows.
+    let r = (row as usize).checked_sub(start)?.checked_sub(1)?;
     ids.get(r).cloned()
 }
 
