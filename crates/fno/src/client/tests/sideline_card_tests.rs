@@ -126,6 +126,66 @@ fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
 }
 
 #[test]
+fn card_age_sort_orders_workers_inside_a_king_group() {
+    // The user report: sorted by age, a king's workers read
+    // 12m, 12m, 10m, 41m, 23s in the card view. The card path now runs the
+    // same run sort the extended table uses, workers order inside their
+    // king's group, kings keep their group order.
+    let ages = [("w-old", 720u64), ("w-new", 60), ("w-mid", 600)];
+    let mut agents = Vec::new();
+    let mut king = agent_row("king-a", 4, Some(AgentBadge::Working), false);
+    king.crown_level = Some(2);
+    king.crown_scope = Some("fno".into());
+    king.harness_session_id = Some("sess-king".into());
+    king.last_activity_age_s = Some(10);
+    agents.push(king);
+    for (name, age) in ages {
+        let mut w = agent_row(name, 5, Some(AgentBadge::Working), false);
+        w.lineage_kind = Some("child".into());
+        w.spawned_by_session = Some("sess-king".into());
+        w.harness_session_id = Some(format!("sess-{name}"));
+        w.last_activity_age_s = Some(age);
+        agents.push(w);
+    }
+    for density in [Density::Extended, Density::Regular] {
+        let mut v = card_view(agents.clone());
+        set_density(&mut v, density);
+        v.agent_sort = AgentSort {
+            column: AgentSortColumn::Age,
+            direction: SortDirection::Ascending,
+        };
+        let (rows, _) = v.display_rows_with_depths();
+        let got: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) if a.name != "king-a" => Some(a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec!["w-new", "w-mid", "w-old"],
+            "workers order by the sort key inside the king group at {density:?}"
+        );
+        // The painted age is the value sorted on: the card detail of the
+        // oldest worker reads the humanized value of its measured age.
+        let now = crate::digest_overlay::now_secs();
+        let w_old = rows
+            .iter()
+            .find_map(|r| match r {
+                DisplayRow::CardDetail(a) if a.name == "w-old" => Some(a),
+                _ => None,
+            })
+            .expect("w-old card detail exists");
+        let detail = v.card_detail_text(w_old, now, 80);
+        assert!(
+            detail.ends_with("12m"),
+            "painted age must read the sorted-on field: {detail:?}"
+        );
+    }
+}
+
+#[test]
 fn card_frame_paints_glyph_name_word_pr_on_line1_king_message_age_on_line2() {
     // AC6/AC7: working worker w1 with PR 42: line 1 = glyph, w1, Work, #42;
     // line 2 = harness, king handle, message, age. A worker with no crowned
