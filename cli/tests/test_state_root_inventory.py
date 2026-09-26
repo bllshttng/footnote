@@ -30,8 +30,11 @@ def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch)
         path = root / pattern
         if pattern == "backups":
             path.mkdir(exist_ok=True)
-        elif pattern in {"graph.db", "graph.db-wal", "graph.db-shm"}:
-            continue  # SQLite creates and owns these files.
+        elif pattern in {"graph.json", "graph.db", "graph.db-wal", "graph.db-shm"}:
+            # SQLite creates and owns the db trio; graph.json is the retired
+            # export-only anchor, and an empty copy of it refuses the store
+            # at open ("could not be read: empty (zero bytes)").
+            continue
         elif not path.exists():
             path.touch()
     # A real writer's output must also read as documented, not just the

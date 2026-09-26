@@ -9508,10 +9508,10 @@ def _reconcile_once(
             # direct-finalize rung's full row supersedes it via the collapse
             # rule. Best-effort: never aborts the close (AC1-ERR).
             try:
-                from fno.cost._register import upsert_ledger_pr
+                from fno.cost._register import ledger_project_for, upsert_ledger_pr
 
                 _led_node = _find_node(post_entries, record.node_id)
-                _led_project = (_led_node or {}).get("project")
+                _led_project = ledger_project_for(_led_node)
                 # The graph node already carries the durable per-phase
                 # provenance (sessions[] with harness + session_id); hand it to
                 # the backstop so a created row never lands session-less.
@@ -9526,7 +9526,7 @@ def _reconcile_once(
                     record.pr_url,
                     _led_project,
                     record.merged_at,
-                    node_sessions=_led_sessions,
+                    node_sessions=_led_sessions, plan_path=record.plan_path,
                 )
             except Exception as _led_exc:  # noqa: BLE001 - never abort the close
                 typer.echo(
