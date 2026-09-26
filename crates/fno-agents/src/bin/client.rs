@@ -268,6 +268,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
     }
 
+    if matches!(verb, "mail-envelope") {
+        return fno_agents::mail_envelope::run(&args[1..]);
+    }
+
     // Binary-direct mail transport for the events and note Python adapters.
     // It is intentionally not a routable `fno agents` verb.
     if matches!(verb, "machine-mail-send") {
@@ -699,6 +703,12 @@ async fn run(args: Vec<String>) -> i32 {
     // and spawn flags.
     if verb == "fallback-chain" {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
+    }
+
+    // `verbs`: hidden claim-style (matches!); the action list is
+    // shrink-only, so the harness-verbs skill teaches the spelling.
+    if matches!(verb, "verbs") {
+        return fno_agents::harness_verbs::run_verbs(&args[1..]);
     }
 
     // `publish-review`: the reviewer lane's second GitHub identity (see

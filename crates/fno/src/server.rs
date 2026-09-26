@@ -11349,7 +11349,7 @@ impl Core {
                 if !crate::registry_label::valid_agent_label(&new_name) {
                     self.notice(
                         client_id,
-                        "label must be 1-64 letters, numbers, underscores, or hyphens",
+                        "label must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
                     );
                     return Flow::Continue;
                 }

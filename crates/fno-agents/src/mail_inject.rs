@@ -191,6 +191,14 @@ pub struct MailInjectArgs {
     pub lane_heal: bool,
     /// `--no-rebind`: with `--lane-heal`, report without writing the row.
     pub no_rebind: bool,
+    /// The `--harness` value verbatim: on the keeper lane this is the HOSTED
+    /// harness's capability row (grok, cursor-agent, ...), which owns the
+    /// verb-risk lookup. Absent when `--harness` was not passed.
+    pub harness_row: Option<String>,
+    /// `--ack-verb-risk <verb>`: the raw sender's explicit acknowledgment that
+    /// the payload runs that verb; the only spelling that carries a
+    /// session-ending or context-destroying verb past the risk guard.
+    pub ack_verb_risk: Option<String>,
 }
 
 /// Resolution miss: no roster entry for the session, or a roster entry with no
@@ -233,6 +241,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut sender: Option<String> = None;
     let mut origin: Option<String> = None;
     let mut self_send = false;
+    let mut ack_verb_risk: Option<String> = None;
     let mut probe = false;
     let mut lane_heal = false;
     let mut no_rebind = false;
@@ -320,6 +329,13 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
             }
             // stdout is only the outcome JSON; the flag is accepted for parity.
             "--json" | "-J" => {}
+            "--ack-verb-risk" => {
+                ack_verb_risk = Some(
+                    it.next()
+                        .ok_or((2, "mail-inject: --ack-verb-risk needs a verb".to_string()))?
+                        .to_string(),
+                );
+            }
             other => {
                 return Err((2, format!("mail-inject: unknown flag: {other}")));
             }
@@ -347,6 +363,8 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         probe,
         lane_heal,
         no_rebind,
+        harness_row: harness_flag,
+        ack_verb_risk,
     })
 }
 
@@ -1186,6 +1204,49 @@ fn single_line_decision(text: &str) -> Option<i32> {
     None
 }
 
+/// The raw-mail risk guard. An unwrapped payload whose leading token
+/// names a native verb the capability table classes session-ending or
+/// context-destroying for the recipient's row is refused: the payload would
+/// land as user-role text, so a mailed `/clear` or `/exit` destroys the
+/// worker's context or ends its session exactly as if the operator had typed
+/// it. `--ack-verb-risk <verb>` on the same send is the only way past, and it
+/// must name the verb the payload runs. The lookup reads the packaged table
+/// through the same typed reader the render verb answers from, so the guard
+/// and `fno-agents verbs` cannot disagree. Refuses before delivery and before
+/// the audit record; framed envelopes skip it (relay traffic, already capped
+/// upstream).
+fn verb_risk_decision(text: &str, harness_row: &str, ack: Option<&str>) -> Option<i32> {
+    if is_framed_envelope(text) {
+        return None;
+    }
+    let verb = text.trim().split_whitespace().next()?;
+    // Local bindings, not an and_then chain: the contract is an owned
+    // temporary, so a meta reference borrowed through it cannot leave the
+    // chain (E0515).
+    let Ok(contract) = crate::harness_capabilities::HarnessContract::packaged() else {
+        return None;
+    };
+    let Ok(caps) = contract.capabilities(harness_row) else {
+        return None;
+    };
+    let Some(meta) = caps.native_verb_meta.get(verb) else {
+        return None;
+    };
+    if !meta.risk.is_guarded() {
+        return None;
+    }
+    if ack.map(|a| a.trim() == verb).unwrap_or(false) {
+        return None;
+    }
+    eprintln!(
+        "mail-inject: refusing raw send of {verb}: the {harness_row} table classes it {} \
+         for this session. It would land as user-role text. If the send really means it, \
+         name the verb on the same send: --ack-verb-risk {verb}",
+        meta.risk.as_str()
+    );
+    Some(1)
+}
+
 /// The capability row a mail recipient renders through: the row name the
 /// shared renderer answers for. The keeper lane hosts a claude pane, so it
 /// takes the claude row.
@@ -1582,6 +1643,18 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     // same predicate lives here. Refuses before delivery and before the audit
     // record, matching the byte cap. Framed envelopes skip it.
     if let Some(code) = single_line_decision(&text) {
+        return code;
+    }
+
+    // The raw-mail risk guard: only unwrapped payloads reach here (framed
+    // envelopes skipped above), and the row is the HOSTED harness's row on
+    // the keeper lane (--harness verbatim), falling back to the recipient
+    // renderer's row.
+    let risk_row = args
+        .harness_row
+        .clone()
+        .unwrap_or_else(|| recipient_capability_row(args.harness).to_string());
+    if let Some(code) = verb_risk_decision(&text, &risk_row, args.ack_verb_risk.as_deref()) {
         return code;
     }
 
@@ -2040,6 +2113,39 @@ mod tests {
         assert_eq!(single_line_decision("/cmd\nsecond line"), Some(1));
         assert_eq!(single_line_decision("prose one\nprose two"), Some(1));
         assert_eq!(single_line_decision("/cmd\n\nsecond"), Some(1));
+    }
+
+    #[test]
+    fn risk_guard_refuses_context_destroying_and_session_ending_verbs() {
+        // The claude row classes /clear context-destroying and /exit would be
+        // session-ending if it were on the roster; grok's /new is
+        // context-destroying on its own row. Only the ack naming the verb
+        // carries either through.
+        assert_eq!(verb_risk_decision("/clear", "claude", None), Some(1));
+        assert_eq!(verb_risk_decision("/clear", "claude", Some("/clear")), None);
+        assert_eq!(
+            verb_risk_decision("/clear keep the name", "claude", None),
+            Some(1)
+        );
+        assert_eq!(verb_risk_decision("/new", "grok", None), Some(1));
+        assert_eq!(verb_risk_decision("/new", "grok", Some("/clear")), Some(1));
+    }
+
+    #[test]
+    fn risk_guard_passes_safe_and_unknown_verbs() {
+        // A safe verb, a verb with no meta row on another row's table, and a
+        // $-prefixed payload all pass untouched.
+        assert_eq!(verb_risk_decision("/compact", "claude", None), None);
+        assert_eq!(verb_risk_decision("/name x", "claude", None), None);
+        assert_eq!(
+            verb_risk_decision("$fno:review medium", "claude", None),
+            None
+        );
+        // Framed relay traffic skips the guard.
+        assert_eq!(
+            verb_risk_decision("<fno_mail from=\"a\">/clear</fno_mail>", "claude", None),
+            None
+        );
     }
 
     #[test]
