@@ -144,16 +144,20 @@ fn judge_segment(
         return None;
     }
     // 4. Bare `backlog` in command position: the third-party Backlog.md CLI,
-    //    never fno. `head_of` resolves wrappers, assignments and subshell
-    //    openers, and a reserved keyword leading the segment (`if backlog
-    //    ...`) is dropped so the command behind it is judged; `fno backlog`
-    //    and `echo backlog` do not refuse.
+    //    never fno. Every pipeline stage is judged (`printf y | backlog init`),
+    //    `head_of` resolves wrappers, assignments and subshell openers, and a
+    //    reserved keyword leading the segment (`if backlog ...`) is dropped so
+    //    the command behind it is judged; `fno backlog` and `echo backlog` do
+    //    not refuse.
     let cmd: Vec<String> = seg
         .iter()
         .skip_while(|t| matches!(t.as_str(), "if" | "while" | "until" | "then" | "do"))
         .cloned()
         .collect();
-    if head_of(&cmd, false).is_some_and(|(head, _, _)| head == "backlog") {
+    if stages(&cmd)
+        .iter()
+        .any(|stage| head_of(stage, false).is_some_and(|(head, _, _)| head == "backlog"))
+    {
         return Some(BACKLOG_REASON.replace("{cmd}", &seg.join(" ")));
     }
     // A group closer's status is its last command's: it keeps the flag.
@@ -391,6 +395,9 @@ mod tests {
         denied("FOO=1 backlog task list");
         denied("if backlog init; then echo hi; fi");
         denied("while backlog task list; do :; done");
+        // A later pipeline stage is still command position.
+        denied("printf 'y\\n' | backlog init");
+        denied("cat x | env backlog task list");
     }
 
     #[test]
@@ -402,5 +409,6 @@ mod tests {
         allowed("rg backlog hooks/");
         allowed("git log --oneline -- backlog.md");
         allowed("for b in backlog task; do echo done; done");
+        allowed("fno backlog get x | tail -3");
     }
 }
