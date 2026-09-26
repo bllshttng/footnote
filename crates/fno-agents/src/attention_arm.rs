@@ -1109,7 +1109,7 @@ pub(crate) fn read_items_at(
     for path in crate::needs::question_journals(fno_dir, cwd) {
         match crate::event_store::journal_text_checked(
             &path,
-            &crate::event_store::EventQuery::of_types(crate::needs::QUESTION_TYPES),
+            &crate::event_store::EventQuery::of_types(crate::needs::PROJECTION_TYPES),
         ) {
             Ok(content) => {
                 journals_raw.push_str(&content);
