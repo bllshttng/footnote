@@ -426,7 +426,9 @@ impl super::Core {
         if retry >= UPDATE_SEND_RETRIES {
             // Bounded best effort: settle so the desk stays truthful about
             // the attempt, and let the update go. The client still has the
-            // Submitting escape (dismiss).
+            // Submitting escape (dismiss). The placement goes with it: a
+            // launch the client never heard about opens no portal.
+            self.launch_desk.take_placement(id, update.request_id);
             self.launch_desk.settle(id, update);
             return;
         }

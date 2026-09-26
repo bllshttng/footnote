@@ -384,6 +384,11 @@ impl Core {
                 Some(false) => {}
                 _ => continue,
             }
+            // A close that would empty the session shuts the server down
+            // mid-restore; the prune never takes the last pane.
+            if self.panes.len() <= 1 {
+                break;
+            }
             let entry = match self.panes.get(&pid) {
                 Some(entry) => entry,
                 None => continue,

@@ -1932,6 +1932,14 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
     let Some(portal) = params.get("portal").and_then(Value::as_u64) else {
         return Ok(());
     };
+    // `--from current` names the calling pane: resolve it HERE, where
+    // FNO_PANE still names the pane the spawn ran inside, and ride the
+    // plain `--at` anchor the server splits beside. The literal never
+    // forwards - the thread door has no calling pane to resolve it with.
+    let mut from_current = false;
+    if params.get("from").and_then(Value::as_str).map(str::trim) == Some("current") {
+        from_current = true;
+    }
     let mut args = vec![
         "mux".to_string(),
         "thread".to_string(),
@@ -1946,6 +1954,9 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
         ("--tab", "tab"),
         ("--from", "from"),
     ] {
+        if from_current && key == "from" {
+            continue;
+        }
         if let Some(v) = params.get(key).and_then(|v| v.as_str()) {
             if !v.is_empty() {
                 args.push(flag.to_string());
@@ -1953,10 +1964,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
             }
         }
     }
-    // `--from current` names the calling pane: resolve it HERE, where
-    // FNO_PANE still names the pane the spawn ran inside, and ride the
-    // plain `--at` anchor the server splits beside.
-    if params.get("from").and_then(Value::as_str).map(str::trim) == Some("current") {
+    if from_current {
         let fno_pane = std::env::var("FNO_PANE")
             .ok()
             .and_then(|s| s.trim().trim_start_matches('%').parse::<u64>().ok());

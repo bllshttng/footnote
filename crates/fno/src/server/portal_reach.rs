@@ -107,7 +107,16 @@ pub(super) fn rearm_held_portal_seats(
             core.notice_all(format!(
                 "restore: portal {index} stored twice; kept the first, closing the second seat"
             ));
-            core.close_by_operator(seat);
+            // A close that would empty the session (the duplicate seat is
+            // its only pane) ends the session mid-restore; keep the seat
+            // readable instead and say so.
+            if core.panes.len() <= 1 {
+                core.notice_all(
+                    "restore: the duplicate seat is the session's only pane; kept it readable",
+                );
+            } else {
+                core.close_by_operator(seat);
+            }
             continue;
         }
         core.portals.insert(
