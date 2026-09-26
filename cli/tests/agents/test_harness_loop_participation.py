@@ -44,14 +44,16 @@ _REAL_LOOP_GATE_ANSWER = harness_map._loop_gate_answer
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# The measurement, 2026-08-28 (grok flipped with its gate, 2026-09-26). Each
-# value was read off the artifact and the wiring that reaches it; the table's
-# own comment carries the evidence per row.
+# The measurement, 2026-08-28. Each value was read off the artifact and the
+# wiring that reaches it; the table's own comment carries the evidence per
+# row. grok stays extension with an empty artifact: the 2026-09-26
+# linked-stage run recorded grok auto-disabling the discovered plugin, so a
+# trusted location alone does not put plugin hooks on the wire.
 MEASURED = {
     "claude": "native",
     "codex": "native",
     "agy": "native",
-    "grok": "native",
+    "grok": "extension",
     "gemini": "none",
     "opencode": "extension",
     "pi": "extension",

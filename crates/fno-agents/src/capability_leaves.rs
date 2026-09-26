@@ -315,9 +315,13 @@ mod tests {
     }
 
     #[test]
-    fn grok_native_with_a_reachable_probe_admits() {
+    fn a_native_row_with_a_reachable_probe_admits() {
+        // claude carries a native row in the packaged table, so the native
+        // arm's readiness legs admit; the probe passing is the row-agnostic
+        // half of the contract (grok's row will consume it when its hooks
+        // are proven on the wire).
         assert_eq!(
-            loop_gate_refusal("grok", "native", "", "/fno:target x-1", || Some(Ok(()))),
+            loop_gate_refusal("claude", "native", "", "/fno:target x-1", || Some(Ok(()))),
             None
         );
     }
