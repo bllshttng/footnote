@@ -63,3 +63,16 @@ def test_blueprint_floor_validator_degrades_a_typo_to_the_lean_default():
     assert DispatchBlock(blueprint_floor="medium").blueprint_floor == "medium"
     assert DispatchBlock(blueprint_floor="high").blueprint_floor == "high"
     assert DispatchBlock().blueprint_floor == "high"
+
+
+def test_blueprint_floor_validator_accepts_the_widened_ladder():
+    assert DispatchBlock(blueprint_floor="low").blueprint_floor == "low"
+    assert DispatchBlock(blueprint_floor="never").blueprint_floor == "never"
+
+
+def test_floor_low_and_never_ride_with_the_row(monkeypatch):
+    for floor in ("low", "never"):
+        client = _patch(monkeypatch, floor)
+        verb, _note = _verb_answer({"id": "x-1", "cwd": "/repo"})
+        assert verb == "/target"
+        assert client.seen[0]["blueprint_floor"] == floor
