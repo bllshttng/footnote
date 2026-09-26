@@ -138,6 +138,31 @@ pub fn admit(readiness: EffectiveLoopReadiness) -> Result<EffectiveLoopReadiness
     }
 }
 
+/// The pre-launch snapshot: the spawn door runs before the worker's session
+/// exists, so the stop leg reads ready with a reason naming the worker's own
+/// Stop hook. Shared by `loop readiness --pre-launch` and the target-family
+/// gate's native arm, which must refuse a looping dispatch on exactly the
+/// legs the readiness verb refuses on.
+fn pre_launch_snapshot(harness: &str, command: &str, owner: String) -> EffectiveLoopReadiness {
+    let stop = ReadinessLeg {
+        state: LegState::Ready,
+        reason: Some("pre-launch: the worker's Stop hook checks this leg".to_string()),
+    };
+    measure(
+        machine_leg(harness),
+        lifecycle_leg(harness, command),
+        stop,
+        provider_goal_leg(harness),
+        owner,
+    )
+}
+
+/// The pre-launch verdict for a native loop: `Some(refusal)` refuses the
+/// dispatch, `None` admits it.
+pub fn pre_launch_refusal(harness: &str, command: &str) -> Option<String> {
+    pre_launch_snapshot(harness, command, continuation_owner("", "pre-launch")).first_refusal()
+}
+
 fn leg_json(leg: &ReadinessLeg) -> Value {
     json!({
         "state": leg.state,
@@ -356,18 +381,17 @@ pub fn run(args: &[String]) -> i32 {
 
     let ensure_goal = args.iter().any(|arg| arg == "--ensure-goal");
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let machine = machine_leg(&harness);
-    let stop = if pre_launch {
-        ReadinessLeg {
-            state: LegState::Ready,
-            reason: Some("pre-launch: the worker's Stop hook checks this leg".to_string()),
-        }
+    let mut snapshot = if pre_launch {
+        pre_launch_snapshot(&harness, &command, owner)
     } else {
-        stop_leg(&harness, &session, &cwd)
+        measure(
+            machine_leg(&harness),
+            lifecycle_leg(&harness, &command),
+            stop_leg(&harness, &session, &cwd),
+            provider_goal_leg(&harness),
+            owner,
+        )
     };
-    let lifecycle = lifecycle_leg(&harness, &command);
-    let provider_goal = provider_goal_leg(&harness);
-    let mut snapshot = measure(machine, lifecycle, stop, provider_goal, owner);
     let mut goal_receipt = None;
     if ensure_goal && harness == "codex" && snapshot.ready() {
         if scope.trim().is_empty() || session.trim().is_empty() {
