@@ -210,7 +210,7 @@ command_surface = "codex-skill"
 # not exist. `review` is the collision case - it is both, and the bare
 # spelling stays native; the fno lane is reached namespaced, as /fno:review.
 native_verbs = ["/review", "/code-review", "/model", "/status", "/compact", "/goal"]
-# Per-verb teaching metadata (x-d156): the roster is palette-measured
+# Per-verb teaching metadata: the roster is palette-measured
 # (2026-09-01) and compact/goal corroborated by the provider_actions
 # rows below; use_when lines are name-derived from that measurement,
 # risk classes all safe (compact is a driven provider action, goal is
@@ -484,7 +484,7 @@ slash_prefix = ""
 # reference's slash-command table (aliases folded into their canonical
 # name; argument-taking verbs listed by name).
 native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config", "/context", "/copy", "/credits", "/diff", "/exit", "/fast", "/feedback", "/fork", "/help", "/hooks", "/keybindings", "/logout", "/mcp", "/model", "/open", "/permissions", "/planning", "/rename", "/resume", "/rewind", "/skills", "/statusline", "/tasks", "/title", "/usage"]
-# Per-verb teaching metadata (x-d156). agy is claude-shaped (the same
+# Per-verb teaching metadata. agy is claude-shaped (the same
 # hook-event names and a Gemini-family core), so use_when lines are
 # name-derived, not vendor-measured; the dangerous classes follow the
 # claude semantics of the shared verbs.
@@ -636,7 +636,7 @@ slash_prefix = "fno:"
 # commands doc: five built-ins ship, and a custom command can override a
 # built-in by name.
 native_verbs = ["/help", "/init", "/redo", "/share", "/undo"]
-# Per-verb teaching metadata (x-d156), measured from the same vendor
+# Per-verb teaching metadata, measured from the same vendor
 # commands doc as the roster. Every opencode row carries built_in = true
 # because a user-defined command can override a built-in by name; a
 # custom override is invisible to this table by construction.
@@ -806,7 +806,7 @@ slash_prefix = "skill:"
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
 native_verbs = ["/name"]
-# Per-verb teaching metadata (x-d156); pi's single measured verb.
+# Per-verb teaching metadata; pi's single measured verb.
 native_verb_meta = { "/name" = { use_when = "rename the pi session", risk = "safe" } }
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
 # the cost, the subscription tag, the context percentage and the compaction
@@ -981,7 +981,7 @@ slash_prefix = ""
 # vendor slash-commands reference (aliases folded into their canonical
 # name).
 native_verbs = ["/about", "/ask", "/bedrock", "/clear", "/config", "/copy", "/copy-conversation-id", "/copy-request-id", "/debug", "/exit", "/feedback", "/fork", "/help", "/line-numbers", "/logs", "/max-mode", "/mcp", "/model", "/open", "/plan", "/plugin", "/quit", "/rename", "/resume", "/rewind", "/run-everything", "/sandbox", "/setup-terminal", "/shell", "/show-thinking", "/status-indicators", "/summarize", "/update", "/vim"]
-# Per-verb teaching metadata (x-d156); cursor-agent ships no vault doc in
+# Per-verb teaching metadata; cursor-agent ships no vault doc in
 # the measurement set, so use_when lines are name-derived. The chat id is
 # CALLEE-minted and the store is remote (see the conversion row and
 # docs/HARNESSES.md), which is why /resume and /rewind read
@@ -1231,7 +1231,7 @@ slash_prefix = ""
 # user guide's slash-command sections. Skill-provided verbs (/commit and
 # the like) are excluded: they ride enabled skills, not the harness.
 native_verbs = ["/always-approve", "/compact", "/hooks-add", "/hooks-list", "/hooks-remove", "/hooks-trust", "/hooks-untrust", "/model", "/new"]
-# Per-verb teaching metadata (x-d156); grok ships no vault doc in the
+# Per-verb teaching metadata; grok ships no vault doc in the
 # measurement set, so use_when lines are name-derived.
 native_verb_meta = { "/always-approve" = { use_when = "toggle the approval bypass", risk = "safe" }, "/compact" = { use_when = "summarize the conversation to free context", risk = "safe" }, "/hooks-add" = { use_when = "add a hook rule", risk = "safe" }, "/hooks-list" = { use_when = "list hook rules", risk = "safe" }, "/hooks-remove" = { use_when = "remove a hook rule", risk = "safe" }, "/hooks-trust" = { use_when = "trust a hook", risk = "safe" }, "/hooks-untrust" = { use_when = "untrust a hook", risk = "safe" }, "/model" = { use_when = "switch the model", risk = "safe" }, "/new" = { use_when = "start a new conversation", risk = "context-destroying" } }
 # Read off a live grok TUI (2026-09-02): the idle composer carries the status

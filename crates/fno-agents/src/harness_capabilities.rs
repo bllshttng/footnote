@@ -221,7 +221,7 @@ pub struct ProviderAction {
     pub proof: String,
 }
 
-/// The raw-mail guard's risk vocabulary for a native verb (x-d156). A
+/// The raw-mail guard's risk vocabulary for a native verb. A
 /// `session-ending` or `context-destroying` verb is refused on
 /// `mail send --raw` unless the send names it with `--ack-verb-risk`.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
