@@ -1929,10 +1929,12 @@ fn parse_grok_inspect(text: &str, grok_home: &Path) -> GrokReachability {
 /// Link the stage into `<grok_home>/plugins/fno`, then a second status
 /// read: the `linked` receipt prints only when that read is reachable. Why
 /// a link and not `grok plugin install --trust`: the plugins directory is
-/// trusted automatically (vendor guide 09-plugins.md), the link follows
-/// every `fno doctor update` restage of the 186 MB stage where a copied
-/// install would go stale, and grok dedupes plugins by name with the
-/// `$GROK_HOME/plugins` copy winning, so the Claude-compat copy drops out.
+/// trusted automatically (vendor guide 09-plugins.md), and the link
+/// follows every `fno doctor update` restage of the 186 MB stage where a
+/// copied install would go stale. Measured 2026-09-26 (grok 1.0.34): the
+/// linked copy reads under the root manifest's name ("footnote"), so the
+/// compat copy is NOT deduped away, and grok still auto-disabled the
+/// unlisted plugin; the stop-contract fixture carries the readings.
 fn install_grok(stage: &Path, _force: bool) -> Result<String, String> {
     match grok_reachability() {
         GrokReachability::Reachable { path } => Ok(format!("already installed, reachable: {path}")),
