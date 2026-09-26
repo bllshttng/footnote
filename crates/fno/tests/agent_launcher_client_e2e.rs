@@ -116,7 +116,10 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     // the full chosen value reads untruncated. The chip value lands when
     // the catalog read does, so wait for it instead of reading once.
     assert!(screen.contains("new agent"), "sheet title: {screen}");
-    let screen = h.wait_screen(10, |s| s.contains("agy · default"));
+    // The chip's value comes from the compile-time capability table (agy
+    // sorts first), not the fake PATH bins; it lands when the catalog read
+    // does, so wait for it instead of reading once.
+    let screen = h.wait_screen(30, |s| s.contains("agy · default"));
     assert!(
         screen.contains("agy · default"),
         "the values strip shows the harness and model choices: {screen}"
@@ -167,7 +170,7 @@ fn agent_list_offers_default_rows_and_no_free_text_model_row() {
     wait_input(&mut h);
     open_composer(&mut h);
     pick_claude_and_open_model_tab(&mut h);
-    let screen = h.wait_screen(10, |s| s.contains("harness default"));
+    let screen = h.wait_screen(30, |s| s.contains("harness default"));
     assert!(
         screen.contains("harness default"),
         "the model body names the harness default: {screen}"

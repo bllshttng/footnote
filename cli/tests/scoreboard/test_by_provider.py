@@ -9,6 +9,7 @@ AC6-FR   by-provider path inherits the ledger reader's retry/BrokenLedger.
 """
 
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta
@@ -155,7 +156,7 @@ def test_hp_window_excludes_old_rows():
 def test_hp_json_contract(tmp_path, monkeypatch):
     ts = (datetime.now() - timedelta(days=1)).isoformat()
     rows = [_row("claude", "opus", nid="x-1", cost=6.0, completed=ts)]
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": GRAPH}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": GRAPH}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--by-provider", "-J"])
     assert res.exit_code == 0, res.output
@@ -290,12 +291,12 @@ def test_edge_unhashable_provider_model_nid_never_crash():
 
 def test_ui_populated_render_formats_bounce_and_blanks_repeated_provider(tmp_path, monkeypatch):
     ts = (datetime.now() - timedelta(days=1)).isoformat()
-    graph = GRAPH + [{"id": "x-2", "caused_by": None}, {"id": "x-9", "caused_by": "x-1", "created_at": ts}]
+    graph = GRAPH + [{"id": "x-9", "caused_by": "x-1", "created_at": ts}]
     rows = [
         _row("claude", "opus", nid="x-1", cost=6.0, completed=ts),
         _row("claude", "haiku", nid="x-2", cost=2.0, completed=ts),
     ]
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    seed_graph(tmp_path / "graph.json", json.dumps({"entries": graph}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--by-provider"])
     assert res.exit_code == 0, res.output

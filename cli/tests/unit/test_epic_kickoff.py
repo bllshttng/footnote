@@ -16,6 +16,7 @@ end-to-end by test_dispatch_verb_projection.py, which runs the real
 selection subprocess; keep dispatch-projection regressions THERE.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -50,7 +51,7 @@ def _write_graph(tmp_path: Path, entries: list[dict], monkeypatch) -> Path:
         row.setdefault("slug", e.get("id", "node"))
         complete.append(row)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": complete}) + "\n")
+    seed_graph(g, json.dumps({"entries": complete}) + "\n")
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
 

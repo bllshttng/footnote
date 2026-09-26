@@ -1290,19 +1290,20 @@ fn pin_clean_board(dir: &Path, scope: &str) {
     let fno_dir = dir.join(".fno");
     fs::create_dir_all(&fno_dir).unwrap();
     let graph = dir.join("graph.json");
-    fs::write(
+    fno_agents::graph_store::seed_rows(
         &graph,
-        format!(
-            "{{\"entries\":[{{\"id\":\"{scope}\",\"type\":\"epic\",\"status\":\"done\",\"completed_at\":\"2026-08-18T00:00:00Z\",\"priority\":\"p1\"}}]}}"
-        ),
+        &[serde_json::json!({
+            "id": scope, "slug": scope, "title": "epic", "type": "epic",
+            "status": "done", "completed_at": "2026-08-18T00:00:00Z", "priority": "p1"
+        })],
     )
     .unwrap();
     fs::write(dir.join("lane.md"), "").unwrap();
     fs::write(
         fno_dir.join("config.toml"),
         format!(
-            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n[work.workspaces]\n",
-            graph.display(),
+            "state_dir = \"{}\"\n[paths]\noperator_lane = \"{}\"\n\n[work.workspaces]\n",
+            dir.display(),
             dir.join("lane.md").display()
         ),
     )
@@ -1354,6 +1355,11 @@ fn run_verb(args: &[&str], envs: &[(&str, &str)]) -> (String, String, Option<i32
     let mut cmd = std::process::Command::new(BINARY);
     cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.args(args);
+    if !envs.iter().any(|(key, _)| *key == "FNO_HOME") {
+        if let Some(cwd) = args.windows(2).find(|pair| pair[0] == "--cwd") {
+            cmd.env("FNO_HOME", cwd[1]);
+        }
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }

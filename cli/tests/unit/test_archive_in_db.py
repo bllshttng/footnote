@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.graph_seed import seed_graph
+
 FULL = {
     "type": "feature",
     "status": "idea",
@@ -42,10 +44,7 @@ def _archived_at(graph: Path, node_id: str):
 
 
 def _seed(graph: Path, *rows) -> None:
-    graph.write_text(
-        json.dumps({"entries": list(rows)}),
-        encoding="utf-8",
-    )
+    seed_graph(graph, rows)
 
 
 @pytest.fixture
@@ -67,8 +66,6 @@ def world(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
-    from fno import doctor_graph
-
     return {"graph": graph, "tmp": tmp_path}
 
 
@@ -92,20 +89,6 @@ def test_default_reads_drop_archived_include_archived_keeps_them(world):
     everything = {r["id"] for r in wire_rows(path=world["graph"], include_archived=True)}
     assert live == {"x-live"}
     assert everything == {"x-live", "x-old"}
-
-
-def test_export_now_writes_residents_into_the_json_file(world):
-    from fno import doctor_graph
-
-    archive = world["graph"].parent / "graph-archive.json"
-    _sweep(world)
-    assert not archive.exists(), "the sweep writes rows, never the advisory file"
-    doctor_graph._flip("sqlite")  # export is a sqlite-backend read
-    doctor_graph.export_graph(now=True)
-    exported = json.loads(world["graph"].read_text(encoding="utf-8"))["entries"]
-    assert {e["id"] for e in exported} == {"x-live", "x-old"}, (
-        "export rebuilds every resident, archived ones included"
-    )
 
 
 def test_import_skips_an_id_reuse_and_the_live_row_wins(tmp_path, monkeypatch):

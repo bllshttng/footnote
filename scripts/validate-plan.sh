@@ -236,6 +236,23 @@ resolve_agents_bin() {
     fi
 }
 
+# Echo the native fno front binary: an explicit executable $FNO_BIN, a build
+# under the source root, then PATH. The law stage read lives here
+# (`fno inbox law stage`); empty means the caller warns NOT CHECKED.
+resolve_front_bin() {
+    local source_root=""
+    source_root=$(_fno_source_root)
+    if [[ -n "${FNO_BIN:-}" && -x "${FNO_BIN}" ]]; then
+        printf '%s' "$FNO_BIN"
+    elif [[ -n "$source_root" && -x "$source_root/crates/fno/target/release/fno" ]]; then
+        printf '%s' "$source_root/crates/fno/target/release/fno"
+    elif [[ -n "$source_root" && -x "$source_root/crates/fno/target/debug/fno" ]]; then
+        printf '%s' "$source_root/crates/fno/target/debug/fno"
+    elif command -v fno >/dev/null 2>&1; then
+        command -v fno
+    fi
+}
+
 # Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
 # nothing. Shared by _plan_rung, _semantic_validate, and the consolidation gate
 # so the "which fno runs?" question has ONE answer here.
@@ -1303,15 +1320,15 @@ PYEOF
         warn "$label: stage-law check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
     elif [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
         local stage_bin
-        stage_bin=$(resolve_agents_bin)
+        stage_bin=$(resolve_front_bin)
         if [[ -z "$stage_bin" ]]; then
-            warn "$label: stage-law check NOT CHECKED (no fno-agents binary) - not a pass"
+            warn "$label: stage-law check NOT CHECKED (no native fno binary) - not a pass"
         else
             local stage_out
             stage_out=$(printf '{"mode":"stage","hook":{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"fno:blueprint","args":"%s"}}}' "$stage_node" \
-                | "$stage_bin" law-match 2>/dev/null) || stage_out=""
+                | "$stage_bin" inbox law stage 2>/dev/null) || stage_out=""
             if [[ -z "$stage_out" ]]; then
-                warn "$label: stage-law check NOT CHECKED (fno-agents law-match returned nothing) - not a pass"
+                warn "$label: stage-law check NOT CHECKED (fno inbox law stage returned nothing) - not a pass"
             else
                 # The block rides one JSON string: cut additionalContext,
                 # split its escaped newlines, read `- <id> (<subject>):`.

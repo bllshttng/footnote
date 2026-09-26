@@ -13,6 +13,7 @@ was a refusal at the CLI seam sitting in front of unplumbed params, so a test
 that called the helper directly would have passed against the broken build.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 from pathlib import Path
 
@@ -55,8 +56,7 @@ def bg_home(tmp_path, monkeypatch, native_backlog_door):
 
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(
-        json.dumps(
+    seed_graph(graph_path, json.dumps(
             {
                 "entries": [
                     {"id": "epic-x", "type": "epic", "project": "alpha"},
@@ -64,9 +64,7 @@ def bg_home(tmp_path, monkeypatch, native_backlog_door):
                     {"id": "epic-z", "type": "epic", "project": "alpha"},
                 ]
             }
-        ),
-        encoding="utf-8",
-    )
+        ))
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }]\n', encoding="utf-8"

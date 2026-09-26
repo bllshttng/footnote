@@ -568,7 +568,7 @@ fn plain_node(id: &str) -> Value {
 fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    let entries = json!({"entries": [
+    let entries = json!([
         granted_node("ab-ac1open", 11, "ready"),
         granted_node("ab-ac1done", 12, "done"),
         json!({
@@ -596,9 +596,8 @@ fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         }),
         plain_node("ab-ac1plain1"),
         plain_node("ab-ac1plain2"),
-    ]});
-    std::fs::write(&graph, entries.to_string()).unwrap();
-    crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+    ]);
+    crate::graph_store::seed_rows(&graph, entries.as_array().unwrap()).unwrap();
     (dir, graph)
 }
 
@@ -635,22 +634,6 @@ fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
     }
 }
 
-/// AC2-EDGE: a store whose backend is not sqlite keeps the full read.
-#[test]
-fn non_sqlite_backend_keeps_the_full_read() {
-    let dir = tempfile::tempdir().unwrap();
-    let graph = dir.path().join("graph.json");
-    std::fs::write(
-        &graph,
-        json!({"entries": [granted_node("ab-ac2one", 11, "ready")]}).to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        crate::graph_store::read_pr_rows(&graph, None).unwrap(),
-        crate::graph_store::read_rows(&graph).unwrap()
-    );
-}
-
 /// AC3-HP: the queue receipt is identical over the narrowed and full reads.
 #[test]
 fn queue_receipt_is_identical_over_the_narrowed_read() {
@@ -674,12 +657,11 @@ fn queue_receipt_is_identical_over_the_narrowed_read() {
 fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    let entries = json!({"entries": [
+    let entries = json!([
         granted_node("ab-ac4one", 11, "ready"),
         granted_node("ab-ac4two", 11, "ready"),
-    ]});
-    std::fs::write(&graph, entries.to_string()).unwrap();
-    crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+    ]);
+    crate::graph_store::seed_rows(&graph, entries.as_array().unwrap()).unwrap();
     let narrowed = crate::graph_store::read_pr_rows(&graph, Some(11)).unwrap();
     let full = crate::graph_store::read_rows(&graph).unwrap();
     for rows in [&narrowed, &full] {

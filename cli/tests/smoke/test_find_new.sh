@@ -8,7 +8,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/.fno"
-echo '{"entries": []}' > "$TMP/.fno/graph.json"
+printf '{"entries": []}\n' | uv run python tests/fixtures/graph_seed.py "$TMP/.fno/graph.json"
 
 export HOME="$TMP"
 

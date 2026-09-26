@@ -188,7 +188,7 @@ def test_cross_model_disabled_is_clean(tmp_path: Path, monkeypatch: pytest.Monke
 # --- AC6: every printed value names its decider ----------------------------
 
 
-def test_a_set_path_key_names_the_file_that_decided_it(tmp_path: Path) -> None:
+def test_graph_anchor_is_not_a_configured_state_file(tmp_path: Path) -> None:
     graph = tmp_path / "graph.json"
     f = _write(
         tmp_path / "config.toml",
@@ -196,19 +196,9 @@ def test_a_set_path_key_names_the_file_that_decided_it(tmp_path: Path) -> None:
         % (tmp_path / ".fno", graph),
     )
     result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    line = next(ln for ln in result.output.splitlines() if "  graph_json:" in ln)
-    assert f"set in {f}" in line
-
-
-def test_an_unset_path_key_reads_default(tmp_path: Path) -> None:
-    """AC6 negative control."""
-    f = _write(tmp_path / "config.toml", 'schema_version = 1\nstate_dir = "%s"\n' % (tmp_path / ".fno"))
-    result = _doctor(f)
-    assert result.exit_code == 0, result.output
-    line = next(ln for ln in result.output.splitlines() if "  graph_json:" in ln)
-    assert line.endswith("(config.paths.graph_json default)")
-    assert "set in" not in line
+    assert result.exit_code == 1, result.output
+    assert "paths.graph_json" in result.output and "not a modeled config key" in result.output
+    assert not any("  OPERATOR graph.json" in ln for ln in result.output.splitlines())
 
 
 # --- AC7: the settings-source line lists contributors, not presences -------

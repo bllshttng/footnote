@@ -7,6 +7,7 @@ winner parity. Every test points the seam at a contradictory local graph file:
 if selection ever answered from it, the sentinels give the test away.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -144,11 +146,11 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
                         lambda i: sidecar_dir / f"{i}.json")
     # The contradictory local graph: every value here must never surface.
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": r["id"], "title": "GRAPH-SENTINEL", "cwd": "/graph-cwd",
          "status": "ready", "priority": "p0"}
         for r in rows
-    ]}), encoding="utf-8")
+    ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
@@ -261,7 +263,7 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
     never crosses in a sidecar."""
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": "ab-aaa00001", "title": "Leaf under epic", "status": "ready",
          "priority": "p2", "parent": "ab-eee00001",
          "created_at": _days_ago(2), "plan_path": "/p/1.md"},
@@ -270,7 +272,7 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
          "plan_path": "/p/2.md"},
         {"id": "ab-eee00001", "title": "The epic", "status": "ready",
          "priority": "p3", "created_at": _days_ago(3)},
-    ]}), encoding="utf-8")
+    ]}))
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -336,7 +338,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
         "EXT-hi": {"plan_path": "/plans/hi.md"},
         "EXT-lo": {"plan_path": "/plans/lo.md"},
     })
-    before = g.read_text()
+    before = read_graph_strict(g)
 
     r = runner.invoke(
         app, ["backlog", "next", "--claim", "sess-ext-1"],
@@ -345,8 +347,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     assert r.exit_code == 0, r.output
     doc = json.loads(r.output)
     assert doc["id"] == "EXT-hi"
-    # The graph file is untouched.
-    assert g.read_text() == before
+    assert read_graph_strict(g) == before
     # The claim exists in the claims dir under the opaque id.
     claims_root = tmp_path / "claims"
     locks = list(claims_root.rglob("*EXT-hi*"))

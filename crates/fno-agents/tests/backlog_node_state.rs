@@ -17,11 +17,7 @@ fn fixture_node(id: &str, details: &str) -> serde_json::Value {
 }
 
 fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(path, entries).unwrap();
 }
 
 fn ws(_graph: &std::path::Path, id: &str, body: &str) -> StateWriteInput {

@@ -658,13 +658,6 @@ class StateFile:
 
 STATE_FILES: tuple[StateFile, ...] = (
     StateFile(
-        filename="graph.json",
-        resolver="fno.paths.graph_json",
-        root_class="OPERATOR",
-        selector="config.paths.graph_json, else config.state_dir",
-        owning_modules=("cli/src/fno/paths.py",),
-    ),
-    StateFile(
         filename="ledger.json",
         resolver="fno.paths.ledger_json",
         root_class="OPERATOR",
@@ -774,30 +767,15 @@ def locks_dir() -> Path:
 
 def graph_json() -> Path:
     """Return the path to graph.json."""
-    settings = _settings()
-    override = settings.paths.graph_json
-    if override is not None:
-        return _guard_state_path(_resolve(override))
     return state_dir() / "graph.json"
 
 
 def graph_archive_json() -> Path:
-    """Return the path to graph-archive.json (terminal-node archive sweep).
-
-    A sibling of graph.json so it follows any ``config.paths.graph_json``
-    override automatically - the archive must live next to the graph it drains
-    from. No override of its own (and so no bare ``~/.fno``): it is never
-    meaningful to separate the archive from its working graph.
-    """
     return graph_json().parent / "graph-archive.json"
 
 
 def relatedness_json() -> Path:
     """Return the path to relatedness.json (node-to-node relatedness sidecar).
-
-    A sibling of graph.json (like graph-archive.json) so it follows any
-    ``config.paths.graph_json`` override and is inherently shared across
-    worktrees. Regenerable artifact, never part of graph.json.
     """
     return graph_json().parent / "relatedness.json"
 

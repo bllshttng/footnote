@@ -1,5 +1,6 @@
 """Acceptance tests for the reversible difficulty coverage backfill."""
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -16,7 +17,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}\n')
+    seed_graph(graph, '{"entries": []}\n')
     import fno.graph._constants as constants
     import fno.graph.store as store
 
@@ -53,10 +54,8 @@ def test_difficulty_backfill_writes_attributed_sample():
 
 
 def test_migrate_difficulty_backfill_cli_writes_positive_sample(tmp_graph):
-    tmp_graph.write_text(
-        json.dumps({"entries": [{"id": "x-cli-large", "size": "L", "difficulty": None}]})
-        + "\n"
-    )
+    seed_graph(tmp_graph, json.dumps({"entries": [{"id": "x-cli-large", "size": "L", "difficulty": None}]})
+        + "\n")
 
     result = runner.invoke(
         app, ["backlog", "migrate-difficulty", "--backfill", "--apply"]

@@ -11,6 +11,7 @@ sets FNO_EVENTS_PATH to a per-test tmp journal anyway, so a future emitter
 cannot reach the live file from here.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph.store import read_graph_strict
 
 # ---------------------------------------------------------------------------
@@ -439,7 +440,7 @@ _AB_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
 def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
     """A hermetic graph with ONE node whose only open do row names `sid`."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -472,7 +473,7 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
     monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
 
     started_at = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    g.write_text(_json.dumps({"entries": [{
+    seed_graph(g, _json.dumps({"entries": [{
         "id": node_id, "title": "abandoned arm", "priority": "p2",
         "project": "fno", "domain": "code", "cwd": "/some/worktree",
         "status": "in_progress",
@@ -541,7 +542,7 @@ def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
 def _in_review_world(tmp_path, monkeypatch, node_id="x-inrev001"):
     """Hermetic graph with ONE in_review node carrying a PR link."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -556,7 +557,7 @@ def _in_review_world(tmp_path, monkeypatch, node_id="x-inrev001"):
     monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
 
-    g.write_text(_json.dumps({"entries": [{
+    seed_graph(g, _json.dumps({"entries": [{
         "id": node_id, "title": "conflicting pr", "priority": "p1",
         "project": "fno", "domain": "code",
         "status": "in_review", "pr_number": 1545,

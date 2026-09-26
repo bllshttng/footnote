@@ -27,6 +27,7 @@ replaces that one prover and leaves the verb, typer's exit codes, the graph
 lock, and the render fanout running for real.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -82,7 +83,7 @@ def probe(tmp_path: Path):
     settings.write_text(f"schema_version: 1\nconfig:\n  state_dir: {state}\n", encoding="utf-8")
 
     graph = state / "graph.json"
-    graph.write_text('{"entries": []}\n', encoding="utf-8")
+    seed_graph(graph, '{"entries": []}\n')
 
     def run(
         *args: str,
@@ -118,7 +119,7 @@ def probe(tmp_path: Path):
 
 
 def _seed(probe, *entries: dict) -> None:
-    probe.graph.write_text(json.dumps({"entries": list(entries)}, indent=2) + "\n", "utf-8")
+    seed_graph(probe.graph, entries)
 
 
 def _node(node_id: str = "zz-0001", **over) -> dict:
@@ -456,11 +457,10 @@ def test_a_graph_with_no_encounters_serializes_byte_identical(probe):
     """The field is sparse. A null on every node would break every board digest."""
     _seed(probe, _node("zz-0001"), _node("zz-0002"))
     assert probe("backlog", "note", "zz-0001", "a note.", "-q").returncode == 0
-    baseline = probe.graph.read_bytes()
-    assert b"encounters" not in baseline
+    assert all("encounters" not in entry for entry in _entries(probe))
 
     assert probe("backlog", "note", "zz-0002", "another note.", "-q").returncode == 0
-    assert b"encounters" not in probe.graph.read_bytes()
+    assert all("encounters" not in entry for entry in _entries(probe))
 
 
 # --- provenance: model and effort --------------------------------------------
@@ -575,11 +575,11 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
     assert stored[0]["evidence"] == evidence
 
     carriers = [
-        str(path.relative_to(probe.state))
+        "graph.db" if path.name.startswith("graph.db") else path.name
         for path in probe.state.rglob("*")
         if path.is_file() and evidence.encode() in path.read_bytes()
     ]
-    assert carriers == ["graph.db"]
+    assert set(carriers) == {"graph.db"}
 
 
 
@@ -611,7 +611,7 @@ def test_append_encounter_names_the_existing_timestamp(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -640,7 +640,7 @@ def test_append_encounter_reports_a_missing_node(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": []}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -657,7 +657,7 @@ def test_a_reason_symbol_not_prose_picks_the_exit_code(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -669,14 +669,16 @@ def test_a_reason_symbol_not_prose_picks_the_exit_code(tmp_path, monkeypatch):
 
     # The collapse this guards: without the refusal, one anonymous record
     # matches every later anonymous record and blocks all of them.
-    assert json.loads(graph.read_text(encoding="utf-8"))["entries"][0].get("encounters") is None
+    from fno.graph.store import read_graph_strict
+
+    assert read_graph_strict(graph)[0].get("encounters") is None
 
 
 def test_append_encounter_dedupes_operator_without_session_id(tmp_path, monkeypatch):
     from fno.graph.store import append_encounter
 
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    seed_graph(graph, json.dumps({"entries": [_node()]}))
     import fno.graph._constants as gc
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")

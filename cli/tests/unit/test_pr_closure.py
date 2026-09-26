@@ -7,6 +7,7 @@ and the consumers. Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR,
 AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import os
@@ -879,7 +880,7 @@ def test_pr_list_surfaces_the_binding_detail_and_drops_the_body(monkeypatch, tmp
     from typer.testing import CliRunner
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    seed_graph(graph_path, json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     from fno.pr import _rest
@@ -919,8 +920,7 @@ def test_pr_list_bound_rows_keep_their_verdict_and_carry_no_detail(monkeypatch, 
     from typer.testing import CliRunner
 
     graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps(
+    seed_graph(graph_path, json.dumps(
             {
                 "entries": [
                     {
@@ -931,8 +931,7 @@ def test_pr_list_bound_rows_keep_their_verdict_and_carry_no_detail(monkeypatch, 
                     }
                 ]
             }
-        )
-    )
+        ))
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     from fno.pr import _rest

@@ -406,17 +406,18 @@ impl TailReader {
         due
     }
 
-    /// [`session_tails`] over the cached reader; same output shape, paced
-    /// discovery.
-    pub(crate) fn tails(&mut self, keys: &[(String, Option<String>)]) -> HashMap<String, String> {
+    /// The raw tail TEXT per uuid, from one `read_tail` per path. The shared
+    /// walk behind [`Self::tails`] and [`Self::tails_and_ctx`]: the prose tail
+    /// and the context reading both come off the same bytes.
+    fn texts(&mut self, keys: &[(String, Option<String>)]) -> HashMap<String, String> {
         let mut out = HashMap::new();
         let mut missing: Vec<&str> = Vec::new();
         for (uuid, log_path) in keys {
             let direct = log_path
                 .as_deref()
-                .and_then(|p| compose_tail(&read_tail(Path::new(p), TRANSCRIPT_TAIL_BYTES)?));
-            if let Some(tail) = direct {
-                out.insert(uuid.clone(), tail);
+                .and_then(|p| read_tail(Path::new(p), TRANSCRIPT_TAIL_BYTES));
+            if let Some(text) = direct {
+                out.insert(uuid.clone(), text);
                 continue;
             }
             if let Some(path) = self.paths.get(uuid).cloned() {
@@ -425,9 +426,7 @@ impl TailReader {
                 // UNREADABLE one drops the cache entry so the paced rescan
                 // can re-resolve a transcript that moved.
                 if let Some(text) = read_tail(&path, TRANSCRIPT_TAIL_BYTES) {
-                    if let Some(tail) = compose_tail(&text) {
-                        out.insert(uuid.clone(), tail);
-                    }
+                    out.insert(uuid.clone(), text);
                     continue;
                 }
                 self.paths.remove(uuid);
@@ -441,15 +440,42 @@ impl TailReader {
             for uuid in &missing {
                 if let Some(path) = self.paths.get(*uuid) {
                     if let Some(text) = read_tail(path, TRANSCRIPT_TAIL_BYTES) {
-                        if let Some(tail) = compose_tail(&text) {
-                            out.insert(uuid.to_string(), tail);
-                        }
+                        out.insert(uuid.to_string(), text);
                     }
                 }
             }
         }
         self.paths.retain(|u, _| keys.iter().any(|(k, _)| k == u));
         out
+    }
+
+    /// [`Self::texts`] filtered to composed prose tails.
+    pub(crate) fn tails(&mut self, keys: &[(String, Option<String>)]) -> HashMap<String, String> {
+        self.texts(keys)
+            .into_iter()
+            .filter_map(|(uuid, text)| compose_tail(&text).map(|tail| (uuid, tail)))
+            .collect()
+    }
+
+    /// Prose tails AND context readings from ONE `read_tail` per path: the
+    /// pane frame's `ctx` cell rides the same transcript pass the sideline's
+    /// last-message column already runs.
+    pub(crate) fn tails_and_ctx(
+        &mut self,
+        keys: &[(String, Option<String>)],
+    ) -> (HashMap<String, String>, HashMap<String, String>) {
+        let texts = self.texts(keys);
+        let mut tails = HashMap::new();
+        let mut ctx = HashMap::new();
+        for (uuid, text) in &texts {
+            if let Some(tail) = compose_tail(text) {
+                tails.insert(uuid.clone(), tail);
+            }
+            if let Some(c) = crate::context_used::from_tail(text) {
+                ctx.insert(uuid.clone(), c);
+            }
+        }
+        (tails, ctx)
     }
 }
 

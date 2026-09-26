@@ -11,6 +11,7 @@ The registration core lives in ``fno.agents.registry`` and the
 fail-open SessionStart entry point in ``fno.agents.register_session``.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -1414,13 +1415,10 @@ def _seed_deferred_node() -> None:
 
     g = paths.graph_json()
     g.parent.mkdir(parents=True, exist_ok=True)
-    g.write_text(
-        json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
             "id": DEFER_NODE, "title": "deferred provenance target",
             "type": "feature", "project": "fno", "status": "ready",
-        }]}),
-        encoding="utf-8",
-    )
+        }]}))
 
 
 def _deferred_sessions() -> list[dict]:

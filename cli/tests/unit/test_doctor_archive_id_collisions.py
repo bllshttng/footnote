@@ -5,6 +5,7 @@ different node under the same id -- a real collision, not a duplicate. The
 check must count it and doctor must fail its exit code above zero.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -17,7 +18,7 @@ def _seed(monkeypatch, tmp_path, *, working: list[dict], archive: list[dict] | N
     from fno.paths import graph_archive_json, graph_json
 
     graph_json().parent.mkdir(parents=True, exist_ok=True)
-    graph_json().write_text(json.dumps({"entries": working}), encoding="utf-8")
+    seed_graph(graph_json(), json.dumps({"entries": working}))
     if archive is not None:
         graph_archive_json().parent.mkdir(parents=True, exist_ok=True)
         graph_archive_json().write_text(json.dumps({"entries": archive}), encoding="utf-8")
@@ -77,7 +78,7 @@ def test_corrupt_archive_is_an_alarm_not_a_clean_zero(tmp_path, monkeypatch):
     from fno.paths import graph_archive_json, graph_json
 
     graph_json().parent.mkdir(parents=True, exist_ok=True)
-    graph_json().write_text(json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8")
+    seed_graph(graph_json(), json.dumps({"entries": [{"id": "x-1"}]}))
     graph_archive_json().parent.mkdir(parents=True, exist_ok=True)
     graph_archive_json().write_text("{not json at all", encoding="utf-8")
 

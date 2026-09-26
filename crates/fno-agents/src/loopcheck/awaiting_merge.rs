@@ -337,13 +337,11 @@ mod tests {
         plan.display().to_string()
     }
 
-    fn write_graph(dir: &std::path::Path, entry: Value) -> std::path::PathBuf {
-        let graph = dir.join("graph.json");
-        std::fs::write(
-            &graph,
-            serde_json::to_string(&serde_json::json!({"entries": [entry]})).unwrap(),
-        )
-        .unwrap();
+    fn write_graph(dir: &std::path::Path, name: &str, entry: Value) -> std::path::PathBuf {
+        // One store per fixture: a second seed into the same db would trip
+        // the publish read-back (the store already holds the first row).
+        let graph = dir.join(name);
+        crate::graph_store::seed_rows(&graph, &[entry]).unwrap();
         graph
     }
 
@@ -359,6 +357,7 @@ mod tests {
         );
         let graph = write_graph(
             dir.path(),
+            "graph-held.json",
             serde_json::json!({"id": "x-held", "plan_path": plan_path}),
         );
         assert_eq!(
@@ -370,6 +369,7 @@ mod tests {
             write_hold_plan(dir.path(), "dispatch_hold:\n  reason: waiting on legal\n");
         let graph2 = write_graph(
             dir.path(),
+            "graph-broken.json",
             serde_json::json!({"id": "x-broken", "plan_path": invalid_plan}),
         );
         assert_eq!(ruling_hold_at("x-broken", &graph2), None);

@@ -1592,14 +1592,17 @@ mod verdict_tests {
         // concurrent unlocked test may have left behind (the crate's env
         // locks are fragmented; see the note on the backlog node).
         std::env::set_var("FNO_CONFIG", &config);
-        std::fs::write(
+        // graph_json_path ignores the retired paths.graph_json config key and
+        // resolves through FNO_HOME, so the home pin rides the env like the
+        // config pin does: leaked deliberately, same posture as FNO_CONFIG.
+        std::env::set_var("FNO_HOME", graph.parent().unwrap());
+        crate::graph_store::seed_rows(
             &graph,
-            json!({"entries": [
-                {"id": "x-bbbb", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-old", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"},
-                {"id": "x-new", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}
-            ]})
-            .to_string(),
+            &[
+                json!({"id": "x-bbbb", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"}),
+                json!({"id": "x-old", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"}),
+                json!({"id": "x-new", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}),
+            ],
         )
         .unwrap();
         let manifest = root.join("kings/x-bbbb.md");
