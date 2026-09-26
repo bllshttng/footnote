@@ -12,7 +12,7 @@ import logging
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, cast
 
 import typer
 
@@ -24,7 +24,7 @@ _LOG = logging.getLogger(__name__)
 
 def _epoch_ms_iso(value: object) -> str:
     try:
-        return datetime.fromtimestamp(value / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.fromtimestamp(cast(int, value) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (OverflowError, OSError, TypeError, ValueError):
         return "unknown"
 
