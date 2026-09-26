@@ -31,3 +31,7 @@ Harness-specific failure modes (symptom, cause, fix) are tabled per harness in `
 ## Honesty
 
 The table says which rows are vendor-measured and which are name-derived, right beside the data. Never claim a verb does what the table does not say.
+
+## Known Limitations and Deferred Work
+
+- The render is only as current as the table's measurement date. A harness newer than its row drifts it. See [LIMITATIONS.md](LIMITATIONS.md).
