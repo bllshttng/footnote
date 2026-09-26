@@ -1,7 +1,8 @@
 //! `fno-agents hook pipe-guard` - refuse a Bash call whose pipe hides the
-//! exit or the rows the call was run for.
+//! exit or the rows the call was run for, or whose command position runs the
+//! third-party Backlog.md CLI.
 //!
-//! Three readings, each a refusal because the pipe answers a different
+//! Four readings, each a refusal because the call answers a different
 //! question than the one asked:
 //!
 //! 1. Truncation: a count-or-existence producer (`pgrep`, `ls`, `find`,
@@ -47,6 +48,10 @@ const TRUNCATION_REASON: &str = "[fno pipe guard] `{cmd}` truncates a count-or-e
 const TIMEOUT_REASON: &str = "[fno pipe guard] `{cmd}` puts `timeout` in the first stage of a pipeline. When timeout kills the command (exit 124), the pipeline reports the last stage's exit, 0, and the killed command printed nothing, so the call reads as a quiet success. On 2026-09-16 three `timeout 120 fno backlog update ... | tail -3` calls were killed at 120s and read as clean.\n\nThe Bash tool already bounds every call and reports its own timeout as an error, so drop `timeout` unless it guards other work. Otherwise put `set -o pipefail;` first so a kill reports 124 (pair it with tail: head can end the command with SIGPIPE 141), or redirect: `timeout 120 x > out.txt 2>&1; echo EXIT=$?; tail -3 out.txt`.";
 
 const STATUS_REASON: &str = "[fno pipe guard] `{cmd}` reads `$?` right after a pipeline. With no pipefail, `$?` is the LAST stage's exit, so `x | tail -3; echo rc=$?` prints rc=0 when x failed or timeout killed it. On 2026-09-16 that read produced rc=0 from a killed update and a bug that did not exist.\n\nTo read x's own exit, redirect instead: `x > out.txt 2>&1; echo EXIT=$?; tail -3 out.txt`. Or put `set -o pipefail;` first (pair it with tail, not head). `${PIPESTATUS[0]}` is bash-only and reads empty in zsh.";
+
+/// Bare `backlog` in command position resolves to the third-party
+/// Backlog.md CLI, not fno; the remedy is the fno prefix.
+const BACKLOG_REASON: &str = "[fno pipe guard] `{cmd}` runs bare `backlog`, which resolves to the third-party Backlog.md CLI at ~/.bun/bin/backlog, not fno. On 2026-09-26 that CLI's guidelines block rewrote AGENTS.md and CLAUDE.md in canonical (627 lines telling agents to run `backlog task create`), and every session in canonical loaded it. Prefix the verb: `fno backlog find|get|idea|update` is the node graph.";
 
 /// Entry: read the payload once, judge, print, always exit 0.
 pub fn run(_args: &[String]) -> i32 {
@@ -137,6 +142,19 @@ fn judge_segment(
 ) -> Option<String> {
     if seg.is_empty() {
         return None;
+    }
+    // 4. Bare `backlog` in command position: the third-party Backlog.md CLI,
+    //    never fno. `head_of` resolves wrappers, assignments and subshell
+    //    openers, and a reserved keyword leading the segment (`if backlog
+    //    ...`) is dropped so the command behind it is judged; `fno backlog`
+    //    and `echo backlog` do not refuse.
+    let cmd: Vec<String> = seg
+        .iter()
+        .skip_while(|t| matches!(t.as_str(), "if" | "while" | "until" | "then" | "do"))
+        .cloned()
+        .collect();
+    if head_of(&cmd, false).is_some_and(|(head, _, _)| head == "backlog") {
+        return Some(BACKLOG_REASON.replace("{cmd}", &seg.join(" ")));
     }
     // A group closer's status is its last command's: it keeps the flag.
     let is_closer = seg
@@ -357,5 +375,32 @@ mod tests {
         allowed("timeout 60 x > /tmp/o.txt 2>&1; echo EXIT=$?");
         allowed("timeout 60 x");
         allowed("echo timeout | tail -1");
+    }
+
+    #[test]
+    fn bare_backlog_denies() {
+        let r = denied("backlog task list");
+        assert!(r.contains("fno backlog"), "names the remedy: {r}");
+        assert!(r.contains("~/.bun/bin/backlog"), "names the impostor: {r}");
+        denied("backlog init");
+        // A chained, subshelled or wrapped bare call is still bare.
+        denied("cd /tmp && backlog task list");
+        denied("fno backlog get x; backlog task list");
+        denied("(backlog task list)");
+        denied("env backlog task list");
+        denied("FOO=1 backlog task list");
+        denied("if backlog init; then echo hi; fi");
+        denied("while backlog task list; do :; done");
+    }
+
+    #[test]
+    fn fno_backlog_and_argument_position_allow() {
+        allowed("fno backlog find x");
+        allowed("fno backlog get done");
+        // `backlog` as an argument is prose, never a command position.
+        allowed("echo backlog");
+        allowed("rg backlog hooks/");
+        allowed("git log --oneline -- backlog.md");
+        allowed("for b in backlog task; do echo done; done");
     }
 }
