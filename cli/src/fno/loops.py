@@ -23,12 +23,9 @@ _LOG = logging.getLogger(__name__)
 
 
 def _epoch_ms_iso(value: object) -> str:
-    if not isinstance(value, int) or isinstance(value, bool):
-        return "unknown"
     try:
-        timestamp = datetime.fromtimestamp(value / 1000, timezone.utc)
-        return timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (OverflowError, OSError, ValueError):
+        return datetime.fromtimestamp(value / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, TypeError, ValueError):
         return "unknown"
 
 loops_app = typer.Typer(
