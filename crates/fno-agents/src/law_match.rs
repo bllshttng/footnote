@@ -2142,7 +2142,7 @@ mod tests {
 
     #[test]
     fn ac4_an_unreadable_index_reports_never_silence() {
-        let missing = std::path::Path::new("/nonexistent/fno-x-fa1e/decisions.jsonl");
+        let missing = std::path::Path::new("/nonexistent/fno-edit-read/decisions.jsonl");
         let state = tempfile::tempdir().expect("tempdir");
         let answer = edit_answer(
             edit_req(Some("S"), &["crates/x.rs"]),
