@@ -447,6 +447,17 @@ pub fn resolve_reentry_with(
             .and_then(|id| account_binding(id).ok().flatten());
         claude_home.listed_job(&short_id, root.as_deref().map(Path::new))
     };
+    // Without the listing a live session cannot be told from a dead one, and
+    // a bg resume of a live one starts a copy the pane never stops.
+    if transition == ReentryTransition::Revive
+        && listing == JobListing::Unread
+        && !short_id.is_empty()
+    {
+        return Err(format!(
+            "row {name:?}: `claude agents --json --all` could not be read, so job {short_id} \
+             cannot be told live or dead; tap again once it answers"
+        ));
+    }
     let transition = if transition == ReentryTransition::Revive && listing.is_running() {
         ReentryTransition::Attach
     } else {
@@ -823,6 +834,7 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
 mod tests {
     use super::*;
     use crate::claude_ask::ClaudeHome;
+    use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
     use crate::state::Registry;
 
     const SECRET: &str = "zai-secret-token";
@@ -831,11 +843,12 @@ mod tests {
     /// one fact the respawn arm reads. An empty listing is the unlisted case.
     fn staged_home(shorts: &[&str]) -> (tempfile::TempDir, ClaudeHome) {
         let dir = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(dir.path()).with_listing(
+        let home = ClaudeHome::at(dir.path()).with_listing(ClaudeAgentsSnapshot::known(
             shorts
                 .iter()
-                .map(|s| (s.to_string(), "stopped".to_string())),
-        );
+                .map(|s| ClaudeAgentRow::new(s, Some("stopped")))
+                .collect(),
+        ));
         (dir, home)
     }
 
@@ -1705,17 +1718,13 @@ mod tests {
         .unwrap()
     }
 
-    fn revive_plan(state: Option<&str>) -> ReentryPlan {
+    fn revive_with(listing: ClaudeAgentsSnapshot) -> Result<ReentryPlan, String> {
         let mut e = row("tapped");
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
         e.launch_account = Some("default".into());
         let dir = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(dir.path()).with_listing(
-            state
-                .map(|s| ("9a1b2c3d".to_string(), s.to_string()))
-                .into_iter(),
-        );
+        let home = ClaudeHome::at(dir.path()).with_listing(listing);
         resolve_reentry_with(
             &reg(vec![e]),
             "tapped",
@@ -1725,7 +1734,22 @@ mod tests {
             &home,
             None,
         )
-        .unwrap()
+    }
+
+    fn revive_plan(state: Option<&str>) -> ReentryPlan {
+        let rows = state
+            .map(|s| ClaudeAgentRow::new("9a1b2c3d", Some(s)))
+            .into_iter()
+            .collect();
+        revive_with(ClaudeAgentsSnapshot::known(rows)).unwrap()
+    }
+
+    #[test]
+    fn a_revive_refuses_when_the_listing_cannot_be_read() {
+        // A bg resume of a session that is in fact live starts a copy the
+        // pane never stops, so an unread listing refuses instead.
+        let err = revive_with(ClaudeAgentsSnapshot::unknown("timed out")).unwrap_err();
+        assert!(err.contains("could not be read"), "{err}");
     }
 
     #[test]
@@ -1816,7 +1840,7 @@ mod tests {
         // The recorded cwd is gone and no git worktree knows the session. The
         // transcript itself names the live directory; the plan must use it.
         let tmp = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(tmp.path());
+        let home = ClaudeHome::at(tmp.path()).with_listing(ClaudeAgentsSnapshot::known(vec![]));
         let live = tmp.path().join("live-dir");
         std::fs::create_dir_all(&live).unwrap();
         let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";

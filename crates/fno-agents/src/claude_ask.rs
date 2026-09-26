@@ -284,9 +284,9 @@ pub(crate) fn claude_cwd_slug(path: &Path) -> String {
 pub struct ClaudeHome {
     home: PathBuf,
     extra_roots: Vec<PathBuf>,
-    /// A fixed `claude agents --json --all` answer: (job id, state) rows.
-    /// `None` reads the real listing.
-    listing: Option<Vec<(String, String)>>,
+    /// A fixed `claude agents --json --all` answer. `None` reads the real
+    /// listing.
+    listing: Option<crate::claude_roster::ClaudeAgentsSnapshot>,
 }
 
 /// One job's line in `claude agents --json --all`.
@@ -334,10 +334,10 @@ impl ClaudeHome {
         }
     }
 
-    /// Pin the (job id, state) rows `claude agents --json --all` lists, for
-    /// a test that stages one.
-    pub fn with_listing(mut self, rows: impl IntoIterator<Item = (String, String)>) -> Self {
-        self.listing = Some(rows.into_iter().collect());
+    /// Pin what `claude agents --json --all` answers, for a test that
+    /// stages one.
+    pub fn with_listing(mut self, listing: crate::claude_roster::ClaudeAgentsSnapshot) -> Self {
+        self.listing = Some(listing);
         self
     }
 
@@ -345,13 +345,10 @@ impl ClaudeHome {
     /// about one job. The listing is the only source of job state; the files
     /// under `jobs/` are Claude's own.
     pub fn listed_job(&self, short_id: &str, config_dir: Option<&Path>) -> JobListing {
-        if let Some(listing) = &self.listing {
-            return match listing.iter().find(|(id, _)| id == short_id) {
-                Some((_, state)) => JobListing::Listed(Some(state.clone())),
-                None => JobListing::Unlisted,
-            };
-        }
-        let snapshot = crate::claude_roster::read_all_agents_in(config_dir);
+        let snapshot = match &self.listing {
+            Some(listing) => listing.clone(),
+            None => crate::claude_roster::read_all_agents_in(config_dir),
+        };
         if let Some(row) = snapshot.find(short_id) {
             return JobListing::Listed(row.state.clone());
         }

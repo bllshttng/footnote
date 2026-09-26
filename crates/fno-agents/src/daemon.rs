@@ -6514,7 +6514,7 @@ pub(crate) fn run_reconcile_sweep(
     // Liveness for a `claude --substrate bg` thread reads the daemon roster
     // and the claude listing: see liveness_sweep::BgRoster. A MISSING roster
     // parses as zero workers and reaps as before; an UNREADABLE one is
-    // unknown liveness, where we refuse to declare death (codex P1, PR 1329).
+    // unknown liveness, where we refuse to declare death.
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object

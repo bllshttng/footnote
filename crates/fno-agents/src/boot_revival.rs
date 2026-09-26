@@ -21,6 +21,10 @@ use crate::state::RegistryEntry;
 
 const RECEIPT_FILE: &str = "boot-revival.json";
 
+/// macOS moves `kern.boottime` when the wall clock is stepped, so two reads
+/// in one boot can differ by a few seconds.
+const BOOT_DRIFT_S: u64 = 120;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReceiptRow {
     pub(crate) name: String,
@@ -48,13 +52,22 @@ pub(crate) fn start(home: &AgentsHome) {
         return;
     };
     let receipt = home.root().join(RECEIPT_FILE);
-    if recorded_boot(&receipt) == Some(boot) {
+    if ran_this_boot(recorded_boot(&receipt), boot) {
         return;
     }
     let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
         return;
     };
     let listing = crate::claude_roster::read_all_agents_union();
+    // An unread listing reads every job as unlisted. Stamping the boot then
+    // would skip the whole fleet for good, so the next daemon start retries.
+    if !listing.is_known() || !listing.warning_text().is_empty() {
+        eprintln!(
+            "boot revival: claude agents --json --all unread ({}); retrying on the next daemon start",
+            listing.warning_text()
+        );
+        return;
+    }
     let closed = closed_nodes();
     let (kings, workers, mut rows) = plan(&registry.entries, &listing, &closed, boot);
     // Stamp the boot first: a daemon that dies mid-pass must not respawn the
@@ -184,6 +197,10 @@ fn closed_nodes() -> HashSet<String> {
         .collect()
 }
 
+fn ran_this_boot(recorded: Option<u64>, boot: u64) -> bool {
+    recorded.is_some_and(|at| at.abs_diff(boot) <= BOOT_DRIFT_S)
+}
+
 fn recorded_boot(receipt: &Path) -> Option<u64> {
     let raw = std::fs::read_to_string(receipt).ok()?;
     serde_json::from_str::<Value>(&raw)
@@ -305,16 +322,11 @@ mod tests {
     fn the_receipt_stamp_makes_the_pass_run_once_per_boot() {
         let dir = tempfile::tempdir().unwrap();
         let receipt = dir.path().join(RECEIPT_FILE);
-        assert_eq!(recorded_boot(&receipt), None);
-        write_receipt(
-            &receipt,
-            BOOT,
-            &[ReceiptRow::new(
-                "quill",
-                "revived",
-                "claude respawn 99473043",
-            )],
-        );
-        assert_eq!(recorded_boot(&receipt), Some(BOOT));
+        assert!(!ran_this_boot(recorded_boot(&receipt), BOOT));
+        write_receipt(&receipt, BOOT, &[]);
+        assert!(ran_this_boot(recorded_boot(&receipt), BOOT));
+        // A clock step nudges kern.boottime; it is still the same boot.
+        assert!(ran_this_boot(recorded_boot(&receipt), BOOT + 3));
+        assert!(!ran_this_boot(recorded_boot(&receipt), BOOT + 86_400));
     }
 }
