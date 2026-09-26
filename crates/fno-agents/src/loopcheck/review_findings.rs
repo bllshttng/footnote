@@ -170,7 +170,7 @@ pub(super) fn review_journal_text(
     global_events_path: &Path,
     repo_slug: &str,
 ) -> String {
-    let project_text = crate::events_store::review_text(events_path);
+    let project_text = crate::event_store::review_text(events_path);
     let global_text = crate::event_store::review_text(global_events_path);
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
     if extra_global.is_empty() {
