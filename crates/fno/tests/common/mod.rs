@@ -487,8 +487,17 @@ impl ClientHarness {
             s.lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
-                .take(2)
-                .any(|l| l.trim_end().ends_with('$'))
+                // A framed pane keeps its bottom edge and the status row below
+                // the prompt, so the prompt is no longer one of the last two
+                // rendered lines.
+                .take(8)
+                .any(|l| {
+                    // A framed pane closes the prompt row with its border
+                    // rule, so strip one trailing rule before looking for `$`.
+                    let l = l.trim_end();
+                    let l = l.strip_suffix('│').unwrap_or(l).trim_end();
+                    l.ends_with('$')
+                })
         };
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {

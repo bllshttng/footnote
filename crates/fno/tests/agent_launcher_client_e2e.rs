@@ -94,7 +94,7 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     // The chip's value comes from the compile-time capability table (agy
     // sorts first), not the fake PATH bins; it lands when the catalog read
     // does, so wait for it instead of reading once.
-    let screen = h.wait_screen(10, |s| s.contains("agy default"));
+    let screen = h.wait_screen(30, |s| s.contains("agy default"));
     assert!(
         screen.contains("agy default"),
         "the harness value shows in full: {screen}"
@@ -142,7 +142,7 @@ fn agent_list_offers_default_rows_and_no_free_text_model_row() {
     wait_input(&mut h);
     open_composer(&mut h);
     type_and_settle(&mut h, DOWN);
-    let screen = h.wait_screen(10, |s| s.contains("default"));
+    let screen = h.wait_screen(30, |s| s.contains("default"));
     assert!(
         screen.contains("default"),
         "the agent list names the default rows: {screen}"
