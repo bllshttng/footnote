@@ -140,38 +140,6 @@ def _read_plan_text(item: dict, node: Optional[dict], gh_runner) -> Optional[str
     return None
 
 
-def _review_id_sets(pr_number: int, repo: Optional[str], gh_runner) -> Optional[dict]:
-    """Fetch the finding/addressed/skipped id sets for a review corpus item.
-
-    Returns None (-> exclude, coverage gap) when the correctness-bearing
-    resolved-thread state is unavailable (gh down / rate-limited), per AC1-ERR.
-    """
-    from fno.retro import harvest
-
-    threads, thread_unavail = harvest.fetch_review_thread_state(pr_number, repo=repo, gh_runner=gh_runner)
-    if thread_unavail:
-        return None
-    comments = harvest.fetch_review_comments(pr_number, repo=repo, gh_runner=gh_runner)
-    commit_dates, _ = harvest.fetch_pr_commit_dates(pr_number, repo=repo, gh_runner=gh_runner)
-    skipped_rows, _ = harvest.fetch_skipped_rows(pr_number, repo=repo, gh_runner=gh_runner)
-
-    # A finding = a top-level bot reviewer comment (the retro harvest's own
-    # candidate definition). Author/human replies and threaded replies are not
-    # findings.
-    all_finding_ids = {
-        c["id"] for c in comments if c.get("is_bot") and not c.get("in_reply_to_id") and c.get("id")
-    }
-    addressed = harvest.addressed_ids_from_threads(threads) | harvest.addressed_ids_from_comments(
-        comments, commit_dates
-    )
-    skipped = harvest.skipped_ids_from_rows(skipped_rows, threads)
-    return {
-        "all_finding_ids": all_finding_ids,
-        "addressed_ids": addressed,
-        "skipped_ids": skipped,
-    }
-
-
 def _default_gh(args: list[str]) -> "tuple[int, str, str]":
     try:
         p = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60)
@@ -201,27 +169,17 @@ def _capped_gh(gh_runner, cap: int):
     return wrapped
 
 
-def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
-    """Score one corpus item, returning ``{dimension: verdict|None}``. A gh/disk
-    failure for an attributed item yields all-None (a coverage gap), never a
-    crash (AC1-ERR / AC1-EDGE)."""
+def _score_item(item: dict, by_id: dict, gh_runner) -> dict[str, Optional[str]]:
+    """Score one blueprint corpus item, returning ``{dimension: verdict|None}``.
+    A gh/disk failure for an attributed item yields all-None (a coverage gap),
+    never a crash (AC1-ERR / AC1-EDGE)."""
     node = by_id.get(item.get("graph_node_id"))
     try:
-        if skill == "blueprint":
-            plan_text = _read_plan_text(item, node, gh_runner)
-            return fold.score_blueprint_item(item, plan_text=plan_text)
-        # review
-        pr_number = (node or {}).get("pr_number")
-        if not pr_number:
-            return {"finding_precision": None}
-        ids = _review_id_sets(int(pr_number), _repo_from_pr_url((node or {}).get("pr_url")), gh_runner)
-        if ids is None:
-            return {"finding_precision": None}
-        return fold.score_review_item(**ids)
+        plan_text = _read_plan_text(item, node, gh_runner)
+        return fold.score_blueprint_item(item, plan_text=plan_text)
     except Exception as exc:  # any unforeseen I/O fault -> coverage gap, not crash
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
-        dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
-        return {d: None for d in dims}
+        return {d: None for d in fold.BLUEPRINT_DIMENSIONS}
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +275,8 @@ def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
         if mode == "replay"
         else ""
     )
+    evidence_line = summary.get("evidence_line")
+    ev_part = f"{evidence_line}\n" if evidence_line else ""
     path.write_text(
         f"# Observer {mode}: {summary['skill_id']} ({date})\n\n"
         f"run_id: `{summary['run_id']}`{ref_line}\n"
@@ -324,6 +284,7 @@ def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
         f"({summary['corpus_size']} attributable items)\n"
         f"verdicts: pass={summary['pass_count']} "
         f"degraded={summary['degraded_count']} fail={summary['fail_count']}\n"
+        f"{ev_part}"
         f"{caveat}\n"
         f"## Failure ranking\n{ranking}\n",
         encoding="utf-8",
@@ -396,8 +357,12 @@ def sweep(
 
     findings: list[tuple[str, str]] = []
     scored_count = 0
-    for item in items:
-        scores = _score_item(item, skill, by_id, gh_runner)
+    review_ev = _review_evidence(items, by_id) if skill == "review" else None
+    for n, item in enumerate(items):
+        if review_ev is not None:
+            scores = {"finding_precision": (review_ev["items"][n] or {}).get("finding_precision")}
+        else:
+            scores = _score_item(item, by_id, gh_runner)
         item_scored = False
         for dimension, verdict in scores.items():
             if verdict is None:
@@ -442,18 +407,22 @@ def sweep(
             err=True,
         )
         raise typer.Exit(5)
+    if skill == "review" and review_ev is not None:
+        summary["evidence_line"] = review_ev.get("evidence_line", "")
     digest = _write_digest(summary, skill, mode="sweep")
 
     state = "ok" if scored_count == len(items) else "partial"
     if json_out:
         typer.echo(json.dumps({**summary, "state": state, "digest": str(digest)}, indent=2))
         return
+    ev = summary.get("evidence_line")
+    ev_part = f"\n  {ev}" if ev else ""
     typer.echo(
         f"{state}: {skill_id} run {run_id}\n"
         f"  scored {scored_count}/{len(items)} attributable items "
         f"({summary['coverage_pct']}% coverage)\n"
         f"  verdicts: pass={summary['pass_count']} degraded={summary['degraded_count']} "
-        f"fail={summary['fail_count']}\n"
+        f"fail={summary['fail_count']}{ev_part}\n"
         f"  digest: {digest}"
     )
 
@@ -470,6 +439,42 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 def _arg_value(args: list[str], flag: str) -> Optional[str]:
     i = args.index(flag) + 1 if flag in args else -1
     return args[i] if 0 <= i < len(args) else None
+
+
+# The digest line when the evidence read fails: names the fault instead of
+# leaving every item an unexplained gap.
+_EVIDENCE_UNREAD = "evidence: unread (fno-agents review-summary --evidence failed)"
+
+
+def _review_evidence(items: list[dict], by_id: dict) -> dict:
+    """One fno-agents review-summary --evidence round-trip: what the attestation
+    journal proves about each item's review. On any fault every item stays a
+    coverage gap and the digest says why - never a fabricated verdict."""
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
+        return {"items": [{} for _ in items], "evidence_line": _EVIDENCE_UNREAD}
+    payload = [
+        {
+            "node": (by_id.get(item.get("graph_node_id")) or {}).get("id"),
+            "pr_number": (by_id.get(item.get("graph_node_id")) or {}).get("pr_number"),
+        }
+        for item in items
+    ]
+    try:
+        result = subprocess.run(
+            [str(binary), "review-summary", "--evidence"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        out = json.loads(result.stdout)
+        if result.returncode == 0 and len(out.get("items", [])) == len(items):
+            return out
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return {"items": [{} for _ in items], "evidence_line": _EVIDENCE_UNREAD}
 
 
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
