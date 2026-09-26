@@ -9,7 +9,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{screen_has_line, strip_prompts, ClientHarness, Scratch};
+use common::{
+    line_ends_with_prompt, line_is_segment, screen_has_line, strip_prompts, ClientHarness, Scratch,
+};
 
 #[test]
 fn client_e2e_prompt_appears_and_echo_roundtrips() {
@@ -31,8 +33,8 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
         let lines: Vec<&str> = s.lines().collect();
         lines
             .iter()
-            .position(|l| strip_prompts(l) == "hello")
-            .is_some_and(|i| lines[i + 1..].iter().any(|l| l.trim_end().ends_with('$')))
+            .position(|l| line_is_segment(l, "hello"))
+            .is_some_and(|i| lines[i + 1..].iter().any(|l| line_ends_with_prompt(l)))
     });
     // AC1-UI: the cursor is visible and sits on the fresh prompt row, where
     // the shell put it. That row is the last screen line ending with `PS1`
@@ -44,7 +46,7 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
     let lines: Vec<&str> = text.lines().collect();
     let prompt_row = lines
         .iter()
-        .rposition(|l| l.trim_end().ends_with('$'))
+        .rposition(|l| line_ends_with_prompt(l))
         .unwrap_or_else(|| panic!("no prompt row found; screen:\n{text}"));
     assert_eq!(
         frame.cursor_row as usize, prompt_row,
@@ -89,9 +91,9 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
     h.wait_screen(30, |s| {
         let mut saw_done = false;
         for line in s.lines() {
-            if strip_prompts(line) == "E2E-FLOOD-DONE" {
+            if line_is_segment(line, "E2E-FLOOD-DONE") {
                 saw_done = true;
-            } else if saw_done && line.trim_end().ends_with('$') {
+            } else if saw_done && line_ends_with_prompt(line) {
                 return true;
             }
         }

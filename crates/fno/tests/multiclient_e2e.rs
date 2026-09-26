@@ -212,10 +212,12 @@ while :; do sleep 0.2; done\n",
         "the input box renders exactly once"
     );
     let frame = a.frames.get(&pane).expect("clamped frame");
+    // The frame ring insets the pty: the grid is the clamped grid minus the
+    // 2-row, 2-col border.
     assert_eq!(
         (frame.rows, frame.cols),
-        (20, 80),
-        "frame is the clamped grid"
+        (18, 78),
+        "frame is the clamped grid minus its border ring"
     );
     // The node's first marker: the SMALLER viewer's own grid carries the
     // input box, on its last row.
