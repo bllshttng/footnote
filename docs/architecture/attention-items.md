@@ -103,7 +103,7 @@ The `attention` arm beats every 30 s, reads the projection, routes each item to 
 
 ## Config keys
 
-The md config row is retired. There is one key: `attention.enabled` (default true), the kill switch. A `[[attention]]` or `[[reach_me]]` row still in config.toml is ignored. The tick detail names the retired row once per beat.
+The md config row is retired. There are two keys: `attention.enabled` (default true), the kill switch, and the `[[attention.sinks]]` rows above. A `[[attention]]` or `[[reach_me]]` row still in config.toml is ignored. The tick detail names the retired row once per beat.
 
 ## Answer lanes
 
@@ -118,9 +118,27 @@ What a file answer can do: close the question, reach the asker, unblock the node
 - A page with conflict markers is skipped every beat and named in the tick detail. An answer typed inside it never records until someone resolves the markers.
 - Another writer changes a page between the arm's read and its close write. That page is skipped (`skip_reason: file_changed`) and the next beat closes it. Other pages still process.
 
-## The other two sink types, named and not built
+## The answer endpoint
 
-`ntfy` brings action buttons and needs an answer endpoint the phone can reach. `webhook` is the escape-hatch contract. Both stay specified in the plan and unbuilt until the pages have been observed. When they ship, this page grows their sections. ntfy will link a page path instead of a block anchor.
+`fno mux serve --attention-api` serves the contract's three paths on `127.0.0.1`, with its own router and port. `--attention-port` sets the port, default 8724. The endpoint runs beside the read-only web bridge, never inside it. `GET /v1/attention/items` lists the projection with `state`, `kind`, `ready` and `project` filters. `GET /v1/attention/items/{id}` returns one item. `POST /v1/attention/items/{id}/answer` records an answer. Remote reach is the user's own tunnel, `tailscale serve` on its own port. fno never binds a public address.
+
+Every path requires a bearer token that matches a configured sink's `token_env` value. The token identifies the sink, never a person. A refused request lands no row. The statuses are `401` for a bad token, `404` for an unknown id, and `409` for a closed item. `422` covers a bad shape, an out-of-range option, `done` on a question, and more than one choice.
+
+An accepted answer appends the same `attention_answer` row the arm writes. The authority stays `sink`. The idempotency key and any Tailscale Serve identity header ride the row as provenance. The endpoint then runs the same `fno inbox outstanding clear` the mux overlay runs. First answer wins. A retry under the same `idempotency_key` replays the receipt and lands no second row. A different key lands a superseded marker that changes nothing. When a clear fails, the row stays durable. The question then needs a terminal close, and the arm retries its own lane.
+
+## The ntfy and webhook sinks
+
+Sinks are `[[attention.sinks]]` rows in config.toml, read by the arm's beat beside the pages. An ntfy row carries `name`, `type = "ntfy"`, `url`, `topic`, `token_env`, and optionally `answer_base_url` and `body`. The `url` is the server root. The body mode is `"title-only"` by default, because anyone who knows a public topic reads it. `"full"` adds the recommendation and the downside. A webhook row carries the same shape with `type = "webhook"` and the adapter's URL.
+
+When a sink's `answer_base_url` is a loopback address, the load refuses it. The tick detail names the refusal every beat. A phone cannot answer this machine's loopback. The supported setups are a tailnet address through Tailscale Serve, or a public URL behind the sink token.
+
+The arm delivers each ready question or pin once per sink. The delivery id is `sha256(sink, item id, event)`. A transient failure retries next beat with the same id. The transient classes are connect errors, 5xx, 401, 403, 408 and 429, the status fanout's retry classes. A permanent 4xx drops the delivery for good. When a delivered item leaves the open set, the arm posts `item.closed`. A returned `external_id` rides that body. Outbound posts run one `curl` child per call. The URL, the bearer header and the body never appear in argv.
+
+ntfy shows at most three actions per notification. A question therefore carries up to three `http` actions, with the recommended option first. Each action posts `{"option": N, "idempotency_key": "<delivery_id>:N"}` to the answer endpoint with the sink's bearer header. The one view link rides the `click` key. When the item has fewer options, a literal `view` button fills a free slot. A pin gets one `Done` action.
+
+A webhook sink receives the `Delivery` body. The body carries `delivery_id`, `event` (`item.opened` or `item.closed`), `sink`, and the item. A sink with an `answer_base_url` also carries the `answer_url`. The adapter's `external_id` returns on `item.closed`. fno ships no adapter. The contract and the endpoint are the deliverable.
+
+## Checks the user's agent runs
 
 ## Checks the user's agent runs
 

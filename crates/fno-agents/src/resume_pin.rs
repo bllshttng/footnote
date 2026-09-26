@@ -114,6 +114,9 @@ pub struct Unpinned {
     pub text: String,
     /// (provider, model) when a recorded route or the row names the provider.
     pub lost_route: Option<(String, String)>,
+    /// The candidate the refusal is about, `None` only on the
+    /// "records no model" arm: the model was never established.
+    pub model: Option<String>,
 }
 
 /// Which provider serves `candidate`, answered from the recorded route
@@ -135,13 +138,15 @@ pub fn resolve(
     let effort = row
         .as_ref()
         .and_then(|r| r.requested_effort.clone().or_else(|| r.effort.clone()));
-    let (candidate, source, marketing) = match &row {
-        Some(r) => (
-            r.requested_model.clone().or_else(|| r.model.clone()),
-            "registry",
-            None,
-        ),
+    let from_row = row
+        .as_ref()
+        .and_then(|r| r.requested_model.clone().or_else(|| r.model.clone()));
+    let (candidate, source, marketing) = match from_row {
+        Some(m) => (Some(m), "registry", None),
         None => {
+            // A bare row that records no model reads the transcript's birth
+            // identity: the first model the session ran on is the route it
+            // was born to serve.
             let (model, marketing) = transcript.map(birth_identity).unwrap_or((None, None));
             (model, "transcript", marketing)
         }
@@ -174,6 +179,7 @@ pub fn resolve(
                  pass --model to resume it"
             ),
             lost_route: None,
+            model: None,
         });
     };
 
@@ -185,7 +191,8 @@ pub fn resolve(
                  fno agents spawn --resume {session_id} -P {p} -m {}",
                 crate::spawn_axes::repr(&candidate)
             ),
-            lost_route: Some((p, candidate)),
+            lost_route: Some((p, candidate.clone())),
+            model: Some(candidate),
         }),
         Some(_) => Ok(Pin {
             argv_model: Some(candidate),
@@ -199,14 +206,16 @@ pub fn resolve(
                 .as_ref()
                 .and_then(|r| r.provider.as_deref())
                 .filter(|p| !p.is_empty() && *p != "anthropic");
-            // Rowless: glm stamps marketingName null on its model identity;
+            // Transcript-sourced (rowless, or a bare row that records no
+            // model): glm stamps marketingName null on its model identity;
             // Anthropic stamps "Opus 5"/"Sonnet 5". A null name means the
             // provider cannot be established, and a default-endpoint resume
             // would bill the wrong vendor.
-            let rowless_unknown = row.is_none() && marketing.is_none();
+            let rowless_unknown = source == "transcript" && marketing.is_none();
             if row_provider.is_some() || rowless_unknown {
                 return Err(Unpinned {
                     lost_route: row_provider.map(|p| (p.to_string(), candidate.clone())),
+                    model: Some(candidate.clone()),
                     text: format!(
                         "session {session_id} last ran {candidate}, but no recorded route names \
                          its provider and this resume restores no route; resume it with: \
@@ -462,6 +471,95 @@ mod tests {
         assert!(
             text.contains("no recorded route names its provider"),
             "{text}"
+        );
+        std::fs::remove_file(&transcript).ok();
+    }
+
+    #[test]
+    fn bare_row_reads_transcript_birth_and_names_lost_route() {
+        // AC1-HP: a row that records no model reads the transcript's birth
+        // identity like a rowless one, so the lost route is NAMED, not lost.
+        let transcript = temp_transcript(
+            "bare-row-birth",
+            &[attachment_line("glm-5.3-flash[1m]", None)],
+        );
+        let lookup: RouteProviderOf<'_> =
+            &|m| (m == Some("glm-5.3-flash[1m]")).then(|| "zai".to_string());
+        let answer = resolve(
+            row(None, None),
+            Some(&transcript),
+            false,
+            "77770001-2222-3333-4444-555555555555",
+            &lookup,
+        );
+        let Err(unpinned) = answer else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(
+            unpinned.lost_route,
+            Some(("zai".to_string(), "glm-5.3-flash[1m]".to_string()))
+        );
+        assert_eq!(unpinned.model.as_deref(), Some("glm-5.3-flash[1m]"));
+        std::fs::remove_file(&transcript).ok();
+    }
+
+    #[test]
+    fn bare_row_glm_birth_without_route_refuses_with_recipe() {
+        // AC1-ERR: the same bare row over an empty route dir: the refusal
+        // names the override recipe, with the model recorded on the answer.
+        let transcript = temp_transcript(
+            "bare-row-no-route",
+            &[attachment_line("glm-5.3-flash[1m]", None)],
+        );
+        let answer = resolve(
+            row(None, None),
+            Some(&transcript),
+            false,
+            "77770002-2222-3333-4444-555555555555",
+            &no_lookup,
+        );
+        let Err(unpinned) = answer else {
+            panic!("expected a refusal")
+        };
+        assert!(unpinned.lost_route.is_none());
+        assert_eq!(unpinned.model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert!(
+            unpinned
+                .text
+                .contains("fno agents spawn --resume 77770002-2222-3333-4444-555555555555"),
+            "{}",
+            unpinned.text
+        );
+        std::fs::remove_file(&transcript).ok();
+    }
+
+    #[test]
+    fn bare_row_anthropic_birth_pins_the_birth_model() {
+        // AC1-EDGE: a bare row born on an Anthropic model (marketing name
+        // present) pins the birth model as today; and a row that records a
+        // model still answers from the row, transcript unread.
+        let transcript = temp_transcript(
+            "bare-row-anthropic",
+            &[attachment_line("claude-opus-5", Some("Opus 5"))],
+        );
+        let answer = resolve(
+            row(None, None),
+            Some(&transcript),
+            false,
+            "77770003-2222-3333-4444-555555555555",
+            &no_lookup,
+        );
+        assert_eq!(answer.unwrap().argv_model.as_deref(), Some("claude-opus-5"));
+        let answer = resolve(
+            row(Some("claude-fable-5-1"), None),
+            Some(&transcript),
+            false,
+            "77770004-2222-3333-4444-555555555555",
+            &no_lookup,
+        );
+        assert_eq!(
+            answer.unwrap().argv_model.as_deref(),
+            Some("claude-fable-5-1")
         );
         std::fs::remove_file(&transcript).ok();
     }

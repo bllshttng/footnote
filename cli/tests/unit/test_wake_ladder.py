@@ -421,6 +421,76 @@ def test_live_roster_skips_rung2_and_forks(monkeypatch):
     assert respawned == []  # never respawned a live session
 
 
+def test_rung2_respawn_gate_answers_bg_resume_never_respawns(monkeypatch):
+    # AC6-HP: the Rust reentry plan answers bg-resume for an exited row whose
+    # saved job lost the route, so rung 2 is skipped and the fork rung runs.
+    import fno.agents.fork_lineage as fork_lineage
+
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", lambda p: {"mechanism": "bg-resume"})
+    respawned = []
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: respawned.append(s) or 0)
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True and detail == "FORK"
+    assert respawned == []  # a job that lost the route never replays
+
+
+def test_rung2_respawn_gate_refusal_never_respawns(monkeypatch):
+    # AC6-ERR: a reentry refusal skips rung 2 and falls through to the fork
+    # rung - never a respawn on an unverified route.
+    import fno.agents.fork_lineage as fork_lineage
+
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        fork_lineage, "spawn_axes_call", lambda p: {"refused": "session records no model"}
+    )
+    respawned = []
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: respawned.append(s) or 0)
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True and detail == "FORK"
+    assert respawned == []
+
+
+def test_rung2_respawn_gate_unavailable_never_respawns(monkeypatch):
+    # AC6-ERR: a SpawnAxesUnavailable raise (a stale binary without the
+    # reentry_mechanism field) skips rung 2 and forks instead.
+    import fno.agents.fork_lineage as fork_lineage
+    from fno.agents.spawn_axes_client import SpawnAxesUnavailable
+
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
+    _allow_rung2_claim(monkeypatch)
+
+    def _raise(payload):
+        raise SpawnAxesUnavailable("stale binary")
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _raise)
+    respawned = []
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: respawned.append(s) or 0)
+    spawned = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
+    )
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True and detail == "FORK"
+    assert respawned == []
+
+
 def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
     monkeypatch.setattr(
         dispatch,

@@ -1012,6 +1012,26 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             skip = t.skip.clone();
         }
         detail.extend(t.detail);
+        // The ntfy and webhook sinks ride the same beat: load (a loopback
+        // answer_url is refused at load), deliver, close, retry transient
+        // failures next beat with the same delivery_id.
+        mark("sinks");
+        let (sinks, refused) = crate::attention_http::load_sinks(&cwd);
+        for r in &refused {
+            detail.push(format!("sinks: refused sink {}: {}", r.name, r.reason));
+        }
+        let http = crate::attention_http::tick_sinks(
+            &items,
+            &sinks,
+            &attention_dir().unwrap_or_else(|_| dir.join(".state")),
+            started + std::time::Duration::from_secs(ATTENTION_TICK_BUDGET_S),
+            &mut crate::attention_http::CurlPost,
+        );
+        acted += http.acted();
+        if skip.is_none() {
+            skip = http.skip.clone();
+        }
+        detail.extend(http.detail);
         if acted == 0 && skip.is_none() {
             // An idle beat must say which kind of idle: a folder of open
             // pages is not an empty projection.
