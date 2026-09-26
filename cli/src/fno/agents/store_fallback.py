@@ -50,6 +50,11 @@ from fno.harness_identity import claude_transport_short_id, session_handle_tier
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
+# `fno agents rm` stamps removed sessions in rm_tombstones.json beside the
+# registry; the healer refuses to re-adopt them inside this window.
+RM_TOMBSTONE_FILENAME = "rm_tombstones.json"
+RM_TOMBSTONE_GRACE_SECS = 86_400
+
 # Session-shaped tokens only. Eight alphanumeric characters can be an OpenCode
 # tail even when they look like a friendly name, so those tokens share the store
 # ambiguity check. Names outside these shapes never pay for a store read.
@@ -485,6 +490,23 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     )
 
 
+def _recent_rm_tombstone(harness, session_id, registry_path) -> Optional[int]:
+    """The session's in-window rm stamp (epoch secs), else None."""
+    path = registry_path
+    if path is None:
+        from fno.paths import agents_registry_path
+        path = agents_registry_path()
+    try:
+        raw = json.loads((path.parent / RM_TOMBSTONE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    now = int(datetime.datetime.now().timestamp())
+    stamps = [r.get("removed_at") for r in raw if isinstance(raw, list) and isinstance(r, dict)
+              and r.get("harness") == harness and r.get("session_id") == session_id]
+    return next((int(t) for t in stamps if isinstance(t, (int, float))
+                 and now - t <= RM_TOMBSTONE_GRACE_SECS), None)
+
+
 def adopt_store_hit(
     hit: StoreHit,
     registry_path: Optional[Path] = None,
@@ -510,6 +532,14 @@ def adopt_store_hit(
         register_existing_session,
     )
 
+    if _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
+        raise AgentResolutionError(
+            f"session {hit.session_id} ({hit.harness}) was removed by `fno agents rm` "
+            f"inside the grace window ({RM_TOMBSTONE_GRACE_SECS // 3600}h); it is not "
+            "re-adopted from the harness store. Re-spawn the work, or wait out the "
+            "window to adopt it deliberately.",
+            ambiguous=True,
+        )
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
