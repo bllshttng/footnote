@@ -1019,7 +1019,7 @@ CO_URL = "https://github.com/o/footnote/pull/1562"
 
 def _do_row(session_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") -> dict:
     return {
-        "phase": "do",
+        "phase": "execute",
         "harness": "claude",
         "session_id": session_id,
         "started_at": "2026-09-01T00:00:00Z",
@@ -1125,7 +1125,7 @@ def test_only_the_do_row_is_carried():
         {"phase": "ship", "harness": "claude", "session_id": "c" * 36},
     ]
     assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
-    assert [r["phase"] for r in entries[1]["sessions"]] == ["do"]
+    assert [r["phase"] for r in entries[1]["sessions"]] == ["execute"]
 
 
 def test_the_sweep_is_idempotent():

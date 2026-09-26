@@ -833,7 +833,7 @@ pub fn derive_session_map(raw: &str) -> HashMap<String, String> {
                             .find(|s| {
                                 matches!(
                                     s.get("phase").and_then(|p| p.as_str()),
-                                    Some("do") | Some("ship")
+                                    Some("execute") | Some("ship")
                                 )
                             })
                             .and_then(|s| s.get("session_id"))
@@ -1469,9 +1469,9 @@ mod tests {
     fn the_driver_map_prefers_the_claim_then_the_last_do_or_ship_session() {
         let raw = r#"{"entries":[
             {"id":"n1","locked_by_harness_session":"aaaaaaaa-1111",
-             "sessions":[{"phase":"do","session_id":"bbbbbbbb-2222"}]},
+             "sessions":[{"phase":"execute","session_id":"bbbbbbbb-2222"}]},
             {"id":"n2","sessions":[
-              {"phase":"do","session_id":"cccccccc-3333"},
+              {"phase":"execute","session_id":"cccccccc-3333"},
               {"phase":"blueprint","session_id":"dddddddd-4444"},
               {"phase":"ship","session_id":"eeeeeeee-5555"}]},
             {"id":"n3","sessions":[{"phase":"blueprint","session_id":"ffffffff-6666"}]},

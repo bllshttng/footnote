@@ -2359,7 +2359,7 @@ pub(crate) fn session_row(
     observed: Option<Value>,
     merge_grant: Option<&Value>,
 ) -> Result<Value, StoreError> {
-    const SESSION_PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+    const SESSION_PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
     const STR_MAX: usize = 200;
     if !SESSION_PHASES.contains(&phase) {
         return Err(StoreError::Invalid(format!(
@@ -2690,7 +2690,7 @@ fn session_reap_open(
     session_id: &str,
     ended_at: Option<&str>,
 ) -> Result<Value, StoreError> {
-    const SESSION_PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
+    const SESSION_PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
     if phase != "all" && !SESSION_PHASES.contains(&phase) {
         return Err(StoreError::Invalid(format!(
             "invalid phase {phase:?}; expected 'all' or one of {SESSION_PHASES:?}"
@@ -4292,7 +4292,7 @@ mod tests {
         let req = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "node_id": "x-grnt", "phase": "execute", "harness": "claude",
                 "session_id": "s-1", "merge_grant": grant,
             }
         });
@@ -4310,7 +4310,7 @@ mod tests {
         let req2 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "node_id": "x-grnt", "phase": "execute", "harness": "claude",
                 "session_id": "s-1",
                 "merge_grant": {"approved": false, "source": "none",
                                 "recorded_by": "spawner",
@@ -4339,7 +4339,7 @@ mod tests {
         let req4 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "node_id": "x-grnt", "phase": "execute", "harness": "claude",
                 "session_id": "s-3", "merge_grant": {"approved": "yes"},
             }
         });
@@ -4352,7 +4352,7 @@ mod tests {
         let req = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-twin", "phase": "do", "harness": "claude",
+                "node_id": "x-twin", "phase": "execute", "harness": "claude",
                 "session_id": "legacy-1", "started_at": "2026-09-04T10:00:00Z",
             }
         });
@@ -4362,7 +4362,7 @@ mod tests {
         let req2 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-twin", "phase": "do", "harness": "unknown",
+                "node_id": "x-twin", "phase": "execute", "harness": "unknown",
                 "session_id": "legacy-1", "started_at": "2026-09-04T10:00:30Z",
                 "ended_at": "2026-09-04T11:00:00Z",
             }
@@ -4382,7 +4382,7 @@ mod tests {
         let req = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-shape", "phase": "do", "harness": "claude",
+                "node_id": "x-shape", "phase": "execute", "harness": "claude",
                 "session_id": "01a06886-9405-74a1-8afd-5b67baf89604",
             }
         });
@@ -4398,7 +4398,7 @@ mod tests {
         let req2 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-shape", "phase": "do", "harness": "codex",
+                "node_id": "x-shape", "phase": "execute", "harness": "codex",
                 "session_id": "01a06886-9405-74a1-8afd-5b67baf89604",
             }
         });
@@ -4407,7 +4407,7 @@ mod tests {
         let req3 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-shape", "phase": "do", "harness": "claude",
+                "node_id": "x-shape", "phase": "execute", "harness": "claude",
                 "session_id": "b936b571-e0aa-40ed-a07d-97acb9a87db1",
             }
         });
@@ -4418,7 +4418,7 @@ mod tests {
         let req4 = json!({
             "name": "session_append",
             "params": {
-                "node_id": "x-shape", "phase": "do", "harness": "grok",
+                "node_id": "x-shape", "phase": "execute", "harness": "grok",
                 "session_id": "8ad8e13c-1111-4222-8333-444455556666",
             }
         });

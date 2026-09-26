@@ -196,15 +196,15 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             typer.echo(
                 f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
-                "a reachable worker still owns the do window. If that session is "
+                "a reachable worker still owns the execute window. If that session is "
                 f"yours and has stopped this node: fno backlog session add {node_id} "
-                f"--phase do --ended-at {now}. The do row stays: {why}.",
+                f"--phase execute --ended-at {now}. The execute row stays: {why}.",
                 err=True,
             )
             raise typer.Exit(code=3)
 
     for r in open_rows:
-        reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
+        reap_open_session_record(_graph_path(), node_id, phase="execute", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
 
     note = _release_node_lockfile(node_id)
     if note.startswith("lockfile"):

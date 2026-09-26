@@ -21,7 +21,7 @@ fn base_row(id: &str, title: &str, status: &str) -> Node {
 
 fn session_row(session_id: &str) -> SessionRecord {
     SessionRecord {
-        phase: "do".into(),
+        phase: "execute".into(),
         harness: "claude".into(),
         session_id: session_id.into(),
         started_at: None,
@@ -643,7 +643,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "ab-one",
             "s-2",
             "operator",
-            Some("do"),
+            Some("execute"),
             Some("claude"),
             None,
         )
@@ -662,7 +662,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "ab-one",
             "s-2",
             "operator",
-            Some("do"),
+            Some("execute"),
             Some("claude"),
             None,
         )
@@ -679,7 +679,7 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             "ab-one",
             "s-review",
             "operator",
-            Some("do"),
+            Some("execute"),
             Some("claude"),
             None,
         );
@@ -974,7 +974,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
         "ab-one",
         "s-explicit",
         "reap-sweep",
-        Some("do"),
+        Some("execute"),
         Some("claude"),
         Some("2026-08-02T07:00:00Z"),
     )
@@ -997,7 +997,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
             "status": "in_progress", "priority": "p2",
             "created_at": "2026-08-01T00:00:00+00:00",
             "sessions": [
-                {"session_id": "s-raw", "phase": "do", "harness": "claude",
+                {"session_id": "s-raw", "phase": "execute", "harness": "claude",
                  "started_at": 123}
             ]
         }));
@@ -1009,7 +1009,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
         "ab-raw1",
         "s-raw",
         "reap-sweep",
-        Some("do"),
+        Some("execute"),
         Some("claude"),
         Some("2026-08-02T08:30:00Z"),
     )

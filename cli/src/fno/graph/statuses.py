@@ -215,7 +215,7 @@ def is_open_phase_row(row: object, phase: str) -> bool:
 
 def is_open_do_row(row: object) -> bool:
     """Return whether a session row is a valid, unfinished ``do`` window."""
-    return is_open_phase_row(row, "do")
+    return is_open_phase_row(row, "execute")
 
 
 def completed_at_status_divergence(entries: list[dict]) -> list[str]:
