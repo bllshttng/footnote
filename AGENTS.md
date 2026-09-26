@@ -170,7 +170,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **[Stage table](docs/architecture/role-based-model-routing.md)** (per-stage axis) - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch. `dispatch.harness` is deprecated. `route`=vendor/model (`--route`) beside `provider`=harness.
 - **Curated CLI menu** - `fno --help` shows ~8 verbs (mux, version included). Most are hidden but invocable via `fno help --all` and per-group `help <group> --all`. `fno doctor lint menu-caps` gates root namespace (cap 12) and advertised surface (10 top-level/12 per sub-app). Group actions are arguments not leaves.
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
-- **Target self-handoff** - `/target` can hand the execute phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
+- **Target self-handoff** - `/target` can hand the execute phase to a fresh-context successor, generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review), two memory-pass checkpoints, stuck terminals write postmortems. See [memory-system](docs/architecture/memory-system.md) and [self-improvement-loops](docs/architecture/self-improvement-loops.md) (the loop map: triggers, config keys, where output lands).
 
 ## Skill / agent development
