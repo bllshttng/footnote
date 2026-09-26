@@ -125,9 +125,11 @@ pub(crate) fn stand_down_gate(
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     pub(crate) top_row: Option<String>,
-    /// any queue on this board failed to read. The quiet branch
-    /// refuses to certify a quiet board while this is true, instead of
-    /// trusting a count that cannot see the blind queues.
+    /// any queue on this board failed to read beyond a budget kill. The
+    /// quiet branch refuses to certify a quiet board while this is true,
+    /// instead of trusting a count that cannot see the blind queues. A
+    /// starved queue is the board's own choice, not evidence, and never
+    /// blocks.
     pub(crate) unreadable_sources: bool,
     pub(crate) actionable_ids: Vec<String>,
     pub(crate) spawn_held_ids: Vec<String>,
@@ -159,10 +161,10 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let status = queue.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if crate::king_board::not_read_status(status) {
+            if crate::king_board::unreadable_status(status) {
                 unreadable_sources = true;
             }
-            if name == "operator_question" && crate::king_board::not_read_status(status) {
+            if name == "operator_question" && crate::king_board::unreadable_status(status) {
                 operator_questions_unreadable = true;
             }
             if crate::king_board::not_read_status(status) {
@@ -682,6 +684,47 @@ mod tests {
         let parsed = parse_king_board_value(&board).unwrap();
         assert!(parsed.unreadable_sources);
         assert_eq!(parsed.actionable, 0);
+    }
+
+    #[test]
+    fn a_budget_starved_questions_queue_on_a_clean_board_blocks_nothing() {
+        // The board chose not to read the queue to stay inside its budget;
+        // that is not evidence about the questions inside it, so neither
+        // completion flag may fire. The kill is still named.
+        let board = board_with_queues(json!([
+            {"name": "operator_question", "status": "over_budget",
+             "error": "not-read: board budget exhausted after ~/.fno/events.jsonl",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.operator_questions_unreadable);
+        assert!(!parsed.unreadable_sources);
+        assert_eq!(
+            parsed.blind_queues,
+            vec!["operator_question not read: not-read: board budget exhausted after ~/.fno/events.jsonl".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_questions_queue_still_blocks_completion() {
+        let board = board_with_queues(json!([
+            {"name": "operator_question", "status": "unreadable", "error": "exit 1: boom",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(parsed.operator_questions_unreadable);
+        assert!(parsed.unreadable_sources);
+    }
+
+    #[test]
+    fn a_budget_starved_queue_never_sets_the_unreadable_sources_flag() {
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "over_budget",
+             "error": "killed at its 28.5s slice of the board budget; the source did not fail",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.unreadable_sources);
     }
 
     #[test]

@@ -1361,7 +1361,7 @@ fn a_clean_king_terminal_does_not_ask_the_operator_anything() {
 
 /// killed read.
 #[test]
-fn external_read_timeout_king_board_blocks_named() {
+fn external_read_timeout_king_parks_named() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let state = king_manifest(cwd, "k-wedge");
@@ -1391,14 +1391,18 @@ fn external_read_timeout_king_board_blocks_named() {
     );
     let elapsed = started.elapsed();
     let d = json;
-    assert_eq!(d["decision"], "block", "{d}");
+    // A slice kill is the board's own choice, not evidence, so it never
+    // blocks by itself: the drain's own undelivered count parks the reign
+    // while CI or a worker catches up (x-1867).
+    assert_eq!(d["decision"], "allow", "{d}");
+    assert_eq!(d["termination_reason"], "NoWork", "{d}");
     assert!(
         elapsed < std::time::Duration::from_secs(10),
         "a wedged source must die at its slice, not hang the fire: {elapsed:?}"
     );
     assert_eq!(
         code, 0,
-        "a block keeps the king running like any non-empty board: {code}"
+        "a park keeps the exit clean like any quiet beat: {code}"
     );
 
     // The killed read is named where the payload carries it.

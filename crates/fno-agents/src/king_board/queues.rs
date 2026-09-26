@@ -355,6 +355,25 @@ pub(crate) fn not_read_status(status: &str) -> bool {
     status == "unreadable" || status == "over_budget"
 }
 
+/// The statuses that are evidence about a queue's contents. A budget kill
+/// is the board's own choice to stop reading: it says nothing about what
+/// the queue holds, so completion gates key on this predicate alone and a
+/// starved queue never blocks by itself.
+pub(crate) fn unreadable_status(status: &str) -> bool {
+    status == "unreadable"
+}
+
+/// The composite queue read: the picked error keeps its cause's verdict.
+/// A fold whose every failing input the board chose not to pay for never
+/// looked, so it reads not-read; one genuine failure is unreadable.
+fn fold_read(over_budget: bool, error: String) -> SourceRead {
+    if over_budget {
+        SourceRead::over_budget(error)
+    } else {
+        SourceRead::err(error)
+    }
+}
+
 pub(crate) fn queue(
     name: &'static str,
     source: String,
@@ -425,6 +444,10 @@ pub(crate) struct BoardInputs {
     /// its reader panicked. The claim-dependent queues read unreadable
     /// rather than rendering an absent measurement as a verdict.
     pub(crate) holder_activity_error: Option<String>,
+    /// The failure receipt is a budget kill: the probe never got a slice.
+    /// The claim-dependent folds then read over_budget with it, not
+    /// unreadable - the board stopped looking, it did not fail.
+    pub(crate) holder_activity_starved: bool,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     /// The merge gate's verdict per candidate: `fno do pr status`'s
@@ -1417,7 +1440,13 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
+                fold_read(
+                    inputs.ready.not_evidence()
+                        && inputs.claims.not_evidence()
+                        && inputs.worked.not_evidence()
+                        && inputs.drivers.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .ready
                         .error
@@ -1445,7 +1474,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
+                fold_read(
+                    inputs.claims.not_evidence()
+                        && inputs.claimed_nodes.not_evidence()
+                        && inputs.drivers.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .claims
                         .error
@@ -1471,18 +1505,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 && inputs.holder_activity_error.is_none()
             {
                 SourceRead::ok(Value::Null)
+            } else if inputs.entries.is_none() {
+                SourceRead::err("graph unreadable".to_string())
             } else {
-                SourceRead::err(if inputs.entries.is_none() {
-                    "graph unreadable".to_string()
-                } else {
+                fold_read(
+                    inputs.claims.not_evidence()
+                        && inputs.drivers.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .claims
                         .error
                         .clone()
                         .or_else(|| inputs.drivers.error.clone())
                         .or_else(|| inputs.holder_activity_error.clone())
-                        .unwrap_or_default()
-                })
+                        .unwrap_or_default(),
+                )
             },
             unheld_rows,
             true,
@@ -1510,7 +1548,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
+                fold_read(
+                    inputs.pr_nodes.not_evidence()
+                        && inputs.claims.not_evidence()
+                        && inputs.drivers.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .pr_nodes
                         .error
@@ -1533,7 +1576,13 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &if stranded_ok {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
+                fold_read(
+                    inputs.entries.is_some()
+                        && inputs.stranded.not_evidence()
+                        && inputs.claims.not_evidence()
+                        && inputs.drivers.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .stranded
                         .error
@@ -1577,7 +1626,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &if inputs.claims.is_ok() && inputs.holder_activity_error.is_none() {
                 SourceRead::ok(Value::Null)
             } else {
-                SourceRead::err(
+                fold_read(
+                    inputs.claims.not_evidence()
+                        && (inputs.holder_activity_error.is_none()
+                            || inputs.holder_activity_starved),
                     inputs
                         .claims
                         .error
@@ -1733,6 +1785,7 @@ mod tests {
             holder_activity: HashMap::new(),
             drivers: SourceRead::ok(json!([])),
             holder_activity_error: None,
+            holder_activity_starved: false,
             prs: SourceRead::ok(prs),
             pr_nodes: SourceRead::ok(pr_nodes),
             pr_gates: SourceRead::ok(json!([])),

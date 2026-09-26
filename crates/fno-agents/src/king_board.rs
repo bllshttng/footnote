@@ -46,7 +46,7 @@ mod queues;
 pub(crate) mod scope;
 mod stranded;
 
-pub(crate) use queues::not_read_status;
+pub(crate) use queues::{not_read_status, unreadable_status};
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -205,6 +205,13 @@ impl SourceRead {
     }
     pub(crate) fn is_ok(&self) -> bool {
         self.error.is_none()
+    }
+    /// No evidence either way: the source answered, or the board chose not
+    /// to pay for the read. A fold whose failing inputs all read this saw
+    /// nothing because the board stopped looking, never because a source
+    /// failed, and must not render as unreadable.
+    pub(crate) fn not_evidence(&self) -> bool {
+        self.is_ok() || self.over_budget
     }
     pub(crate) fn rows(&self) -> Vec<Value> {
         match &self.payload {
@@ -423,7 +430,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let claims = match s_claims {
         None => {
             spent(&mut sources, "claims", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
         Some(_) => {
             let read = read_claims(&cwd);
@@ -441,13 +448,13 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let undispatched = match s_undispatched {
         None => {
             spent(&mut sources, "undispatched", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
         Some(dl) => {
             let bound = Budget::spawn_bound(dl);
             if bound.is_zero() {
                 spent(&mut sources, "undispatched", &budget);
-                SourceRead::err(budget.spent_error())
+                budget.spent_read()
             } else {
                 let mut cmd = fno_py_cmd();
                 cmd.extend([
@@ -473,11 +480,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let (claimed_nodes, mut holders, claimed_warnings) = match s_stalled {
         None => {
             spent(&mut sources, "claimed_nodes", &budget);
-            (
-                SourceRead::err(budget.spent_error()),
-                Vec::new(),
-                Vec::new(),
-            )
+            (budget.spent_read(), Vec::new(), Vec::new())
         }
         Some(_) => {
             let (read, mut holders, w) = read_claimed_nodes(&claims, entries.as_deref());
@@ -502,11 +505,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // get the same transcript measurement the claim holders get.
     let s_drivers = budget.start(SRC_DRIVERS);
     let (drivers, roster_tokens, driver_name_tokens) = match s_drivers {
-        None => (
-            SourceRead::err(budget.spent_error()),
-            Vec::new(),
-            HashMap::new(),
-        ),
+        None => (budget.spent_read(), Vec::new(), HashMap::new()),
         Some(_) => {
             let (mut read, name_to_token) = read_driver_rows(entries.as_deref());
             let mut tokens: Vec<String> = Vec::new();
@@ -572,6 +571,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         needs,
         holder_activity,
         holder_activity_error,
+        holder_starved,
     ) = std::thread::scope(|s| {
         // The worked read is a full fno-py cold start plus fleet roster read,
         // so it rides the concurrent section too: its join waits below, after
@@ -583,7 +583,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             s.spawn(move || {
                 let bound = Budget::spawn_bound(dl);
                 if bound.is_zero() {
-                    return SourceRead::err(spent_err);
+                    return SourceRead::over_budget(spent_err);
                 }
                 let mut cmd = fno_py_cmd();
                 cmd.extend([
@@ -614,7 +614,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             })
         });
         let mut worked = match t_worked {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("worked: reader panicked")),
@@ -643,7 +643,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 // deadline still gates the START: a thread scheduled after
                 // the deadline marks itself spent instead of reading.
                 if Budget::spawn_bound(dl).is_zero() {
-                    return SourceRead::err(spent_err);
+                    return SourceRead::over_budget(spent_err);
                 }
                 let Some(entries) = entries else {
                     return SourceRead::err("graph unreadable: no entries for ready selection");
@@ -688,7 +688,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             s.spawn(move || {
                 let bound = Budget::spawn_bound(dl);
                 if bound.is_zero() {
-                    return SourceRead::err(spent_err);
+                    return SourceRead::over_budget(spent_err);
                 }
                 let mut cmd = fno_py_cmd();
                 cmd.extend(
@@ -732,7 +732,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 // refused-worker leg batch-probes the whole registry and
                 // measured ~7s on a busy fleet.
                 if Budget::spawn_bound(dl).is_zero() {
-                    return SourceRead::err(spent_err);
+                    return SourceRead::over_budget(spent_err);
                 }
                 let home = crate::paths::AgentsHome::from_env();
                 let (mut event_paths, default_ledger) = default_needs_sources(&home);
@@ -766,11 +766,11 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             None => {
                 let err = budget.spent_error();
                 (
-                    SourceRead::err(err.clone()),
-                    SourceRead::err(err.clone()),
+                    SourceRead::over_budget(err.clone()),
+                    SourceRead::over_budget(err.clone()),
                     Vec::new(),
                     true,
-                    SourceRead::err(err),
+                    SourceRead::over_budget(err),
                 )
             }
             Some(h) => h.join().unwrap_or_else(|_| {
@@ -785,7 +785,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         };
         mark(&mut sources, "pr_gate", &pr_gates, false);
         let ready = match t_ready {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
@@ -806,7 +806,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             );
         }
         let outstanding = match t_outstanding {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             Some(h) => h
                 .join()
                 .unwrap_or(SourceRead::err("outstanding: reader panicked")),
@@ -817,7 +817,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             outstanding
         };
         let needs = match t_needs {
-            None => SourceRead::err(budget.spent_error()),
+            None => budget.spent_read(),
             // A panicked fold must read UNREADABLE, never ok-empty: an
             // empty needs stream and a stream that never answered are
             // different boards, and the queue's loudness is the only
@@ -826,18 +826,20 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .join()
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
-        let (holder_activity, holder_activity_error): (
+        let (holder_activity, holder_activity_error, holder_starved): (
             HashMap<String, crate::truth_probe::TruthProbe>,
             Option<String>,
+            bool,
         ) = match t_truth {
             // No deadline for a non-empty holder set is a spent board: the
-            // probe never ran, which reads unreadable, never ok-empty.
-            None if holders.is_empty() => (HashMap::new(), None),
-            None => (HashMap::new(), Some(spent_err.clone())),
+            // probe never ran, which reads not-read (a budget kill), never
+            // ok-empty and never a source failure.
+            None if holders.is_empty() => (HashMap::new(), None, false),
+            None => (HashMap::new(), Some(spent_err.clone()), true),
             Some(h) => match h.join() {
-                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None),
+                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None, false),
                 Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
-                    (map, None)
+                    (map, None, false)
                 }
                 // An empty timed-out page is UNREADABLE. A non-empty partial
                 // page remains usable, and queues name its missing holders.
@@ -847,10 +849,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         "truth probe: batch of {} handles timed out",
                         holders.len()
                     )),
+                    false,
                 ),
                 Err(_) => (
                     HashMap::new(),
                     Some("truth probe: reader panicked".to_string()),
+                    false,
                 ),
             },
         };
@@ -866,6 +870,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             needs,
             holder_activity,
             holder_activity_error,
+            holder_starved,
         )
     });
     warnings.extend(pr_warnings);
@@ -993,12 +998,12 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let blocked_child = match s_blocked_child {
         None => {
             spent(&mut sources, "blocked_child", &budget);
-            SourceRead::err(budget.spent_error())
+            budget.spent_read()
         }
         Some(dl) => {
             if Budget::spawn_bound(dl).is_zero() {
                 spent(&mut sources, "blocked_child", &budget);
-                SourceRead::err(budget.spent_error())
+                budget.spent_read()
             } else {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let home = crate::paths::AgentsHome::from_env();
@@ -1172,6 +1177,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         drivers,
         holder_activity,
         holder_activity_error,
+        holder_activity_starved: holder_starved,
         prs,
         pr_nodes,
         pr_gates,
@@ -1489,6 +1495,7 @@ mod tests {
             drivers: ok_read(Value::Array(Vec::new())),
             holder_activity: HashMap::new(),
             holder_activity_error: None,
+            holder_activity_starved: false,
             prs: ok_read(Value::Array(Vec::new())),
             pr_nodes: ok_read(Value::Array(Vec::new())),
             pr_gates: ok_read(Value::Array(Vec::new())),
@@ -2351,6 +2358,37 @@ mod tests {
     }
 
     #[test]
+    fn a_starved_truth_batch_reads_the_five_queues_over_budget() {
+        // The probe never got a slice: the board stopped looking, it did not
+        // fail. The five claim-dependent queues carry the kill, not the
+        // failure word, so a starved board never renders as unreadable.
+        let node = json!({"id": "x-blind", "priority": "p0", "status": "in_progress"});
+        let claims = json!([{"key": "node:x-blind", "state": "live", "holder": "h"}]);
+        let mut inputs = inputs_with(json!([]), claims, json!([node]));
+        inputs.entries = Some(Vec::new());
+        inputs.holder_activity_error =
+            Some("not-read: board budget exhausted after ~/.fno/events.jsonl".to_string());
+        inputs.holder_activity_starved = true;
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        for name in [
+            "stalled_holder",
+            "stale_claim",
+            "unheld_progress",
+            "undriven_pr",
+            "unplanned",
+        ] {
+            let q = queues.iter().find(|q| q["name"] == name).expect(name);
+            assert_eq!(q["status"], "over_budget", "{name}");
+        }
+        let parsed = crate::king_termination::parse_king_board_value(&board).expect("parses");
+        assert!(
+            !parsed.unreadable_sources,
+            "a starved board is not an unreadable board"
+        );
+    }
+
+    #[test]
     fn an_unreadable_claims_source_reads_the_claims_queues_unreadable() {
         // AC5-ERR: the claims source's Err must arrive as unreadable
         // queues, never as an empty-fleet success that would re-dispatch held
@@ -3114,9 +3152,15 @@ mod tests {
             "board took {elapsed:?} against a 2,000ms budget with a 5s sleep source"
         );
         let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
+        // A budget kill is the board's own choice, not evidence about the
+        // source: it must not block completion, but it must stay named.
         assert!(
-            parsed.unreadable_sources,
-            "the killed source must read as unreadable"
+            !parsed.unreadable_sources,
+            "the killed source must read as not-read, not unreadable"
+        );
+        assert!(
+            !parsed.blind_queues.is_empty(),
+            "the killed source must still be named"
         );
     }
 
