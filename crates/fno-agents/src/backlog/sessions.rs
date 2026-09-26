@@ -35,6 +35,16 @@ pub fn triggers() -> String {
 pub fn ensure_table(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(&ddl())
+        .map_err(|error| error.to_string())?;
+    migrate_phase_vocabulary(connection)
+}
+
+/// The 2026-09-25 phase rename, one idempotent UPDATE per open: rows the
+/// matching WHERE finds nothing left to flip. Covers stores a stale deployed
+/// binary kept stamping with the retired spelling after this shipped.
+pub(crate) fn migrate_phase_vocabulary(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch("UPDATE sessions SET phase = 'execute' WHERE phase = 'do'")
         .map_err(|error| error.to_string())
 }
 

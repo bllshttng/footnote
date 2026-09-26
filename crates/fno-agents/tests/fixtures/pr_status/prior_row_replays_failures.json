@@ -1,0 +1,154 @@
+{
+ "expected": {
+  "exit": 1,
+  "stderr_lines": [
+   "42 OPEN red settled mergeable NOT-ready @ b41ac4bfeedf - 1 blockers: ci_red failing: check-2001[Run smoke]",
+   "note: check-2001 failed at step 'Run smoke': Process completed with exit code 1.",
+   "note: check-2002 failed at step 'Run smoke': Process completed with exit code 1."
+  ],
+  "stdout": "{\"pr\": \"42\", \"head\": \"b41ac4bfeedface0123456789abcdef012345678\", \"verdict\": \"red\", \"settled\": true, \"green\": false, \"pr_state\": \"OPEN\", \"mergeable\": \"MERGEABLE\", \"github_merge_state\": {\"state\": \"clean\", \"blockers\": [], \"missing_required_checks\": null, \"source\": \"mergeable_state clean\"}, \"checks\": {\"total\": 2, \"check_runs\": 2, \"statuses\": 0, \"fail_check_runs\": 2, \"fail_statuses\": 0, \"pass\": 0, \"fail\": 2, \"pending\": 0, \"unsettled\": 0, \"unsettled_fail\": 0}, \"failures\": [{\"check\": \"check-2001\", \"job_id\": \"2001\", \"step\": \"Run smoke\", \"first_error\": \"Process completed with exit code 1.\"}, {\"check\": \"check-2002\", \"job_id\": \"2002\", \"step\": \"Run smoke\", \"first_error\": \"Process completed with exit code 1.\"}], \"optional_reviews\": [], \"optional_reviews_unresolved\": 0, \"optional_reviews_resolved_unchanged\": 0, \"review_coverage\": {\"coverage\": \"not_asked\", \"reviewed_count\": null}, \"review_posture\": null, \"merge_authority\": {\"config_auto_merge_enabled\": true, \"grant\": \"dispatch\"}, \"merge_execution\": null, \"rounds_used\": null, \"max_rounds\": null, \"rounds_exhausted\": null, \"rounds_note\": \"no review_coverage row at this head; run fno-agents review-coverage\", \"review_activity\": {\"blocker\": \"\", \"detail\": \"\", \"hold\": null, \"worktree\": {\"probed\": false, \"path\": null, \"dirty\": null, \"head\": null, \"note\": \"not asked: PR is terminal\"}}, \"dispatch_hold\": null, \"merge_decision\": {\"outcome\": \"held\", \"head\": \"b41ac4bfeedface0123456789abcdef012345678\", \"blockers\": [{\"code\": \"ci_red\", \"class\": \"held\", \"detail\": \"CI is red\"}]}, \"ready\": false, \"ready_blockers\": [\"ci_red\"]}\n"
+ },
+ "inputs": {
+  "branch_history": null,
+  "cache": {
+   "seed_rows": {
+    "Owner--Repo-42-b41ac4bfeedf": {
+     "exit": 1,
+     "output": {
+      "checks": {
+       "check_runs": 2,
+       "fail": 2,
+       "total": 2
+      },
+      "failures": [
+       {
+        "check": "check-2001",
+        "first_error": "Process completed with exit code 1.",
+        "job_id": "2001",
+        "step": "Run smoke"
+       },
+       {
+        "check": "check-2002",
+        "first_error": "Process completed with exit code 1.",
+        "job_id": "2002",
+        "step": "Run smoke"
+       }
+      ],
+      "green": false,
+      "head": "b41ac4bfeedface0123456789abcdef012345678",
+      "mergeable": "MERGEABLE",
+      "pr": "42",
+      "pr_state": "OPEN",
+      "settled": true,
+      "verdict": "red"
+     },
+     "ts": 1790409000
+    }
+   }
+  },
+  "coverage_row": {
+   "coverage": "not_asked",
+   "reviewed_count": null
+  },
+  "fetch_fail": false,
+  "fetch_stderr": "",
+  "github_merge_blockers": {
+   "blockers": [],
+   "missing_required_checks": null,
+   "source": "mergeable_state clean",
+   "state": "clean"
+  },
+  "hold_reason": null,
+  "merge_authority": {
+   "config_auto_merge_enabled": true,
+   "grant": "dispatch"
+  },
+  "merge_execution": null,
+  "optional_reviews": {
+   "optional_reviews": [],
+   "optional_reviews_resolved_unchanged": 0,
+   "optional_reviews_unresolved": 0
+  },
+  "rate_limit_class": "",
+  "raw": {
+   "check_runs_pages": [
+    {
+     "check_runs": [
+      {
+       "conclusion": "failure",
+       "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/2001",
+       "name": "smoke",
+       "started_at": "2026-09-25T00:00:00Z",
+       "status": "completed"
+      },
+      {
+       "conclusion": "failure",
+       "details_url": "https://github.com/Owner/Repo/actions/runs/1/job/2002",
+       "name": "pytest",
+       "started_at": "2026-09-25T00:00:00Z",
+       "status": "completed"
+      }
+     ],
+     "total_count": 2
+    }
+   ],
+   "failed_job_logs": {},
+   "job_logs": {},
+   "job_steps": {},
+   "pulls": {
+    "base": {
+     "ref": "main"
+    },
+    "head": {
+     "ref": "feature/x-8ab0",
+     "sha": "b41ac4bfeedface0123456789abcdef012345678"
+    },
+    "merge_state_status": "clean",
+    "mergeable": true,
+    "merged": false,
+    "state": "open"
+   },
+   "runs_listing": {
+    "total_count": 0,
+    "workflow_runs": []
+   },
+   "statuses": {
+    "state": "success",
+    "statuses": []
+   },
+   "zero_rows": []
+  },
+  "receipt": {
+   "blockers": [
+    {
+     "class": "held",
+     "code": "ci_red",
+     "detail": "CI is red"
+    }
+   ],
+   "head": "b41ac4bfeedface0123456789abcdef012345678",
+   "outcome": "held"
+  },
+  "rerun_recovery": {
+   "failed": [],
+   "recovered": false
+  },
+  "review_activity": {
+   "blocker": "",
+   "detail": "",
+   "hold": null,
+   "worktree": {
+    "dirty": null,
+    "head": null,
+    "note": "not asked: PR is terminal",
+    "path": null,
+    "probed": false
+   }
+  },
+  "review_lane": true
+ },
+ "name": "prior_row_replays_failures",
+ "now": 1790409600,
+ "refresh": false,
+ "use_cache": true
+}

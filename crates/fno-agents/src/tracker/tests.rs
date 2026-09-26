@@ -147,7 +147,7 @@ fn ac1_snapshot_joins_sidecar_over_a_recorded_gh() {
         "id": "o/r#1",
         "plan_path": "/plans/one.md",
         "cwd": "/repo",
-        "sessions": [{"phase": "do", "session_id": "s1"}, {"phase": "do", "session_id": "s2"}],
+        "sessions": [{"phase": "execute", "session_id": "s1"}, {"phase": "execute", "session_id": "s2"}],
     });
     std::fs::write(
         sidecar_dir.join(format!("{}.json", crate::claims::encode_key("o/r#1"))),

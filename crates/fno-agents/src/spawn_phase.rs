@@ -44,7 +44,7 @@ mod tests {
         assert_eq!(seed_phase("/fno:review x"), Some("review"));
         assert_eq!(seed_phase("/code-review this diff"), Some("review"));
         assert_eq!(seed_phase("/review x-1"), Some("review"));
-        assert_eq!(seed_phase("/fno:target x-1"), Some("do"));
+        assert_eq!(seed_phase("/fno:target x-1"), Some("execute"));
         assert_eq!(seed_phase("  /fno:think why"), Some("think"));
     }
 

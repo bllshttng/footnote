@@ -74,6 +74,7 @@ pub mod blueprint_judge;
 mod boot_revival;
 mod bounded_cmd;
 mod bounded_spawn;
+pub mod burn_watch;
 mod cancel_sentinel;
 pub mod canonical_check;
 pub mod capability_leaves;
@@ -272,6 +273,7 @@ pub mod pr_nudge;
 pub mod pr_park;
 pub mod pr_push;
 pub mod pr_rebase;
+pub mod pr_status;
 pub mod pr_status_facts;
 pub mod pr_worktree;
 pub mod protocol;
@@ -1449,6 +1451,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_sent",
     "pr_nudge_escalated",
     "pr_nudge_paused",
+    // Burn arm (daemon-emitted): a worker whose spend or node age grows on
+    // a flat sample is woken; three unanswered wakes escalate as one fleet
+    // task through the pr-nudge store.
+    "burn_watch_wake",
+    "burn_watch_escalated",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     //. The roots reach a spawn as an RPC param from the Python seam,

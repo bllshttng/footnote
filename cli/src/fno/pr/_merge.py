@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import run
+from fno.pr._rest import fetch_pr_file_paths_rest
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
@@ -468,19 +469,6 @@ def _is_documentation_path(path: str) -> bool:
 # in-process surface (MCP): such a caller that classifies a docs-only head and
 # then sees code pushed must evict or wait out the TTL before merging. Move to
 # a head-keyed cache if a long-lived surface ever needs cross-push exactness.
-def _pr_file_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
-    """Changed file paths via the paginated REST files endpoint; None on a
-    miss, and an EMPTY list is a real answer."""
-    res = _gh(
-        ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
-         "--paginate", "--jq", ".[] | .filename // empty"],
-        cwd,
-    )
-    if not res.ok:
-        return None
-    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
-
-
 _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 _CACHE_BOUND = 256
@@ -500,7 +488,7 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
         names = hit[1]
     else:
-        names = _pr_file_paths(pr_number, repo)
+        names, _paths_reason = fetch_pr_file_paths_rest(str(pr_number), repo=repo, runner=run)
         if names is None or any(not _is_documentation_path(p) for p in names):
             # Only a CODE answer (or a failed read, which fails closed to
             # code) memoizes: the cached key is (repo, pr), not the head, so
@@ -1847,9 +1835,9 @@ def run_merge(
     flake = None
     if auto_merge.require_checks_pass:
         try:
-            from fno.pr._status import rerun_recovery
+            from fno.rust_binary import verb_call
 
-            flake = rerun_recovery(pr_number, repo, sha=covered_head or None)
+            flake = verb_call("authorized-merge", {"op": "status-rerun", "cwd": repo, "pr": int(pr_number), "sha": covered_head or ""}, timeout=120)
         except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
             sys.stderr.write(
                 f"pr-merge: rerun-recovery probe unavailable ({exc}); "

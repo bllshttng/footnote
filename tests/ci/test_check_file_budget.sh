@@ -67,7 +67,7 @@ fresh; lines 150 grow >> cli/src/fno/keep.py; commit
 check 'growth over the added-line budget is refused' 1 'added +150 lines (added-line budget 30'
 
 fresh; git rm -q cli/src/fno/dead.py; commit
-check 'a deleted module adds nothing' 0 'cli/src/fno added +0, budget 30'
+check 'a deleted module adds nothing' 0 'cli/src/fno added +0, net -50, budget 30'
 
 fresh; git rm -q cli/src/fno/dead.py; lines 120 grow >> cli/src/fno/sub/old.py; commit
 check 'a deleted module does not offset nested growth' 1 'added +120 lines (added-line budget 30'
@@ -76,17 +76,22 @@ fresh; git mv scripts/tool.py cli/src/fno/tool.py; commit
 check 'a module moved into the tree counts as growth' 1 'added +150 lines (added-line budget 30'
 
 fresh; mkdir -p cli/src/fno/tests; lines 150 t > cli/src/fno/tests/test_x.py; commit
-check 'test files do not count against the tree' 0 'cli/src/fno added +0, budget 30'
+check 'test files do not count against the tree' 0 'cli/src/fno added +0, net +0, budget 30'
 
-# The specimen that proved the hole: a branch that deletes far more than it
-# adds is still refused, because the ceiling is on added lines, never net.
-fresh; lines 152 extra > cli/src/fno/extra.py; commit
-git rm -q cli/src/fno/extra.py cli/src/fno/dead.py cli/src/fno/sub/old.py
-lines 101 fresh > cli/src/fno/fresh.py; commit
-check 'the delete-heavy rewrite is refused on added lines' 1 'added +101 lines (added-line budget 30'
+# The specimen that proved the hole: a port deletes far more than it adds
+# forward (80 deleted, 40 added). Net negative, so the tally passes without a
+# label even though the added lines pass the 30-line ceiling.
+fresh; git rm -q cli/src/fno/dead.py cli/src/fno/sub/old.py
+lines 40 fresh > cli/src/fno/fresh.py; commit
+check 'a net-negative port passes the tally' 0 'cli/src/fno added +40, net -40, budget 30'
+
+# The ceiling survives: a rewrite whose net is zero still faces the added-line
+# budget, so deletions cannot buy growth.
+fresh; git rm -q cli/src/fno/dead.py; lines 50 fresh > cli/src/fno/fresh.py; commit
+check 'a net-zero rewrite still faces the added-line ceiling' 1 'added +50 lines (added-line budget 30'
 
 fresh; lines 12 grow >> cli/src/fno/keep.py; commit
-check 'added lines under the budget pass' 0 'cli/src/fno added +12, budget 30'
+check 'added lines under the budget pass' 0 'cli/src/fno added +12, net +12, budget 30'
 
 fresh; lines 12 grow >> cli/src/fno/keep.py; commit
 check 'the env override moves the budget' 1 'budget 5' PY_ADDED_BUDGET=5
@@ -161,7 +166,7 @@ rm -f "$GH_MARKER"
 out="$(PATH="$GHBIN:$PATH" GH_STUB_RESULT=true GH_STUB_MARKER="$GH_MARKER" \
   GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
   FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)" bash "$GATE" 2>&1)"; got=$?
-if [[ "$got" -eq 0 && "$out" == *'added +20, budget 30'* && ! -e "$GH_MARKER" ]]; then
+if [[ "$got" -eq 0 && "$out" == *'added +20, net +20, budget 30'* && ! -e "$GH_MARKER" ]]; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))
@@ -189,7 +194,7 @@ check 'the label waives the tree allowance and names itself' 0 \
 
 fresh; lines 20 grow >> cli/src/fno/keep.py; commit
 out="$(FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception bash "$GATE" 2>&1)"
-if [[ "$out" == *'added +20, budget 30'* && "$out" != *'waives'* ]]; then
+if [[ "$out" == *'added +20, net +20, budget 30'* && "$out" != *'waives'* ]]; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))

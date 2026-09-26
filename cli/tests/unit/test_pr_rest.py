@@ -1,11 +1,10 @@
-"""Tests for the REST settledness reader behind `fno do pr status`.
+"""Tests for the surviving REST readers (`fno.pr._rest`).
 
 The load-bearing guard: the settledness reader issues NO GraphQL call, so a
 watching fleet spends the idle core budget instead of the shared per-USER
-GraphQL quota. Every other test pins the mapping (REST payloads -> the rollup
-shape `verdict_for` already classifies) and the loud-failure contract: a failed
-read is `(None, reason)`, which `run_status` must render as
-`verdict: error, settled: false` - never as an absent answer.
+GraphQL quota. The PR rollup reader itself is the Rust owner now
+(crates/fno-agents/src/pr_status.rs); what stays here pins the metadata,
+files, PR-listing and reason-classification contracts.
 """
 from __future__ import annotations
 
@@ -13,11 +12,8 @@ import json
 
 import pytest
 
-from fno.pr import _quota, _rest, _status
+from fno.pr import _quota, _rest
 from fno.pr._proc import Result
-
-# The real zero-job wrapper, captured before any fixture stubs it.
-_REAL_ZERO_JOB_ROWS = _rest._zero_job_rows
 
 _PULLS = {
     "html_url": "https://github.com/Owner/Repo/pull/42",
@@ -61,29 +57,6 @@ def _runner(
 
 def _cr(name, status, conclusion="", started="2026-08-14T10:00:00Z"):
     return {"name": name, "status": status, "conclusion": conclusion, "started_at": started}
-
-
-def test_settledness_reader_issues_no_graphql_call():
-    """The node's named guard: no `gh pr view` / `gh api graphql` argv, ever."""
-    calls: list[list[str]] = []
-    r = _runner(
-        check_runs=[_cr("ci", "completed", "success")],
-        statuses=[{"context": "legacy", "state": "SUCCESS", "created_at": "2026-08-14T10:00:00Z"}],
-        calls=calls,
-    )
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=r)
-    assert reason == "" and pr_json is not None
-    graphql = [
-        c for c in calls
-        if c[:3] == ["gh", "pr", "view"] or (len(c) > 2 and c[2] == "graphql")
-    ]
-    assert graphql == [], f"settledness read spent GraphQL: {graphql}"
-    # The reads that DID fire are the REST endpoints + the local slug; the
-    # runs listing is the op's own read, no Python argv for it anymore.
-    assert any("/pulls/42" in c[-1] for c in calls)
-    assert any("check-runs" in c[-1] for c in calls)
-    assert any(c[-1].endswith("/status") for c in calls)
-    assert any(c[:2] == ["git", "remote"] for c in calls)
 
 
 def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
@@ -294,48 +267,6 @@ def test_pr_info_allows_missing_html_url_without_losing_metadata():
     assert info["head_sha"] == "abc123def"
 
 
-def test_rest_reader_rejects_malformed_check_runs():
-    def runner(cmd, cwd=None):
-        if cmd[:2] == ["git", "remote"]:
-            return Result(0, _GH_URL, "")
-        if "/pulls/" in cmd[-1]:
-            return Result(0, json.dumps(_PULLS), "")
-        if "check-runs" in cmd[-1]:
-            return Result(0, '{"check_runs":{}}', "")
-        return Result(0, '{"statuses":[]}', "")
-
-    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
-    assert payload is None
-    assert "malformed check_runs" in reason
-
-
-def test_rest_reader_fails_closed_when_legacy_status_read_fails_with_green_check_runs():
-    r = _runner(
-        check_runs=[_cr("ci", "completed", "success")],
-        fail=lambda cmd: "legacy status unavailable" if cmd[-1].endswith("/status") else None,
-    )
-    payload, reason = _rest.fetch_pr_rest("42", runner=r)
-    assert payload is None
-    assert reason == "legacy status unavailable"
-
-
-def test_rest_reader_rejects_malformed_statuses():
-    def runner(cmd, cwd=None):
-        if cmd[:2] == ["git", "remote"]:
-            return Result(0, _GH_URL, "")
-        if "/pulls/" in cmd[-1]:
-            return Result(0, json.dumps(_PULLS), "")
-        if "check-runs" in cmd[-1]:
-            return Result(0, '{"check_runs":[{"name":"ci"}]}', "")
-        if "actions/runs?" in cmd[-1]:
-            return Result(0, '{"total_count":0,"workflow_runs":[]}', "")
-        return Result(0, '{"statuses":{}}', "")
-
-    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
-    assert payload is None
-    assert "malformed statuses" in reason
-
-
 def test_current_pr_number_uses_rest_not_gh_pr_view():
     calls: list[list[str]] = []
 
@@ -360,74 +291,6 @@ def test_current_pr_number_uses_rest_not_gh_pr_view():
     ]
 
 
-def test_rest_green_maps_to_rollup_green():
-    r = _runner(
-        check_runs=[
-            _cr("ci", "completed", "success", "2026-08-14T10:00:00Z"),
-            _cr("lint", "completed", "success", "2026-08-14T10:01:00Z"),
-        ],
-    )
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=r)
-    assert reason == ""
-    verdict, code, counts = _status.verdict_for(pr_json["statusCheckRollup"])
-    assert (verdict, code) == ("green", 0)
-    assert counts["total"] == 2
-    assert pr_json["headRefOid"] == "abc123def"
-    assert pr_json["state"] == "OPEN"
-
-
-def test_fetch_pr_rest_carries_mergeable_through():
-    """x-4271: `run_status` reads `pr_json["mergeable"]` to gate `ready` on a
-    conflicting PR - the field must survive the REST fetch, not stop at
-    `fetch_pr_info_rest`'s own return value."""
-    pulls = dict(_PULLS, mergeable=False)
-    r = _runner(pulls=pulls, check_runs=[_cr("ci", "completed", "success")])
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=r)
-    assert reason == ""
-    assert pr_json["mergeable"] == "CONFLICTING"
-
-
-def test_rest_in_progress_is_pending_not_red():
-    r = _runner(check_runs=[_cr("ci", "in_progress", "")])
-    pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
-    verdict, code, _ = _status.verdict_for(pr_json["statusCheckRollup"])
-    assert (verdict, code) == ("pending", 2)
-
-
-def test_rest_superseded_run_dedup_survives_the_port():
-    """REST returns superseded runs in the same list (a known dedup hazard):
-    the port must classify only the latest attempt per name."""
-    r = _runner(
-        check_runs=[
-            _cr("ci", "completed", "cancelled", "2026-08-14T09:55:00Z"),
-            _cr("ci", "completed", "success", "2026-08-14T10:00:00Z"),
-        ],
-    )
-    pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
-    verdict, code, counts = _status.verdict_for(pr_json["statusCheckRollup"])
-    assert (verdict, code) == ("green", 0)
-    assert counts["total"] == 1
-
-
-def test_rest_failure_is_loud_with_transport_named():
-    """A failed REST read must NOT read as settled: (None, reason) reaches the
-    caller as `verdict: error, settled: false` with the failure class named."""
-
-    def fail(cmd):
-        if "check-runs" in cmd[-1]:
-            return "HTTP 403: You have exceeded a secondary rate limit"
-        return None
-
-    r = _runner(fail=fail)
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=r)
-    assert pr_json is None
-    assert "secondary rate limit" in reason.lower()
-
-
-# Verbatim as measured 2026-08-24T01:01:17Z during a live secondary refusal.
-# GitHub's own wording contains NO "secondary" - that absence is the premise
-# the live-bucket classifier exists for. The `...` gaps are where the live
-# capture was truncated, not paraphrase.
 _VERBATIM_403 = (
     "gh: API rate limit exceeded for user ID 4994564. If you reach out to "
     "GitHub Support for help, please include the request ID "
@@ -646,101 +509,6 @@ def test_shim_only_stderr_keeps_the_shims_own_diagnostic_raw():
     assert not hasattr(reason, "rate_limit_class") or not reason.rate_limit_class
 
 
-def test_rest_merged_state_maps():
-    r = _runner(
-        pulls={
-            "html_url": "https://github.com/Owner/Repo/pull/42",
-            "state": "closed",
-            "merged": True,
-            "merged_at": "2026-08-18T00:00:00Z",
-            "head": {"sha": "s", "ref": "feature/test"},
-            "base": {"ref": "main"},
-        }
-    )
-    pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
-    assert pr_json["state"] == "MERGED"
-
-
-def test_rest_non_numeric_pr_is_a_loud_error():
-    pr_json, reason = _rest.fetch_pr_rest("feature/x", runner=_runner())
-    assert pr_json is None
-    assert "numeric" in reason
-
-
-def test_rest_unresolvable_slug_is_a_loud_error():
-    r = _runner()
-
-    def bad_git(cmd, cwd=None):
-        if cmd[:2] == ["git", "remote"]:
-            return Result(1, "", "no origin")
-        return r(cmd, cwd)
-
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=bad_git)
-    assert pr_json is None
-    assert "owner/repo" in reason
-
-
-def test_rest_bad_json_is_a_loud_error():
-    def r2(cmd, cwd=None):
-        if cmd[:2] == ["git", "remote"]:
-            return Result(0, _GH_URL, "")
-        if "/pulls/" in cmd[-1]:
-            return Result(0, "not json", "")
-        return Result(1, "", "?")
-
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=r2)
-    assert pr_json is None
-    assert "not JSON" in reason
-
-
-def test_status_context_entries_map_through_classify():
-    r = _runner(
-        check_runs=[_cr("ci", "completed", "success")],
-        statuses=[{"context": "deploy", "state": "pending", "created_at": ""}],
-    )
-    pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
-    verdict, code, counts = _status.verdict_for(pr_json["statusCheckRollup"])
-    assert (verdict, code) == ("pending", 2)
-    assert counts["total"] == 2
-
-
-def test_rollup_rows_carry_the_actions_job_ref():
-    """x-c124: a failing row must carry its own log ref - `detailsUrl` under
-    the GraphQL-shape key `fno.pr._logs._job_ref` parses, so the failure
-    detail needs no second lookup."""
-    cr = {
-        "name": "smoke",
-        "status": "completed",
-        "conclusion": "failure",
-        "started_at": "2026-08-14T10:00:00Z",
-        "details_url": "https://github.com/Owner/Repo/actions/runs/32579190880/job/97045903772",
-    }
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=_runner(check_runs=[cr]))
-    assert reason == ""
-    row = pr_json["statusCheckRollup"][0]
-    assert row["detailsUrl"].endswith("/job/97045903772")
-
-
-def test_status_rows_carry_their_target_url():
-    """A StatusContext's one affordance is its external link; dropping it on
-    the REST port would make a non-Actions red unexplainable."""
-    pr_json, _ = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(
-            statuses=[
-                {
-                    "context": "ext/check",
-                    "state": "failure",
-                    "created_at": "2026-08-14T10:00:00Z",
-                    "target_url": "https://ci.example.com/build/7",
-                }
-            ]
-        ),
-    )
-    row = pr_json["statusCheckRollup"][0]
-    assert row["targetUrl"] == "https://ci.example.com/build/7"
-
-
 def test_transport_failure_names_its_class_and_disclaims_blockers():
     """x-4eac (the 2026-08-19 EOF incident): a transport death is a fact about
     the READ. The reason must say so before a worker polls harder or edits
@@ -934,225 +702,5 @@ def test_published_refusal_hides_the_account_name_in_a_local_path(tmp_path, monk
     assert str(tmp_path) not in reason
 
 
-def _workflow_run(run_id, name):
-    return {"id": run_id, "name": name, "head_sha": "abc123def"}
 
 
-def test_same_named_jobs_from_different_workflows_both_survive(monkeypatch):
-    """The selector's workflow dimension must be live on the REST path: two
-    workflows both defining `self-test` key distinct slots, so a CANCELLED red
-    from one is not superseded by a pass from the other. The join key is the
-    run id embedded in the job's details_url."""
-    crs = [
-        {
-            "name": "self-test", "status": "completed", "conclusion": "cancelled",
-            "started_at": "2026-08-30T05:00:00Z",
-            "details_url": "https://github.com/Owner/Repo/actions/runs/111/job/1a",
-        },
-        {
-            "name": "self-test", "status": "completed", "conclusion": "success",
-            "started_at": "2026-08-30T06:00:00Z",
-            "details_url": "https://github.com/Owner/Repo/actions/runs/222/job/2a",
-        },
-    ]
-    _serve_listing(
-        monkeypatch,
-        [
-            {"id": 111, "name": "alpha"},
-            {"id": 222, "name": "beta"},
-        ],
-    )
-    pr_json, reason = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha"), _workflow_run(222, "beta")]),
-    )
-    assert reason == "" and pr_json is not None
-    rollup = pr_json["statusCheckRollup"]
-    by_workflow = {row["workflow"]: row for row in rollup if row["name"] == "self-test"}
-    assert set(by_workflow) == {"alpha", "beta"}, by_workflow
-    assert by_workflow["alpha"]["conclusion"] == "cancelled"
-    verdict, _, counts = _status.verdict_for(rollup)
-    assert verdict == "red"
-    assert counts["fail"] == 1 and counts["total"] == 2
-
-
-def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow(monkeypatch):
-    """An external app's check run carries no Actions URL; "" keys it exactly
-    like the pre-workflow selector did instead of crashing the join."""
-    crs = [
-        {
-            "name": "external", "status": "completed", "conclusion": "success",
-            "started_at": "2026-08-30T05:00:00Z",
-            "details_url": "https://ci.example.net/builds/9",
-        },
-    ]
-    _serve_listing(monkeypatch, [{"id": 111, "name": "alpha"}])
-    pr_json, reason = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha")]),
-    )
-    assert reason == ""
-    assert pr_json["statusCheckRollup"][0]["workflow"] == ""
-
-
-def test_failed_workflow_run_listing_is_loud_not_a_silent_degrade(monkeypatch):
-    """A listing the op could not read cannot prove the slot collapse it
-    would hide: (None, reason), the module's loud-failure contract, never
-    rows that quietly key name-only."""
-    import fno.rust_binary as rust_binary
-
-    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
-
-    def boom(verb, payload, **kw):
-        raise rust_binary.VerbUnavailable("secondary rate limit")
-
-    monkeypatch.setattr(rust_binary, "verb_call", boom)
-    pr_json, reason = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(check_runs=[_cr("ci", "completed", "success")]),
-    )
-    assert pr_json is None
-    assert "secondary rate limit" in reason
-
-
-def _serve_listing(monkeypatch, listing):
-    """Restore the real zero-job wrapper and fake only the binary call, so a
-    test drives the op transport with its own listing."""
-    import fno.rust_binary as rust_binary
-
-    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
-
-    def fake_verb(verb, payload, **kw):
-        return {"rows": [], "listing": list(listing)}
-
-    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
-
-
-_ZERO_JOB_ROW = {
-    "name": ".github/workflows/cli-ci.yml",
-    "status": "completed",
-    "conclusion": "failure",
-    "startedAt": "2026-09-19T07:00:00Z",
-    "detailsUrl": "https://github.com/Owner/Repo/actions/runs/35337460787",
-    "workflow": ".github/workflows/cli-ci.yml",
-}
-
-
-def test_zero_job_failure_rows_read_red(monkeypatch):
-    """AC3-HP: the op's rows join the rollup and the verdict reads red."""
-    import fno.rust_binary as rust_binary
-
-    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
-    payloads: list[dict] = []
-
-    def fake_verb(verb, payload, **kw):
-        payloads.append(payload)
-        assert verb == "authorized-merge"
-        return {
-            "rows": [dict(_ZERO_JOB_ROW)],
-            "listing": [
-                {
-                    "id": 35337460787,
-                    "name": "cli-ci",
-                    "path": ".github/workflows/cli-ci.yml",
-                    "status": "completed",
-                    "conclusion": "failure",
-                }
-            ],
-        }
-
-    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
-    pr_json, reason = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(
-            check_runs=[_cr("rust-ci", "completed", "success")],
-            workflow_runs=[
-                {
-                    "id": 35337460787,
-                    "name": "cli-ci",
-                    "path": ".github/workflows/cli-ci.yml",
-                    "status": "completed",
-                    "conclusion": "failure",
-                }
-            ],
-        ),
-    )
-    assert reason == "" and pr_json is not None
-    rollup = pr_json["statusCheckRollup"]
-    assert _ZERO_JOB_ROW in rollup
-    verdict, exit_code, counts = _status.verdict_for(rollup)
-    assert (verdict, exit_code) == ("red", 1)
-    assert counts["fail"] == 1
-    payload = payloads[0]
-    assert payload["op"] == "status-zero-job-runs"
-    # _slug_or_reason lowercases the remote's owner/repo.
-    assert payload["slug"] == "owner/repo"
-    assert payload["sha"] == "abc123def"
-    assert payload["check_runs"]
-    # The op owns the listing read; the transport sends no pre-read page.
-    assert "runs" not in payload
-
-
-def test_timeout_annotation_relabels_the_check_run_and_keeps_its_cause(monkeypatch):
-    import fno.rust_binary as rust_binary
-
-    message = "The job has exceeded the maximum execution time of 35m0s"
-    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
-
-    def fake_verb(verb, payload, **kw):
-        assert verb == "authorized-merge"
-        assert payload["check_runs"][0]["conclusion"] == "cancelled"
-        return {
-            "rows": [],
-            "listing": [],
-            "check_runs": [
-                {
-                    **payload["check_runs"][0],
-                    "conclusion": "timed_out",
-                    "timeout": message,
-                }
-            ],
-        }
-
-    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
-    check = {
-        **_cr("stress", "completed", "cancelled"),
-        "id": 123,
-        "output": {"annotations_count": 1},
-        "details_url": "https://github.com/Owner/Repo/actions/runs/5/job/8",
-    }
-    pr_json, reason = _rest.fetch_pr_rest("42", runner=_runner(check_runs=[check]))
-    assert reason == "" and pr_json is not None
-    row = pr_json["statusCheckRollup"][0]
-    assert row["conclusion"] == "timed_out"
-    assert row["timeout"] == message
-
-
-def test_zero_job_read_failure_is_loud_never_green(monkeypatch):
-    """AC3-ERR: an unavailable binary answers (None, reason) - the module's
-    loud-failure contract, which run_status renders as verdict: error."""
-    import fno.rust_binary as rust_binary
-
-    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
-
-    def boom(verb, payload, **kw):
-        raise rust_binary.VerbUnavailable("binary not found")
-
-    monkeypatch.setattr(rust_binary, "verb_call", boom)
-    pr_json, reason = _rest.fetch_pr_rest(
-        "42",
-        runner=_runner(
-            check_runs=[_cr("rust-ci", "completed", "success")],
-            workflow_runs=[
-                {
-                    "id": 35337460787,
-                    "name": "cli-ci",
-                    "path": ".github/workflows/cli-ci.yml",
-                    "status": "completed",
-                    "conclusion": "failure",
-                }
-            ],
-        ),
-    )
-    assert pr_json is None
-    assert "zero-job run read failed" in reason

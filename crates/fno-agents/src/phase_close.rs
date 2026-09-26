@@ -348,7 +348,7 @@ mod tests {
             json!([
                 {"phase": "think", "harness": "claude", "session_id": sid, "started_at": "2026-09-01T00:00:00Z"},
                 {"phase": "review", "harness": "claude", "session_id": sid, "started_at": "2026-09-01T00:00:00Z"},
-                {"phase": "do", "harness": "claude", "session_id": sid, "started_at": "2026-09-01T00:00:00Z"},
+                {"phase": "execute", "harness": "claude", "session_id": sid, "started_at": "2026-09-01T00:00:00Z"},
                 {"phase": "ship", "harness": "claude", "session_id": sid, "started_at": "2026-09-01T00:00:00Z"},
                 {"phase": "blueprint", "harness": "claude", "session_id": sid, "ended_at": "2026-09-01T00:00:00Z"},
                 {"phase": "blueprint", "harness": "claude", "session_id": sid}
@@ -377,7 +377,7 @@ mod tests {
                 "sessions": [
                     {"phase": "ship", "harness": "claude", "session_id": "a", "started_at": "2026-09-01T00:00:00Z"},
                     {"phase": "ship", "harness": "codex", "session_id": "b", "started_at": "2026-09-01T01:00:00Z"},
-                    {"phase": "do", "harness": "claude", "session_id": "a", "started_at": "2026-09-01T00:00:00Z"}
+                    {"phase": "execute", "harness": "claude", "session_id": "a", "started_at": "2026-09-01T00:00:00Z"}
                 ]
             })],
         )
@@ -391,7 +391,7 @@ mod tests {
             vec![
                 ("ship", Some("2026-09-01T00:00:00Z"), Some(at)),
                 ("ship", Some("2026-09-01T01:00:00Z"), Some(at)),
-                ("do", Some("2026-09-01T00:00:00Z"), None),
+                ("execute", Some("2026-09-01T00:00:00Z"), None),
             ]
         );
         assert_eq!(row["sessions"][0]["ended_by"], json!("merge"));

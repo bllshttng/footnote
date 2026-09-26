@@ -16,7 +16,7 @@ fn x2774_open_node(id: &str, status: &str, sids: &[&str]) -> Value {
         .iter()
         .map(|sid| {
             json!({
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": sid,
                 "started_at": "2026-09-01T01:00:00Z",
@@ -151,7 +151,7 @@ fn xb7f8_a_terminal_parent_is_not_held_by_its_descendants() {
             "id": "NP",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "claude", "session_id": "s-parent", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "claude", "session_id": "s-parent", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );
@@ -370,9 +370,9 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         "id": "ND",
         "status": "done",
         "sessions": [
-            {"phase": "do", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
-            {"phase": "do", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
-            {"phase": "do", "harness": "claude", "session_id": "s-donefresh", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            {"phase": "execute", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s-donefresh", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
         ]
     });
     stage_graph(
@@ -511,7 +511,7 @@ fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
             "id": "NW",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "claude", "session_id": "s-wrote", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "claude", "session_id": "s-wrote", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );
@@ -587,7 +587,7 @@ fn x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row() {
             "id": "NP",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );

@@ -28,6 +28,22 @@ pub(crate) struct ReviewInputs {
     /// predicate, or the self-review floor on a stock install.
     pub(crate) optional_lane_configured: bool,
     pub(crate) nudge_configs: Vec<NudgeConfig>,
+    /// The reviewer names that mark a review author as optional (the
+    /// `fno.pr._reviews.optional_reviewer_names` set): resolved optional
+    /// logins plus every peer posting identity.
+    pub(crate) optional_reviewer_names: Vec<String>,
+    /// The config half of the merge gate's lane predicate
+    /// (`_review_lane_configured` before the payload floor): any configured
+    /// login/reviewer lane, or identity-free peers. `peer_identity` alone
+    /// answers False (a shared identity posts under an existing login, not a
+    /// distinct local lane).
+    pub(crate) lane_configured: bool,
+    /// `config.review.reviewers` names the local `code-review` reviewer.
+    pub(crate) code_review_configured: bool,
+    /// `config.review.self_review_required`, resolved (absent = true).
+    pub(crate) self_review_floor_on: bool,
+    /// `config.review.github_approval_satisfies`, resolved (absent = true).
+    pub(crate) approval_satisfies: bool,
 }
 
 /// Resolve [`ReviewInputs`]: event paths, repo slug, the GLOBAL-then-local
@@ -208,6 +224,37 @@ pub(crate) fn resolve_review_inputs(
         .is_some_and(|v| !v.is_empty());
     let nudge_configs = resolved_nudge_configs(&settings);
 
+    // The derived sets the status composer reads. The optional-name set is
+    // the resolved logins plus every peer posting identity (the shared one
+    // first, matching the Python order); the lane half is the merge gate's
+    // own config reading, spelled here so pr_status never touches the
+    // pub(super) fields directly.
+    let mut optional_reviewer_names = optional_bots.clone();
+    if let Some(shared) = settings.peer_identity.as_deref().filter(|s| !s.is_empty()) {
+        optional_reviewer_names.push(shared.to_string());
+    }
+    for peer in &settings.peers {
+        if let Some(id) = peer.identity.as_deref().filter(|s| !s.is_empty()) {
+            optional_reviewer_names.push(id.to_string());
+        }
+    }
+    let lane_configured = settings
+        .required_bots
+        .as_ref()
+        .is_some_and(|v| !v.is_empty())
+        || settings
+            .optional_apps
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+        || !settings.reviewers.is_empty()
+        || settings.peer_identity.is_none() && settings.peers.iter().any(|p| p.identity.is_none());
+    let code_review_configured = settings
+        .reviewers
+        .iter()
+        .any(|r| normalize_reviewer(r) == "code-review");
+    let self_review_floor_on = settings.self_review_required.unwrap_or(true);
+    let approval_satisfies = settings.github_approval_satisfies.unwrap_or(true);
+
     ReviewInputs {
         project_events,
         global_events,
@@ -221,10 +268,13 @@ pub(crate) fn resolve_review_inputs(
         // Lane CONFIGURATION is explicit config, never the built-in default:
         // the default logins are honored-if-present where a lane exists, but
         // they must not light up the login gate, the coverage publisher's
-        // lane predicate, or the self-review floor on a stock install - that
-        // flip skips the floor and forces gh review reads for installs that
-        // configured nothing (review round 2).
+        // lane predicate, or the self-review floor on a stock install.
         optional_lane_configured,
         nudge_configs,
+        optional_reviewer_names,
+        lane_configured,
+        code_review_configured,
+        self_review_floor_on,
+        approval_satisfies,
     }
 }

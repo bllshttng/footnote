@@ -258,7 +258,7 @@ def _stamp_spawned_session_row(
             from fno.paths import agents_registry_path
             from fno.rust_binary import verb_call
             try:
-                grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
+                grant = _resolve_spawn_merge_grant(message) if phase == "execute" else None
                 verb_call("pending-session-row", {"action": "park", "name": worker_name,
                          "phase": phase, "merge_grant": grant,
                          "registry": str(agents_registry_path())})
@@ -275,7 +275,7 @@ def _stamp_spawned_session_row(
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # The durable grant rides only a do-phase row: review/think workers never
     # merge, and a grant on their rows would be a receipt nobody should read.
-    merge_grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
+    merge_grant = _resolve_spawn_merge_grant(message) if phase == "execute" else None
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase=phase,
