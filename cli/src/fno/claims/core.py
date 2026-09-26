@@ -1928,6 +1928,7 @@ def _legacy_reap_dead_claims(
                             fresh,
                             root=root_label,
                             age_ms=max(0, ts - fresh.acquired_at),
+                            basis=fresh_native.get("basis"),
                         )
                     elif not entry.exists():
                         # archive_claim's idempotent short-circuit: the

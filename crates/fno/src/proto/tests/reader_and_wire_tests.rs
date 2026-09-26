@@ -80,8 +80,8 @@ fn proto_pre_attach_wire_shapes_are_frozen() {
 }
 
 #[test]
-fn proto_v83_agent_launch_roundtrips() {
-    // The launcher exchange is additive (v83): both payloads survive a
+fn proto_agent_launch_roundtrips() {
+    // The launcher payload survives a
     // wire encode/decode with every field intact, and the tagged launch
     // state keeps its snake_case kind on the wire.
     let req = AgentLaunchRequest {
@@ -91,6 +91,7 @@ fn proto_v83_agent_launch_roundtrips() {
         harness: "codex".into(),
         substrate: "pane".into(),
         model: None,
+        provider: Some("openrouter".into()),
         model_names_harness: false,
         effort: Some("high".into()),
         permission_mode: None,
@@ -99,6 +100,7 @@ fn proto_v83_agent_launch_roundtrips() {
         split: None,
         node: None,
         message: "line one\nline \"two\" $ ` \u{1f600}".into(),
+        extra_flags: vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
     };
     let mut buf = std::io::Cursor::new(Vec::new());
     write_msg_sync(&mut buf, &ClientMsg::AgentLaunch(req.clone())).unwrap();

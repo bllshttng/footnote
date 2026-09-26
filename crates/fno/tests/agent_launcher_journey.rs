@@ -53,6 +53,16 @@ fn attach_and_launch(scratch: &Scratch, sock: &PathBuf) -> FakeClient {
 }
 
 fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, message: &str) {
+    send_launch_with_flags(client, scratch, request_id, message, Vec::new());
+}
+
+fn send_launch_with_flags(
+    client: &mut FakeClient,
+    scratch: &Scratch,
+    request_id: u64,
+    message: &str,
+    extra_flags: Vec<String>,
+) {
     client.raw(&ClientMsg::AgentLaunch(AgentLaunchRequest {
         request_id,
         revision: 1,
@@ -60,6 +70,7 @@ fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, mess
         harness: "claude".to_string(),
         substrate: "pane".to_string(),
         model: None,
+        provider: None,
         model_names_harness: false,
         effort: None,
         permission_mode: None,
@@ -68,6 +79,7 @@ fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, mess
         split: None,
         node: None,
         message: message.to_string(),
+        extra_flags,
     }));
 }
 
@@ -97,6 +109,7 @@ fn launcher_journey_model_only_pin_omits_harness() {
         harness: "claude".to_string(),
         substrate: String::new(),
         model: Some("glm-5.3-flash[1m]".to_string()),
+        provider: None,
         model_names_harness: true,
         effort: None,
         permission_mode: None,
@@ -105,6 +118,7 @@ fn launcher_journey_model_only_pin_omits_harness() {
         split: None,
         node: None,
         message: "hi".to_string(),
+        extra_flags: Vec::new(),
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -153,7 +167,13 @@ fn launcher_journey_argv_stdin_and_birth_decode() {
     let mut client = attach_and_launch(&scratch, &sock);
 
     let message = "line one\nsay \"hi\" $HOME `whoami` \u{1f600}";
-    send_launch(&mut client, &scratch, 1, message);
+    send_launch_with_flags(
+        &mut client,
+        &scratch,
+        1,
+        message,
+        vec!["--agent".into(), "abc".into(), "--name".into(), "x".into()],
+    );
 
     // The exchange: Starting acknowledgment, then the decoded birth.
     client.wait(15, "launch terminal state", |c| {
@@ -200,6 +220,10 @@ fn launcher_journey_argv_stdin_and_birth_decode() {
         "--mux-session",
         "main",
         "--no-wait",
+        "--agent",
+        "abc",
+        "--name",
+        "x",
         "--prompt-file",
         "-",
     ];
@@ -239,6 +263,7 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
         harness: "claude".to_string(),
         substrate: String::new(),
         model: None,
+        provider: None,
         model_names_harness: false,
         effort: None,
         permission_mode: None,
@@ -247,6 +272,7 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
         split: Some("right".into()),
         node: None,
         message: "hi".to_string(),
+        extra_flags: Vec::new(),
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -304,6 +330,7 @@ fn launcher_journey_node_prefill_rides_the_door() {
         harness: "claude".to_string(),
         substrate: String::new(),
         model: None,
+        provider: None,
         model_names_harness: false,
         effort: None,
         permission_mode: None,
@@ -312,6 +339,7 @@ fn launcher_journey_node_prefill_rides_the_door() {
         split: None,
         node: Some("x-1".to_string()),
         message: message.to_string(),
+        extra_flags: Vec::new(),
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
