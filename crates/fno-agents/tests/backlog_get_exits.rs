@@ -21,6 +21,9 @@ fn get(config: &PathBuf, args: &[&str]) -> (i32, String, String) {
         .env("FNO_CONFIG", config)
         .env("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
         .env("FNO_TRACKER_BACKEND", "graph")
+        // A client spawned by a test dies with the test run, never idling
+        // as a daemon orphan (x-5533's contract, guard-enforced).
+        .envs(fno_agents::test_run::self_owner_env())
         .output()
         .expect("run fno-agents backlog get");
     (

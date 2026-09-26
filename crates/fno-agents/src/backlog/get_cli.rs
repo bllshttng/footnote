@@ -125,15 +125,6 @@ fn resolved_cwd(row: &Value) -> Value {
     row.get("cwd").cloned().unwrap_or(Value::Null)
 }
 
-/// Stamp the row's `_resolved_cwd` and return the stamped clone.
-fn stamped(row: &Value) -> Value {
-    let mut out = row.clone();
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert("_resolved_cwd".to_string(), resolved_cwd(row));
-    }
-    out
-}
-
 /// The archive read-through on a working-graph miss: the tiers, else a
 /// `previous_id` hit; the row stamps `_archived`.
 fn archive_hit(entries: &[Value], query: &str) -> Option<Value> {
@@ -315,12 +306,5 @@ mod tests {
         assert!(GetArgs::parse(&unknown).is_none());
         let ok = vec!["x-1".to_string(), "--grouped".to_string()];
         assert!(GetArgs::parse(&ok).is_some());
-    }
-
-    #[test]
-    fn stamped_adds_resolved_cwd_from_cwd_when_no_project() {
-        let row = json!({"id": "x-1", "cwd": "/repo"});
-        let out = stamped(&row);
-        assert_eq!(out["_resolved_cwd"], json!("/repo"));
     }
 }
