@@ -377,7 +377,7 @@ fn compose_full_screen_board_fills_the_terminal() {
     v.board_full = true;
     let text = crate::vt::frame_text(&v.compose());
     assert!(
-        text.lines().any(|l| l.starts_with("┌─ backlog")),
+        text.lines().any(|l| l.starts_with("╭─ backlog")),
         "board box at column 0: {text}"
     );
     assert!(!text.contains("x side"), "no dock when full screen");

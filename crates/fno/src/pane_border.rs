@@ -173,8 +173,8 @@ fn bottom_right(f: &EdgeFields, step: usize) -> Vec<(char, Part)> {
     row
 }
 
-/// The name tab: `─ name ─`, the title set into the rule (the btop look the
-/// operator picked over the herdr caps). Focus changes the tab's COLOR, never
+/// The name tab: `─ name ─`, the title set into the rule (the operator's
+/// 2026-09-26 pick). Focus changes the tab's COLOR, never
 /// its shape, so focus never moves the drop step or the grip.
 fn tab(name: &str) -> Vec<(char, Part)> {
     let mut row = Vec::new();
