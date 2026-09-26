@@ -1221,15 +1221,15 @@ mod tests {
     #[test]
     fn thread_group_help_renders_the_addressing_contract() {
         // The help body is the contract the two portal documents quote:
-        // both address forms, the discovery verb, the exact-match boundary,
+        // the TV rule (explicit placement creates, a default never does),
+        // the split-from form, the discovery verb, the exact-match boundary,
         // and the no-spawn refusal. `attach_id` stays internal; the help
         // teaches `name`, `session` and `short_id` (the whoami fields).
         let help = render_path_help(&["mux", "thread"]);
         assert!(help.contains("fno mux thread w2"), "{help}");
-        assert!(
-            help.contains("3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90"),
-            "{help}"
-        );
+        assert!(help.contains("explicit placement flag creates"), "{help}");
+        assert!(help.contains("No flag tunes"), "{help}");
+        assert!(help.contains("--split DIR --from"), "{help}");
         assert!(help.contains("fno agents whoami"), "{help}");
         assert!(help.contains("exact"), "{help}");
         assert!(help.contains("refuse and spawn no worker"), "{help}");
