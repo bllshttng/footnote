@@ -13,10 +13,10 @@ def test_table_maps_every_shipped_work_verb_in_all_three_spellings():
         ("/blueprint x-1", "blueprint"), ("/fno:blueprint x-1", "blueprint"),
         ("$fno:blueprint x-1", "blueprint"),
         ("/think q", "think"), ("$fno:think q", "think"),
-        ("/fix", "do"), ("/fno:fix t", "do"), ("$fno:tdd x", "do"),
-        ("/execute p.md", "do"), ("/fno:execute waves p.md", "do"), ("/do x", "do"),
+        ("/fix", "execute"), ("/fno:fix t", "execute"), ("$fno:tdd x", "execute"),
+        ("/execute p.md", "execute"), ("/fno:execute waves p.md", "execute"), ("/do x", "execute"),
         ("/pr create", "ship"), ("/fno:pr check 12", "ship"), ("/ship pr", "ship"),
-        ("/target", "do"), ("/fno:target", "do"), ("$fno:target", "do"),
+        ("/target", "execute"), ("/fno:target", "execute"), ("$fno:target", "execute"),
         ("/review", "review"), ("/fno:review", "review"), ("/code-review", "review"),
     ]
     for message, expected in cases:
@@ -50,7 +50,7 @@ def test_infer_phase_reads_both_sigils_and_rejects_paths():
     path prose answer exactly what `/fno:` and prose answer."""
     assert infer_phase("$fno:blueprint x") == "blueprint"
     assert infer_phase("/Users/x") == ""
-    assert infer_phase("$target x-1") == "do"
+    assert infer_phase("$target x-1") == "execute"
 
 
 def test_stage_profile_resolves_the_dollar_namespaced_verb():
