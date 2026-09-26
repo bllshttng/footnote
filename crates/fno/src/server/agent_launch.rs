@@ -411,14 +411,16 @@ impl super::Core {
     /// never strand the client's disabled button.
     pub(super) fn agent_launch_update(&mut self, id: u64, update: AgentLaunchUpdate, retry: u8) {
         if self.send_launch_update(id, update.clone()) {
-            // The composer's portal: an operator gesture on a thread
-            // launch, opened through the requesting client's own reach on
-            // the Launched receipt. A failed open is one notice naming the
-            // Enter gesture; the launch stays Launched.
-            if let LaunchState::Launched { name, .. } = &update.state {
-                if let Some(placement) = self.launch_desk.take_placement(id, update.request_id) {
-                    self.open_composer_portal(id, name, placement);
-                }
+            // The placement leaves the desk on EVERY terminal state: only
+            // a Launched thread spends it (the composer's portal, an
+            // operator gesture opened through the requesting client's own
+            // reach). A failed open is one notice naming the Enter
+            // gesture; the launch stays Launched.
+            let placement = self.launch_desk.take_placement(id, update.request_id);
+            if let (LaunchState::Launched { name, .. }, Some(placement)) =
+                (&update.state, placement)
+            {
+                self.open_composer_portal(id, name, placement);
             }
             self.launch_desk.settle(id, update);
             return;

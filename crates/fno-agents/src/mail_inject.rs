@@ -385,7 +385,8 @@ fn thread_route_hint(substrate: Option<&str>, name: &str) -> Option<String> {
     }
     Some(format!(
         "idle thread row: this control.sock paste cannot prove landing. The measured route:\n  \
-         fno mux command {name} --text <payload> --proof screen\n  \
+         fno mux command {name} --text <payload> --proof screen \\\n  \
+           --expect '<regex the finished turn matches>' --empty-composer '<idle regex>'\n  \
          (a dialog answer rides a bare Enter after: fno mux pane send <session>:<pane-id> --raw --submit)"
     ))
 }
@@ -3102,8 +3103,10 @@ mod tests {
     fn thread_route_hint_names_the_portal_route() {
         let h = thread_route_hint(Some("thread"), "king-fno-g6").expect("thread row hints");
         assert!(h.contains("fno mux command king-fno-g6 --text <payload> --proof screen"));
+        assert!(h.contains("--expect"));
+        assert!(h.contains("--empty-composer"));
         assert!(!h.contains("--portal new"));
-        assert!(h.contains("--submit --raw"));
+        assert!(h.contains("--raw --submit"));
         assert!(h.contains("bare Enter"));
         assert!(
             thread_route_hint(Some("pane"), "w").is_none(),

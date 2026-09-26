@@ -3669,10 +3669,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--at" => {
                 params.insert("at".into(), str_arg(&mut it, "--at")?);
             }
-            // The named cell a split halves: `portal N`, a worker name, or
-            // `current`. `current` stays literal here: the placement layer
-            // resolves it from FNO_PANE when the spawn ran inside a pane.
-            "--from" => {
+            // The named cell a split halves (spawn only): `portal N`, a
+            // worker name, or `current`. `current` stays literal here: the
+            // placement layer resolves it from FNO_PANE when the spawn ran
+            // inside a pane. Every other verb's `--from` is promote's
+            // resume pointer below.
+            "--from" if verb == "spawn" => {
                 params.insert("from".into(), str_arg(&mut it, "--from")?);
             }
             "--from" => {

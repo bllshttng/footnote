@@ -95,16 +95,28 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
     if let Some(v) = &parsed.from {
         if v == "current" {
-            // Same shape as `--at current`: the control door has no
-            // calling pane; resolve `current` before the reach (the spawn
-            // placement layer does, from FNO_PANE).
-            eprintln!(
-                "fno mux thread: --from current needs a calling pane; \
-                 the thread door has none"
-            );
-            return EXIT_USAGE;
+            // `current` names the calling pane: resolve it HERE from
+            // FNO_PANE, the way the spawn placement layer and pane_args
+            // do. The literal never rides the wire - the server has no
+            // calling pane to resolve it with.
+            let fno_pane = std::env::var("FNO_PANE")
+                .ok()
+                .map(|s| s.trim().trim_start_matches('%').to_string())
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok());
+            match fno_pane {
+                Some(pane) => placement.at = Some(pane),
+                None => {
+                    eprintln!(
+                        "fno mux thread: --from current needs a numeric \
+                         FNO_PANE (run it inside a mux pane)"
+                    );
+                    return EXIT_USAGE;
+                }
+            }
+        } else {
+            placement.from = Some(v.clone());
         }
-        placement.from = Some(v.clone());
     }
     let Some(name) = parsed
         .name

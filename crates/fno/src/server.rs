@@ -65,7 +65,6 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
-mod slot_capture;
 pub(crate) mod agent_launch;
 mod agent_rows_join;
 mod drift_retire;
@@ -84,6 +83,7 @@ mod retire_session;
 mod row_set;
 mod session_guard;
 mod shutdown_capture;
+mod slot_capture;
 mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
@@ -1863,7 +1863,6 @@ fn wheel_gate(
         }
     }
 }
-
 
 /// Whether a stored layout slot binds a done member. Bindings name
 /// workers with the exact string `worker_binding_key` builds, so the slot
