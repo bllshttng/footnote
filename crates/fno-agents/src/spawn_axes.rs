@@ -607,6 +607,12 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{}", crate::node_seed::decide(seed));
         return 0;
     }
+    // A `spawn_node` field answers which node the spawn works, with the
+    // source that named it (same field-on-a-verb shape as node_seed).
+    if let Some(ask) = parsed.get("spawn_node") {
+        println!("{}", crate::node_seed::resolve_node(ask));
+        return 0;
+    }
     // A `keeper_posture` field asks the agy_launch owner which permission
     // tokens a launch carries (same field-on-a-verb shape as node_seed).
     if let Some(ask) = parsed.get("keeper_posture") {
