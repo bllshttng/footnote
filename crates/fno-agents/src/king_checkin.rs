@@ -953,24 +953,12 @@ fn r_refusal_rate() -> Result<Value, String> {
     crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
-/// The finished background subagents this session still holds, read from
-/// its own claude transcript; claude-only, the same posture as the refusal
-/// and wake readers, and it fails as a reader on every other harness.
-fn r_subagents() -> Result<Value, String> {
-    let transcript = own_claude_transcript()?;
-    crate::subagent_hold::reading(
-        &transcript,
-        std::time::SystemTime::now(),
-        crate::subagent_hold::live_threshold(),
-    )
-}
-
 /// The caller's own claude transcript, shared by the refusal and wake
 /// readers. Only claude sessions keep a per-session transcript file today
 /// (`crate::claude_drive::find_transcript`), so any other harness (or a
 /// claude session whose transcript cannot be found) reads as an ordinary
 /// failed reading, never a silent zero.
-fn own_claude_transcript() -> Result<PathBuf, String> {
+pub(crate) fn own_claude_transcript() -> Result<PathBuf, String> {
     let (session_id, harness) = crate::claims::resolve_identity();
     if harness.as_deref() != Some("claude") {
         return Err("the wake and refusal readers need a claude transcript; \
@@ -1264,7 +1252,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     });
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
-    take("subagents", r_subagents());
+    take("subagents", crate::king_answers::r_subagents());
     take("wake_meter", r_wake_meter(since));
     take("drain", r_drain(ctx));
     take("held", crate::king_answers::held_reading(&ctx.scope));
@@ -3114,8 +3102,8 @@ mod tests {
         let readings = sample_readings(
             json!({"open_prs": 1, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 3, "owned_active": 1, "total_nodes": 15, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            cap_ok(),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3130,11 +3118,11 @@ mod tests {
     #[test]
     fn the_scope_line_reads_unmeasured_with_the_reason() {
         let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            board0(),
             json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
                    "owned_reason": "territory: registry unreadable (x)", "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            cap_ok(),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3172,11 +3160,11 @@ mod tests {
             "epic_cap": 15
         });
         let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            board0(),
             court,
             json!({"footprint": "admit", "gate": "admit", "disagree": false,
                    "unparsed_lines": 0, "lanes": ""}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            workers_none(),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3218,11 +3206,11 @@ mod tests {
             "epics: none in scope holds an open child"
         );
         let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            board0(),
+            court0(),
             json!({"footprint": "admit", "gate": "admit", "disagree": false,
                    "unparsed_lines": 0, "lanes": ""}),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            workers_none(),
         );
         set_reading(
             &mut readings,
@@ -3235,6 +3223,32 @@ mod tests {
             "lines: {lines:?}"
         );
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED court: ")));
+    }
+
+    /// The fixture payloads most render tests share, named once here.
+    fn board7() -> Value {
+        json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []})
+    }
+    fn board0() -> Value {
+        json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []})
+    }
+    fn court4() -> Value {
+        json!({"active_nodes": 4, "total_nodes": 6, "rows": []})
+    }
+    fn court0() -> Value {
+        json!({"active_nodes": 0, "total_nodes": 0, "rows": []})
+    }
+    fn cap_ok() -> Value {
+        json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0})
+    }
+    fn workers3() -> Value {
+        json!({"live_workers": 3, "oldest_worker_seen": "90s w1"})
+    }
+    fn workers_none() -> Value {
+        json!({"live_workers": 0, "oldest_worker_seen": "none"})
+    }
+    fn workers_empty() -> Value {
+        json!({"live_workers": 0, "oldest_worker_seen": ""})
     }
 
     fn sample_readings(board: Value, court: Value, cap: Value, workers: Value) -> Vec<Reading> {
@@ -3551,12 +3565,7 @@ mod tests {
     /// and no territory line ever contains `blueprinter` again.
     #[test]
     fn the_blueprint_journal_matches_the_lines_and_the_territory_line_is_clean() {
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let bp_line = lines.iter().find(|l| l.starts_with("blueprint:")).unwrap();
@@ -3625,12 +3634,7 @@ mod tests {
         assert_eq!(capacity["disagree"], false);
         assert_eq!(capacity["gate_axis"], "king_share");
         assert_eq!(capacity["gate_cpu"], "pass");
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3655,12 +3659,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capacity["disagree"], true);
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3686,12 +3685,7 @@ mod tests {
         .unwrap();
         assert!(capacity["gate_cpu"].is_null());
         assert_eq!(capacity["disagree"], false);
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity, workers_none());
         let data = build_data(&readings, "x-bbbb");
         let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
             .into_iter()
@@ -3715,12 +3709,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capacity["lanes"], "openai 1/- unmeasured, zai 8/10 closed");
-        let readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            capacity.clone(),
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let readings = sample_readings(board0(), court0(), capacity.clone(), workers_none());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
             data.get("capacity_lanes"),
@@ -3741,12 +3730,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unreadable["lanes"], "lanes unreadable");
-        let unread_readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            unreadable,
-            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-        );
+        let unread_readings = sample_readings(board0(), court0(), unreadable, workers_none());
         let unread_data = build_data(&unread_readings, "x-bbbb");
         let unread_line = render_lines(
             "x-bbbb",
@@ -3770,12 +3754,7 @@ mod tests {
                 &json!({"verdict": "accepted"}),
             )
             .unwrap();
-            let readings = sample_readings(
-                json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-                json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-                capacity,
-                json!({"live_workers": 0, "oldest_worker_seen": "none"}),
-            );
+            let readings = sample_readings(board0(), court0(), capacity, workers_none());
             let data = build_data(&readings, "x-bbbb");
             render_lines("x-bbbb", &readings, &data, &None, "", "no change")
                 .into_iter()
@@ -3808,12 +3787,7 @@ mod tests {
 
     #[test]
     fn printed_numbers_and_row_come_from_one_dict() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
@@ -3831,12 +3805,7 @@ mod tests {
     // journaled data.
     #[test]
     fn refusal_rate_line_prints_beside_capacity_and_crown() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3853,9 +3822,9 @@ mod tests {
     #[test]
     fn subagents_reading_names_held_agents_and_raises_attention() {
         let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            board7(),
+            court4(),
+            cap_ok(),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
         );
         set_reading(
@@ -3901,9 +3870,9 @@ mod tests {
     #[test]
     fn a_failed_subagents_reader_prints_its_own_line_and_counts_failed() {
         let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            board7(),
+            court4(),
+            cap_ok(),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1", "live_subagents": 3}),
         );
         set_reading(
@@ -3930,12 +3899,7 @@ mod tests {
     // AC6-EDGE: a top payload with no subagents key renders `-`, never 0.
     #[test]
     fn workers_payload_without_subagents_renders_a_dash() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("live_subagents"), Some(&Value::Null));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -3950,12 +3914,7 @@ mod tests {
     // attention item, so an over beat is never journalled as a quiet one.
     #[test]
     fn wake_ratio_line_prints_and_names_attention_when_over() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::took(
@@ -3981,12 +3940,7 @@ mod tests {
     // prints.
     #[test]
     fn a_failed_wake_meter_reading_prints_the_reader_failed_line() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::failed(
@@ -4010,12 +3964,7 @@ mod tests {
     // the printed n/a line.
     #[test]
     fn wake_attention_without_typed_turns_names_n_a() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -4057,12 +4006,7 @@ mod tests {
 
     #[test]
     fn refusal_rate_rising_line_carries_the_handoff_suffix() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let mut data = build_data(&readings, "x-bbbb");
         data.insert("refusal_rate_rising".into(), json!(true));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -4088,12 +4032,7 @@ mod tests {
 
     #[test]
     fn failed_reader_prints_own_line_and_beat_continues() {
-        let mut readings = sample_readings(
-            Value::Null,
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(Value::Null, court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::failed("board", "board payload names no undriven_pr queue".into()),
@@ -4113,12 +4052,7 @@ mod tests {
 
     #[test]
     fn no_change_refused_while_a_reading_failed() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let mut readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         set_reading(
             &mut readings,
             Reading::failed("drain", "drain unreadable".into()),
@@ -4132,7 +4066,7 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            cap_ok(),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
         set_reading(
@@ -4163,7 +4097,7 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            cap_ok(),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
         set_reading(
@@ -4189,12 +4123,7 @@ mod tests {
 
     #[test]
     fn answered_and_quiet_render_one_line_each_and_a_failed_read_says_so() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -4245,12 +4174,7 @@ mod tests {
 
     #[test]
     fn held_rows_render_the_decide_verb_and_none_when_clear() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         set_reading(
             &mut readings,
             Reading::took(
@@ -4279,12 +4203,7 @@ mod tests {
 
     #[test]
     fn held_absent_reads_none() {
-        let mut readings = sample_readings(
-            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
-            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 0, "oldest_worker_seen": ""}),
-        );
+        let mut readings = sample_readings(board0(), court0(), cap_ok(), workers_empty());
         readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -4320,10 +4239,10 @@ mod tests {
         let (previous, err) = previous_row(&ctx);
         assert!(err.is_empty());
         let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            board7(),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
@@ -4359,8 +4278,8 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         set_reading(
             &mut readings,
@@ -4386,13 +4305,7 @@ mod tests {
         );
 
         // A count that also moved still names itself, after the attention.
-        set_reading(
-            &mut readings,
-            Reading::took(
-                "board",
-                json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            ),
-        );
+        set_reading(&mut readings, Reading::took("board", board7()));
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
         assert_eq!(
@@ -4408,8 +4321,8 @@ mod tests {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
             json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+            cap_ok(),
+            workers3(),
         );
         set_reading(
             &mut readings,
@@ -4433,12 +4346,7 @@ mod tests {
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
     #[test]
     fn a_quiet_control_plane_reads_ok() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(
             data.get("control_plane_attention"),
@@ -4453,12 +4361,7 @@ mod tests {
 
     #[test]
     fn hand_row_baseline_reads_unmeasured_not_no_change() {
-        let readings = sample_readings(
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
-            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
-            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
-        );
+        let readings = sample_readings(board7(), court4(), cap_ok(), workers3());
         let data = build_data(&readings, "x-bbbb");
         let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
             "data": {"scope": "x-bbbb", "change": "resumed the crown"}});

@@ -358,6 +358,18 @@ pub(crate) fn fetch_workers_payload() -> Result<Value, String> {
     Ok(payload)
 }
 
+/// The finished background subagents this session still holds, read from
+/// its own claude transcript; claude-only, the same posture as the refusal
+/// and wake readers, and it fails as a reader on every other harness.
+pub(crate) fn r_subagents() -> Result<Value, String> {
+    let transcript = crate::king_checkin::own_claude_transcript()?;
+    crate::subagent_hold::reading(
+        &transcript,
+        std::time::SystemTime::now(),
+        crate::subagent_hold::live_threshold(),
+    )
+}
+
 /// The payload's worker rows, behind the same positive-predicate guard the
 /// summary runs: a top payload whose census failed carries no rows, and a
 /// reading that answered from it would read as a quiet zero.
