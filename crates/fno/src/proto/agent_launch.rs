@@ -1,4 +1,4 @@
-//! Typed payloads for the sideline new-agent launcher (v83).
+//! Typed payloads for the sideline new-agent launcher (v91).
 //!
 //! Every field is a structured value the server forwards into canonical
 //! `fno agents spawn` argv elements. No free-form shell text exists anywhere
@@ -29,6 +29,9 @@ pub struct AgentLaunchRequest {
     /// "harness decides" rather than inventing a resolved value.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional model provider pin from a configured routing row.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// True when the model came from a picked routing row: argv omits
     /// `--harness` so the door resolves that row's harness, route, account
     /// and effort itself. A typed model keeps the false default and the
@@ -61,6 +64,9 @@ pub struct AgentLaunchRequest {
     /// refusal (never a fabricated seed) is what the operator sees.
     #[serde(default)]
     pub message: String,
+    /// Additional argv tokens for `fno agents spawn`; never shell text.
+    #[serde(default)]
+    pub extra_flags: Vec<String>,
 }
 
 /// One progress update for a launch attempt, correlated by `request_id`.
