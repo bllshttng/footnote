@@ -555,6 +555,22 @@ pub fn decide(payload: &Value) -> Value {
     Value::Object(out)
 }
 
+/// The `reentry_mechanism` field's answer: which relaunch a Resume resolves
+/// to for the named row, or the refusal naming why the wake may not respawn.
+pub fn reentry_mechanism_decide(ask: &Value) -> Value {
+    let name = ask.get("name").and_then(Value::as_str).unwrap_or("");
+    match crate::reentry::resolve_reentry(
+        &crate::paths::AgentsHome::from_env().registry_json(),
+        name,
+        crate::reentry::ReentryTransition::Resume,
+        None,
+        None,
+    ) {
+        Ok(plan) => serde_json::json!({ "mechanism": plan.mechanism }),
+        Err(reason) => serde_json::json!({ "refused": reason }),
+    }
+}
+
 /// The verb entry: JSON payload on stdin, decision JSON on stdout (the
 /// spawn-overlay shape). Exit 0 even for a "no axes" answer; exit 2 only for
 /// transport-level faults (unreadable payload), which the caller reports as
@@ -631,6 +647,14 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     // back on, answered by crates/fno-agents/src/resume_pin.rs.
     if let Some(pin) = parsed.get("resume_pin") {
         println!("{}", crate::resume_pin::decide(pin));
+        return 0;
+    }
+    // A `reentry_mechanism` field asks the reentry resolver which relaunch a
+    // wake may take (the same field-on-a-verb shape). It calls the
+    // registry-writing wrapper, so a route the resolver recovered from a
+    // bare row's transcript is also persisted here, the same as any door.
+    if let Some(ask) = parsed.get("reentry_mechanism") {
+        println!("{}", reentry_mechanism_decide(ask));
         return 0;
     }
     // A `reap_receipt` field asks the receipt builder for the Python
@@ -734,6 +758,19 @@ mod tests {
         assert_eq!(repr("back\\slash"), "'back\\\\slash'");
         assert_eq!(repr("a\nb"), "'a\\nb'");
         assert_eq!(repr("tab\there"), "'tab\\there'");
+    }
+
+    #[test]
+    fn reentry_mechanism_answers_the_plan_mechanism() {
+        // AC6-HP (Rust half): the field answers the resolver's mechanism, or
+        // a refusal shaped so Python's respawn_ok can only say false.
+        let _root = crate::paths::DeclaredRoot::declare("reentry_mechanism_decide");
+        let refused = reentry_mechanism_decide(&json!({"name": "no-such-row"}));
+        assert!(refused.get("refused").is_some(), "{refused}");
+        assert!(refused.get("mechanism").is_none());
+        // An unnamed row refuses the same shape - never a mechanism.
+        let unnamed = reentry_mechanism_decide(&json!({}));
+        assert!(unnamed.get("refused").is_some(), "{unnamed}");
     }
 
     #[test]
