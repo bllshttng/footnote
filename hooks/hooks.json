@@ -236,6 +236,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/law-stage-inject.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SubagentStart": [

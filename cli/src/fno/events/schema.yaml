@@ -4067,6 +4067,9 @@ event_types:
         scope:
           type: string
           description: "Optional. Who the law governs: `global`, or `project:<slug>`. A row with no scope reads as project:fno, because every row recorded before this field existed was recorded in fno. The law door stamps the recording session's project by default; widening to global is an explicit --global, because law is never inherited by silence. Readers filter to global plus the session's project and fail open with a named reason when the project cannot be resolved."
+        paths:
+          type: array
+          description: "Optional. Repo-relative globs. A live law with paths prints at the first Edit or Write of a matching file in each session (hooks/law-stage-inject.sh)."
     consumers: [operator, fno inbox decisions]
 
   - name: operator_notice

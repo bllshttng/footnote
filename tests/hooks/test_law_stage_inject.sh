@@ -72,6 +72,27 @@ check "a prompt payload carries the block through" \
     '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"## Law governing review"}}' \
     "$out"
 
+# AC7-HP: an Edit payload rides the file it is about to change as `paths`,
+# so the verb answers the edit read (path laws) instead of the classifier.
+EDIT_PAYLOAD='{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"crates/x.rs","old_string":"a","new_string":"b"}}'
+out="$(run_with_stub \
+    'read -r req
+     [[ "$req" == *"paths\":[\"crates/x.rs\"]"* ]] && echo "{\"ok\":true,\"stage\":\"edit\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"edit-paths-ok\"}}}"' \
+    "$EDIT_PAYLOAD")"
+check "an Edit payload rides the file as paths" \
+    '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"edit-paths-ok"}}' \
+    "$out"
+
+# AC8-HP: a prompt payload builds the request exactly as before, with no
+# `paths` key anywhere on it.
+out="$(run_with_stub \
+    'read -r req
+     [[ "$req" != *"paths"* ]] && echo "{\"ok\":true,\"stage\":null,\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"prompt-no-paths-ok\"}}}"' \
+    "$PROMPT_PAYLOAD")"
+check "a prompt payload carries no paths key" \
+    '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"prompt-no-paths-ok"}}' \
+    "$out"
+
 # AC3-ERR: every degraded path renders NOTHING. An absent binary, a crashed
 # verb, and an answer with no block are all the same silence.
 out="$(run_with_stub 'exit 0' "$SKILL_PAYLOAD")"
