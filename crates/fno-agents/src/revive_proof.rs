@@ -181,7 +181,7 @@ mod tests {
 
     /// Stage one session record: the fork's job, kind bg, with a sessionId.
     fn stage_session(home: &PathBuf, job: &str, uuid: &str) {
-        let sessions = home.join(".claude").join("sessions");
+        let sessions = ClaudeHome::at(home).sessions_dir();
         fs::create_dir_all(&sessions).unwrap();
         let record = format!(
             r#"{{"jobId":"{job}","kind":"bg","sessionId":"{uuid}","messagingSocketPath":null}}"#
@@ -190,13 +190,13 @@ mod tests {
     }
 
     fn stage_transcript(home: &PathBuf, uuid: &str, body: &str) {
-        let dir = home.join(".claude").join("projects").join("-tmp-work");
+        let dir = ClaudeHome::at(home).projects_dir().join("-tmp-work");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(format!("{uuid}.jsonl")), body).unwrap();
     }
 
     fn stage_state(home: &PathBuf, job: &str, state: &str) {
-        let dir = home.join(".claude").join("jobs").join(job);
+        let dir = ClaudeHome::at(home).jobs_dir_for(job);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("state.json"),

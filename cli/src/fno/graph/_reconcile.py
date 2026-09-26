@@ -546,7 +546,7 @@ def _normalized_pr_url(url: Optional[str]) -> Optional[str]:
 @dataclass
 class PrRowBinding:
     node_id: str
-    action: str  # filled_primary | appended_additional | already_bound | already_done
+    action: str  # filled_primary | appended_additional | already_bound | already_done | released
 
 
 @dataclass
@@ -638,6 +638,10 @@ def bind_pr_rows(
     clean_owner = owner.strip() if isinstance(owner, str) else ""
     for nid in claimed_ids:
         node = nodes[nid]
+        # The claim line predates the release: skip it, bind the rest.
+        if node.get("released_from") in claimed_ids and not node.get("contained_in"):
+            bindings.append(PrRowBinding(nid, "released"))
+            continue
         refs = node_pr_refs(node)
         if any(number == pr_number for number, _ in refs):
             action = "already_bound"

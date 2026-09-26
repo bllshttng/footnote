@@ -3200,6 +3200,7 @@ def cmd_update(
         normalize_tag,
     )
     from fno.graph.store import commit_rows_via_store
+    from fno.graph._contain import release_contained
     from fno.graph._intake import (
         _parse_blocker_list, _validate_blocker_ids, _find_node,
         _would_create_cycle, _would_exceed_epic_depth,
@@ -3750,8 +3751,7 @@ def cmd_update(
                 # an `== _owner` test contradicted it - re-parenting onto a
                 # descendant of the unit silently un-contained the node, making
                 # it independently dispatchable and costed again and dropping it
-                # from the owner's merge cascade. Walk up from the new parent;
-                # depth-capped and cycle-safe like the other ancestor walks.
+                # from the owner's merge cascade.
                 _cur = (_find_node(entries, _new_parent) or {}).get("id") if _new_parent else None
                 _seen: set = set()
                 _still_contained = False
@@ -3762,7 +3762,7 @@ def cmd_update(
                     _seen.add(_cur)
                     _cur = (_find_node(entries, _cur) or {}).get("parent")
                 if not _still_contained:
-                    node.pop("contained_in", None)
+                    release_contained(entries, node)
             if parent.lower() == "null":
                 node["parent"] = None
             else:

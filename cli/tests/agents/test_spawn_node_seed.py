@@ -587,3 +587,80 @@ def test_seed_only_pane_spawn_mints_the_nodes_row_binding(
     assert result.exit_code == 0, result.output
     assert received["provenance"]["FNO_NODE"] == "x-1"
     assert received["message"] == "/fno:target x-1"
+
+
+# ---- the payload names the node; the resolver answers with a source --------
+
+
+def test_seam_refuses_when_the_payload_names_an_unknown_node(monkeypatch, capsys):
+    """AC7-ERR: the payload names x-dead; the scan-arm compose carries the
+    payload source, and the row gate's refusal exits 2 before any peer."""
+    _stub_row(monkeypatch, None)
+    _stub_verb_seq(monkeypatch, [
+        {
+            "action": "compose",
+            "argv": ["spawn", "/fno:target x-dead", "--node", "x-dead"],
+            "source": "payload",
+        },
+        {
+            "action": "refuse",
+            "message": "the payload names x-dead, but no readable backlog row has that id; fix the id, or pass the work as prose",
+        },
+    ])
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-dead"))
+    assert exc.value.code == 2
+    assert "the payload names x-dead" in capsys.readouterr().err
+
+
+@requires_rust
+def test_seam_real_binary_binds_a_seed_named_after_a_modifier(monkeypatch, tmp_path):
+    """AC1/AC6: the id rides after a modifier token (`L x-1be2`); the strict
+    scan names it, the seam splices --node, and the full call re-decides with
+    the row facts."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    _stub_row(
+        monkeypatch,
+        _row(id="x-1be2", dispatch_verb="/target", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path)),
+    )
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    args, node_verb = _node_seed_at_seam(_seed_args("/fno:target L x-1be2"))
+    assert args[-2:] == ["--node", "x-1be2"]
+    assert node_verb is None
+
+
+@requires_rust
+def test_seam_real_binary_refuses_a_payload_named_unknown_node(monkeypatch, capsys):
+    """AC7-ERR on the real transport: the compiled resolver names x-dead from
+    the payload, and the refusal names the payload, never --node."""
+    _stub_row(monkeypatch, None)
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-dead"))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "the payload names x-dead, but no readable backlog row" in err
+
+
+@requires_rust
+def test_seam_real_binary_payload_disagreement_names_the_payload(monkeypatch, tmp_path, capsys):
+    """AC4-ERR on the real transport: a payload-named node whose verb
+    disagrees refuses naming the payload and the spawn to run instead."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    _stub_row(
+        monkeypatch,
+        _row(id="x-1be2", dispatch_verb="/blueprint", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path)),
+    )
+    from fno.agents.rust_runtime import _node_seed_at_seam
+
+    with pytest.raises(SystemExit) as exc:
+        _node_seed_at_seam(_seed_args("/fno:target x-1be2"))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "the payload names /target x-1be2" in err
+    assert "spawn /fno:blueprint x-1be2" in err
+    assert "--node" not in err

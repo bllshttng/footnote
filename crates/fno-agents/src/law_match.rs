@@ -1023,7 +1023,7 @@ fn is_decision_id(s: &str) -> bool {
 /// `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$`, the node-id shape
 /// `parse-claims-arg.sh` uses. Measured 2026-09-14: the shape matches 3 of
 /// 59 live law subjects, and all 3 are real node ids.
-fn matches_node_id_shape(s: &str) -> bool {
+pub(crate) fn matches_node_id_shape(s: &str) -> bool {
     let Some((prefix, suffix)) = s.split_once('-') else {
         return false;
     };

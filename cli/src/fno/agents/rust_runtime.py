@@ -749,12 +749,16 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
-    """Project the seam's facts to the node-seed verb and apply the answer pre-route."""
+    """Project the seam's facts to the node-seed verb and apply the answer pre-route.
+
+    A payload-named node's refusals name the payload, not ``--node``.
+    """
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    node_source = None
     if not node:
         from fno.rust_binary import VerbUnavailable, verb_call
         try:
@@ -770,6 +774,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
             if answer.get("action") == "compose":
                 args = [str(tok) for tok in answer.get("argv") or list(args)]
                 node = (_spawn_flag_value(args, "--node") or "").strip()
+                node_source = "payload" if answer.get("source") == "payload" else None
                 if not node and (reason := _spawn_flag_value(args, "--node-reason")):
                     os.environ["FNO_NODE_REASON"] = reason
                     del args[args.index("--node-reason") : args.index("--node-reason") + 2]
@@ -801,6 +806,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
         "effective_verb": effective_verb,
         "stored_verb": stored or None,
         "derive_error": derive_error,
+        "node_source": node_source,
         "family": list(_TARGET_FAMILY_VERBS),
         "crown": _is_crown_bearing_spawn("spawn", args),
         "resume": _is_resume_bearing_spawn("spawn", args),
