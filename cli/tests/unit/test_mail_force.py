@@ -135,7 +135,6 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     Crowned topology: x-2dfa gates the trailer on the crown, and the subject
     here is that ``--force`` types the WRAPPED body rather than bare text.
     """
-    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     _entry_row, sent = _install(monkeypatch)
 
     result = runner.invoke(
