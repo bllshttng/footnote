@@ -141,10 +141,11 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             Color::Default,
             cell_flags::INVERSE | cell_flags::BOLD,
         ),
-        // A disabled body entry: the theme's dim color, still on the inverse
-        // body block (matching Body/BodySel/BodyHead) so the row stays part of
-        // the block instead of punching a plain-background hole in it.
-        Role::BodyDim => (t.dim, Color::Default, cell_flags::INVERSE | cell_flags::DIM),
+        // A disabled body entry: the theme's dim color on the plain
+        // background. The inverse block it used to sit on turned the light
+        // `dim` into the BACKGROUND, so the row rendered light-on-light and
+        // near invisible under every named theme (the screenshot review).
+        Role::BodyDim => (t.dim, Color::Default, 0),
         Role::Border => (t.border, Color::Default, 0),
         Role::Title => (t.title, Color::Default, cell_flags::BOLD),
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
