@@ -49,7 +49,6 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
     _session_provenance,
 )
 from fno.graph.node_builder import register as _register_node_builder
-from fno.graph.rank import cmd_rank as _cmd_rank
 from fno.graph.api import cmd_version as _cmd_version
 # The roster renderer lives in its own module: this file is shrink-only and
 # the provenance change touches it. The alias keeps the historical name
@@ -10271,7 +10270,6 @@ def cmd_migrate_updated_at(
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
-cli.command("rank")(_cmd_rank)
 
 
 # -- archive --

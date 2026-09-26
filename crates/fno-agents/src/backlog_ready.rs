@@ -176,12 +176,12 @@ pub struct NoSuchParent(pub String);
 // JSON helpers (Python-truthiness semantics)
 // ---------------------------------------------------------------------------
 
-fn is_dict(v: &Value) -> bool {
+pub(crate) fn is_dict(v: &Value) -> bool {
     v.is_object()
 }
 
 /// Python truthiness for the value shapes a graph row carries.
-fn truthy(v: Option<&Value>) -> bool {
+pub(crate) fn truthy(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -192,7 +192,7 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-fn get_str<'a>(e: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn get_str<'a>(e: &'a Value, key: &str) -> Option<&'a str> {
     e.get(key).and_then(Value::as_str)
 }
 
@@ -208,7 +208,7 @@ fn priority_rank(name: &str) -> i64 {
         .unwrap_or(2)
 }
 
-fn priority_name(e: &Value) -> String {
+pub(crate) fn priority_name(e: &Value) -> String {
     match get_str(e, "priority") {
         Some(p) if PRIORITY_ORDER.iter().any(|(k, _)| *k == p) => p.to_string(),
         _ => "p2".to_string(),
@@ -1074,7 +1074,7 @@ fn row_matches_project(e: &Value, project: Option<&str>) -> bool {
 
 /// Transitive children of `parent_id` via the `parent` field; cycle-safe;
 /// the parent itself never included.
-fn descendants_of(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
+pub(crate) fn descendants_of(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
     let mut children_by_parent: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for e in entries {
         if let (Some(id), Some(pid)) = (entry_id(e), get_str(e, "parent")) {
@@ -1233,7 +1233,7 @@ fn importance_score(entry: &Value, effective_priority: &str, now_ms: i64) -> f64
 // Epics-first ordering (graph/_intake.py)
 // ---------------------------------------------------------------------------
 
-fn rank_band(entry: &Value) -> (i64, f64) {
+pub(crate) fn rank_band(entry: &Value) -> (i64, f64) {
     match entry.get("rank") {
         Some(Value::Number(n)) => match n.as_f64() {
             Some(f) if f.is_finite() => (0, f),
@@ -1243,7 +1243,7 @@ fn rank_band(entry: &Value) -> (i64, f64) {
     }
 }
 
-fn epics_with_child_progress(by_id: &BTreeMap<String, Value>) -> BTreeSet<String> {
+pub(crate) fn epics_with_child_progress(by_id: &BTreeMap<String, Value>) -> BTreeSet<String> {
     let mut progressing = BTreeSet::new();
     for child in by_id.values() {
         let Some(parent_id) = get_str(child, "parent") else {
@@ -1267,7 +1267,7 @@ fn epics_with_child_progress(by_id: &BTreeMap<String, Value>) -> BTreeSet<String
 /// The node's live epic parent, or None (`_intake._live_epic_for`): an
 /// epic-typed parent with a valid priority and status, not explicitly
 /// terminal and not status-terminal without child progress.
-fn live_epic_for(
+pub(crate) fn live_epic_for(
     node: &Value,
     by_id: &BTreeMap<String, Value>,
     child_progress: &BTreeSet<String>,
@@ -1307,7 +1307,7 @@ fn live_epic_for(
     Some(epic.clone())
 }
 
-fn in_progress_epic_ids(
+pub(crate) fn in_progress_epic_ids(
     entries: &[Value],
     by_id: &BTreeMap<String, Value>,
     child_progress: &BTreeSet<String>,
@@ -1338,7 +1338,7 @@ fn in_progress_epic_ids(
     result
 }
 
-fn make_effective_priority(
+pub(crate) fn make_effective_priority(
     by_id: &BTreeMap<String, Value>,
     child_progress: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {

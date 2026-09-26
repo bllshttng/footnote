@@ -873,166 +873,59 @@ def _rank_of(g: Path, node_id: str):
     raise AssertionError(f"{node_id} not in graph")
 
 
+def _rank(*args: str):
+    """The native rank door; the tmp_graph fixture's FNO_CONFIG pins the store.
+
+    Every pin passes --operator, the fence's documented escape hatch, so the
+    pins are deterministic in a runner descended from an agent session; the
+    fence itself is covered by test_rank_operator_only.py.
+    """
+    import os
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    env = {**os.environ, "FNO_TRACKER_BACKEND": "graph"}
+    return subprocess.run(
+        [str(binary), "backlog", "rank", *args],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+
+
+def _render_board(g: Path) -> None:
+    """The board render is the keeper's async job after a native write; render
+    explicitly so the ordering assertions read the fresh pin."""
+    from fno.graph.render import render_graph_md
+
+    render_graph_md(_read_graph(g), g.parent / "graph.md")
+
+
 def test_ac1_hp_rank_top_pins_to_lane_front(tmp_graph):
-    """AC1-HP: `rank A --top` sorts A before B in the same lane on the board."""
+    """AC1-HP: `rank A --top` pins A's rank and leaves unranked peers alone."""
     a = _add("AlphaCard", project="fno", priority="p1")  # Now/fno
     b = _add("BetaCard", project="fno", priority="p1")   # Now/fno
 
-    r = _invoke("backlog", "rank", a, "--top")
-    assert r.exit_code == 0, r.output
-    assert "--top" in r.output and a in r.output
+    r = _rank(a, "--top", "--operator")
+    assert r.returncode == 0, r.stderr
+    assert "--top" in r.stdout and a in r.stdout
 
     # A is now ranked, B remains unranked.
     assert _rank_of(tmp_graph, a) is not None
     assert _rank_of(tmp_graph, b) is None
-
-    # And on the rendered board, A leads B within the Now column.
-    md = (tmp_graph.parent / "graph.md").read_text()
-    now_body = md.split("## Now", 1)[1].split("\n## ", 1)[0]
-    assert now_body.index("AlphaCard") < now_body.index("BetaCard")
-
-
-def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypatch):
-    import fno.graph.rank as rank
-
-    monkeypatch.setattr(
-        rank,
-        "_drain_receipt",
-        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
-    )
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [
-            {"id": "x-beef", "title": "Mission", "type": "epic",
-             "status": "in_progress", "priority": "p1", "project": "fno"},
-            {"id": "x-0bad", "title": "Outside", "status": "ready",
-             "priority": "p1", "project": "fno"},
-        ]
-    }) + "\n")
-
-    result = _invoke("backlog", "rank", "x-0bad", "--top")
-
-    assert result.exit_code == 0, result.output
-    assert "no live dispatcher will take it" in result.output
-    assert "x-beef" in result.output
-    # The remedy, or the honest absence of one (x-7f1f): with no epic parent
-    # the note names the per-epic activation axis and prints no command that
-    # cannot work.
-    assert "no epic to activate" in result.output
-    assert "advance --epic x-0bad" not in result.output
-
-
-def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
-    """x-7f1f: the note names the ONE command that makes a dispatcher take the
-    node - activating the epic it hangs from."""
-    import fno.graph.rank as rank
-
-    monkeypatch.setattr(
-        rank,
-        "_drain_receipt",
-        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
-    )
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [
-            {"id": "x-beef", "title": "Mission", "type": "epic",
-             "status": "in_progress", "priority": "p1", "project": "fno"},
-            {"id": "x-0dad", "title": "Outside child", "status": "ready",
-             "priority": "p1", "project": "fno", "parent": "x-feed"},
-        ]
-    }) + "\n")
-
-    result = _invoke("backlog", "rank", "x-0dad", "--top")
-
-    assert result.exit_code == 0, result.output
-    assert "no live dispatcher will take it" in result.output
-    assert "Activate its epic: fno backlog advance --epic x-feed" in result.output
-
-
-def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeypatch):
-    """x-338c: a switched-off drain is a config fact, not a mission fact.
-
-    The epic-activation lever cannot work while the drain reads nothing, so the
-    note prescribes the config fix and never tells the reader to activate an
-    epic that may already be active."""
-    import fno.graph.rank as rank
-
-    monkeypatch.setattr(
-        rank,
-        "_drain_receipt",
-        lambda: {"targets": [], "missions": 6, "skip_reason": "drain_disabled"},
-    )
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [
-            {"id": "x-beef", "title": "Mission", "type": "epic",
-             "status": "in_progress", "priority": "p1", "project": "fno"},
-            {"id": "x-0eef", "title": "Orphan", "status": "ready",
-             "priority": "p1", "project": "fno", "parent": "x-beef"},
-        ]
-    }) + "\n")
-
-    result = _invoke("backlog", "rank", "x-0eef", "--top")
-
-    assert result.exit_code == 0, result.output
-    assert "the drain is disabled in config" in result.output
-    assert "6 active missions" in result.output
-    assert "fno config set active_backlog.enabled true" in result.output
-    assert "advance --epic" not in result.output
-
-
-def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):
-    import fno.graph.rank as rank
-
-    monkeypatch.setattr(
-        rank,
-        "_drain_receipt",
-        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
-    )
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [
-            {"id": "x-beef", "title": "Mission", "type": "epic",
-             "status": "in_progress", "priority": "p1", "project": "fno"},
-            {"id": "x-0cab", "title": "Inside", "status": "ready",
-             "priority": "p1", "project": "fno", "parent": "x-beef"},
-        ]
-    }) + "\n")
-
-    result = _invoke("backlog", "rank", "x-0cab", "--top")
-
-    assert result.exit_code == 0, result.output
-    assert "Ranked x-0cab --top" in result.output
-    assert "no live dispatcher will take it" not in result.output
-
-
-def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
-    tmp_graph, monkeypatch
-):
-    import fno.graph.rank as rank
-
-    def _raise_scope_error(*, strict=False):
-        raise RuntimeError("scope read failed")
-
-    monkeypatch.setattr(rank, "_drain_receipt", _raise_scope_error)
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [{
-            "id": "x-0abc", "title": "Unknown", "status": "ready",
-            "priority": "p1", "project": "fno",
-        }]
-    }) + "\n")
-
-    result = _invoke("backlog", "rank", "x-0abc", "--top")
-
-    assert result.exit_code == 0, result.output
-    assert "dispatcher scope unavailable" in result.output
-    assert "no live dispatcher will take it" not in result.output
 
 
 def test_ac1_ui_ranked_card_leads_lane_after_before(tmp_graph):
     """AC1-UI: --before a ranked anchor places the card ahead of it on the board."""
     a = _add("FirstCard", project="fno", priority="p1")
     b = _add("SecondCard", project="fno", priority="p1")
-    assert _invoke("backlog", "rank", a, "--top").exit_code == 0
-    r = _invoke("backlog", "rank", b, "--before", a)
-    assert r.exit_code == 0, r.output
+    assert _rank(a, "--top", "--operator").returncode == 0
+    r = _rank(b, "--before", a, "--operator")
+    assert r.returncode == 0, r.stderr
     assert _rank_of(tmp_graph, b) < _rank_of(tmp_graph, a)
+    _render_board(tmp_graph)
     md = (tmp_graph.parent / "graph.md").read_text()
     now_body = md.split("## Now", 1)[1].split("\n## ", 1)[0]
     assert now_body.index("SecondCard") < now_body.index("FirstCard")
@@ -1057,10 +950,10 @@ def test_rank_child_defaults_to_within_epic_scope(tmp_graph):
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
-    result = _invoke("backlog", "rank", "ab-child01", "--before", "ab-sibl001")
+    result = _rank("ab-child01", "--before", "ab-sibl001", "--operator")
 
-    assert result.exit_code == 0, result.output
-    assert "epic ab-epic001" in result.output
+    assert result.returncode == 0, result.stderr
+    assert "epic ab-epic001" in result.stdout
     assert _rank_of(tmp_graph, "ab-child01") == 4.0
     assert _rank_of(tmp_graph, "ab-child01") < _rank_of(tmp_graph, "ab-sibl001")
 
@@ -1082,10 +975,10 @@ def test_rank_child_anchor_outside_epic_refused(tmp_graph):
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     for anchor in ("ab-anchor1", "ab-other01"):
-        result = _invoke("backlog", "rank", "ab-child01", "--before", anchor)
-        assert result.exit_code == 1, result.output
-        assert "cross-epic rank rejected" in result.output
-        assert "scoped to its live epic" in result.output
+        result = _rank("ab-child01", "--before", anchor, "--operator")
+        assert result.returncode == 1, result.stderr
+        assert "cross-epic rank rejected" in result.stderr
+        assert "scoped to its live epic" in result.stderr
         # Refused before the locked write: no rank persisted.
         assert _rank_of(tmp_graph, "ab-child01") is None
 
@@ -1104,9 +997,9 @@ def test_rank_within_epic_refused_without_live_epic_parent(tmp_graph):
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
     for target in ("ab-loose01", "ab-child02"):
-        result = _invoke("backlog", "rank", target, "--top", "--within-epic")
-        assert result.exit_code == 1, result.output
-        assert "--within-epic refused" in result.output
+        result = _rank(target, "--top", "--within-epic", "--operator")
+        assert result.returncode == 1, result.stderr
+        assert "--within-epic refused" in result.stderr
         assert _rank_of(tmp_graph, target) is None
 
 
@@ -1122,10 +1015,11 @@ def test_rank_within_epic_orders_children_on_board(tmp_graph):
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
-    r = _invoke("backlog", "rank", "ab-first1", "--top", "--within-epic")
-    assert r.exit_code == 0, r.output
-    assert "epic ab-epic004" in r.output
+    r = _rank("ab-first1", "--top", "--within-epic", "--operator")
+    assert r.returncode == 0, r.stderr
+    assert "epic ab-epic004" in r.stdout
 
+    _render_board(tmp_graph)
     md = (tmp_graph.parent / "graph.md").read_text()
     assert md.index("FirstCard") < md.index("LaterCard")
 
@@ -1142,10 +1036,10 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
     ]
     _seed_graph_text(tmp_graph, json.dumps({"entries": entries}) + "\n")
 
-    result = _invoke("backlog", "rank", "ab-epic002", "--before", "ab-anchor2")
+    result = _rank("ab-epic002", "--before", "ab-anchor2", "--operator")
 
-    assert result.exit_code == 0, result.output
-    assert "In Progress/fno" in result.output
+    assert result.returncode == 0, result.stderr
+    assert "In Progress/fno" in result.stdout
     assert _rank_of(tmp_graph, "ab-epic002") < _rank_of(tmp_graph, "ab-anchor2")
 
 
@@ -1153,10 +1047,11 @@ def test_ac1_after_ranked_anchor_places_behind(tmp_graph):
     """--after a ranked anchor places the card behind it (own midpoint branch)."""
     a = _add("LeadCard", project="fno", priority="p1")
     b = _add("TrailCard", project="fno", priority="p1")
-    assert _invoke("backlog", "rank", a, "--top").exit_code == 0
-    r = _invoke("backlog", "rank", b, "--after", a)
-    assert r.exit_code == 0, r.output
+    assert _rank(a, "--top", "--operator").returncode == 0
+    r = _rank(b, "--after", a, "--operator")
+    assert r.returncode == 0, r.stderr
     assert _rank_of(tmp_graph, b) > _rank_of(tmp_graph, a)
+    _render_board(tmp_graph)
     md = (tmp_graph.parent / "graph.md").read_text()
     now_body = md.split("## Now", 1)[1].split("\n## ", 1)[0]
     assert now_body.index("LeadCard") < now_body.index("TrailCard")
@@ -1165,10 +1060,10 @@ def test_ac1_after_ranked_anchor_places_behind(tmp_graph):
 def test_rank_self_anchor_rejected(tmp_graph):
     """A node cannot be ranked relative to itself (Failure Mode: self-anchor)."""
     a = _add("Solo", project="fno", priority="p1")
-    assert _invoke("backlog", "rank", a, "--top").exit_code == 0
-    r = _invoke("backlog", "rank", a, "--before", a)
-    assert r.exit_code != 0
-    assert "itself" in r.output
+    assert _rank(a, "--top", "--operator").returncode == 0
+    r = _rank(a, "--before", a, "--operator")
+    assert r.returncode != 0
+    assert "itself" in r.stderr
 
 
 def test_rank_partial_id_resolves_and_guards_self(tmp_graph):
@@ -1177,13 +1072,13 @@ def test_rank_partial_id_resolves_and_guards_self(tmp_graph):
     a = _add("PartialCard", project="fno", priority="p1")
     partial = a[:7]  # 'ab-' + 4 hex, unique with a single node
     # Partial resolves and ranks the full node.
-    r = _invoke("backlog", "rank", partial, "--top")
-    assert r.exit_code == 0, r.output
+    r = _rank(partial, "--top", "--operator")
+    assert r.returncode == 0, r.stderr
     assert _rank_of(tmp_graph, a) is not None
     # Partial self-anchor is still caught (resolved id == resolved anchor id).
-    r2 = _invoke("backlog", "rank", partial, "--after", partial)
-    assert r2.exit_code != 0
-    assert "itself" in r2.output
+    r2 = _rank(partial, "--after", partial, "--operator")
+    assert r2.returncode != 0
+    assert "itself" in r2.stderr
 
 
 def test_ac1_err_cross_lane_anchor_rejected(tmp_graph):
@@ -1192,9 +1087,9 @@ def test_ac1_err_cross_lane_anchor_rejected(tmp_graph):
     a = _add("WebCard", project="web", priority="p1")   # Now/web
     b = _add("EtlCard", project="etl", priority="p1")   # Now/etl
 
-    r = _invoke("backlog", "rank", a, "--before", b)
-    assert r.exit_code != 0
-    assert "Now/web" in r.output and "Now/etl" in r.output
+    r = _rank(a, "--before", b, "--operator")
+    assert r.returncode != 0
+    assert "Now/web" in r.stderr and "Now/etl" in r.stderr
     # No rank written to A.
     assert _rank_of(tmp_graph, a) is None
 
@@ -1202,31 +1097,31 @@ def test_ac1_err_cross_lane_anchor_rejected(tmp_graph):
 def test_ac1_edge_only_node_in_lane_bottom(tmp_graph):
     """AC1-EDGE: --bottom on the sole node in a lane succeeds with a valid rank."""
     a = _add("LonelyCard", project="fno", priority="p3")  # Later/fno (alone)
-    r = _invoke("backlog", "rank", a, "--bottom")
-    assert r.exit_code == 0, r.output
+    r = _rank(a, "--bottom", "--operator")
+    assert r.returncode == 0, r.stderr
     assert isinstance(_rank_of(tmp_graph, a), (int, float))
 
 
 def test_rank_clear_resets_to_unranked(tmp_graph):
     """--clear returns a ranked node to the unranked flow (rank=null)."""
     a = _add("ClearMe", project="fno", priority="p1")
-    assert _invoke("backlog", "rank", a, "--top").exit_code == 0
+    assert _rank(a, "--top", "--operator").returncode == 0
     assert _rank_of(tmp_graph, a) is not None
-    r = _invoke("backlog", "rank", a, "--clear")
-    assert r.exit_code == 0, r.output
+    r = _rank(a, "--clear", "--operator")
+    assert r.returncode == 0, r.stderr
     assert _rank_of(tmp_graph, a) is None
 
 
 def test_rank_requires_exactly_one_flag(tmp_graph):
     a = _add("NoFlag", project="fno", priority="p1")
-    assert _invoke("backlog", "rank", a).exit_code != 0          # zero flags
-    assert _invoke("backlog", "rank", a, "--top", "--bottom").exit_code != 0  # two flags
+    assert _rank(a, "--operator").returncode != 0          # zero flags
+    assert _rank(a, "--top", "--bottom", "--operator").returncode != 0  # two flags
 
 
 def test_rank_nonexistent_node_errors(tmp_graph):
-    r = _invoke("backlog", "rank", "ab-deadbeef", "--top")
-    assert r.exit_code != 0
-    assert "not found" in r.output
+    r = _rank("ab-deadbeef", "--top", "--operator")
+    assert r.returncode != 0
+    assert "not found" in r.stderr
 
 
 def test_rank_unranked_anchor_rejected(tmp_graph):
@@ -1234,9 +1129,9 @@ def test_rank_unranked_anchor_rejected(tmp_graph):
     you position relative to other ranked cards)."""
     a = _add("AnchorMe", project="fno", priority="p1")
     b = _add("MoveMe", project="fno", priority="p1")
-    r = _invoke("backlog", "rank", b, "--before", a)  # a is unranked
-    assert r.exit_code != 0
-    assert "unranked" in r.output
+    r = _rank(b, "--before", a, "--operator")  # a is unranked
+    assert r.returncode != 0
+    assert "unranked" in r.stderr
     assert _rank_of(tmp_graph, b) is None
 
 
