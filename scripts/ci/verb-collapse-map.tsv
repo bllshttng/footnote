@@ -4,8 +4,6 @@ agents announce	T1	agents announce	0
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
-agents backlog-note	T1	agents backlog-note	0
-agents backlog-notes	T1	agents backlog-notes	0
 agents bash-census	T1	agents bash-census	0
 agents capabilities	T1	agents capabilities	2
 agents census	T1	agents census	0
@@ -38,7 +36,6 @@ agents evals-macro	T1	agents evals-macro	0
 agents finalize	T1	agents finalize	26
 agents fleet-incident	T1	agents fleet-incident	0
 agents gate	T1	agents gate	6
-agents graph-get	T1	agents graph-get	0
 agents heal-token	T1	agents heal-token	8
 agents history	T1	agents history	3
 agents incident	T1	agents incident	0
@@ -199,7 +196,6 @@ backlog discover	T1	backlog discover	0
 backlog done	KEEP	backlog done	42	deliberate readability slack for a high-traffic distinct operation
 backlog encounter	T1	backlog encounter	0
 backlog epic status	T1	backlog epic status	7
-backlog find	T1	backlog find	23
 backlog get	KEEP	backlog get	87	deliberate readability slack for a high-traffic distinct operation
 backlog groom	T1	backlog groom	20
 backlog idea	T1	backlog idea	34
@@ -214,7 +210,6 @@ backlog migrate-updated-at	T1	backlog migrate-updated-at	0
 backlog new	T1	backlog new	38
 backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
 backlog note	T1	backlog note	1
-backlog notes	T1	backlog notes	0
 backlog pick	T1	backlog pick	2
 backlog project-root	T1	backlog project-root	6
 backlog provenance	T1	backlog provenance	7

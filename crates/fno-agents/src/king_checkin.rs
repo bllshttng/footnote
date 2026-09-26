@@ -286,7 +286,7 @@ fn r_user_notes(ctx: &Ctx) -> Result<Value, String> {
     Ok(Value::String(block))
 }
 
-fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
+pub(crate) fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
     for q in board
         .get("queues")
         .and_then(|q| q.as_array())
@@ -303,109 +303,6 @@ fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
         }
     }
     Err(format!("board payload names no {name} queue"))
-}
-
-/// The default blueprint-subagent ceiling when no provider budget applies
-/// (no new config key: a registry row is barred, so the default is a named
-/// Rust constant). One per king: law d-6eb2cbbd.
-const DEFAULT_BLUEPRINT_CEILING: usize = 1;
-
-/// The check-in's blueprint reading: this session's live blueprint
-/// subagents against the ceiling, then which unplanned nodes to start and
-/// which to skip. The claim list and the session id arrive through the seam
-/// (arguments, not ambient reads) so the unit tests need no claims directory.
-/// A failed source is this reading's error, never a zero: an unreadable claim
-/// list read as `running 0` would name starts past the ceiling. Starts also
-/// wait until plans ready fall below the king's worker slots - a blueprint
-/// nobody can build is the exact spend the wake meter exists to name.
-fn r_blueprint(
-    board: &Result<Value, String>,
-    cwd: &Path,
-    session_id: Option<String>,
-    claims: Result<Vec<String>, String>,
-    slots: Result<usize, String>,
-) -> Result<Value, String> {
-    let session_id = session_id
-        .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
-    let holders = claims?;
-    let holder = format!("blueprint-session:{session_id}");
-    let running = holders.iter().filter(|h| **h == holder).count();
-    let board = board.as_ref()?;
-    let rows = board_queue(board, "unplanned")?
-        .get("rows")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let candidates: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string))
-        .collect();
-    let provider = std::env::var("FNO_ROUTE_PROVIDER").unwrap_or_default();
-    let provider_cap = crate::spawn_gate_lanes::provider_subagents_cap(cwd, &provider);
-    // A provider budget can only lower the one-per-king ceiling, never raise it.
-    let (ceiling, ceiling_source) = match provider_cap {
-        Some(cap) if cap < DEFAULT_BLUEPRINT_CEILING => {
-            (cap, format!("agents.provider_limits.{provider}.subagents"))
-        }
-        _ => (DEFAULT_BLUEPRINT_CEILING, "one per king".to_string()),
-    };
-    let plans_ready = board_queue(board, "undispatched")
-        .ok()
-        .and_then(|q| q.get("count").and_then(Value::as_u64).map(|c| c as usize));
-    let (pr_v, slots_v, gate_reason): (Value, Value, Option<String>) = match (plans_ready, &slots) {
-        (Some(pr), Ok(s)) => {
-            if pr < *s {
-                (json!(pr), json!(s), None)
-            } else {
-                (
-                    json!(pr),
-                    json!(s),
-                    Some(format!(
-                        "plans ready {pr} / slots {s}: build slots are the bottleneck"
-                    )),
-                )
-            }
-        }
-        (None, Ok(_)) => (
-            Value::Null,
-            slots.clone().map(|s| json!(s)).unwrap_or(Value::Null),
-            Some("plans ready unmeasured: the board names no undispatched count".to_string()),
-        ),
-        (_, Err(e)) => (
-            Value::Null,
-            Value::Null,
-            Some(format!("plans ready unmeasured: {e}")),
-        ),
-    };
-    let open = if gate_reason.is_some() {
-        0
-    } else {
-        ceiling.saturating_sub(running)
-    };
-    let starts: Vec<String> = candidates.iter().take(open).cloned().collect();
-    let mut skips: Vec<Value> = match &gate_reason {
-        Some(reason) => candidates
-            .iter()
-            .map(|id| json!({"id": id, "reason": reason}))
-            .collect(),
-        None => candidates
-            .iter()
-            .skip(open)
-            .map(|id| json!({"id": id, "reason": format!("at ceiling {running} of {ceiling}")}))
-            .collect(),
-    };
-    if candidates.is_empty() && running == 0 {
-        skips.push(json!({"id": null, "reason": "no unplanned node in scope"}));
-    }
-    Ok(json!({
-        "running": running,
-        "ceiling": ceiling,
-        "ceiling_source": ceiling_source,
-        "plans_ready": pr_v,
-        "slots": slots_v,
-        "starts": starts,
-        "skips": skips,
-    }))
 }
 
 fn open_pr_count() -> Result<i64, String> {
@@ -1212,7 +1109,17 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         )
         .share
         .ok_or_else(|| "king share unreadable".to_string());
-        r_blueprint(&beat.board, &ctx.cwd, session_id, claims, slots)
+        let floor = crate::agents_config::config_lookup(&ctx.cwd, &["dispatch", "blueprint_floor"])
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| crate::backlog_ready::DEFAULT_BLUEPRINT_FLOOR.to_string());
+        crate::king_checkin_blueprint::r_blueprint(
+            &beat.board,
+            &ctx.cwd,
+            session_id,
+            claims,
+            slots,
+            &floor,
+        )
     });
     take(
         "escalations",
@@ -1286,6 +1193,10 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         );
         data.insert("blueprint_slots".into(), bp.value["slots"].clone());
         data.insert("blueprint_starts".into(), bp.value["starts"].clone());
+        data.insert(
+            "blueprint_target_ready".into(),
+            bp.value["target_ready"].clone(),
+        );
         data.insert("blueprint_skips".into(), bp.value["skips"].clone());
     }
     if let Some(esc) = get("escalations").filter(|r| r.ok) {
@@ -1638,6 +1549,14 @@ fn render_lines(
                     "  start /fno:blueprint subagent {}",
                     dash(Some(id))
                 ));
+            }
+            for id in bp
+                .get("target_ready")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+            {
+                lines.push(format!("  target-ready: /fno:target {}", dash(Some(id))));
             }
             for skip in bp
                 .get("skips")
@@ -3305,260 +3224,6 @@ mod tests {
             .position(|x| x.name == r.name)
             .unwrap_or_else(|| panic!("fixture has no {} reading", r.name));
         readings[i] = r;
-    }
-
-    /// A board payload naming one `unplanned` queue with `ids` as candidates
-    /// and, when `plans_ready` is Some, one `undispatched` queue counting it.
-    fn unplanned_board(ids: &[&str], plans_ready: Option<usize>) -> Value {
-        let mut queues = vec![json!({
-            "name": "unplanned", "status": "ok", "count": ids.len(),
-            "rows": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()
-        })];
-        if let Some(pr) = plans_ready {
-            queues.push(json!({
-                "name": "undispatched", "status": "ok", "count": pr, "rows": []
-            }));
-        }
-        json!({"queues": queues})
-    }
-
-    /// Call `r_blueprint` with a fixed provider (so the ambient
-    /// FNO_ROUTE_PROVIDER cannot leak in) and a temp config dir.
-    fn blueprint_reading(
-        dir: &std::path::Path,
-        config_toml: &str,
-        board: Value,
-        session_id: Option<&str>,
-        holders: Vec<String>,
-        slots: Result<usize, String>,
-    ) -> Result<Value, String> {
-        let fnodir = dir.join(".fno");
-        std::fs::create_dir_all(&fnodir).unwrap();
-        std::fs::write(fnodir.join("config.toml"), config_toml).unwrap();
-        // FNO_CONFIG pins the walk to the fixture the way the lanes-cap test
-        // does: a repo-root .fno/config.toml must never leak into the read.
-        let prior_config = std::env::var_os("FNO_CONFIG");
-        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
-        let prior_provider = std::env::var_os("FNO_ROUTE_PROVIDER");
-        std::env::set_var("FNO_ROUTE_PROVIDER", "zai");
-        let reading = r_blueprint(
-            &Ok(board),
-            dir,
-            session_id.map(str::to_string),
-            Ok(holders),
-            slots,
-        );
-        match prior_provider {
-            Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
-            None => std::env::remove_var("FNO_ROUTE_PROVIDER"),
-        }
-        match prior_config {
-            Some(v) => std::env::set_var("FNO_CONFIG", v),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-        reading
-    }
-
-    /// The happy path: 4 unplanned candidates, running 0, ceiling capped to
-    /// one per king even under a higher provider budget: only the first id in
-    /// board order starts, the rest skip at the ceiling.
-    #[test]
-    fn r_blueprint_starts_up_to_the_ceiling_in_board_order() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-happy-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3", "x-4"], Some(0)),
-            Some("sess-1"),
-            vec![],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["running"], 0);
-        assert_eq!(reading["ceiling"], 1);
-        assert_eq!(reading["ceiling_source"], "one per king");
-        assert_eq!(reading["plans_ready"], 0);
-        assert_eq!(reading["slots"], 4);
-        assert_eq!(reading["starts"], json!(["x-1"]), "{reading}");
-        assert_eq!(
-            reading["skips"],
-            json!([
-                {"id": "x-2", "reason": "at ceiling 0 of 1"},
-                {"id": "x-3", "reason": "at ceiling 0 of 1"},
-                {"id": "x-4", "reason": "at ceiling 0 of 1"}
-            ]),
-            "{reading}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// AC7: a provider budget can only lower the one-per-king ceiling, and a
-    /// start waits until plans ready are fewer than the king's worker slots.
-    #[test]
-    fn r_blueprint_ceiling_is_one_per_king_under_a_bigger_budget() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-one-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "[agents.provider_limits.zai]\nsubagents = 3\n",
-            unplanned_board(&["x-1", "x-2"], Some(2)),
-            Some("sess-1"),
-            vec![],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["ceiling"], 1);
-        assert_eq!(reading["ceiling_source"], "one per king");
-        assert_eq!(reading["plans_ready"], 2);
-        assert_eq!(reading["slots"], 4);
-        assert_eq!(reading["starts"], json!(["x-1"]), "{reading}");
-        assert_eq!(
-            reading["skips"][0]["reason"], "at ceiling 0 of 1",
-            "{reading}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// AC6: plans ready at or above slots stops every start.
-    #[test]
-    fn r_blueprint_skips_everything_when_build_slots_are_the_bottleneck() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-bottl-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "",
-            unplanned_board(&["x-1", "x-2", "x-3"], Some(5)),
-            Some("sess-1"),
-            vec![],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["running"], 0);
-        assert_eq!(reading["starts"], json!([]));
-        assert_eq!(reading["skips"].as_array().unwrap().len(), 3);
-        assert_eq!(
-            reading["skips"][0]["reason"],
-            "plans ready 5 / slots 4: build slots are the bottleneck",
-            "{reading}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// AC8: an unreadable undispatched queue reads plans ready unmeasured,
-    /// and no candidate starts on an unmeasured gate.
-    #[test]
-    fn r_blueprint_skips_everything_when_plans_ready_unmeasured() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-unmeas-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "",
-            unplanned_board(&["x-1", "x-2"], None),
-            Some("sess-1"),
-            std::vec![],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["starts"], json!([]), "{reading}");
-        assert_eq!(
-            reading["skips"][0]["reason"],
-            "plans ready unmeasured: the board names no undispatched count",
-            "{reading}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The floor: 0 candidates and running 0 leaves the one null skip, so a
-    /// beat with nothing to start still leaves a receipt.
-    #[test]
-    fn r_blueprint_leaves_a_receipt_when_nothing_is_unplanned() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-empty-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "",
-            unplanned_board(&[], Some(0)),
-            Some("sess-1"),
-            vec![],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["starts"], json!([]));
-        assert_eq!(
-            reading["skips"],
-            json!([{"id": null, "reason": "no unplanned node in scope"}])
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// At the ceiling no candidate starts, whatever the queue holds.
-    #[test]
-    fn r_blueprint_skips_everything_at_the_ceiling() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-ceil-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "[agents.provider_limits.zai]\nsubagents = 2\n",
-            unplanned_board(&["x-1", "x-2", "x-3"], Some(0)),
-            Some("sess-1"),
-            vec![
-                "blueprint-session:sess-1".to_string(),
-                "blueprint-session:sess-1".to_string(),
-            ],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["running"], 2);
-        assert_eq!(reading["starts"], json!([]));
-        assert_eq!(reading["skips"].as_array().unwrap().len(), 3);
-        assert_eq!(
-            reading["skips"][0]["reason"], "at ceiling 2 of 1",
-            "{reading}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Another session's blueprint claim never counts toward this king's
-    /// running total.
-    #[test]
-    fn r_blueprint_does_not_count_another_sessions_claim() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-other-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "",
-            unplanned_board(&["x-1"], Some(0)),
-            Some("sess-1"),
-            vec!["blueprint-session:someone-else".to_string()],
-            Ok(4),
-        )
-        .unwrap();
-        assert_eq!(reading["running"], 0);
-        assert_eq!(reading["starts"], json!(["x-1"]));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A missing session id fails the reading: it must never read as
-    /// `running 0`, which would name starts past the ceiling.
-    #[test]
-    fn r_blueprint_fails_without_a_session_id() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-nosess-{}", std::process::id()));
-        let reading = blueprint_reading(
-            &dir,
-            "",
-            unplanned_board(&["x-1"], Some(0)),
-            None,
-            vec![],
-            Ok(4),
-        );
-        assert!(reading.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// An unreadable unplanned queue fails the reading instead of reading as
-    /// an empty candidate list.
-    #[test]
-    fn r_blueprint_fails_on_an_unreadable_unplanned_queue() {
-        let dir = std::env::temp_dir().join(format!("fno-bp-badq-{}", std::process::id()));
-        let board = json!({"queues": [{"name": "unplanned", "status": "error",
-            "error": "graph unreadable", "rows": []}]});
-        let reading = blueprint_reading(&dir, "", board, Some("sess-1"), vec![], Ok(4));
-        assert!(reading.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The journaled row carries the same starts and skips the lines print,

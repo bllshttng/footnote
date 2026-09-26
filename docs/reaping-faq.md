@@ -22,7 +22,7 @@ kept fb6399d5 [unmarked] (not a spawn row: origin adopted)
 
 The verb names the verdict. `kept` means the sweep declined this pass. `held` means the rehearsal declined to promise an action. `would retire` is the dry-run remove verdict, and `retired` is the real one.
 
-The first report lines carry the counts and the `fleet`, `unmarked`, `owned`, and `contested` class totals. The last lines carry the dry-run marker and the mux sweep line. A retire line names its basis, for example `every named node done`, with the witnesses that agreed.
+The first report lines carry the counts and the `fleet`, `unmarked`, `owned`, and `contested` class totals. The last lines carry the dry-run marker and the mux sweep line. A dry-run report also carries one census line: `session inventory: enumerated N session(s), M never judged (no registry row)`, plus one line per unread census source and one for a partial transcript-root read. An unread registry replaces the count with `never-judged count unknown (registry unreadable)`, because every session then lacks a registry row and a count would read as a diagnosis. The gap between N and the judged rows is where a scoping bug reads from outside. A retire line names its basis, for example `every named node done`, with the witnesses that agreed.
 
 Every daemon tick with held rows also writes one journal row you can read without the verb. The row carries one entry per held handle, with its reason, detail, age, and escalation flag. Read it with:
 
@@ -360,7 +360,7 @@ Every top-level key of `fno agents reap --json`, one row each. The dry run rende
 | `crowns` | `vacated crown {scope} (holder {session} dead: {evidence}; inherits: {inheritor})` and `kept crown {scope} ({reason})`; `null` when no crown sweep ran | [Manifest-only crowns and the dead-crown reaper](architecture/reign.md#manifest-only-crowns-and-the-dead-crown-reaper) |
 | `schema_skew` | `registry schema v{on_disk} is ahead of the v{understood} this fno understands: ...` | [Read the answer](#read-the-answer) |
 | `dry_run` | the `(dry-run: no changes made)` marker | [A dry run and a real run answer different questions](#a-dry-run-and-a-real-run-answer-different-questions) |
-| `inventory` | projection, no line: the census of sessions and store roots this pass read; present only when `--dry-run --json` runs, and a live `--json` object omits it (`client.rs` `run_reap`) | [Read the answer](#read-the-answer) |
+| `inventory` | dry run, text: `session inventory: enumerated N session(s), M never judged (no registry row)` plus one line per incomplete source and a partial-roots line; JSON: the census object, present only when `--dry-run` runs, and a live `--json` object omits it (`client.rs` `run_reap`) | [Read the answer](#read-the-answer) |
 | `mux` | `mux sweep (ran|unread|skipped by --no-mux)` | [Ten programs stop or remove a session](#ten-programs-stop-or-remove-a-session) |
 
 ## One table: the reason, the act, the check

@@ -50,7 +50,6 @@ config schema
 backlog idea
 backlog get
 backlog update
-backlog find
 backlog next
 backlog ready
 backlog done

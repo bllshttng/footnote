@@ -33,7 +33,7 @@ def _installed_loop_extensions(monkeypatch):
     tests/agents/test_harness_loop_participation.py."""
     import fno.agents.harness_map as _harness_map
 
-    monkeypatch.setattr(_harness_map, "_loop_extension_installed", lambda h: True)
+    monkeypatch.setattr(_harness_map, "_loop_gate_answer", lambda h, c: {"refusal": None})
 
 
 _REQUIRED_INTERACTIVE_FIELDS = {

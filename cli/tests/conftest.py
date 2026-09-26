@@ -1015,6 +1015,26 @@ def _no_live_evidence_gate(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_loop_gate(monkeypatch):
+    """Hermetic default for the loop gate.
+
+    `fno.agents.harness_map.check_loop_participation` answers through the
+    `fno-agents status --target-family --harness` leaf, and in the test
+    environment that resolver can find a real installed binary whose grok
+    arm runs a bounded `grok inspect`. The default admits every looping
+    dispatch; tests of the refusals install their own responder on
+    `fno.agents.harness_map._loop_gate_answer`.
+    """
+
+    def _admit(harness, command):
+        return {"refusal": None}
+
+    import fno.agents.harness_map as harness_map
+
+    monkeypatch.setattr(harness_map, "_loop_gate_answer", _admit)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_resume_pin(monkeypatch):
     """Hermetic default for the resume-pin transport.
 
@@ -1213,18 +1233,25 @@ def _no_status_ci_door(monkeypatch):
     installed one, so an unstubbbed call is a real network read or a
     wrong-shape answer. The default answers an empty row set for status-ci
     (no required check failing) and the fail-open no-recovery fact for
-    status-rerun; any other op raises, like a missing binary. Tests pinning
-    real door answers re-stub `fno.rust_binary.verb_call`.
+    status-rerun. ONLY the status door's verbs are faked: `verb_call` is the
+    universal transport (spawn-gate, spawn-axes, permission-tokens, ...), and
+    faking it whole refused every spawn in the suite with
+    "unavailable in tests" while CI's preserved FNO_AGENTS_BIN sat unread.
+    Tests pinning real door answers re-stub `fno.rust_binary.verb_call`.
     """
     import fno.rust_binary as rust_binary
 
-    def _fake_verb_call(verb, payload, unavailable=None, **kwargs):
+    real_verb_call = rust_binary.verb_call
+
+    def _fake_verb_call(
+        verb, payload, unavailable=rust_binary.VerbUnavailable, **kwargs
+    ):
         op = payload.get("op") if isinstance(payload, dict) else None
-        if op == "status-ci":
+        if verb == "authorized-merge" and op == "status-ci":
             return []
-        raise (unavailable or rust_binary.VerbUnavailable)(
-            f"fno-agents {verb} {op} unavailable in tests"
-        )
+        if verb == "authorized-merge" and op == "status-rerun":
+            raise unavailable(f"fno-agents {verb} {op} unavailable in tests")
+        return real_verb_call(verb, payload, unavailable=unavailable, **kwargs)
 
     monkeypatch.setattr(rust_binary, "verb_call", _fake_verb_call)
 

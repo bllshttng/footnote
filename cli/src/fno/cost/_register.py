@@ -717,6 +717,17 @@ _NON_DELIVERY_TERMINALS = frozenset(
 )
 
 
+def ledger_project_for(node: dict | None) -> str | None:
+    """The project key the plan-fidelity gate joins on: the checkout's remote
+    slug, exactly what the register path stamps and the gate reads. The node's
+    ``project`` field is a different key ('fno' vs the remote slug), so it is
+    only the fallback when no remote resolves."""
+    from fno.graph._intake import repo_root
+    from fno.paths import _slug_from_git_remote
+
+    return _slug_from_git_remote(Path(repo_root())) or (node or {}).get("project")
+
+
 def upsert_ledger_pr(
     node_id: str,
     pr_number: int,
@@ -724,11 +735,15 @@ def upsert_ledger_pr(
     project: str | None,
     merged_at: str | None,
     node_sessions: list[str] | None = None,
+    plan_path: str | None = None,
 ) -> str:
     """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
 
     Reconcile-side backstop for the transcript-gone tail: the
     merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
+    ``project`` is the REMOTE slug the plan-fidelity gate joins on and
+    ``plan_path`` the bound plan, so the created row is visible to that join;
+    the node's ``project`` field is a different key and leaves it unjoined.
     Under the SAME ``/tmp/fno-ledger.lock`` flock the register path uses:
 
     - existing execution row with ``pr_number`` null -> stamp pr_number/pr_url
@@ -785,6 +800,7 @@ def upsert_ledger_pr(
                 "pr_number": pr_number,
                 "pr_url": pr_url,
                 "project": project,
+                "plan_path": plan_path,
                 "completed": _utc_iso(merged_at),
                 "backstop": True,
                 "termination_reason": "reconcile-backstop",

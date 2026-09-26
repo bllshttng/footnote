@@ -34,6 +34,19 @@ DEAD_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 OTHER_UUID = "ffffffff-1111-2222-3333-444444444444"
 
 
+@pytest.fixture(autouse=True)
+def _admit_spawn_gate(monkeypatch):
+    """Hermetic spawn gate: this suite tests revival semantics, not admission.
+
+    The gate is a transport over the fno-agents binary, which a clean checkout
+    and the smoke-pytest shard leave unresolved, so every spawn here refused
+    exit 87 before reaching the revival paths under test. Sibling spawn suites
+    stub the same seam; the gate's own behavior is covered in
+    test_spawn_gate_agreement.py.
+    """
+    _admitting_gate(monkeypatch)
+
+
 @pytest.fixture
 def workdir_claude(tmp_path, monkeypatch):
     """Isolated fno home with the fake claude on PATH (emits short_id 7c5dcf5d).

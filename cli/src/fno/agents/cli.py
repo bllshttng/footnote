@@ -3628,11 +3628,15 @@ def cmd_register(
     # lets the DND column on `fno agents list` say "held" for this row instead
     # of leaving the operator to guess from a blank cell.
     if delivery_policy is not None:
+        from fno.harness_identity import session_identity_key
         from fno.mail import hold as _hold
 
+        # Clock key is the collision-free identity key; the name-keyed clear removes a pre-migration clock.
+        clock_key = session_identity_key(session_id)
         if delivery_policy == "bus-only":
-            _hold.arm_permanent(entry.name)
+            _hold.arm_permanent(clock_key)
         else:
+            _hold.clear(clock_key)
             _hold.clear(entry.name)
 
     events.emit(

@@ -126,6 +126,19 @@ def test_agents_ask_row_matches_the_command() -> None:
     assert "-p" not in shorts
 
 
+def _resolves(path: str) -> None:
+    """Assert a legend row resolves somewhere real: the Python tree, or the
+    native dispatcher for a verb the port moved into the binary (the Python
+    leg is deleted, so the in-process app refuses it with "No such command")."""
+    result = runner.invoke(app, [*path.split(), "--help"], env=_IN_PROCESS)
+    if result.exit_code == 0:
+        return
+    from tests._native_door import run_native
+
+    code, _out, _err = run_native(*path.split(), "--help")
+    assert code == 0, f"legend names `fno {path}`, which does not resolve"
+
+
 def test_legend_names_no_dead_command() -> None:
     """Every `fno <path>` a legend row names still resolves."""
     from fno.cli import SHORTHAND_LEGEND
@@ -142,6 +155,4 @@ def test_legend_names_no_dead_command() -> None:
         # A row may name a family: `backlog add/idea/update/intake`.
         leaves = parts[-1].split("/") if "/" in parts[-1] else [parts[-1]]
         for leaf in leaves:
-            path = " ".join(parts[:-1] + [leaf])
-            result = runner.invoke(app, [*path.split(), "--help"], env=_IN_PROCESS)
-            assert result.exit_code == 0, f"legend names `fno {path}`, which does not resolve"
+            _resolves(" ".join(parts[:-1] + [leaf]))

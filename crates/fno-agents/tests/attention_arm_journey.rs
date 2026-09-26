@@ -93,9 +93,11 @@ impl SinkIo for JourneyIo {
         self.records.push(format!("{}: {answer:?}", item.id));
         Ok("Recorded: option 1 (file)".to_string())
     }
-    fn clear(&mut self, id: &str, answer: &str) -> Result<(), String> {
+    fn clear(&mut self, id: &str, answer: &str) -> Result<String, String> {
         self.clears.push(format!("{id}: {answer}"));
-        Ok(())
+        Ok(format!(
+            "outstanding: {id} answered; mail to w1: delivered (hosted)"
+        ))
     }
     fn notify(&mut self, _title: &str, _body: &str) {}
 }
