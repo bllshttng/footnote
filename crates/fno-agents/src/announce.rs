@@ -638,13 +638,15 @@ fn expired(m: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
 // Cursor: per-session seen-id set (decision 4)
 // ---------------------------------------------------------------------------
 
-fn cursor_path(state_root: &Path, session_id: &str) -> PathBuf {
+// pub(crate): the law edit read (law_match edit_answer) keeps its own
+// per-session seen-id set beside this one, so the dir is the caller's word.
+pub(crate) fn cursor_path(state_root: &Path, dir: &str, session_id: &str) -> PathBuf {
     let safe = format!("{}.json", session_id.replace('/', "_"));
-    state_root.join("announce-cursors").join(safe)
+    state_root.join(dir).join(safe)
 }
 
-fn load_cursor(state_root: &Path, session_id: &str) -> HashSet<String> {
-    let text = match std::fs::read_to_string(cursor_path(state_root, session_id)) {
+pub(crate) fn load_cursor(state_root: &Path, dir: &str, session_id: &str) -> HashSet<String> {
+    let text = match std::fs::read_to_string(cursor_path(state_root, dir, session_id)) {
         Ok(t) => t,
         Err(_) => return HashSet::new(),
     };
@@ -662,8 +664,8 @@ fn load_cursor(state_root: &Path, session_id: &str) -> HashSet<String> {
     }
 }
 
-fn save_cursor(state_root: &Path, session_id: &str, seen: &HashSet<String>) {
-    let path = cursor_path(state_root, session_id);
+pub(crate) fn save_cursor(state_root: &Path, dir: &str, session_id: &str, seen: &HashSet<String>) {
+    let path = cursor_path(state_root, dir, session_id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -766,7 +768,7 @@ pub(crate) fn read_render(
     let registry = crate::client_verbs::load_registry_entries(&paths.registry)?;
     let projects =
         crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
-    let mut seen = load_cursor(&paths.state_root, session_id);
+    let mut seen = load_cursor(&paths.state_root, "announce-cursors", session_id);
 
     let mut fresh: Vec<&Value> = Vec::new();
     let mut standing_seen: Vec<&Value> = Vec::new();
@@ -847,7 +849,7 @@ fn prune_and_save(
         .map(str::to_string)
         .collect();
     seen.retain(|id| live_ids.contains(id));
-    save_cursor(&paths.state_root, session_id, &seen);
+    save_cursor(&paths.state_root, "announce-cursors", session_id, &seen);
 }
 
 pub(crate) fn run_announce_read(args: &[String], paths: &AnnouncePaths) -> i32 {
