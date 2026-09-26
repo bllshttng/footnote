@@ -1,10 +1,10 @@
 """Law scope: the door stamps in Rust, the chokepoint filter, both fail visibly.
 
-The scope stamp and the widening moved to the Rust record door
-(`crates/fno-agents/src/law_match.rs`, the record-door and scope_tests
-sections); what stays here are the transport contracts that still run in
-Python: `scope-split` filters `list_decisions`, and a project that cannot be
-resolved REFUSES at the door but fails OPEN in a reader.
+The scope stamp and the widening live in the Rust record door behind the
+front's `fno inbox law` group (`crates/fno-agents/src/law_match.rs`, the
+record-door and scope_tests sections); what runs here are the transport
+contracts that stay in Python: `scope-split` filters `list_decisions`, and a
+project that cannot be resolved REFUSES at the door but fails OPEN in a reader.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from tests.unit._front_dev import front_dev_binary
 
@@ -20,20 +19,6 @@ pytestmark = pytest.mark.skipif(
     front_dev_binary() is None,
     reason="compiled fno front binary not present (build with `cargo build --manifest-path crates/fno/Cargo.toml --bin fno)`",
 )
-
-
-def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-    monkeypatch.setenv("FNO_HOME", str(tmp_path / "state"))
-    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
-    index = tmp_path / "state" / "decisions.jsonl"
-    index.parent.mkdir(exist_ok=True)
-    index.touch()
-    import fno.decide
-
-    monkeypatch.setattr(fno.decide, "_decisions_index_path", lambda: index)
-    return index
 
 
 def _work_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str = "demo") -> Path:
@@ -55,57 +40,6 @@ def _work_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str = "demo
     )
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(map_file))
     return proj
-
-
-def _run(args: list[str]):
-    import typer
-
-    from fno.law import law_app
-
-    parent = typer.Typer()
-    parent.add_typer(law_app, name="law")
-    return CliRunner().invoke(parent, ["law", *args])
-
-
-def test_the_shim_forwards_global_so_the_door_can_widen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Widening is the crate door's flag; the shim carries it verbatim."""
-    index = _isolate(tmp_path, monkeypatch)
-    proj = _work_map(tmp_path, monkeypatch)
-    monkeypatch.chdir(proj)
-    from types import SimpleNamespace
-
-    seen: dict = {}
-
-    import fno.rust_binary
-
-    monkeypatch.setattr(
-        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
-    )
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
-    )
-
-    result = _run(
-        [
-            "set",
-            "scope",
-            "Every project answers only what needs the user.",
-            "--rationale",
-            "General.",
-            "--global",
-        ]
-    )
-
-    assert result.exit_code == 0, result.output
-    import json
-
-    request = json.loads(seen["input"])
-    assert request["mode"] == "record"
-    assert "--global" in request["argv"]
-    assert index.exists()
 
 
 def test_scope_split_keeps_global_and_the_matching_project(tmp_path, monkeypatch):

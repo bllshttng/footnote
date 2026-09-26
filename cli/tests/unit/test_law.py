@@ -1,11 +1,10 @@
-"""The law door lives in the crate; the Python command is a shim.
+"""The law door is native on the fno Rust front; Python keeps the validator.
 
-`fno inbox law set` forwards its arguments to the native door on the `fno`
-front binary,
-which owns every gate and flag natively (--global, --paths included). The
-door's gate tests run in Rust (`crates/fno-agents/src/law_match.rs`, the
-record-door section); what stays here is the shim contract and the Python
-library gates that `record_decision` still enforces for its other callers.
+`fno inbox law set` has no Python surface: the front classifies the verb
+before the CLI runs. The door's gate tests run in Rust
+(`crates/fno-agents/src/law_match.rs`, the record-door section); what stays
+here is the Python library gate `record_decision` still enforces for its
+other callers, and the fail-closed validator round-trip.
 
 Every refusal here asserts an EXACT exit code. `typer` already spends exit 2 on
 usage errors, so a bare non-zero assertion proves the command failed and nothing
@@ -16,15 +15,11 @@ is the thing refusing.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from tests.unit._front_dev import front_dev_binary
-
-LAW_REFUSED_EXIT = 3
 
 pytestmark = pytest.mark.skipif(
     front_dev_binary() is None,
@@ -85,111 +80,14 @@ def _as_chat_session(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _run(args: list[str]):
-    """Invoke through a mounted parent, the way `fno inbox law` reaches it."""
-    import typer
-
-    from fno.law import law_app
-
-    parent = typer.Typer()
-    parent.add_typer(law_app, name="law")
-    return CliRunner().invoke(parent, ["law", *args])
+# ── no Python law surface remains ─────────────────────────────────────────────
 
 
-# ── the shim contract: forward argv, mirror the exit code ─────────────────────
-
-
-def test_shim_forwards_argv_to_the_record_door(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The shim's whole job: every argument, flag included, rides to
-    the front's law door, and the door's exit code is the command's."""
-    _isolate(tmp_path, monkeypatch)
-    from types import SimpleNamespace
-
-    seen: dict = {}
-
-    import fno.rust_binary
-
-    monkeypatch.setattr(
-        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
-    )
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda args, **k: seen.update(args=args, **k) or SimpleNamespace(returncode=0),
-    )
-
-    result = _run(
-        [
-            "set",
-            "merge-authority",
-            "Merges belong to the operator",
-            "--rationale",
-            "why",
-            "--global",
-            "--paths",
-            "crates/**",
-        ]
-    )
-
-    assert result.exit_code == 0, result.output
-    assert seen["args"][1:] == ["inbox", "law", "set"], seen["args"]
-    request = json.loads(seen["input"])
-    assert request["mode"] == "record"
-    argv = request["argv"]
-    assert "merge-authority" in argv
-    assert "Merges belong to the operator" in argv
-    assert "--global" in argv
-    assert argv[argv.index("--paths") + 1] == "crates/**"
-    assert "--rationale" in argv
-
-
-def test_shim_mirrors_the_door_exit_code(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Exit 1 (recorded-but-index-failed) and exit 3 (refused) pass through:
-    the caller reads the door's answer, not a reinterpreted one."""
-    _isolate(tmp_path, monkeypatch)
-    from types import SimpleNamespace
-
-    import fno.rust_binary
-
-    monkeypatch.setattr(
-        fno.rust_binary, "resolve_front_binary", lambda: Path("/stub/fno")
-    )
-    for door_exit in (1, 3, 2):
-        monkeypatch.setattr(
-            "subprocess.run", lambda *a, e=door_exit, **k: SimpleNamespace(returncode=e)
-        )
-        result = _run(["set", "topic", "The body", "--rationale", "why"])
-        assert result.exit_code == door_exit, (door_exit, result.output)
-
-
-def test_shim_refuses_when_the_binary_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _isolate(tmp_path, monkeypatch)
-    import fno.rust_binary
-
-    monkeypatch.setattr(fno.rust_binary, "resolve_front_binary", lambda: None)
-
-    result = _run(["set", "topic", "The body"])
-
-    assert result.exit_code == LAW_REFUSED_EXIT, result.output
-    assert "binary is unavailable" in result.output
-    assert _rows(tmp_path / "state" / "decisions.jsonl") == []
-
-
-# ── the statement is not durable law: the validator still refuses ─────────────
-
-
-def test_no_staged_proposal_surface_remains() -> None:
-    """prepare / enact / resume / inspect are gone, hash and receipt with them."""
+def test_no_python_law_surface_remains() -> None:
+    """The front owns the verbs; the proposal-era names stay gone."""
     from fno import law
-    from fno.law import law_app
 
-    commands = {command.name for command in law_app.registered_commands}
-    assert commands == {"set"}
+    assert not hasattr(law, "law_app")
     for retired in (
         "prepare_proposal",
         "enact_proposal",
@@ -202,6 +100,13 @@ def test_no_staged_proposal_surface_remains() -> None:
     from fno import paths
 
     assert not hasattr(paths, "law_proposals_dir")
+
+
+def test_the_root_loader_has_no_law_entry() -> None:
+    """The deprecated root `fno law` mount is gone with the group."""
+    from fno.cli import LAZY_SUBCOMMANDS
+
+    assert "law" not in LAZY_SUBCOMMANDS
 
 
 def test_library_refuses_chat_attested_from_an_unmarked_process(
@@ -260,8 +165,7 @@ def test_an_unavailable_validator_refuses_the_recording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Fail closed: a statement nobody could classify records nothing. The
-    shim's exit contract mirrors the door, and the library wrapper refuses on
-    an unavailable front."""
+    library wrapper refuses on an unavailable front."""
     from fno.rust_binary import VerbUnavailable
 
     index = _isolate(tmp_path, monkeypatch)
