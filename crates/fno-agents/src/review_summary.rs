@@ -182,7 +182,7 @@ fn evidence_response(events_path: &Path, stdin_text: Option<&str>) -> (String, i
     // the display line makes. Unreadable = error, never a silent empty ledger.
     let events_text = match crate::loopcheck::event_lines(events_path) {
         Ok(lines) => lines.join("\n"),
-        Err(_) => return (error_json("events ledger unreadable"), 2),
+        Err(e) => return (error_json(&format!("events ledger unreadable: {e}")), 2),
     };
     (evidence(&events_text, &items).to_string(), 0)
 }
