@@ -74,7 +74,9 @@ def test_architectural_followup_folds_when_near_duplicate_exists(monkeypatch):
         {
             "outcome": "choice_required",
             "minted_id": None,
-            "candidates": [{"id": "fno-cand01"}],
+            "candidates": [
+                {"id": "fno-cand01", "title": "skill-diff: blueprint failure looks architectural (run r0)"}
+            ],
             "wave_command": "fno backlog idea t --wave-of fno-cand01",
         },
         indent=2,
@@ -94,6 +96,33 @@ def test_architectural_followup_folds_when_near_duplicate_exists(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli._file_no_diff_node("blueprint", "run-2", "architectural") == "fno-cand01"
     assert "--wave-of" in calls[1] and "fno-cand01" in calls[1]
+
+
+def test_architectural_followup_mints_separately_over_another_skills_node(monkeypatch):
+    """The top fold candidate belongs to another skill: text similarity is not
+    identity, so the filer mints its own node with --separate."""
+    calls = []
+    choice = json.dumps(
+        {
+            "outcome": "choice_required",
+            "candidates": [
+                {"id": "fno-other1", "title": "skill-diff: review failure looks architectural (run r9)"}
+            ],
+        }
+    )
+    minted = json.dumps({"id": "fno-new01"})
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return Result(choice if len(calls) == 1 else minted)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._file_no_diff_node("blueprint", "run-4", "architectural") == "fno-new01"
+    assert "--separate" in calls[1] and "--wave-of" not in calls[1]
 
 
 def test_architectural_followup_unparseable_receipt_defers(monkeypatch):
