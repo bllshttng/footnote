@@ -1411,9 +1411,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
 }
 
 /// Upsert a synthesized row, keyed on the canonical `harness_session_id`
-/// (covers claude too: its uuid syncs there). Reuses
-/// [`crate::state::update_registry`] (the one locked writer) -- not a second
-/// registry writer.
+/// (covers claude too: its uuid syncs there), through [`crate::state::update_registry`].
 pub(crate) fn upsert_synthesized_row(
     registry_path: &Path,
     entry: crate::state::RegistryEntry,
@@ -1445,8 +1443,8 @@ pub(crate) fn upsert_synthesized_row(
                 merged.exited_at = old.exited_at.clone();
                 merged.predecessor_session_ids = old.predecessor_session_ids.clone();
                 merged.forked_from_session_id = old.forked_from_session_id.clone();
-                // adoption observed nothing about the node, so a
-                // merge keeps whatever a spawn/register path stamped.
+                // adoption observed nothing about the node, so the merge
+                // keeps whatever a spawn/register path stamped.
                 if merged.node.is_none() {
                     merged.node = old.node.clone();
                 }
