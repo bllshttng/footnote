@@ -233,8 +233,12 @@ impl AddKind {
     }
 }
 
-/// The GLM/z.ai base_url preset (Claude's Discretion 4: preset-first is fine).
-const GLM_BASE_URL: &str = "https://api.z.ai/api/anthropic";
+/// The GLM/z.ai base_url preset (Claude's Discretion 4: preset-first is
+/// fine), read from the compiled-in reach map.
+fn glm_base_url() -> String {
+    crate::model_catalog::vendor_base_url("zai", "anthropic")
+        .expect("model_reach.toml carries the zai anthropic endpoint")
+}
 
 /// Validate a new-account id BEFORE any subprocess: lowercase alphanumeric +
 /// hyphens, leading letter (the register verb's `_ID_PATTERN` contract).
@@ -1019,7 +1023,7 @@ impl ConnectionsView {
             "--auth".into(),
             "api_key".into(),
             "--env".into(),
-            format!("ANTHROPIC_BASE_URL={GLM_BASE_URL}"),
+            format!("ANTHROPIC_BASE_URL={}", glm_base_url()),
             "--env".into(),
             format!("ANTHROPIC_API_KEY={}", w.api_key),
         ])

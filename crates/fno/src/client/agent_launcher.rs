@@ -45,6 +45,12 @@ pub(crate) struct HarnessChoice {
     /// This harness's configured model choices. OpenCode uses its own model
     /// list because its model IDs carry `provider/model`.
     pub models: Vec<ModelChoice>,
+    /// Launchable catalog rows beyond the main list (searchable by group 2's
+    /// more row). Never rendered in the main body.
+    pub more: Vec<ModelChoice>,
+    /// The models.dev cache failure, when the catalog could not be read.
+    /// Never degrades the harness rows.
+    pub catalog_error: Option<String>,
     /// A harness-specific model catalog failure, such as OpenCode's own list.
     pub models_error: Option<String>,
     /// See harness_capabilities.toml `efforts`: `None` = no surface at all,
@@ -71,17 +77,10 @@ impl HarnessChoice {
     }
 }
 
-/// One configured model choice: `name` is what the model chip shows, `model`
-/// is the launch id, and `route`/`provider` preserve its configured route.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModelChoice {
-    pub name: String,
-    pub model: String,
-    pub route: String,
-    /// Derived from the configured account route; no provider list is baked in.
-    pub provider: Option<String>,
-    pub verdict: String,
-}
+pub(crate) use crate::model_catalog::{
+    codex_models_cache_path, merge_model_choices, parse_codex_models,
+    parse_configured_account_models, parse_opencode_models, ModelChoice, ModelState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecentModelChoice {
@@ -1429,11 +1428,16 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         return;
     };
     if let Some(name) = &draft.model_row {
-        if !row
-            .models
-            .iter()
-            .any(|m| &m.name == name && m.provider.as_deref().unwrap_or_default() == draft.provider)
-        {
+        let offered = row.models.iter().any(|m| {
+            &m.name == name && m.provider.as_deref().unwrap_or_default() == draft.provider
+        }) || row.more.iter().any(|m| {
+            // A pin on a Ready row under more survives: the row exists, it
+            // just waits beyond the main list.
+            matches!(m.state, ModelState::Ready)
+                && &m.name == name
+                && m.provider.as_deref().unwrap_or_default() == draft.provider
+        });
+        if !offered {
             draft.model.clear();
             draft.model_row = None;
             draft.bump();
@@ -1526,7 +1530,9 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                         model: slug.to_string(),
                         route: String::new(),
                         provider: None,
-                        verdict: "ok".to_string(),
+                        state: ModelState::Ready,
+                        key_env: None,
+                        key_file: None,
                     })
                     .collect()
             });
@@ -1535,6 +1541,8 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                 native: true,
                 installed: on_path(name),
                 models: models.unwrap_or_default(),
+                more: Vec::new(),
+                catalog_error: None,
                 models_error: None,
                 efforts,
                 permission_modes,
@@ -1550,14 +1558,16 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     // list command. Both reads are bounded and run off the UI loop.
     let bin = crate::server::fno_bin().to_string_lossy().into_owned();
     let account_argv = [bin.as_str(), "config", "get", "accounts.records", "-J"];
+    let routing_argv = [bin.as_str(), "config", "get", "model_routing", "-J"];
     let opencode_argv = ["opencode", "models", "--pure"];
     let opencode_installed = rows
         .iter()
         .any(|row| row.name == "opencode" && row.selectable());
     let timeout = std::time::Duration::from_secs(30);
     let deadline = tokio::time::Instant::now() + timeout;
-    let (accounts, opencode) = tokio::join!(
+    let (accounts, routing, opencode) = tokio::join!(
         crate::dispatch_launch::run_fno_captured(&account_argv, timeout, deadline),
+        crate::dispatch_launch::run_fno_captured(&routing_argv, timeout, deadline),
         async {
             if opencode_installed {
                 crate::dispatch_launch::run_fno_captured(&opencode_argv, timeout, deadline).await
@@ -1602,6 +1612,28 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     } else {
         (Vec::new(), None)
     };
+    // The models.dev catalog: read whatever cache exists now and refresh in
+    // the background when stale. The picker never waits on the network; a
+    // failed or missing cache only fills `catalog_error`.
+    let state = crate::model_catalog::state_dir();
+    let cache = crate::model_catalog::cache_path(&state);
+    let mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
+    if crate::model_catalog::needs_refresh(mtime, std::time::SystemTime::now()) {
+        let spawn_state = state.clone();
+        tokio::spawn(async move {
+            let _ = crate::model_catalog::refresh(&spawn_state).await;
+        });
+    }
+    let (catalog, catalog_error) = match crate::model_catalog::load(&state) {
+        Ok(catalog) => (Some(catalog), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let routing_value: serde_json::Value = match routing {
+        Some((true, stdout, _)) => serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    };
+    let reach = crate::model_catalog::parse_reach(crate::model_catalog::REACH_TOML);
+
     // The floor stands; codex tops up from its own models cache and every
     // harness merges its configured account rows over the floor. opencode
     // owns its list outright (above).
@@ -1630,190 +1662,42 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                 merge_model_choices(&mut row.models, list);
             }
         }
+        // The reach rows: Ready provider models join the main list; the rest
+        // wait under `more`. The native catalog's rows are Ready by
+        // definition (they launch through the harness's own routing), but
+        // they live under more so the floor and the configured rows lead.
+        let (ready, mut more) = crate::model_catalog::reach_rows(
+            &row.name,
+            &reach,
+            &routing_value,
+            &by_harness,
+            catalog.as_ref(),
+            &|env, file| crate::provider_key::key_present(env, file),
+        );
+        let (ready, native_more) = match reach
+            .harness
+            .get(&row.name)
+            .and_then(|h| h.native_catalog.clone())
+        {
+            Some(native_id) => {
+                let floor_ids: Vec<&str> = row.models.iter().map(|m| m.model.as_str()).collect();
+                let (native_rows, rest): (Vec<_>, Vec<_>) = ready
+                    .into_iter()
+                    .partition(|r| r.provider.as_deref() == Some(native_id.as_str()));
+                let kept: Vec<ModelChoice> = native_rows
+                    .into_iter()
+                    .filter(|r| !floor_ids.contains(&r.model.as_str()))
+                    .collect();
+                (rest, kept)
+            }
+            None => (ready, Vec::new()),
+        };
+        more.extend(native_more);
+        merge_model_choices(&mut row.models, &ready);
+        row.more = more;
+        row.catalog_error = catalog_error.clone();
     }
     CatalogOutcome::Ok(rows, models_err)
-}
-
-pub(crate) fn provider_from_route(route: &str) -> Option<String> {
-    route
-        .split_once('/')
-        .map(|(provider, _)| provider.trim())
-        .filter(|provider| !provider.is_empty())
-        .map(str::to_string)
-}
-
-pub(crate) fn parse_configured_account_models(
-    stdout: &str,
-) -> Result<std::collections::HashMap<String, Vec<ModelChoice>>, String> {
-    let value: serde_json::Value = serde_json::from_str(stdout)
-        .map_err(|_| "account records response was unreadable".to_string())?;
-    let records_value = value
-        .get("value")
-        .ok_or_else(|| "account records response had no value list".to_string())?;
-    if records_value.is_null() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let records = records_value
-        .as_array()
-        .ok_or_else(|| "account records response had no value list".to_string())?;
-    let mut by_harness: std::collections::HashMap<String, Vec<ModelChoice>> =
-        std::collections::HashMap::new();
-    for record in records {
-        let Some(harness) = record.get("harness").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let route = record
-            .get("route")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim();
-        let declared_provider = record
-            .get("route_provider_id")
-            .or_else(|| record.get("provider"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|provider| !provider.is_empty());
-        let declared_model = record
-            .get("model_name")
-            .or_else(|| record.get("model"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
-        let route_provider = provider_from_route(route);
-        let route_model = route.split_once('/').map(|(_, model)| model.trim());
-        let provider = declared_provider
-            .map(str::to_string)
-            .or(route_provider)
-            .or_else(|| declared_model.and_then(provider_from_route));
-        let model_source = declared_model.or(route_model);
-        let Some(model_source) = model_source.filter(|model| !model.is_empty()) else {
-            continue;
-        };
-        let model_id = provider
-            .as_ref()
-            .and_then(|provider| {
-                model_source
-                    .strip_prefix(provider)
-                    .and_then(|rest| rest.strip_prefix('/'))
-            })
-            .unwrap_or(model_source)
-            .to_string();
-        let route = if route.is_empty() {
-            provider
-                .as_ref()
-                .map(|provider| format!("{provider}/{model_id}"))
-                .unwrap_or_default()
-        } else {
-            route.to_string()
-        };
-        let name = if model_id.is_empty() {
-            continue;
-        } else {
-            model_id.clone()
-        };
-        let choices = by_harness.entry(harness.to_string()).or_default();
-        if choices
-            .iter()
-            .any(|choice| choice.model == model_id && choice.provider == provider)
-        {
-            continue;
-        }
-        choices.push(ModelChoice {
-            name,
-            model: model_id,
-            route,
-            provider,
-            verdict: "ok".to_string(),
-        });
-    }
-    Ok(by_harness)
-}
-
-pub(crate) fn parse_opencode_models(stdout: &str) -> Vec<ModelChoice> {
-    let mut models = Vec::new();
-    for id in stdout.lines().map(str::trim).filter(|id| !id.is_empty()) {
-        let Some(provider) = provider_from_route(id) else {
-            continue;
-        };
-        if models.iter().any(|model: &ModelChoice| model.name == id) {
-            continue;
-        }
-        models.push(ModelChoice {
-            name: id.to_string(),
-            model: id.to_string(),
-            route: String::new(),
-            provider: Some(provider),
-            verdict: "ok".to_string(),
-        });
-    }
-    models
-}
-
-/// codex's own model catalog cache, maintained by codex under CODEX_HOME
-/// (default ~/.codex).
-fn codex_models_cache_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
-        })?;
-    Some(home.join("models_cache.json"))
-}
-
-/// Parse codex's models_cache.json into (visible, hidden): one ModelChoice
-/// per models[].slug whose visibility is not "hide", plus the hidden slugs
-/// so the live cache can retire floor entries. A missing or unreadable
-/// cache parses to two empty lists: the capability-table floor stands,
-/// never an error row.
-pub(crate) fn parse_codex_models(text: &str) -> (Vec<ModelChoice>, Vec<String>) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return (Vec::new(), Vec::new());
-    };
-    let Some(models) = value.get("models").and_then(|v| v.as_array()) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut models_out = Vec::new();
-    let mut hidden = Vec::new();
-    for model in models {
-        let Some(slug) = model.get("slug").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if model.get("visibility").and_then(|v| v.as_str()) == Some("hide") {
-            if !hidden.iter().any(|known: &String| known == slug) {
-                hidden.push(slug.to_string());
-            }
-            continue;
-        }
-        if models_out
-            .iter()
-            .any(|choice: &ModelChoice| choice.model == slug)
-        {
-            continue;
-        }
-        models_out.push(ModelChoice {
-            name: slug.to_string(),
-            model: slug.to_string(),
-            route: String::new(),
-            provider: None,
-            verdict: "ok".to_string(),
-        });
-    }
-    (models_out, hidden)
-}
-
-/// Append `extra` choices whose (model id, provider) pair is new, so the
-/// floor list stays first and the live sources (codex's cache, configured
-/// account records) fill in without duplicates.
-pub(crate) fn merge_model_choices(base: &mut Vec<ModelChoice>, extra: &[ModelChoice]) {
-    for choice in extra {
-        if base
-            .iter()
-            .any(|m| m.model == choice.model && m.provider == choice.provider)
-        {
-            continue;
-        }
-        base.push(choice.clone());
-    }
 }
 
 // -- picker ------------------------------------------------------------------
@@ -2152,13 +2036,15 @@ fn picker_rows(
                                 if check { "\u{2713}" } else { "\u{2022}" },
                                 &m.name,
                                 &hint,
-                                m.verdict == "ok",
-                                (m.verdict == "ok").then(|| PickerAction::PickRow {
-                                    harness: harness.clone(),
-                                    name: m.name.clone(),
-                                    model: m.model.clone(),
-                                    route: m.route.clone(),
-                                    provider: m.provider.clone(),
+                                matches!(m.state, ModelState::Ready),
+                                matches!(m.state, ModelState::Ready).then(|| {
+                                    PickerAction::PickRow {
+                                        harness: harness.clone(),
+                                        name: m.name.clone(),
+                                        model: m.model.clone(),
+                                        route: m.route.clone(),
+                                        provider: m.provider.clone(),
+                                    }
                                 }),
                             );
                         }
@@ -2364,7 +2250,9 @@ pub(crate) fn apply_picker_action(
                 model: l.draft.model.clone(),
                 route,
                 provider: non_empty(&l.draft.provider),
-                verdict: "ok".to_string(),
+                state: ModelState::Ready,
+                key_env: None,
+                key_file: None,
             };
             l.recent_models
                 .retain(|recent| recent.harness != harness || recent.choice.name != name);
