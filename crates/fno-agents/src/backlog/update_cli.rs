@@ -1282,24 +1282,64 @@ fn apply_mutators(
     }
     if let Some(v) = &args.locked_by {
         let session = null_if(v);
-        {
-            let obj = rows[idx].as_object_mut().expect("row is an object");
-            obj.insert(
-                "locked_by".into(),
-                session.clone().map(|s| json!(s)).unwrap_or(Value::Null),
-            );
-            obj.insert(
-                "locked_at".into(),
-                session
-                    .is_some()
-                    .then(|| json!(crate::graph_store::now_isoformat()))
-                    .unwrap_or(Value::Null),
-            );
-            // Clearing the lock also clears the harness stamp so an unclaim
-            // never leaves a stale holder identity.
-            if session.is_none() {
+        match session {
+            Some(holder) => {
+                // The claim store is the lock's single writer: `--locked-by`
+                // acquires `node:<id>` for the holder and the projection
+                // reads it back; the row carries no mirror copy. A foreign
+                // live claim refuses naming the claim verb.
+                let key = format!("node:{node_id}");
+                let pid = crate::claims::durable_session_pid().map(|p| p as u32);
+                let (pid_unavailable, ttl_ms) = match pid {
+                    Some(_) => (false, None),
+                    // No durable session to anchor: a 2h lease keeps the
+                    // stamp readable, the same shape the pid-less task
+                    // claim rides.
+                    None => (true, Some(7_200_000)),
+                };
+                match crate::claims::acquire(
+                    &key,
+                    &holder,
+                    crate::claims::AcquireOpts {
+                        pid,
+                        pid_unavailable,
+                        ttl_ms,
+                        reason: Some("locked-by stamp".into()),
+                        metadata: None,
+                        pid_provenance: None,
+                        root: None,
+                        events_dir: None,
+                    },
+                ) {
+                    crate::claims::AcquireOutcome::Acquired(_) => {}
+                    crate::claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
+                        return Err(refused(
+                            format!(
+                                "error: {node_id} is held by '{h}'. To hold it: \
+                                 fno agents claim acquire node:{node_id} --holder {holder} \
+                                 (after the other holder releases), or clear that claim."
+                            ),
+                            3,
+                        ));
+                    }
+                    crate::claims::AcquireOutcome::Error(e) => {
+                        return Err(refused(e, 2));
+                    }
+                }
+            }
+            None => {
+                // Clearing drops the row mirror and releases the claim
+                // holder-verified; a foreign live holder stays put.
+                let obj = rows[idx].as_object_mut().expect("row is an object");
+                obj.insert("locked_by".into(), Value::Null);
+                obj.insert("locked_at".into(), Value::Null);
                 obj.insert("locked_by_harness".into(), Value::Null);
                 obj.insert("locked_by_harness_session".into(), Value::Null);
+                let key = format!("node:{node_id}");
+                let (_, record) = crate::claims::status(&key, None);
+                if let Some(record) = record {
+                    let _ = crate::claims::release(&key, &record.holder, None, None);
+                }
             }
         }
     }
@@ -1920,9 +1960,10 @@ fn linked_plan_size(args: &UpdateArgs) -> Option<String> {
 }
 
 /// The post-commit read-back for `--locked-by`: the Updated receipt answers
-/// "was the command accepted", never "is the value there". Refuses a
-/// mismatched owner, warns on a mirror-only stamp, refuses a release that
-/// leaves the node wedged in_progress.
+/// "was the command accepted", never "is the value there". The claim store
+/// is the truth the receipt checks: a stamp is accepted when a claim for the
+/// node names that holder and reads live or suspect; a release refuses when
+/// it leaves the node wedged in_progress.
 fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(), Refusal> {
     let rows =
         graph_store::read_rows(graph).map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
@@ -1930,58 +1971,48 @@ fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(),
         .iter()
         .filter(|r| r.get("archived_at").is_none())
         .find(|r| entry_id(r) == Some(node_id));
-    let stored_owner = stored
-        .and_then(|r| r.get("locked_by"))
-        .and_then(Value::as_str);
     let expected = null_if(locked_by);
-    if stored_owner != expected.as_deref() {
-        let show = |v: Option<&str>| {
-            v.map(|s| format!("'{s}'"))
-                .unwrap_or_else(|| "'None'".into())
-        };
-        return Err(refused(
-            format!(
-                "error: {node_id} read back locked_by={}, not {}: the write did not \
-                 persist. A concurrent claim transition may have cleared it; \
-                 re-check before trusting.",
-                show(stored_owner),
-                show(expected.as_deref())
-            ),
-            1,
-        ));
-    }
-    if expected.is_none() {
-        // Earned-success rule: a lock clear that left the node in_progress on
-        // its own open do rows did not return it to the queue.
-        let row = stored.unwrap_or(&Value::Null);
-        let stored_status = row
-            .get("persisted_status")
-            .and_then(Value::as_str)
-            .or_else(|| row.get("status").and_then(Value::as_str));
-        if stored_status == Some("in_progress") {
-            let open_do = row
-                .get("sessions")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter(|r| graph_store::is_open_do_row(r)).count())
-                .unwrap_or(0);
-            let plural = if open_do != 1 { "s" } else { "" };
+    if let Some(holder) = expected {
+        let (state, record) = crate::claims::status(&format!("node:{node_id}"), None);
+        let holder_matches = record.as_ref().is_some_and(|r| r.holder == holder)
+            && matches!(
+                state,
+                crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+            );
+        if !holder_matches {
             return Err(refused(
                 format!(
-                    "update: {node_id} still reads in_progress after clearing the \
-                     claim ({open_do} open do row{plural}). The claim was not what \
-                     held it. Use: fno backlog requeue {node_id}"
+                    "error: {node_id} read back no live claim for '{holder}': the stamp \
+                     did not hold. Hold it with: fno agents claim acquire \
+                     node:{node_id} --holder {holder}"
                 ),
-                3,
+                1,
             ));
         }
         return Ok(());
     }
-    if !node_has_live_claim(&format!("node:{node_id}")) {
-        eprintln!(
-            "warning: no live claim lockfile backs node:{node_id}; claim hygiene \
-             (fno agents claim reap) clears locked_by without one. To hold the node: \
-             fno agents claim acquire node:{node_id}"
-        );
+    // A release: the earned-success rule. A lock clear that left the node
+    // in_progress on its own open do rows did not return it to the queue.
+    let row = stored.unwrap_or(&Value::Null);
+    let stored_status = row
+        .get("persisted_status")
+        .and_then(Value::as_str)
+        .or_else(|| row.get("status").and_then(Value::as_str));
+    if stored_status == Some("in_progress") {
+        let open_do = row
+            .get("sessions")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter(|r| graph_store::is_open_do_row(r)).count())
+            .unwrap_or(0);
+        let plural = if open_do != 1 { "s" } else { "" };
+        return Err(refused(
+            format!(
+                "update: {node_id} still reads in_progress after clearing the \
+                 claim ({open_do} open do row{plural}). The claim was not what \
+                 held it. Use: fno backlog requeue {node_id}"
+            ),
+            3,
+        ));
     }
     Ok(())
 }

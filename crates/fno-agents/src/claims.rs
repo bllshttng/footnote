@@ -2527,7 +2527,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 /// pool-machinery ancestor (a thread worker has no process of its own) -
 /// because the caller's fallback is to leave the anchor exactly as it
 /// found it. An unresolvable pid is not a reason to write a worse one.
-fn durable_session_pid() -> Option<i32> {
+pub(crate) fn durable_session_pid() -> Option<i32> {
     crate::spawn_context::session_identity_ambient(std::process::id())
         .0
         .map(|pid| pid as i32)

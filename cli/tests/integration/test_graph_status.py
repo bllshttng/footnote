@@ -81,6 +81,9 @@ def _native_update(tmp_graph, *args: str):
             "HOME": str(tmp_graph.parent),
             "FNO_STATE_DIR": str(tmp_graph.parent),
             "FNO_TRACKER_BACKEND": "graph",
+            # The claim store is the lock's single writer: the binary must
+            # read and write the SAME root the python fixtures seeded.
+            **({"FNO_CLAIMS_ROOT": root} if (root := _os.environ.get("FNO_CLAIMS_ROOT")) else {}),
         },
         cwd=str(tmp_graph.parent),
     )
@@ -107,18 +110,19 @@ def test_idea_status_derived_from_no_plan_path(tmp_graph):
 
 
 def test_idea_status_overridden_by_lockfile_claim(tmp_graph, monkeypatch):
-    """An idea-shaped node with a live claim lockfile derives to in_progress."""
+    """An idea-shaped node whose holder stamps it through the claim store
+    derives to in_progress: locked_by projects from the claim, never from a
+    row mirror."""
     from fno.claims.core import acquire_claim
-    from fno.graph.store import read_graph
 
     add = _invoke("--json", "backlog", "add", "Claimed idea")
     node_id = json.loads(add.stdout)["id"]
-    claims_root = tmp_graph.parent / "claims"
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    # Env-routed acquire (never the explicit-root legacy writer whose
+    # dialect the native reader refuses): the --locked-by stamp must land
+    # as an idempotent re-acquire of THIS holder's live claim.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-X")
-    acquire_claim(
-        f"node:{node_id}", "target-session:session-X", root=claims_root
-    )
+    acquire_claim(f"node:{node_id}", "session-X")
 
     r = _native_update(tmp_graph, node_id, "--locked-by", "session-X")
     assert r[0] == 0, r[1]
@@ -792,6 +796,22 @@ def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph, monke
     add = _invoke("--json", "backlog", "add", "Running work")
     target_id = json.loads(add.stdout)["id"]
 
+    # The live claim the scenario names, seeded env-routed so the native
+    # reader accepts it; the --locked-by call is then an idempotent
+    # re-acquire of the same holder, never a second writer.
+    from fno.claims.core import acquire_claim
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    acquire_claim(
+        f"node:{target_id}",
+        "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
+    )
+    upd = _native_update(
+        tmp_graph, target_id,
+        "--locked-by", "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
+    )
+    assert upd[0] == 0, upd[1]
+
     r = _invoke(
         "--json", "backlog", "idea", "Claimed finding",
         "--wave-of", target_id,
@@ -803,7 +823,7 @@ def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph, monke
     assert receipt["outcome"] == "wave"
     assert receipt["minted_id"] is None
 
-    node = next(e for e in read_graph(tmp_graph) if e["id"] == target_id)
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
     assert node.get("status") == "in_progress", node.get("status")
     notes = node.get("progress_notes") or []
     assert notes and notes[-1]["kind"] == "wave"
@@ -929,6 +949,8 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
     target_id = json.loads(target.stdout)["id"]
+    _native_update(tmp_graph, target_id, "--locked-by", "null")
+    _native_update(tmp_graph, target_id, "--completion-note", "terminal fixture")
     _invoke("backlog", "done", target_id)
     r = _invoke(
         "--json", "backlog", "idea", "Late finding",
