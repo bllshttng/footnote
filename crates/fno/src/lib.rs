@@ -32,6 +32,7 @@ pub mod feed_overlay;
 pub mod frame_html;
 pub mod keys;
 pub mod lane_colors_panel;
+pub(crate) mod lattice;
 pub mod law_cli;
 pub mod link;
 pub mod live_store_fence;

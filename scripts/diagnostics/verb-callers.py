@@ -138,7 +138,9 @@ CONTROLS = {"agents spawn": 100, "do": 25, "backlog next": 25}
 # no longer prove the leaf-specific AST walk. The two independent controls
 # below still pin a nested list-literal call and a kept agents leaf.
 AST_CONTROLS = {"agents spawn": 2, "backlog done": 1}
-INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "do": 20, "backlog update": 10}
+# `backlog next` replaces the retired `backlog update` as the third
+# internal-text control: a live backlog leaf whose python leg still sweeps.
+INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "do": 20, "backlog next": 10}
 
 # Verbs reachable ONLY through shell command substitution, where the binary
 # name is glued to a variable assignment and is not a bare token:

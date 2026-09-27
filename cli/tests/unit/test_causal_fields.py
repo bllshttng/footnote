@@ -64,55 +64,6 @@ def test_entry_causal_defaults_parse_old_graphs():
 # -- backlog update flags ------------------------------------------------------
 
 
-def test_update_sets_causal_fields(tmp_graph):
-    _seed(tmp_graph, [_node("ab-00000001"), _node("ab-00000002")])
-    result = runner.invoke(app, [
-        "backlog", "update", "ab-00000001",
-        "--caused-by", "ab-00000002", "--fixes-pr", "42", "--reverted",
-    ])
-    assert result.exit_code == 0, result.output
-    n = _read(tmp_graph)[0]
-    assert n["caused_by"] == "ab-00000002"
-    assert n["fixes_pr"] == 42
-    assert n["reverted"] is True
-
-
-def test_update_caused_by_self_reference_fails(tmp_graph):
-    _seed(tmp_graph, [_node("ab-00000001")])
-    result = runner.invoke(app, [
-        "backlog", "update", "ab-00000001", "--caused-by", "ab-00000001",
-    ])
-    assert result.exit_code == 1
-    assert _read(tmp_graph)[0].get("caused_by") is None
-
-
-def test_update_caused_by_unknown_node_fails(tmp_graph):
-    _seed(tmp_graph, [_node("ab-00000001")])
-    result = runner.invoke(app, [
-        "backlog", "update", "ab-00000001", "--caused-by", "ab-deadbeef",
-    ])
-    assert result.exit_code == 1
-
-
-def test_update_clears_causal_fields(tmp_graph):
-    _seed(tmp_graph, [
-        _node("ab-00000001", caused_by="ab-00000002", fixes_pr=42, reverted=True),
-        _node("ab-00000002"),
-    ])
-    result = runner.invoke(app, [
-        "backlog", "update", "ab-00000001",
-        "--caused-by", "null", "--fixes-pr", "0", "--no-reverted",
-    ])
-    assert result.exit_code == 0, result.output
-    n = _read(tmp_graph)[0]
-    assert n["caused_by"] is None
-    assert n["fixes_pr"] is None
-    assert n["reverted"] is False
-
-
-# -- retro land: auto caused_by ------------------------------------------------
-
-
 def _candidate() -> Candidate:
     return Candidate(
         title="follow-up",

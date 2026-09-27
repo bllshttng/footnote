@@ -168,6 +168,45 @@ pub fn graph_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".fno").join("graph.json"))
 }
 
+/// The configured dispatch-verb extension: `(allowed_verbs, verb_registry
+/// keys)`. Unset `allowed_verbs` defaults to the shipped trio, the same
+/// default the Python config model carries.
+pub fn dispatch_verbs_from_config() -> (Vec<String>, Vec<String>) {
+    const DEFAULT_DISPATCH_VERBS: [&str; 3] = ["/target", "/think", "/blueprint"];
+    for path in candidates() {
+        let doc = read_flat(&path);
+        let dispatch = doc.get("dispatch");
+        let allowed: Vec<String> = dispatch
+            .and_then(|d| d.get("allowed_verbs"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                DEFAULT_DISPATCH_VERBS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+        let registry: Vec<String> = dispatch
+            .and_then(|d| d.get("verb_registry"))
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        return (allowed, registry);
+    }
+    (
+        DEFAULT_DISPATCH_VERBS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        Vec::new(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

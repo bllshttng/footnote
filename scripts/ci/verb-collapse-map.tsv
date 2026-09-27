@@ -122,6 +122,7 @@ agents target-family	T1	agents target-family	2
 agents test-run	T1	agents test-run	3
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
+agents transcript-paths	T1	agents transcript-paths	2
 agents truth	T1	agents truth	16
 agents verify-evidence	T1	agents verify-evidence	7
 agents wait	T1	agents wait	10
@@ -256,7 +257,6 @@ backlog undefer	T1	backlog undefer	14
 backlog undispatched	T1	backlog undispatched	0
 backlog unqueue	T1	backlog unqueue	0
 backlog unsupersede	T1	backlog unsupersede	0
-backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
 backlog view	T1	backlog view	3
 backlog worked	T1	backlog worked	2
 bundle check	T1	bundle check	11
