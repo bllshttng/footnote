@@ -718,10 +718,28 @@ def _hermetic_authorized_merge(monkeypatch):
 # pulls only os/pathlib/typing plus harness_identity, never fno.graph.
 from fno.hermetic import neutralise  # noqa: E402
 
+# The pytest process's own harness session id, caught BEFORE the swap below
+# scrubs it. Session markers are deliberately ambient - tests run as bare
+# operator shells - so after the swap nothing in os.environ can answer "was
+# pytest itself started inside a harness session?". The fixture below hands
+# the caught value to the tests that need it.
+_HARNESS_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+
 _SANDBOX = tempfile.mkdtemp(prefix="fno-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
 os.environ.update(_hermetic_env)
+
+
+@pytest.fixture()
+def harness_session_id() -> str:
+    """The pytest process's own harness session id, or '' from a bare shell.
+
+    Read this instead of the environment: the swap above empties every session
+    marker before any test module imports, so an import-time read always sees
+    the name unset.
+    """
+    return _HARNESS_SESSION_ID
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
