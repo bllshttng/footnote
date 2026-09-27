@@ -124,6 +124,13 @@ fn fence_declared_root(claimed: bool, root: &Path) {
     );
 }
 
+/// The fence for a state root resolved OUTSIDE this module: the plans chain
+/// resolves its own space root through the full config chain, and the same
+/// hermetic rule applies there.
+pub(crate) fn fence_resolved_root(root: &Path) {
+    fence_declared_root(test_sandbox_claimed(), root);
+}
+
 /// Resolved `~/.fno/agents/` root and the paths under it.
 #[derive(Debug, Clone)]
 pub struct AgentsHome {
