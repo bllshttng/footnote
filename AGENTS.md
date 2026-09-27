@@ -113,7 +113,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / `fno do state`:
 - `~/.fno/graph.db` - the backlog graph; mutate via `fno backlog` only.
 - `<space>/worktrees/<name>/target-state.md` - immutable manifest. Only post-init write is first-fill of `plan_path` via `fno do state set`.
-- Generated copies named in `generated-artifacts.tsv` or `skill-bundles.yaml`, and the installed plugin copy. Edit and Write are refused. The refusal names the source and regen command.
+- Generated copies named in `generated-artifacts.tsv` or `skill-bundles.yaml`, and the installed plugin copy. Edit, Write, and Bash writes are refused. The refusal names the source and regen command.
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
