@@ -134,11 +134,15 @@ pub fn driver_default_max(lib: &Path) -> Result<u64, LoopError> {
 /// otherwise `fno_bin` is used as-is (callers pass `"fno"` for production and a
 /// tempdir stub path for tests).
 pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
-    let binary = std::env::var("FNO_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| fno_bin.to_string());
-    Command::new(binary)
+    if let Some(v) = std::env::var("FNO_BIN").ok().filter(|s| !s.is_empty()) {
+        return Command::new(v);
+    }
+    // A caller-passed stub path wins; the production default rides the crate
+    // resolver so a lib unit test cannot reach the installed fno.
+    if fno_bin == "fno" {
+        return Command::new(crate::scrape::fno_bin());
+    }
+    Command::new(fno_bin)
 }
 
 /// Run a spawn closure, retrying briefly on ETXTBSY ("Text file busy", os error
@@ -361,7 +365,7 @@ fn pick_would_undo_a_route_with(
 /// `fno`, an absent `fno`, a refusal - is an `Err` the caller logs and ignores,
 /// so the loop cannot be wedged by it.
 fn pick_account_env() -> Result<PickedEnv, String> {
-    let out = Command::new("fno")
+    let out = Command::new(crate::scrape::fno_bin())
         .args(PICK_ARGV)
         .output()
         .map_err(|e| format!("could not run `fno config accounts pick`: {e}"))?;

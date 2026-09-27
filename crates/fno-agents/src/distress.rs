@@ -1142,7 +1142,9 @@ print(rec["payload"]["content"][0]["text"], end="")
         // AC2/AC4 for the loopcheck seam: a declared stub passes through
         // unchanged; unset under cfg!(test) the resolver answers a path that
         // cannot exec and whose text names the remedy.
-        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let _env_guard = fno_bin_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         std::env::remove_var(var);
@@ -1167,7 +1169,9 @@ print(rec["payload"]["content"][0]["text"], end="")
         // receives the argv (positive control); with the var removed the row
         // still lands in events.jsonl and the stub log gains nothing - the
         // durable row never depended on the push.
-        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let _env_guard = fno_bin_env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let tmp = tempfile::tempdir().unwrap();

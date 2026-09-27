@@ -77,7 +77,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut driver = "target".to_string();
     let mut harness: Option<String> = None;
     let mut harness_session: Option<String> = None;
-    let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    let mut fno_bin = super::loopcheck_fno_bin();
     // Env-as-default like the two bin overrides, so the real shell shim can be
     // driven end to end against a wedged child at a test bound without the
     // shim having to forward a flag it does not know about.

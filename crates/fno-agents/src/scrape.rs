@@ -1068,7 +1068,9 @@ mod tests {
         // AC3: unset under cfg!(test) the resolver answers a path that does
         // not exist and whose text names the remedy; AC2: a declared path
         // passes through unchanged.
-        let _guard = crate::claims::test_env_lock().lock().unwrap();
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os("FNO_BIN");
         std::env::remove_var("FNO_BIN");
         let resolved = fno_bin();

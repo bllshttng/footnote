@@ -545,6 +545,11 @@ fn run_render_pass() -> Result<(), (i32, String)> {
     let bin = match std::env::var_os("FNO_BIN") {
         Some(v) => PathBuf::from(v),
         None => {
+            // A lib unit test declared no fno: refuse before the PATH walk,
+            // the same declared-only rule scrape::fno_bin applies.
+            if cfg!(test) {
+                return Err((-1, "no fno declared under a unit test".into()));
+            }
             let path = match std::env::var_os("PATH") {
                 Some(p) => p,
                 None => return Err((-1, "PATH is unset; the view pass cannot run".into())),
