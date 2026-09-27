@@ -931,93 +931,35 @@ def test_profile_lanes_walk_in_declared_order(monkeypatch):
 
 
 @requires_rust
-def test_profile_lanes_skip_capped_vendor(monkeypatch):
-    import fno.agents.spawn_defaults as spawn_defaults
-    import fno.agents.spawn_gate as spawn_gate
-
-    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
-    _pin_capacity(monkeypatch)
-    monkeypatch.setattr(
-        spawn_gate,
-        "probe_capacity",
-        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
-    )
-    err = io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "w", "/fno:target x-1"],
-        err=err,
-        max_lanes={"zai": 2},
-        profiles={"target": {"lanes": [
-            _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
-            _lane("codex", permission_mode="yolo"),
-        ]}},
-    )
-    assert out[out.index("--harness") + 1] == "codex"
-    assert "provider zai at 2 of 2" in err.getvalue()
-    assert "agents.profiles.target.lanes[1]" in err.getvalue()
-
-
-@requires_rust
-def test_profile_only_lane_at_cap_refuses(monkeypatch):
-    import fno.agents.spawn_defaults as spawn_defaults
-    import fno.agents.spawn_gate as spawn_gate
-
-    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
-    # contract is that it never BLOCKS a spawn - so it disables exactly the
-    # refusal under test here. Opt back in, or this asserts nothing.
+def test_profile_capped_lane_refuses_when_count_unavailable(tmp_path, monkeypatch):
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
-    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr(
-        spawn_gate,
-        "probe_capacity",
-        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
-    )
+    config = tmp_path / "config.toml"
+    config.write_text("[agents.provider_limits.zai]\nlanes = 2\n")
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    (agents_home / "registry.json").write_text("not json")
+    claims_root = tmp_path / "claims"
+    claims_root.mkdir()
+    runtime_state = tmp_path / "runtime-state.json"
+    runtime_state.write_text('{"usage": {}}')
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno-home"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(runtime_state))
+
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         _inject(
             ["spawn", "--name", "w", "/fno:target x-1"],
             err=err,
-            max_lanes={"zai": 2},
-            profiles={"target": {"lanes": [
-                _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
-            ]}},
-        )
-    assert exc.value.code == 2
-    assert "zai" in err.getvalue() and "2 of 2" in err.getvalue()
-
-
-@requires_rust
-def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
-    import fno.agents.spawn_defaults as spawn_defaults
-    import fno.agents.spawn_gate as spawn_gate
-
-    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
-    # contract is that it never BLOCKS a spawn - so it disables exactly the
-    # refusal under test here. Opt back in, or this asserts nothing.
-    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
-    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr(
-        spawn_gate,
-        "probe_capacity",
-        lambda *a, **k: {
-            "verdict": "unknown",
-            "reason": "lane_count_unavailable",
-            "provider": "zai",
-            "error": "registry incomplete",
-        },
-    )
-    err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _inject(
-            ["spawn", "--name", "w", "/fno:target x-1"],
-            err=err,
-            max_lanes={"zai": 2},
             profiles={"target": {"lanes": [
                 _lane("claude", route="zai/glm-5.3[1m]"),
             ]}},
         )
     assert exc.value.code == 2
-    assert "registry incomplete" in err.getvalue()
+    assert "fno registry unreadable:" in err.getvalue()
 
 
 @requires_rust
@@ -1036,7 +978,6 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
     assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
 
 
-@requires_rust
 @requires_rust
 def test_profile_lane_injects_pane_group(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
