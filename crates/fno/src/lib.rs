@@ -64,6 +64,7 @@ pub mod server;
 pub mod server_stats;
 pub mod sideline_color;
 pub mod spawn_journal;
+pub mod splash;
 pub mod sprites;
 pub mod squad;
 pub mod squad_cascade;
