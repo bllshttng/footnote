@@ -126,6 +126,10 @@ pub(crate) fn plan_doc_filename(
     let template = config_lookup(anchor, &["plans_filename"])
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| DEFAULT_PLANS_FILENAME.to_string());
+    // Python strftime leaves a code it does not know (say %q) in the output
+    // literally; chrono drops it. Wrap every code chrono cannot render in a
+    // field-shaped literal so the rendered name carries it the same way.
+    let template = preserve_unsupported_codes(&template);
     let items = chrono::format::strftime::StrftimeItems::new(&template);
     let stamped = at
         .unwrap_or_else(LocalTimestamp::now)
@@ -153,6 +157,40 @@ pub(crate) fn plan_doc_filename(
         }
     }
     Ok(trimmed)
+}
+
+/// Python's strftime leaves a code it does not know literally in the name;
+/// chrono renders some of those with its own meaning (`%q` is chrono's
+/// quarter) or drops others. Rewriting an out-of-set `%X` to `%%X` makes
+/// chrono emit `%` plus the bare letter, which is exactly the literal.
+const PYTHON_STRFTIME_CODES: &[&str] = &[
+    "a", "A", "b", "B", "c", "C", "d", "D", "e", "F", "g", "G", "h", "H", "I", "j", "m", "M", "n",
+    "p", "r", "R", "S", "t", "T", "u", "U", "V", "w", "W", "x", "X", "y", "Y", "z", "Z",
+];
+
+/// Escape every `%X` code outside Python's strftime set to its literal form.
+fn preserve_unsupported_codes(template: &str) -> String {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_alphabetic() {
+            let code = &template[i + 1..i + 2];
+            if PYTHON_STRFTIME_CODES.contains(&code) {
+                out.push_str(&template[i..i + 2]);
+            } else {
+                out.push('%');
+                out.push('%');
+                out.push_str(&template[i + 1..i + 2]);
+            }
+            i += 2;
+            continue;
+        }
+        let ch = template[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// The node id a plan filename encodes, if it ends with one and its prefix
@@ -881,6 +919,19 @@ mod tests {
         // leading dashes strip. An empty slug and node leave only the date.
         let name = plan_doc_filename(&fx.root(), "", "", LocalTimestamp::from_epoch(NOW)).unwrap();
         assert_eq!(name, "20260927.md", "empty slug and node degrade cleanly");
+    }
+
+    #[test]
+    fn plans_filename_keeps_codes_chrono_cannot_render() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = Fixture::new("badcode");
+        let _env = EnvGuard::new(&fx.pins());
+        // Python strftime leaves %q literally in the output; the render must
+        // too, not silently drop it.
+        fs::write(fx.config(), "plans_filename = \"%q-%Y%m%d-{slug}.md\"\n").unwrap();
+        let name =
+            plan_doc_filename(&fx.root(), "feature", "", LocalTimestamp::from_epoch(NOW)).unwrap();
+        assert_eq!(name, "%q-20260927-feature.md");
     }
 
     #[test]
