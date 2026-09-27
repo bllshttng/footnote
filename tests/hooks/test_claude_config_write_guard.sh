@@ -51,8 +51,8 @@ expect "AC1: > ~/.claude/jobs/<id>/tmp/x.out is allowed" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ~/.claude/jobs/$SID/tmp/x.out\"},\"session_id\":\"$SID\"}"
 
 # ── AC2: the measured incident shape, absolute redirect ───────────────────────
-expect "AC2: absolute redirect to uvsync.out" block \
-  '{"tool_name":"Bash","tool_input":{"command":"uv sync --project cli > /Users/bb16/.claude/uvsync.out"},"session_id":"'$SID'"}'
+expect "AC2: expanded-home absolute redirect to uvsync.out" block \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"uv sync --project cli > $HOME/.claude/uvsync.out\"},\"session_id\":\"$SID\"}"
 expect "AC2: >> append to agents-ci.log" block \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"run-agent --collect >> ~/.claude/agents-ci.log\"},\"session_id\":\"$SID\"}"
 expect "AC2: \$HOME form" block \
@@ -62,15 +62,15 @@ expect "AC2: \$CLAUDE_CONFIG_DIR form" block \
 
 # ── AC3: Edit and Write payloads to a top-level file ──────────────────────────
 expect "AC3: Write to ~/.claude/notes.md" block \
-  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/Users/bb16/.claude/notes.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$HOME/.claude/notes.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
 expect "AC3: Edit to a top-level dotfile" block \
-  "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/Users/bb16/.claude/.buddy copy.json\",\"old_string\":\"a\",\"new_string\":\"b\"},\"session_id\":\"$SID\"}"
+  "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$HOME/.claude/.buddy copy.json\",\"old_string\":\"a\",\"new_string\":\"b\"},\"session_id\":\"$SID\"}"
 
 # ── AC4: named harness config files and tmp files stay editable ───────────────
 expect "AC4: Write to settings.json stays allowed" approve \
-  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/Users/bb16/.claude/settings.json\",\"content\":\"{}\"},\"session_id\":\"$SID\"}"
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$HOME/.claude/settings.json\",\"content\":\"{}\"},\"session_id\":\"$SID\"}"
 expect "AC4: Write to CLAUDE.md stays allowed" approve \
-  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/Users/bb16/.claude/CLAUDE.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$HOME/.claude/CLAUDE.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
 expect "AC4: .claude.json.tmp stays out of scope" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ~/.claude/.claude.json.tmp.123.abc\"},\"session_id\":\"$SID\"}"
 
@@ -78,7 +78,7 @@ expect "AC4: .claude.json.tmp stays out of scope" approve \
 expect "AC5: projects/ write" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"dump > ~/.claude/projects/x/cache.json\"},\"session_id\":\"$SID\"}"
 expect "AC5: plugins/ write" approve \
-  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/Users/bb16/.claude/plugins/cache/x/y.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$HOME/.claude/plugins/cache/x/y.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}"
 
 # ── AC6: the config FILE at \$HOME is a sibling, not inside the dir ───────────
 expect "AC6: > ~/.claude.json stays allowed" approve \
@@ -104,6 +104,12 @@ expect "AC8: cp into the config dir" block \
 expect "AC8: mv into jobs/ stays allowed" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"mv staged ~/.claude/jobs/$SID/tmp/scratch.out\"},\"session_id\":\"$SID\"}"
 
+# ── AC8b: a directory-form destination lands a top-level file ─────────────────
+expect "AC8b: cp into the config dir itself" block \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cp staged ~/.claude/\"},\"session_id\":\"$SID\"}"
+expect "AC8b: bare mv destination" block \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"mv staged ~/.claude\"},\"session_id\":\"$SID\"}"
+
 # ── AC9: the refusal names the session's job tmp dir ──────────────────────────
 out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ~/.claude/x.out\"},\"session_id\":\"$SID\"}" | bash "$GUARD" 2>/dev/null)
 if printf '%s' "$out" | grep -q "jobs/${SID:0:8}/tmp"; then
@@ -125,6 +131,30 @@ if [[ "$out" == "{}" ]]; then
   pass "AC10: CLAUDE_CONFIG_DIR subdir stays allowed"
 else
   fail "AC10: subdir under CLAUDE_CONFIG_DIR blocked: $out"
+fi
+rm -rf "$CFGDIR"
+
+# ── AC11: the python3 fallback (no jq on PATH) still reads tool_input ─────────
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ~/.claude/x.out\"},\"session_id\":\"$SID\"}" | PATH="/usr/bin:/bin" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"block"'; then
+  pass "AC11: python3-only PATH still blocks a redirect"
+else
+  fail "AC11: python3 fallback approved: $out"
+fi
+out=$(printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$HOME/.claude/notes.md\",\"content\":\"x\"},\"session_id\":\"$SID\"}" | PATH="/usr/bin:/bin" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"block"'; then
+  pass "AC11: python3-only PATH still blocks a Write"
+else
+  fail "AC11: python3 fallback approved a Write: $out"
+fi
+
+# ── AC12: the refusal names the VIOLATED namespace's job dir ──────────────────
+CFGDIR="$(mktemp -d)"
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > $CFGDIR/scratch.out\"},\"session_id\":\"$SID\"}" | CLAUDE_CONFIG_DIR="$CFGDIR" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q "jobs/${SID:0:8}/tmp" && printf '%s' "$out" | grep -q "$CFGDIR/jobs"; then
+  pass "AC12: isolated namespace job dir named"
+else
+  fail "AC12: refusal lacks the isolated job dir: $out"
 fi
 rm -rf "$CFGDIR"
 
