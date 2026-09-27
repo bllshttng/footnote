@@ -5684,7 +5684,7 @@ def _mux_pane_send(
     # the entry IS the row, so the bus-only gate reads it directly --
     # a bus-only recipient never gets a pane paste, same as the control.sock
     # and codex lanes.
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(entry, text) == BUS_ONLY_POLICY:
         _record_failure("pre-submit")
         return False
     from fno.agents.harness_map import capabilities_or_undeclared
@@ -6254,63 +6254,53 @@ def _mux_content_confirm(
     return False
 
 
-def _hold_lapsed_for(entry) -> bool:
-    """True when ``entry``'s ``bus-only`` flag no longer holds mail.
-
-    Busy mode arms the flag with a clock (``fno.mail.hold``). A row with no
-    clock under any of its addresses is not a busy-mode hold at all - it is a
-    policy stamped by ``fno agents register --delivery-policy bus-only``, which
-    has no clock by construction - so it never lapses and the refusal stands
-    exactly as it did before this function existed. Only a timed hold expires.
-
-    The address list comes from ``hold.addresses``, the same rule the writers
-    use, rather than a second copy here. A copy that omitted the canonical
-    handle looked correct on claude, where the handle IS the ``short_id``, and
-    made this check unable to find a codex hold at all: every writer keys by the
-    first-eight, and none of that row's other addresses is the first-eight.
-
-    Pure read. It never mutates the registry, so it cannot deadlock a caller
-    already holding the registry lock; the stale flag is tidied by the release
-    path and by ``fno agents mail notify-self``.
-    """
-    try:
-        from fno.mail import hold as _hold
-
-        if _hold.read_any(entry) is None:
-            return False
-        return _hold.lapsed(entry)
-    except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
-        return False
-
-
-def _delivery_policy_refusal(target) -> Optional[str]:
-    """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
-    belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
-    unreadable registry). The gate every shared injector consults BEFORE any
-    transport call, so the no-paste guarantee holds on every reachable lane
-    rather than on whichever lane remembered to check. Accepts an
-    ``AgentEntry``, or an id/handle token matched against
-    ``harness_session_id``, ``short_id``, and ``name``; an unresolvable read
-    fails open toward live delivery, never toward stranding mail. Never
-    raises."""
-    try:
-        if target is None:
-            return None
-        # The expiry check belongs on BOTH entry and token branches.
-        if hasattr(target, "delivery_policy"):
-            if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
-                return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY
-            return None
-        entries = load_registry()
-    except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
+def _delivery_policy_refusal(target, body: Optional[str] = None) -> Optional[str]:
+    """:data:`BUS_ONLY_POLICY` when the Rust hold gate holds mail to
+    ``target``; ``None`` otherwise. One-call port of the gate body to
+    ``mail_hold.rs`` ``gate`` (law d-b6cc1a2a), which owns the row resolution
+    (harness session id, short id, name), the clock sweep, the own-send and
+    ``control:`` passes, and the C16 receipt. An entry whose policy is not
+    ``bus-only`` answers ``None`` with no subprocess; a failed or unreadable
+    gate on a stamped row fails closed -- it never lifts a hold it could not
+    read, which was ``_hold_lapsed_for``'s rule. Accepts an ``AgentEntry``, or
+    an id/handle token; the token pre-read keeps the token branch failing open
+    toward live delivery when no stamped row carries it. Never raises."""
+    if target is None:
         return None
-    for entry in entries:
-        if (
-            getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
-            and target in (entry.harness_session_id, entry.short_id, entry.name)
-        ):
-            return None if _hold_lapsed_for(entry) else BUS_ONLY_POLICY
-    return None
+    if hasattr(target, "delivery_policy"):
+        if getattr(target, "delivery_policy", None) != BUS_ONLY_POLICY:
+            return None
+        token = getattr(target, "harness_session_id", None) or getattr(target, "name") or ""
+    else:
+        token = target
+        try:
+            stamped = any(
+                getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
+                and target in (entry.harness_session_id, entry.short_id, entry.name)
+                for entry in load_registry()
+            )
+        except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
+            return None
+        if not stamped:
+            return None
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return BUS_ONLY_POLICY
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-hold", "--gate", "--session", token],
+            input=body or "",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        import json
+
+        return None if json.loads(proc.stdout).get("verdict") == "deliver" else BUS_ONLY_POLICY
+    except Exception:  # noqa: BLE001 - fail closed: never lift a hold we could not read
+        return BUS_ONLY_POLICY
 
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
@@ -6372,7 +6362,7 @@ def _mail_inject_keeper(
 
     #, same discipline as lane A: a bus-only recipient gets no prompt-
     # line paste on any transport, refused before the binary and the socket.
-    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(recipient, text) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 
@@ -6440,7 +6430,7 @@ def _mail_inject_claude(
     # a bus-only recipient never gets a prompt-line paste, on any lane
     # that routes through this injector. Refused BEFORE the binary, the roster,
     # and the socket: no transport call at all.
-    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(recipient, text) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 
@@ -6926,7 +6916,7 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(thread_id, text) == BUS_ONLY_POLICY:
         if reason_out is not None:
             reason_out.append(BUS_ONLY_POLICY)
         return False
@@ -7115,7 +7105,7 @@ def _deliver_live(
     # The bus-only policy bounds EVERY live transport below, not only the three
     # shared injectors: the switchboard and daemon-RPC lanes drive a recipient
     # turn without routing through any of them.
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(entry, wrapped) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 

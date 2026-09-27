@@ -1192,27 +1192,31 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
     enforce_body_cap(text.len(), warn, refuse)
 }
 
-/// Refuse an unframed payload that is not a single command line. The
-/// invariant this door pins: an unframed payload is ONE line typed verbatim
-/// and it is a command, so it starts with / or $ (law d-f6570dc9, amending
-/// d-5976045c). Authored prose is style-checked and wrapped by `fno agents
-/// mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is framed
-/// and skipped. `Some(exit)` refuses before delivery and before the audit
-/// record; `None` proceeds.
+/// Refuse an unframed SINGLE-line payload that is not a command. The
+/// invariant this door pins: a one-line unframed payload is a command, so it
+/// starts with / or $ (law d-f6570dc9, amending d-5976045c). Authored prose
+/// is style-checked and wrapped by `fno agents mail send`; a `<fno_mail>` /
+/// `<cross-session-message>` envelope is framed and skipped.
+///
+/// A MULTI-line unframed payload is no longer refused here: the whole
+/// refusal reason was that a second line "rides in as a second submitted
+/// turn" -- and C17 deleted that harm, because the typing layer
+/// ([`inject_with_submit`]) flattens every newline run into one submitted
+/// line. The held-mail drain (hold.py `release` -> `_deliver_live` with no
+/// mail context) is the caller this door was stranding: its multi-line
+/// digest was refused with "an unframed payload must be a single line" and
+/// the held messages never reached the session. The digest types now, still
+/// audited as a raw inject.
 fn single_line_decision(text: &str) -> Option<i32> {
     if is_framed_envelope(text) {
         return None;
     }
     let trimmed = text.trim();
-    // A trailing terminator (the newline `echo` appends) is harmless: the paste
-    // submits the command, then an empty turn. Refuse only genuine second-line
-    // content, which rides in as a second submitted turn.
+    // A trailing terminator (the newline `echo` appends) was always harmless;
+    // genuine second-line content is flattened into the one submitted turn by
+    // the typing layer, so multi-line no longer refuses at all.
     if trimmed.contains('\n') || trimmed.contains('\r') {
-        eprintln!(
-            "mail-inject: an unframed payload must be a single line. A second line rides \
-             in as trailing content on the submitted turn."
-        );
-        return Some(1);
+        return None;
     }
     // Raw exists to run a command, not to carry a message: an unwrapped
     // payload lands as user-role text, so a message here impersonates the
@@ -2161,12 +2165,15 @@ mod tests {
     }
 
     #[test]
-    fn single_line_refuses_multi_line_unwrapped() {
-        // A second line of CONTENT rides in as a second submitted turn. A trailing
-        // terminator (covered above) does not, since trim() removes it.
-        assert_eq!(single_line_decision("/cmd\nsecond line"), Some(1));
-        assert_eq!(single_line_decision("prose one\nprose two"), Some(1));
-        assert_eq!(single_line_decision("/cmd\n\nsecond"), Some(1));
+    fn multi_line_unwrapped_types_flattened_after_c17() {
+        // The old refusal ("a second line rides in as a second submitted
+        // turn") died with the bracketed paste: the typing layer flattens
+        // every newline run into ONE submitted line, so a multi-line
+        // unframed payload delivers. The held-mail drain's digest is the
+        // caller this door was stranding.
+        assert_eq!(single_line_decision("/cmd\nsecond line"), None);
+        assert_eq!(single_line_decision("prose one\nprose two"), None);
+        assert_eq!(single_line_decision("/cmd\n\nsecond"), None);
     }
 
     #[test]

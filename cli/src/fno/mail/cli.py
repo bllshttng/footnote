@@ -3006,7 +3006,7 @@ def _raw_send(
     #     session, the same not-injectable shape as any other no-path verdict.
     from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
 
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(entry, stripped) == BUS_ONLY_POLICY:
         _refused(
             f"{name!r} is DND (delivery-policy bus-only): prompt-line injection is "
             "forbidden for this recipient. Send wrapped mail instead - it "

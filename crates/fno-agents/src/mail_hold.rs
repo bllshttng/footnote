@@ -14,8 +14,14 @@
 //! (`_write` in cli/src/fno/mail/hold.py) produces, so every Python reader
 //! (the injector gate, `notify-self`, `hold-release`) sees one hold, never
 //! two dialects.
+//!
+//! The delivery gate (C15, C16) lives here too: `--gate` answers one JSON
+//! verdict telling a caller whether mail to a session delivers live now.
+//! Own sends and `control:` mail pass a hold; the receipt names when it
+//! ends. It is the single authority the Python injectors consult; the
+//! Python gate bodies were one-call ports of it (law d-b6cc1a2a).
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -437,21 +443,219 @@ fn live_conversation_clock(handle: &str, now: chrono::DateTime<chrono::Utc>) -> 
     Some(clock)
 }
 
-/// `fno-agents mail-hold --session <id> [--off]`
+/// The delivery gate's answer for one send (C15, C16).
+pub(crate) struct GateVerdict {
+    /// True when the mail may deliver live now.
+    pub deliver: bool,
+    /// Why a held send delivered anyway: the caller IS the recipient
+    /// (`own`), or the body opens with a `control:` directive line
+    /// (`control`).
+    pub pass: Option<&'static str>,
+    /// The C16 receipt naming when the hold ends. `None` for a hand-stamped
+    /// hold with no clock, where the Python caller keeps its existing text.
+    pub receipt: Option<String>,
+    /// The live clock's `until`, for the verdict JSON. `None` when untimed
+    /// or delivering.
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The registry row the gate's token addresses, as (harness session id,
+/// name, delivery policy). The three keys are the ones the Python token
+/// branch matched: full session id (case-normalized), short id, name.
+fn lookup_gate_row(token: &str) -> Option<(String, String, Option<String>)> {
+    let registry = load_registry(&AgentsHome::shared_registry_json()).ok()?;
+    let wanted = identity_key(token);
+    let entry = registry.entries.iter().find(|e| {
+        e.harness_session_id
+            .as_deref()
+            .map(|sid| identity_key(sid) == wanted)
+            .unwrap_or(false)
+            || e.short_id == token
+            || e.name == token
+    })?;
+    Some((
+        entry.harness_session_id.clone()?,
+        entry.name.clone(),
+        entry.delivery_policy.clone(),
+    ))
+}
+
+/// Every clock address the gate sweeps for one row, in `hold.addresses`
+/// order: the full identity key leads, then the canonical first-eight
+/// handle (the pre-migration writer key), then the token verbatim.
+fn gate_clock_addresses(sid: &str, token: &str) -> Vec<String> {
+    let mut out = vec![identity_key(sid)];
+    if let Some(first8) = sid.get(..8) {
+        out.push(identity_key(first8));
+    }
+    if !out.iter().any(|h| h == &identity_key(token)) {
+        out.push(identity_key(token));
+    }
+    out
+}
+
+/// True when the caller resolving its own identity IS the held row (C15:
+/// a session's own sends pass its own hold). The resolver is the authority;
+/// the direct canonical-stamp read is its deterministic half, so a caller
+/// whose stamp is complete but unproven still passes its own hold.
+fn caller_is_recipient(sid: &str) -> bool {
+    let home = AgentsHome::from_env();
+    let owned =
+        crate::spawn_context::resolve_self_identity(&|k| std::env::var(k).ok(), None, None, &home);
+    if owned
+        .session_id
+        .as_deref()
+        .map(|s| identity_key(s) == identity_key(sid))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // The resolver's first input, read directly: a complete canonical stamp
+    // (FNO_HARNESS_NAME + FNO_HARNESS_SESSION_ID) names the caller.
+    let name = std::env::var("FNO_HARNESS_NAME").unwrap_or_default();
+    let session = std::env::var("FNO_HARNESS_SESSION_ID").unwrap_or_default();
+    !name.trim().is_empty()
+        && !session.trim().is_empty()
+        && crate::claims::same_session_id(&session, sid)
+}
+
+/// The C15 control pass: the body's first non-blank line -- after one
+/// leading `<fno_mail ...>` open tag is stripped, because the wrapped lane
+/// puts the directive after the tag -- starts with `control:`
+/// (case-insensitive, the budget rule).
+fn body_is_control(body: &str) -> bool {
+    let Some(first) = body.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return false;
+    };
+    let rest = match first.find('>') {
+        Some(gt) if first.len() >= 9 && first[..9].eq_ignore_ascii_case("<fno_mail") => {
+            &first[gt + 1..]
+        }
+        _ => first,
+    };
+    rest.trim_start().to_lowercase().starts_with("control:")
+}
+
+/// The C16 receipt for a live timed clock, in the row's local time. A
+/// conversation clock with more than the grace left names the answer end
+/// (its `until` is only the crash backstop, so a clock time there would be
+/// false); a conversation clock inside its grace reads as the wall clock it
+/// now is. An idle clock says "or later", because activity restarts it.
+fn hold_receipt(clock: &Clock, name: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let until = clock.until?;
+    let hhmm = |t: chrono::DateTime<chrono::Utc>| {
+        t.with_timezone(&chrono::Local).format("%H:%M").to_string()
+    };
+    let conversation = clock.source.as_deref() == Some(CONVERSATION_SOURCE);
+    if conversation && until - now > chrono::Duration::seconds(GRACE_S) {
+        return Some(format!(
+            "held: {name} is in a conversation with the user; delivers about 2 minutes after the answer ends"
+        ));
+    }
+    if clock.clock_kind == "idle" {
+        return Some(format!(
+            "held until about {} or later: {name} is in do-not-disturb and the quiet-minutes clock restarts on activity; delivers itself then",
+            hhmm(until)
+        ));
+    }
+    Some(format!(
+        "held until about {}: {name} is in do-not-disturb; delivers itself then",
+        hhmm(until)
+    ))
+}
+
+/// The delivery gate (C15, C16): does mail to `token` deliver live now?
+/// Resolution, clock sweep, own-send and control passes all read; the gate
+/// never writes, so it runs inside callers that may hold the registry lock.
+/// A lapsed clock delivers; a hand-stamped hold (no clock) stays held with
+/// no receipt, because the turn-boundary surface it promises is real.
+pub(crate) fn gate(
+    token: &str,
+    body: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> GateVerdict {
+    let deliver = |pass| GateVerdict {
+        deliver: true,
+        pass,
+        receipt: None,
+        until: None,
+    };
+    let Some((sid, name, policy)) = lookup_gate_row(token) else {
+        return deliver(None);
+    };
+    if policy.as_deref() != Some("bus-only") {
+        return deliver(None);
+    }
+    let clock = gate_clock_addresses(&sid, token)
+        .iter()
+        .find_map(|h| read_clock(h));
+    let held = match clock.as_ref() {
+        // No clock file: a hand-stamped hold with no end, no receipt.
+        None => None,
+        Some(c) => match c.until {
+            // Lapsed timed clock: the hold no longer holds.
+            Some(u) if u <= now => return deliver(None),
+            // Live timed clock.
+            Some(u) => Some((c, u)),
+            // `until: null` records a deliberate permanent policy: held.
+            None => None,
+        },
+    };
+    if caller_is_recipient(&sid) {
+        return deliver(Some("own"));
+    }
+    if body.is_some_and(body_is_control) {
+        return deliver(Some("control"));
+    }
+    let Some((clock, until)) = held else {
+        // Hand-stamped (no clock, or `until: null`): held, no receipt.
+        return GateVerdict {
+            deliver: false,
+            pass: None,
+            receipt: None,
+            until: None,
+        };
+    };
+    GateVerdict {
+        deliver: false,
+        pass: None,
+        receipt: hold_receipt(clock, &name, now),
+        until: Some(until),
+    }
+}
+
+/// The one JSON line `--gate` prints; Python parses the verdict field.
+fn gate_json(verdict: &GateVerdict) -> String {
+    serde_json::json!({
+        "verdict": if verdict.deliver { "deliver" } else { "hold" },
+        "pass": verdict.pass,
+        "receipt": verdict.receipt,
+        "until": verdict.until.map(|u| u.to_rfc3339()),
+    })
+    .to_string()
+}
+
+/// `fno-agents mail-hold --session <id> [--off | --gate]`
 ///
 /// Arm (default): run the conversation arm and report its outcome.
 /// `--off`: clear the clock and unstamp the policy, so a cancelled crown's
 /// mail delivers normally instead of holding forever on a stamped row with
 /// no clock (the never-lapses state). No row for the session: exit 3,
 /// nothing written.
+/// `--gate`: the delivery gate (C15, C16). Reads the optional body on
+/// stdin, prints one JSON verdict line, exits 0. Never writes: it runs
+/// inside callers that may hold the registry lock, and its answer is the
+/// single authority every Python injector consults.
 pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut session: Option<&String> = None;
     let mut off = false;
+    let mut gate_mode = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--session" => session = iter.next(),
             "--off" => off = true,
+            "--gate" => gate_mode = true,
             other => {
                 eprintln!("mail-hold: unknown argument {other:?}");
                 return 2;
@@ -462,6 +666,19 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
         eprintln!("mail-hold: --session <session-id> is required");
         return 2;
     };
+    if gate_mode {
+        // The body is optional. A terminal stdin is never read (the gate is a
+        // caller verb, not an interactive prompt); a piped or closed stdin is
+        // drained, and a read failure degrades to the no-body gate.
+        let mut body = String::new();
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            let _ = std::io::stdin().read_to_string(&mut body);
+        }
+        let verdict = gate(session_id, Some(&body), chrono::Utc::now());
+        println!("{}", gate_json(&verdict));
+        return 0;
+    }
     if off {
         match set_policy(session_id, None) {
             Some(matched) => {
@@ -965,5 +1182,256 @@ pub(crate) mod tests {
             2,
             "--minutes is gone; it reads as an unknown argument"
         );
+    }
+
+    /// A registry row already stamped `bus-only`, the gate's held shape.
+    fn stamped_row(name: &str, session: &str) -> serde_json::Value {
+        let mut row = registry_row(name, session);
+        row["delivery_policy"] = serde_json::Value::String("bus-only".into());
+        row
+    }
+
+    /// Restores snapshotted env vars on drop, so a panicking assert cannot
+    /// leak a stamp into the next test (the crate env lock serializes them).
+    struct EnvGuard(Vec<(String, Option<std::ffi::OsString>)>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(v) => std::env::set_var(&key, v),
+                    None => std::env::remove_var(&key),
+                }
+            }
+        }
+    }
+
+    fn env_guard(keys: &[&str]) -> EnvGuard {
+        EnvGuard(
+            keys.iter()
+                .map(|k| (k.to_string(), std::env::var_os(k)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn gate_delivers_an_unstamped_or_absent_row() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([registry_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            let v = gate(SID, None, now);
+            assert!(v.deliver && v.pass.is_none() && v.receipt.is_none() && v.until.is_none());
+            // No row at all: deliver (fail open toward live delivery).
+            let v = gate("nobody-here", None, now);
+            assert!(v.deliver);
+            // An unstamped row with a stray clock still delivers.
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(gate(SID, None, now).deliver);
+        });
+    }
+
+    #[test]
+    fn gate_delivers_a_lapsed_clock_and_holds_a_live_one() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            write_clock(
+                &identity_key(SID),
+                now - chrono::Duration::seconds(60),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            let v = gate(SID, None, now);
+            assert!(v.deliver, "a clock whose until is past delivers");
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            let v = gate(SID, None, now);
+            assert!(!v.deliver);
+            assert!(v.receipt.is_some());
+        });
+    }
+
+    #[test]
+    fn gate_holds_a_hand_stamped_row_with_no_receipt() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            // No clock at all, and an explicit `until: null` permanent clock:
+            // both hand-stamped shapes hold, and neither prints a receipt (the
+            // turn-boundary surface they promise is real).
+            let v = gate(SID, None, now);
+            assert!(!v.deliver && v.receipt.is_none() && v.until.is_none());
+            std::fs::create_dir_all(dir.join("mail-hold")).unwrap();
+            std::fs::write(
+                clock_path(dir, &identity_key(SID)),
+                "{\"until\": null, \"window_s\": null, \"clock_kind\": \"idle\", \"ceiling\": null}\n",
+            )
+            .unwrap();
+            let v = gate(SID, None, now);
+            assert!(!v.deliver && v.receipt.is_none());
+        });
+    }
+
+    #[test]
+    fn gate_passes_the_recipients_own_send() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // Pin the caller's self identity to the held row through the env
+            // getter the resolver reads (a complete canonical stamp), with a
+            // drop guard so a failed assert cannot leak the stamp.
+            let _g = env_guard(&["FNO_HARNESS_NAME", "FNO_HARNESS_SESSION_ID"]);
+            std::env::set_var("FNO_HARNESS_NAME", "claude");
+            std::env::set_var("FNO_HARNESS_SESSION_ID", SID);
+            let v = gate(SID, None, now);
+            assert!(v.deliver && v.pass == Some("own"));
+            // A different caller stays held.
+            std::env::set_var(
+                "FNO_HARNESS_SESSION_ID",
+                "eeeeeeee-9999-8888-7777-666655554444",
+            );
+            let v = gate(SID, None, now);
+            assert!(!v.deliver);
+        });
+    }
+
+    #[test]
+    fn gate_passes_control_mail_and_holds_a_mid_line_mention() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            let v = gate(SID, Some("<fno_mail from=\"k\">control: stop"), now);
+            assert!(v.deliver && v.pass == Some("control"));
+            let v = gate(SID, Some("CONTROL: stop the budget clock"), now);
+            assert!(v.deliver && v.pass == Some("control"));
+            let v = gate(SID, Some("the control: word mid-line"), now);
+            assert!(!v.deliver, "a mention is prose, not the directive");
+            // The directive must open the FIRST line, after the tag.
+            let v = gate(
+                SID,
+                Some("<fno_mail from=\"k\">\nstop, control: said late"),
+                now,
+            );
+            assert!(!v.deliver);
+        });
+    }
+
+    #[test]
+    fn gate_receipts_name_each_clock_shape() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let now = chrono::Utc::now();
+            // Answering-phase conversation clock: no wall time, the answer end.
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(ANSWER_BACKSTOP_S),
+                ANSWER_BACKSTOP_S,
+                "wall",
+                None,
+                Some(CONVERSATION_SOURCE),
+            )
+            .unwrap();
+            let receipt = gate(SID, None, now).receipt.unwrap();
+            assert!(
+                receipt == "held: worker is in a conversation with the user; delivers about 2 minutes after the answer ends",
+                "{receipt}"
+            );
+            // Conversation clock inside its grace: reads as the wall clock it is.
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(GRACE_S - 10),
+                GRACE_S,
+                "wall",
+                None,
+                Some(CONVERSATION_SOURCE),
+            )
+            .unwrap();
+            let receipt = gate(SID, None, now).receipt.unwrap();
+            assert!(receipt.starts_with("held until about "), "{receipt}");
+            assert!(
+                receipt.ends_with("worker is in do-not-disturb; delivers itself then"),
+                "{receipt}"
+            );
+            // Idle clock: "or later", because activity restarts it.
+            write_clock(
+                &identity_key(SID),
+                now + chrono::Duration::seconds(300),
+                300,
+                "idle",
+                Some(now + chrono::Duration::seconds(600)),
+                None,
+            )
+            .unwrap();
+            let receipt = gate(SID, None, now).receipt.unwrap();
+            assert!(
+                receipt.starts_with("held until about ") && receipt.contains("or later"),
+                "{receipt}"
+            );
+        });
+    }
+
+    #[test]
+    fn run_mail_hold_gate_prints_one_json_verdict_and_writes_nothing() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            let before = std::fs::read_dir(dir.join("mail-hold"))
+                .map(|rd| rd.count())
+                .unwrap_or(0);
+            // Live clock: --gate prints hold. stdin carries no body.
+            write_clock(
+                &identity_key(SID),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // run_mail_hold reads stdin; the test harness cannot pipe one, so
+            // the empty read must degrade to a no-body gate call.
+            assert_eq!(
+                run_mail_hold(&["--gate".into(), "--session".into(), SID.into()]),
+                0
+            );
+            let after = std::fs::read_dir(dir.join("mail-hold"))
+                .map(|rd| rd.count())
+                .unwrap_or(0);
+            assert_eq!(before + 1, after, "only the clock write above happened");
+        });
     }
 }

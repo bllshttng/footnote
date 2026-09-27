@@ -51,6 +51,27 @@ def _expire(handle):
     )
 
 
+def _stub_gate(monkeypatch, verdict: str):
+    """Stub the Rust gate subprocess to answer ``verdict``; returns the calls."""
+    import json
+
+    calls: list = []
+
+    def _fake_run(argv, input="", capture_output=True, text=True, timeout=10, **_kw):
+        calls.append((argv, input))
+        # The Rust gate's control pass, mirrored: a body whose first line
+        # opens with the directive delivers with pass=control.
+        effective = verdict
+        if input.strip().lower().startswith("control:"):
+            effective = "deliver"
+        out = json.dumps({"verdict": effective, "pass": None, "receipt": None, "until": None})
+        return SimpleNamespace(stdout=out + "\n", returncode=0)
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+    return calls
+
+
 # --- Task 1: the hold and its clock -----------------------------------------
 
 
@@ -165,51 +186,41 @@ def test_a_corrupt_clock_reads_as_no_clock_and_keeps_holding():
     assert hold_mod.lapsed(HANDLE) is False
 
 
-def test_gate_entry_branch_refuses_a_live_hold_and_lifts_an_expired_one():
-    """The branch a caller holding an AgentEntry takes (dispatch.py:576, :5741, :6773).
-
-    It returns before ``load_registry`` is ever called, so a self-heal wired
-    only into the registry loop below would be decorative here.
+def test_gate_maps_a_stubbed_hold_verdict_to_the_refusal(monkeypatch):
+    """The gate body lives in Rust (mail_hold.rs ``gate``); Python maps the
+    verdict. The entry branch returns before ``load_registry``; the body rides
+    the gate so the control pass can see it.
     """
-    hold_mod.arm(HANDLE, 5)
+    calls = _stub_gate(monkeypatch, "hold")
     assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+    assert dispatch._delivery_policy_refusal(_entry(), "control: stop") is None
+    assert calls[-1][1] == "control: stop"
 
-    _expire(HANDLE)
-    assert dispatch._delivery_policy_refusal(_entry()) is None
 
-
-def test_gate_token_branch_refuses_a_live_hold_and_lifts_an_expired_one(monkeypatch):
-    """The other branch: a caller holding only an id/handle token."""
+def test_gate_maps_deliver_to_none_and_fails_closed_on_a_broken_gate(monkeypatch):
+    """A failed or unreadable gate never lifts a hold it could not read: a
+    stamped row fails closed to BUS_ONLY_POLICY, while an unstamped token
+    keeps failing open toward live delivery.
+    """
     monkeypatch.setattr(dispatch, "load_registry", lambda: [_entry()])
+    _stub_gate(monkeypatch, "deliver")
+    assert dispatch._delivery_policy_refusal(_entry()) is None
+    assert dispatch._delivery_policy_refusal(HANDLE) is None
 
-    hold_mod.arm(HANDLE, 5)
-    assert dispatch._delivery_policy_refusal(HANDLE) == dispatch.BUS_ONLY_POLICY
+    def _boom(*_a, **_kw):
+        raise OSError("gate down")
 
-    _expire(HANDLE)
+    monkeypatch.setattr(dispatch.subprocess, "run", _boom)
+    assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+    monkeypatch.setattr(dispatch, "load_registry", lambda: [])
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
-def test_the_gate_finds_a_clock_filed_under_the_canonical_handle(monkeypatch):
-    """The key every WRITER uses, on a row where it is none of the other three.
-
-    A codex row's short_id is a daemon worker key and its harness_session_id is
-    the full id, so neither is the first-eight the clock sits under. Reading
-    only those three looked correct on claude, where the handle IS the short_id,
-    and left a codex hold unexpirable.
-    """
-    codex = SimpleNamespace(
-        name="worker-migration",
-        short_id="daemon-worker-key",
-        harness_session_id="abcd1234-0b3f-4c5a-9e88-2ad4f0c81b97",
-        delivery_policy="bus-only",
-    )
-    monkeypatch.setattr(dispatch, "load_registry", lambda: [codex])
-
-    hold_mod.arm(HANDLE, 5)  # HANDLE is that session id's first eight
-    assert dispatch._delivery_policy_refusal(codex) == dispatch.BUS_ONLY_POLICY
-
-    _expire(HANDLE)
-    assert dispatch._delivery_policy_refusal(codex) is None
+def test_gate_fails_closed_when_the_binary_is_missing(monkeypatch):
+    """No gate binary on a stamped row: the refusal stands (fail closed)."""
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
+    assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+    monkeypatch.setattr(dispatch, "load_registry", lambda: [])
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
@@ -517,24 +528,44 @@ def test_release_by_the_clock_key_still_drains_the_canonical_mailbox(monkeypatch
 # --- Task 5: the bounce -----------------------------------------------------
 
 
-def test_bounce_reason_names_the_recipient_and_when_it_lands():
-    hold_mod.arm(HANDLE, 5)
+def test_bounce_reason_returns_the_gate_receipt(monkeypatch):
+    """The receipt body lives in the Rust gate (C16); Python returns its
+    ``receipt`` field verbatim, and its None too."""
+    import json
+
+    def _fake_run(argv, **_kw):
+        out = json.dumps(
+            {
+                "verdict": "hold",
+                "pass": None,
+                "receipt": "held until about 21:04: worker is in do-not-disturb; "
+                "delivers itself then",
+                "until": None,
+            }
+        )
+        return SimpleNamespace(stdout=out, returncode=0)
+
+    monkeypatch.setattr(hold_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+
     reason = hold_mod.bounce_reason(HANDLE)
 
     assert reason is not None
-    assert HANDLE in reason
     assert "do-not-disturb" in reason
-    assert "quiet minutes" in reason
-    assert "lifts in" in reason
+    assert reason.startswith("held until about 21:04")
 
 
-def test_wall_bounce_reason_names_the_wall_clock():
-    hold_mod.arm_wall(HANDLE, 5)
+def test_bounce_reason_none_keeps_the_callers_text(monkeypatch):
+    import json
 
-    reason = hold_mod.bounce_reason(HANDLE)
+    def _fake_run(argv, **_kw):
+        out = json.dumps({"verdict": "hold", "pass": None, "receipt": None, "until": None})
+        return SimpleNamespace(stdout=out, returncode=0)
 
-    assert reason is not None
-    assert "wall clock" in reason
+    monkeypatch.setattr(hold_mod.subprocess, "run", _fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+
+    assert hold_mod.bounce_reason(HANDLE) is None
 
 
 def test_cli_rejects_minutes_and_for_together(monkeypatch):
@@ -694,16 +725,44 @@ def test_a_bus_only_row_with_no_clock_reads_held_not_blank():
     assert row["dnd"] == "held"
 
 
-def test_the_dnd_column_and_the_delivery_gate_never_disagree():
-    """Whatever the column says, the gate must agree mail is or is not moving."""
+def test_the_dnd_column_and_the_delivery_gate_never_disagree(monkeypatch):
+    """Whatever the column says, the gate must agree mail is or is not moving.
+
+    The stub answers from the SAME Python clock state the column reads, so the
+    parity contract itself is what runs; the gate's own clock logic is tested
+    in Rust.
+    """
+    import json
+
+    def _fake_run(argv, **_kw):
+        token = argv[argv.index("--session") + 1]
+        clock = hold_mod.read_any(token)
+        # Mirror the Rust gate: only a LAPSED timed clock delivers; no clock,
+        # a permanent (until: null) clock, and a live clock all hold.
+        lapsed = (
+            clock is not None
+            and clock.until is not None
+            and clock.until <= hold_mod._now()
+        )
+        verdict = "deliver" if lapsed else "hold"
+        out = json.dumps({"verdict": verdict, "pass": None, "receipt": None, "until": None})
+        return SimpleNamespace(stdout=out, returncode=0)
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+    # The entry branch passes the harness session id to the gate, so the
+    # clocks here sit under that same key; the column's addresses() sweep
+    # finds it either way.
+    full = _entry().harness_session_id
     cases = [
         ("no clock", lambda: None),
-        ("permanent", lambda: hold_mod.arm_permanent(HANDLE)),
-        ("live timed", lambda: hold_mod.arm(HANDLE, 5)),
-        ("lapsed timed", lambda: _expire(HANDLE)),
+        ("permanent", lambda: hold_mod.arm_permanent(full)),
+        ("live timed", lambda: hold_mod.arm(full, 5)),
+        ("lapsed timed", lambda: _expire(full)),
     ]
     for name, arrange in cases:
         hold_mod.clear(HANDLE)
+        hold_mod.clear(full)
         arrange()
         held_per_column = fmt.serialize_entry(_full_entry(), live_status=None)["dnd"]
         held_per_gate = (
