@@ -124,6 +124,7 @@ cli/tests/integration/test_native_lane_bundles.py::test_bundle_leaves_account_at
 cli/tests/integration/test_native_lane_bundles.py::test_lane_bundle_reaches_the_argv_behind_the_fence::marker.requires_rust  # on main before this ratchet
 cli/tests/integration/test_native_lane_bundles.py::test_sibling_lane_selection_carries_that_lanes_bundle::marker.requires_rust  # on main before this ratchet
 cli/tests/integration/test_native_lane_bundles.py::test_typed_fence_displaces_the_lane_bundle_by_name::marker.requires_rust  # on main before this ratchet
+cli/tests/integration/test_native_update_repaint.py::_update::pytest.skip  # CI pytest env builds no dev fno-agents binary
 cli/tests/integration/test_no_hardcoded_paths.py::test_ac1_hp_no_hardcoded_paths_in_tree::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_provider_usage_live.py::test_live_provider_usage_has_numeric_usage_and_future_resets::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_rank_operator_only.py::_binary::pytest.skip  # on main before this ratchet
