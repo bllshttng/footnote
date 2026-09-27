@@ -801,7 +801,7 @@ fn stage_answer_with(
                 // and pays its graph reads only when such a law exists.
                 // Hermetic callers (an explicit index path) skip it.
                 if index_path.is_none() {
-                    matching.extend(graduated_retraction_lines(&index));
+                    matching.extend(graduated_retraction_lines(&index, scope_project.as_deref()));
                 }
                 if !matching.is_empty() || !unread.is_empty() || index.damaged > 0 {
                     let additional_context = if matching.is_empty() {
@@ -1861,10 +1861,15 @@ pub(crate) fn record_door_write(door: RecordDoor, decision: String, caller: &Cal
     if supersedes.is_none() && !door.subject.trim().is_empty() {
         match decision_index::default_store_live() {
             Ok(index) => {
+                // Scope-equality, not machine-wide: a law recorded in one
+                // project never silently retires another project's law of
+                // the same subject; the record scope and the row scope must
+                // name the same law-world.
                 let same: Vec<String> = index
                     .rows
                     .iter()
                     .filter(|r| decision_index::is_law(r))
+                    .filter(|r| decision_index::row_scope(r) == scope)
                     .filter(|r| {
                         r.get("subject")
                             .and_then(Value::as_str)
@@ -2108,6 +2113,21 @@ fn all_decision_rows() -> Result<(Vec<Value>, usize), String> {
     )
 }
 
+/// The rows this caller's project may address: global plus the current
+/// project, the stage view. Unresolvable fails open, matching
+/// `retain_in_scope` semantics.
+fn scope_filtered_rows(rows: Vec<Value>) -> Vec<Value> {
+    match resolve_project(None, &settings_sources()) {
+        Ok(slug) => rows
+            .into_iter()
+            .filter(|r| decision_index::row_in_scope(r, &slug))
+            .collect(),
+        // Unresolvable fails open: nothing hidden, matching
+        // `retain_in_scope`.
+        Err(_) => rows,
+    }
+}
+
 fn run_retract_door(argv: &[String]) -> i32 {
     let door = match parse_retract_door(argv, RETRACT_USAGE) {
         Ok(d) => d,
@@ -2145,6 +2165,10 @@ fn run_retract_door(argv: &[String]) -> i32 {
              the answer may be incomplete."
         );
     }
+    // Scope read: the caller's own project plus global, the same view the
+    // stage and edit answers render. Unresolvable fails open (nothing
+    // hidden), matching `retain_in_scope`.
+    let rows = scope_filtered_rows(rows);
     let retired = decision_index::retirement_map(&rows);
     let token = door.token.trim();
     let target = if is_decision_id(token) {
@@ -2306,6 +2330,7 @@ fn run_history_read(argv: &[String]) -> i32 {
             return 1;
         }
     };
+    let rows = scope_filtered_rows(rows);
     let answer = history_answer(door.token.trim(), &rows);
     if answer
         .get("chain")
@@ -2334,31 +2359,48 @@ fn history_answer(token: &str, rows: &[Value]) -> Value {
     let subject_cf = token.to_lowercase();
     let chain: Vec<&Value> = if is_decision_id(token) {
         let want = token.to_lowercase();
-        // The chain behind an id: the row itself plus the rows it relates to
-        // (its own supersedes target, and every row superseding it).
+        // The chain behind an id: the anchor plus every row linked through
+        // `supersedes`, transitively in both directions, so d-a <- d-b <- d-c
+        // renders whole from any member.
         match rows.iter().find(|r| row_id(r).to_lowercase() == want) {
             None => Vec::new(),
             Some(anchor) => {
-                let mut chain: Vec<&Value> = Vec::new();
-                if let Some(prev) = anchor.get("supersedes").and_then(Value::as_str) {
-                    if let Some(row) = rows
-                        .iter()
-                        .find(|r| row_id(r).to_lowercase() == prev.to_lowercase())
-                    {
-                        chain.push(row);
+                let mut chosen: Vec<&Value> = vec![anchor];
+                loop {
+                    let before = chosen.len();
+                    let chosen_ids: Vec<String> =
+                        chosen.iter().map(|c| row_id(c).to_lowercase()).collect();
+                    for row in rows.iter() {
+                        if chosen.iter().any(|c| std::ptr::eq(*c, row)) {
+                            continue;
+                        }
+                        let row_id_cf = row_id(row).to_lowercase();
+                        let row_sup = row
+                            .get("supersedes")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let linked = chosen_ids.contains(&row_sup)
+                            || row
+                                .get("supersedes")
+                                .and_then(Value::as_str)
+                                .map(|s| chosen_ids.contains(&s.to_lowercase()))
+                                .unwrap_or(false)
+                            || chosen.iter().any(|c| {
+                                c.get("supersedes")
+                                    .and_then(Value::as_str)
+                                    .map(|s| s.to_lowercase() == row_id_cf)
+                                    .unwrap_or(false)
+                            });
+                        if linked {
+                            chosen.push(row);
+                        }
+                    }
+                    if chosen.len() == before {
+                        break;
                     }
                 }
-                chain.push(anchor);
-                for row in rows.iter().filter(|r| {
-                    r.get("supersedes")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_lowercase()
-                        == want
-                }) {
-                    chain.push(row);
-                }
-                chain
+                chosen
             }
         }
     } else {
@@ -2454,16 +2496,27 @@ fn near_law_lines(law: &LawRow) -> Vec<String> {
 /// A live law whose graduation follow-up node has closed asks for its own
 /// retraction, by subject, in the stage block every session already reads.
 /// The graph read pays only when such a law exists.
-fn graduated_retraction_lines(index: &decision_index::Index) -> Vec<String> {
-    graduated_retraction_lines_in(index, node_is_closed)
+fn graduated_retraction_lines(
+    index: &decision_index::Index,
+    scope_project: Option<&str>,
+) -> Vec<String> {
+    graduated_retraction_lines_in(index, node_is_closed, scope_project)
 }
 
 fn graduated_retraction_lines_in(
     index: &decision_index::Index,
     is_closed: impl Fn(&str) -> bool,
+    scope_project: Option<&str>,
 ) -> Vec<String> {
+    // The stage view: global plus the staged node's project. `None` fails
+    // open, matching `retain_in_scope`.
     let mut lines = Vec::new();
     for row in &index.rows {
+        if let Some(slug) = scope_project {
+            if !decision_index::row_in_scope(row, slug) {
+                continue;
+            }
+        }
         let Some(grad) = row.get("graduation") else {
             continue;
         };
@@ -2480,13 +2533,20 @@ fn graduated_retraction_lines_in(
             continue;
         }
         let id = row_id(row);
-        let subject = row_subject(row).trim();
+        let subject = sh_quote(row_subject(row).trim());
         lines.push(format!(
-            "law: {id} ({subject}) graduated: its node {node_id} closed. \
+            "law: {id} graduated ({subject}): its node {node_id} closed. \
              Retract it: fno inbox law retract {subject} --reason \"graduation node {node_id} closed\""
         ));
     }
     lines
+}
+
+/// Single-quote a string for safe reuse in a shell command line: every
+/// metacharacter loses its power inside single quotes, and embedded single
+/// quotes close, escape, and reopen the quoting.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// A follow-up node counts as closed at `done` or `superseded`; an
@@ -4050,7 +4110,8 @@ mod scope_tests {
             concat!(
                 "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
                 "\"data\":{\"decision_id\":\"d-0ad0ad0a\",\"subject\":\"merge-authority\",",
-                "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"chat_attested\"}}\n"
+                "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"chat_attested\",",
+                "\"scope\":\"project:demo\"}}\n"
             ),
         )
         .expect("writes");
@@ -4068,18 +4129,47 @@ mod scope_tests {
     }
 
     #[test]
+    fn a_foreign_scope_law_is_never_auto_superseded() {
+        let env = DoorEnv::new();
+        let index = env.0.path().join("decisions.jsonl");
+        std::fs::write(
+            &index,
+            concat!(
+                "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
+                "\"data\":{\"decision_id\":\"d-0ad0ad0a\",\"subject\":\"merge-authority\",",
+                "\"decision\":\"Merges belong to the operator\",\"authority_source\":\"chat_attested\",",
+                "\"scope\":\"project:other\"}}\n"
+            ),
+        )
+        .expect("writes");
+        let code = record_door_write(
+            door("merge-authority", "Merges belong to whoever asks"),
+            "Merges belong to whoever asks".to_string(),
+            &Caller::as_authority("chat_attested"),
+        );
+        assert_eq!(code, 0, "the record lands");
+        let text = env.index_text();
+        assert!(
+            !text.contains("supersedes"),
+            "the foreign-scope law survives: {text}"
+        );
+    }
+
+    #[test]
     fn several_live_laws_refuse_the_same_subject_edit() {
         let env = DoorEnv::new();
         let index = env.0.path().join("decisions.jsonl");
         let law_a = concat!(
             "{\"ts\":\"2026-09-01T00:00:00Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
             "\"data\":{\"decision_id\":\"d-aaaa0001\",\"subject\":\"merge-authority\",",
-            "\"decision\":\"First\",\"authority_source\":\"chat_attested\"}}\n"
+            "\"decision\":\"First\",\"authority_source\":\"chat_attested\",",
+            "\"scope\":\"project:demo\"}}\n"
         );
         let law_b = concat!(
             "{\"ts\":\"2026-09-01T00:00:01Z\",\"type\":\"operator_decision\",\"source\":\"test\",",
             "\"data\":{\"decision_id\":\"d-bbbb0002\",\"subject\":\"merge-authority\",",
-            "\"decision\":\"Second\",\"authority_source\":\"chat_attested\"}}\n"
+            "\"decision\":\"Second\",\"authority_source\":\"chat_attested\",",
+            "\"scope\":\"project:demo\"}}\n"
         );
         std::fs::write(&index, format!("{law_a}{law_b}")).expect("writes");
         let code = record_door_write(
@@ -4227,13 +4317,13 @@ mod scope_tests {
             })],
             damaged: 0,
         };
-        let lines = graduated_retraction_lines_in(&index, |id| id == "x-9ca30001");
+        let lines = graduated_retraction_lines_in(&index, |id| id == "x-9ca30001", None);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("fno inbox law retract portal-test"),
-            "{lines:?}"
+            lines[0].contains("fno inbox law retract 'portal-test'"),
+            "the subject is shell-quoted: {lines:?}"
         );
-        let open = graduated_retraction_lines_in(&index, |_| false);
+        let open = graduated_retraction_lines_in(&index, |_| false, None);
         assert!(open.is_empty(), "an open node prompts nothing");
         let plain = decision_index::Index {
             rows: vec![serde_json::json!({
@@ -4243,9 +4333,51 @@ mod scope_tests {
             damaged: 0,
         };
         assert!(
-            graduated_retraction_lines_in(&plain, |_| true).is_empty(),
+            graduated_retraction_lines_in(&plain, |_| true, None).is_empty(),
             "a law with no graduation kind adds no read and no line"
         );
+        let foreign = decision_index::Index {
+            rows: vec![serde_json::json!({
+                "decision_id": "d-cccc0003", "subject": "elsewhere",
+                "authority_source": "operator", "ts": "2026-09-01T00:00:00Z",
+                "scope": "project:other",
+                "graduation": {"kind": "should-be-enforced-but-i-did-not", "follow_up": "node:x-9ca30002"}
+            })],
+            damaged: 0,
+        };
+        assert!(
+            graduated_retraction_lines_in(&foreign, |_| true, Some("demo")).is_empty(),
+            "a foreign-project law stays out of this project's stage block"
+        );
+    }
+
+    #[test]
+    fn history_follows_the_whole_supersession_chain_by_id() {
+        let rows = vec![
+            serde_json::json!({
+                "_event_type": "operator_decision",
+                "decision_id": "d-aaaa0001", "subject": "chain-test",
+                "decision": "First", "authority_source": "operator",
+                "ts": "2026-09-01T00:00:00Z"
+            }),
+            serde_json::json!({
+                "_event_type": "operator_decision",
+                "decision_id": "d-bbbb0002", "subject": "chain-test",
+                "decision": "Second", "authority_source": "operator",
+                "ts": "2026-09-02T00:00:00Z", "supersedes": "d-aaaa0001"
+            }),
+            serde_json::json!({
+                "_event_type": "operator_decision",
+                "decision_id": "d-cccc0003", "subject": "chain-test",
+                "decision": "Third", "authority_source": "operator",
+                "ts": "2026-09-03T00:00:00Z", "supersedes": "d-bbbb0002"
+            }),
+        ];
+        for token in ["d-aaaa0001", "d-bbbb0002", "d-cccc0003"] {
+            let answer = history_answer(token, &rows);
+            let chain = answer["chain"].as_array().expect("array");
+            assert_eq!(chain.len(), 3, "token {token}: {answer}");
+        }
     }
 
     #[test]

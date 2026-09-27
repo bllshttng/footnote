@@ -121,7 +121,13 @@ pub fn run(args: &[OsString]) -> i32 {
 /// value is `-`. A tty check cannot tell an attended call from a daemon,
 /// but the argv can.
 fn stdin_requested(argv: &[String]) -> bool {
-    argv.iter()
+    // Both spellings the record door parses: two arguments, and the inline
+    // `--decision-file=-` form its flag=value splitter accepts.
+    argv.iter().any(|arg| {
+        arg.split_once('=')
+            .is_some_and(|(f, v)| f == "--decision-file" && v == "-")
+    }) || argv
+        .iter()
         .zip(argv.iter().skip(1))
         .any(|(flag, value)| flag == "--decision-file" && value == "-")
 }
@@ -198,11 +204,15 @@ mod tests {
     #[test]
     fn stdin_only_for_decision_file_dash() {
         // A daemon whose stdin is an open pipe must never block the
-        // verb. Only `--decision-file -` asks for stdin.
+        // verb. Only `--decision-file -` (either spelling) asks for stdin.
         assert!(stdin_requested(&[
             "subject".to_string(),
             "--decision-file".to_string(),
             "-".to_string(),
+        ]));
+        assert!(stdin_requested(&[
+            "topic".to_string(),
+            "--decision-file=-".to_string()
         ]));
         assert!(!stdin_requested(&[
             "subject".to_string(),
@@ -212,6 +222,10 @@ mod tests {
             "subject".to_string(),
             "--decision-file".to_string(),
             "plan.md".to_string(),
+        ]));
+        assert!(!stdin_requested(&[
+            "topic".to_string(),
+            "--decision-file=plan.md".to_string()
         ]));
         assert!(!stdin_requested(&[]));
     }
