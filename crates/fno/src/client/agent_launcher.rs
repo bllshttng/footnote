@@ -249,6 +249,13 @@ pub(crate) enum PickerAction {
     /// The Model list's `more` row: rebuild the picker over the harness's
     /// full catalog tail, Esc stepping back to the main list.
     OpenMore,
+    /// A NoKey or Unreachable more-row: never picks. Rebuilds the picker as
+    /// the connect steps (NoKey) or the protocol gap (Unreachable); Esc
+    /// steps back to the more list.
+    ShowSteps {
+        title: String,
+        lines: Vec<String>,
+    },
 }
 
 /// The open choice popover: the shared `Popup` widget anchored at the chip,
@@ -1181,15 +1188,7 @@ pub(crate) async fn launcher_keys(
                             .and_then(|(ri, _)| picker.actions.get(ri).cloned().flatten());
                         if let Some(action) = action {
                             let anchor = picker.anchor;
-                            commit_picker_action(
-                                l,
-                                &catalog,
-                                &backlog,
-                                action,
-                                portal,
-                                picker.field,
-                                anchor,
-                            );
+                            commit_picker_action(l, &catalog, action, portal, picker.field, anchor);
                         }
                         // A disabled or header row: the picker stays open.
                     }
@@ -2440,8 +2439,22 @@ pub(crate) fn more_rows(
                         provider: m.provider.clone(),
                     }),
                 ),
-                ModelState::NoKey { key_env, steps: _ } => ("\u{25cb}", key_env.clone(), None),
-                ModelState::Unreachable { reason } => ("\u{2013}", reason.clone(), None),
+                ModelState::NoKey { key_env, steps } => (
+                    "\u{25cb}",
+                    key_env.clone(),
+                    Some(PickerAction::ShowSteps {
+                        title: format!("connect {key}"),
+                        lines: steps.clone(),
+                    }),
+                ),
+                ModelState::Unreachable { reason } => (
+                    "\u{2013}",
+                    reason.clone(),
+                    Some(PickerAction::ShowSteps {
+                        title: format!("{key} on {harness}"),
+                        lines: vec![reason.clone()],
+                    }),
+                ),
             };
             push_entry(&mut rows, &mut actions, glyph, &m.name, &hint, true, action);
         }
@@ -2464,6 +2477,36 @@ pub(crate) fn open_more(l: &mut Launcher, catalog: &Option<CatalogOutcome>, anch
         anchor,
         filter: String::new(),
         mode: PickerMode::More,
+    });
+}
+
+/// A NoKey or Unreachable more-row's Enter: the picker becomes the steps
+/// sheet, one header plus one disabled row per line, footer `esc back`.
+pub(crate) fn show_steps(l: &mut Launcher, title: String, lines: Vec<String>, anchor: Anchor) {
+    let mut all_rows = vec![PopupRow::Header(title.clone())];
+    let mut all_actions: Vec<Option<PickerAction>> = vec![None];
+    for line in &lines {
+        push_entry(
+            &mut all_rows,
+            &mut all_actions,
+            "\u{2022}",
+            line,
+            "",
+            false,
+            None,
+        );
+    }
+    let (mut popup, actions) = filtered_popup(Focus::Model, &all_rows, &all_actions, "", anchor);
+    popup = popup.footer("esc back");
+    l.picker = Some(Picker {
+        popup,
+        actions,
+        all_rows,
+        all_actions,
+        field: Focus::Model,
+        anchor,
+        filter: String::new(),
+        mode: PickerMode::Steps { title },
     });
 }
 
@@ -2627,6 +2670,7 @@ pub(crate) fn apply_picker_action(
         // Drilled back into by commit_picker_action; a direct commit here
         // (a stale row action) just closes the picker, the draft intact.
         PickerAction::OpenMore => {}
+        PickerAction::ShowSteps { .. } => {}
     }
 }
 
@@ -2636,7 +2680,6 @@ pub(crate) fn apply_picker_action(
 fn commit_picker_action(
     l: &mut Launcher,
     catalog: &Option<CatalogOutcome>,
-    backlog: &[crate::proto::BacklogCard],
     action: PickerAction,
     portal: u8,
     field: Focus,
@@ -2644,6 +2687,7 @@ fn commit_picker_action(
 ) {
     match action {
         PickerAction::OpenMore => open_more(l, catalog, anchor),
+        PickerAction::ShowSteps { title, lines } => show_steps(l, title, lines, anchor),
         action => apply_picker_action(l, catalog, action, portal, field),
     }
 }
@@ -3303,7 +3347,6 @@ pub(crate) async fn launcher_mouse(
         let portal = next_free_portal(view);
         // Field-disjoint snapshot for the commit path.
         let catalog = view.launcher_catalog.clone();
-        let backlog = view.backlog.clone();
         if let Some(l) = view.launcher.as_mut() {
             let Some(mut picker) = l.picker.take() else {
                 unreachable!("checked Some above");
@@ -3326,7 +3369,7 @@ pub(crate) async fn launcher_mouse(
                     let anchor = picker.anchor;
                     l.picker = Some(picker);
                     if let Some(action) = action {
-                        commit_picker_action(l, &catalog, &backlog, action, portal, field, anchor);
+                        commit_picker_action(l, &catalog, action, portal, field, anchor);
                     }
                 }
                 _ => {

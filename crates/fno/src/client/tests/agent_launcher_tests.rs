@@ -2026,3 +2026,121 @@ fn more_list_groups_marks_and_esc_steps_back_to_the_main_list() {
         picker.all_rows,
     );
 }
+#[test]
+fn nokey_row_enter_shows_connect_steps_and_esc_returns_to_more() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![nokey_steps(
+            "MiniMax-M2",
+            "minimax",
+            "MINIMAX_API_KEY",
+            "export MINIMAX_API_KEY=<your key>",
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let action = more_row_action(&l, "MiniMax-M2").expect("the nokey row carries an action");
+    assert!(
+        matches!(
+            action,
+            super::agent_launcher::PickerAction::ShowSteps { .. }
+        ),
+        "a nokey rows enter names the connect steps: {action:?}"
+    );
+    if let super::agent_launcher::PickerAction::ShowSteps { title, lines } = action {
+        assert_eq!(title, "connect minimax");
+        assert_eq!(lines, vec!["export MINIMAX_API_KEY=<your key>".to_string()]);
+        super::agent_launcher::show_steps(&mut l, title, lines, anchor);
+    }
+    let picker = l.picker.as_ref().expect("steps sheet open");
+    assert_eq!(
+        picker.mode,
+        super::agent_launcher::PickerMode::Steps {
+            title: "connect minimax".to_string()
+        }
+    );
+    let rows_now: Vec<String> = picker
+        .all_rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Header(h) => Some(format!("# {h}")),
+            crate::popup::PopupRow::Entry { label, enabled, .. } => {
+                Some(format!("{} {}", if *enabled { "+" } else { "-" }, label))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows_now,
+        vec![
+            "# connect minimax".to_string(),
+            "- export MINIMAX_API_KEY=<your key>".to_string()
+        ],
+        "the steps sheet is one header plus disabled lines: {rows_now:?}"
+    );
+    assert_eq!(l.draft.model, "", "nothing was picked");
+    let current = l.picker.take().unwrap();
+    super::agent_launcher::picker_step_down(&mut l, &v.launcher_catalog, &v.backlog, current);
+    let picker = l.picker.as_ref().expect("back on the more list");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::More);
+}
+fn nokey_steps(
+    name: &str,
+    provider: &str,
+    env: &str,
+    step: &str,
+) -> super::agent_launcher::ModelChoice {
+    let mut m = nokey(name, provider, env);
+    m.state = ModelState::NoKey {
+        key_env: env.to_string(),
+        steps: vec![step.to_string()],
+    };
+    m
+}
+
+fn more_row_action(
+    l: &super::agent_launcher::Launcher,
+    label: &str,
+) -> Option<super::agent_launcher::PickerAction> {
+    let picker = l.picker.as_ref()?;
+    let row = picker.all_rows.iter().position(|r| {
+        matches!(r,
+        crate::popup::PopupRow::Entry { label: l, .. } if l == label)
+    })?;
+    picker.all_actions.get(row)?.clone()
+}
+#[test]
+fn unreachable_row_enter_names_the_gap_and_picks_nothing() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![unreachable(
+            "glm-5",
+            "zai-openai",
+            "claude speaks anthropic; zai-openai serves openai",
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let action = more_row_action(&l, "glm-5").expect("the unreachable row carries an action");
+    let (title, lines) = match action {
+        super::agent_launcher::PickerAction::ShowSteps { title, lines } => (title, lines),
+        other => panic!("expected ShowSteps, got {other:?}"),
+    };
+    assert_eq!(title, "zai-openai on claude");
+    assert_eq!(
+        lines,
+        vec!["claude speaks anthropic; zai-openai serves openai".to_string()]
+    );
+    super::agent_launcher::show_steps(&mut l, title, lines, anchor);
+    assert_eq!(l.draft.model, "", "nothing was picked");
+}
