@@ -225,6 +225,11 @@ pub(crate) fn parallel(rows: &[SessionRow]) -> Value {
             }
             let start = stream.partition_point(|(ts, _)| *ts <= pair[0]);
             let end = stream.partition_point(|(ts, _)| *ts < pair[1]);
+            // Two turns in one epoch second invert the range; an empty gap
+            // overlaps nothing.
+            if start >= end {
+                continue;
+            }
             for (ts, other) in &stream[start..end] {
                 if *other != *sid {
                     let key = if sid < other {
@@ -828,6 +833,19 @@ mod tests {
         let p = parallel(&[a, b, c]);
         assert_eq!(p["overlap_pairs"], 1);
         assert_eq!(p["sessions"], 2);
+    }
+
+    #[test]
+    fn same_second_turns_scan_an_empty_gap() {
+        // Two operator turns in one epoch second invert the partitioned
+        // range; the pair must scan nothing, not panic.
+        let mut a = row("aaaa", "claude");
+        a.operator_turns = vec!["2026-09-16T12:00:00Z".into(), "2026-09-16T12:00:00Z".into()];
+        let mut b = row("bbbb", "codex");
+        b.operator_turns = vec!["2026-09-16T12:05:00Z".into()];
+        let p = parallel(&[a, b]);
+        assert_eq!(p["overlap_pairs"], 0);
+        assert_eq!(p["sessions"], 0);
     }
 
     #[test]
