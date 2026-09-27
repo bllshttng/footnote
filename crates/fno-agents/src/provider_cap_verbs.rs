@@ -297,12 +297,27 @@ pub(crate) fn run_fno_output(
     cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Option<String> {
+    run_fno_output_env(args, cwd, timeout, &[])
+}
+
+/// [`run_fno_output`] with env set on the child: the transcript bridge must
+/// reach the python runtime even where agents verbs default to the Rust one,
+/// the same pin `family1_truth_command` rides.
+pub(crate) fn run_fno_output_env(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+    envs: &[(&str, &str)],
+) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let fno = crate::scrape::fno_bin();
     let mut cmd = Command::new(&fno);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
     }
     cmd.args(args)
         .stdin(Stdio::null())
