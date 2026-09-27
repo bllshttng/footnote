@@ -1740,15 +1740,11 @@ pub(crate) mod tests {
     /// The stub `fno-py` the runner drains through: appends its argv to
     /// `$PARK_LOG` and exits 1 when `$PARK_FAIL` is set, else 0.
     fn write_stub_py(dir: &std::path::Path) -> std::path::PathBuf {
-        let stub = dir.join("stub-fno-py.sh");
-        std::fs::write(
-            &stub,
+        crate::write_exec_stub(
+            dir,
+            "stub-fno-py.sh",
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PARK_LOG\"\n[ -n \"$PARK_FAIL\" ] && exit 1\nexit 0\n",
         )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        stub
     }
 
     fn parked_dir_for(dir: &std::path::Path) -> std::path::PathBuf {
