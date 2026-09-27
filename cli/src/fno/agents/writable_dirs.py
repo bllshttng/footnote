@@ -93,9 +93,8 @@ ADD_DIR_PROVIDERS = ("claude", "codex", "agy", "cursor-agent")
 
 
 def strip_remote_add_dirs(argv: list[str]) -> list[str]:
-    """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``:
-    codex >= 0.156.1 refuses the pair, so an unstripped pane dies unpainted;
-    the resume lanes already made this trade. Tokens survive verbatim.
+    """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``; the
+    0.156.1 refusal kills an unstripped pane; the resume lanes trade the same.
     """
     if "--remote" not in argv:
         return argv
@@ -111,11 +110,8 @@ def strip_remote_add_dirs(argv: list[str]) -> list[str]:
         else:
             out.append(tok)
     if len(out) != len(argv):
-        print(
-            "codex pane: dropped --add-dir root grants; codex >= 0.156.1 "
-            "refuses them on a --remote launch (roots are daemon-side)",
-            file=sys.stderr,
-        )
+        print("codex pane: dropped --add-dir grants;"
+              " codex >= 0.156.1 refuses them on --remote", file=sys.stderr)
     return out
 
 
