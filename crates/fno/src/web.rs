@@ -126,6 +126,11 @@ struct AppState {
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
     reign_html: PathBuf,
+    /// False when the reign root came from a config form this mirror cannot
+    /// expand (a template, a `~user` or relative anchor, an unset `$VAR`):
+    /// /crown then never republishes through the fallback path, so a
+    /// project-isolated bridge cannot overwrite the global page.
+    reign_republish: bool,
     fleet_html: PathBuf,
     /// The mux session this bridge attaches to; a backlog launch names it to
     /// the spawn door.
@@ -149,19 +154,24 @@ struct CachedModel {
     inputs: Arc<backlog_model::Inputs>,
 }
 
-fn reign_html_path_from_state_root(state_root: &Path) -> PathBuf {
-    state_root.join("reign.html")
-}
-
-fn reign_html_path() -> PathBuf {
+/// The reign page path plus whether its root resolved FAITHFULLY (see
+/// [`crate::reign_root::reign_state_root`]): an unfaithful root is served as a
+/// miss but never written through.
+fn reign_html_path() -> (PathBuf, bool) {
     #[cfg(not(test))]
     {
-        reign_html_path_from_state_root(&crate::proto::mux_sidecar_root())
+        crate::reign_root::reign_state_root()
     }
     #[cfg(test)]
     {
         let graph = crate::backlog_view::graph_path();
-        reign_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
+        (
+            graph
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("reign.html"),
+            true,
+        )
     }
 }
 
@@ -728,11 +738,13 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
     let _state_guard = WebStateFile::write(&socket, &args.bind, args.port, &token);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    let (reign_html, reign_republish) = reign_html_path();
     let state = AppState {
         tx,
         snap,
         token,
-        reign_html: reign_html_path(),
+        reign_html,
+        reign_republish,
         fleet_html: fleet_html_path(),
         session: args.session.into(),
         writable,
@@ -1009,14 +1021,22 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     let modified = std::fs::metadata(&st.reign_html)
         .and_then(|m| m.modified())
         .ok();
-    if crown_needs_republish(authorized, modified, SystemTime::now()) {
+    // An unfaithful root is never written through: the republish would pass
+    // the fallback as `--out` and overwrite the global page with this
+    // project's court data.
+    if st.reign_republish && crown_needs_republish(authorized, modified, SystemTime::now()) {
         start_crown_republish(&st.reign_html);
     }
+    let notice = if st.reign_republish {
+        "fno agents king ledger (a render has started; reload in about a minute)"
+    } else {
+        "reign.html is not resolvable from this config (a template, ~user, relative or unset $VAR state_dir); fix state_dir or run fno agents king ledger"
+    };
     private_page_response(
         &st.reign_html,
         q.t.as_deref(),
         &st.token,
-        "fno agents king ledger (a render has started; reload in about a minute)",
+        notice,
         NavPage::Crown,
     )
     .await
@@ -1772,6 +1792,7 @@ mod tests {
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
+            reign_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2169,6 +2190,7 @@ console.log("evictedRowCount: 18 cases ok");
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
+            reign_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2454,13 +2476,54 @@ console.log("backlog page helpers: 12 cases ok");
         CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
     }
 
-    #[test]
-    fn reign_html_follows_state_root_beside_graph_json() {
-        let state = Path::new("/configured/state");
-        assert_eq!(
-            reign_html_path_from_state_root(state),
-            PathBuf::from("/configured/state/reign.html")
+    #[tokio::test]
+    async fn an_unfaithful_reign_root_never_serves_the_render_started_notice() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-reign-{}-unfaithful", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            reign_html: dir.join("reign.html"),
+            reign_republish: false,
+            fleet_html: dir.join("fleet.html"),
+            session: Arc::<str>::from("sess"),
+            writable: true,
+            model: Default::default(),
+            shutdown,
+        };
+        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /crown?t=right HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        server.abort();
+        // The gate's user-visible half: the page never claims a render it
+        // did not start.
+        assert!(
+            !String::from_utf8_lossy(&buf).contains("render has started"),
+            "an unfaithful root must not claim a render"
         );
+        tokio::task::yield_now().await;
+        assert!(
+            !CROWN_REPUBLISHING.load(Ordering::SeqCst),
+            "an unfaithful root never starts a republish"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2510,6 +2573,7 @@ console.log("backlog page helpers: 12 cases ok");
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
+            reign_republish: true,
             fleet_html: fleet_path,
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -2922,6 +2986,7 @@ console.log("backlog page helpers: 12 cases ok");
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
+            reign_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
@@ -3014,6 +3079,7 @@ console.log("backlog page helpers: 12 cases ok");
             snap: Arc::new(Mutex::new(Snapshot::default())),
             token: Arc::<str>::from("right"),
             reign_html: dir.join("reign.html"),
+            reign_republish: true,
             fleet_html: dir.join("fleet.html"),
             session: Arc::<str>::from("sess"),
             writable: true,
