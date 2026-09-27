@@ -151,11 +151,11 @@ def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
     set_related only touches peers in the declaring node's own delta, so a peer
     left naming a deleted node is unreachable by any repair verb.
     """
-    _seed(tmp_graph, [
-        {"id": "x-aaaa", "title": "a", "related": ["x-bbbb", "x-cccc"]},
-        {"id": "x-bbbb", "title": "b", "related": ["x-aaaa"]},
-        {"id": "x-cccc", "title": "c", "related": ["x-aaaa"]},
-    ])
+    seed_graph(tmp_graph, json.dumps({"entries": [
+        dict(_node("x-aaaa"), related=["x-bbbb", "x-cccc"]),
+        dict(_node("x-bbbb"), related=["x-aaaa"]),
+        dict(_node("x-cccc"), related=["x-aaaa"]),
+    ]}, indent=2) + "\n")
     assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
 
     assert runner.invoke(

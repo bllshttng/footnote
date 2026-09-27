@@ -96,6 +96,13 @@ def _node(plan: Path, **over) -> dict:
     return base
 
 
+def _epic(nid, slug, parent=None):
+    return {
+        "id": nid, "slug": slug, "title": slug, "status": "ready",
+        "domain": "code", "project": "fno", "type": "epic", "parent": parent,
+    }
+
+
 def test_supersede_repaints_both_nodes(tmp_graph, tmp_path):
     """AC1-HP: supersede repaints the old node's doc (status forward to superseded is
     a graph gate, but blocked_by/priority mirror still converges)."""

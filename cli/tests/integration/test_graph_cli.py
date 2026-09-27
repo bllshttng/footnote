@@ -581,9 +581,15 @@ def test_done_clears_queued_state(tmp_graph):
     r = _invoke("backlog", "add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "queue", nid)
-    # The canonical bare close's mutation is what clears the queued ghost
-    # fields, and the subject of this test is that clear, not the note path.
-    _invoke("backlog", "done", nid, "-m", "queued-state fixture")
+    # Evidence lands on the row first; the canonical bare close's mutation is
+    # what clears the queued ghost fields, and the subject of this test is
+    # that clear, not the note path.
+    data = {"entries": _read_graph(tmp_graph)}
+    next(e for e in data["entries"] if e["id"] == nid)["completion_note"] = (
+        "queued-state fixture"
+    )
+    _seed_graph_text(tmp_graph, json.dumps(data))
+    _invoke("backlog", "done", nid)
     data = json.loads(_native_get(nid))
     assert data.get("queued_at") is None
     assert data["completed_at"] is not None

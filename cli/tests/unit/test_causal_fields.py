@@ -64,6 +64,17 @@ def test_entry_causal_defaults_parse_old_graphs():
 # -- backlog update flags ------------------------------------------------------
 
 
+def _candidate() -> Candidate:
+    return Candidate(
+        title="follow-up",
+        body="body",
+        tier=TIER_NODE,
+        priority="p2",
+        source_pr=42,
+        source_id="c1",
+    )
+
+
 def test_land_threads_caused_by_to_create(tmp_path):
     seen: list[dict] = []
 
