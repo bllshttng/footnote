@@ -11,7 +11,7 @@ fn client_compose_places_panes_divider_and_chrome() {
     let lines: Vec<&str> = text.lines().collect();
     // Tab strip: scoped to the content columns on row 0, so line 0 carries
     // both the sideline's squad-1 row (cols 0..27) and the strip (cols 28+).
-    assert!(lines[0].contains("[2]"), "{:?}", lines[0]);
+    assert!(lines[0].contains("[ 2 ]"), "{:?}", lines[0]);
     assert!(lines[0].contains("▾*footnote"), "{:?}", lines[0]);
     assert!(lines[2].contains("▸ notes"), "{:?}", lines[2]);
     // Content row 1 is the pane FRAMES' top edge: each pane wears a rounded

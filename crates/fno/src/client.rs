@@ -1087,9 +1087,10 @@ struct View {
     hover_focus: bool,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
-    /// an explicit apply from the settings modal. `terminal` (the default)
-    /// inherits the emulator's own colors so every pre-theme render is
-    /// byte-identical.
+    /// an explicit apply from the settings modal. `footnote-superscript` is
+    /// the default; a terminal reporting a light background defaults to
+    /// `footnote-paper`, and `terminal` stays available as the no-op that
+    /// inherits the emulator's own colors.
     theme: Theme,
     /// The board's work-queue cards, verbatim off the wire Layout. The
     /// sidebar renders none of them (the lane is gone); the launcher's
@@ -4316,7 +4317,7 @@ impl View {
             }
             let mut c = panel_w as usize;
             for span in self.tab_bar_window() {
-                let w = span.text.chars().count();
+                let w = tab_text_cols(&span.text);
                 if col >= c && col < c + w {
                     return match span.hit? {
                         TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
@@ -6007,8 +6008,9 @@ impl View {
         else {
             return spans;
         };
-        // The home workspace wears the f[no] brand mark in place of its name:
-        // `f` bold, `[no]` dim amber (draw_tab_bar splits the two tones).
+        // The home workspace wears the Ｆ[no] brand mark in place of its name:
+        // `Ｆ` bold, `[no]` the reverse-video stamp (draw_tab_bar splits the
+        // two tones).
         if s.name == "fno" {
             let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
             spans.push(TabSpan {
@@ -6039,7 +6041,7 @@ impl View {
             let (glyph_prefix, fg, glyph_flags) =
                 match tab_rollup_state(&self.layout.agents, s.id, t.id) {
                     Some(st) => {
-                        let style = lattice_style(st, self.theme.accent);
+                        let style = lattice_style(st, self.theme.needs_you);
                         (format!("{} ", style.glyph), style.fg, style.flags)
                     }
                     None => (String::new(), Color::Default, 0),
@@ -6050,8 +6052,11 @@ impl View {
             } else {
                 0
             };
+            // One cell of padding inside each side of every tab label: the
+            // inactive shape already reads ` label `, the active brackets get
+            // theirs as `[ label ]`.
             let text = if i == s.active_tab {
-                format!("[{label}]")
+                format!("[ {label} ]")
             } else {
                 format!(" {label} ")
             };
@@ -6087,7 +6092,7 @@ impl View {
     /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
         let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
-        let span_w = |s: &TabSpan| s.text.chars().count();
+        let span_w = |s: &TabSpan| tab_text_cols(&s.text);
         let full = self.tab_bar_spans();
         if full.iter().map(span_w).sum::<usize>() <= width {
             return full;
@@ -6200,17 +6205,17 @@ impl View {
                 } else {
                     cell_flags::BOLD
                 };
-                (self.theme.accent, f)
+                (self.theme.brand, f)
             } else if matches!((lifted_tab, span.hit), (Some(t), Some(TabHit::Tab(tid))) if t == tid)
             {
                 (span.fg, span.flags | cell_flags::DIM)
             } else {
                 (span.fg, span.flags)
             };
-            // The brand mark's `[no]` drops to the dim amber wordmark tone for
-            // just those four chars; every other span paints uniform.
-            let is_mark = span.role == SpanRole::Squad && span.text.trim() == "f[no]";
-            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Wordmark, &self.theme);
+            // The brand mark's `[no]` drops to the reverse-video stamp tone
+            // for just those four chars; every other span paints uniform.
+            let is_mark = span.role == SpanRole::Squad && span.text.trim() == crate::wordmark::TEXT;
+            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Stamp, &self.theme);
             let mut in_no = false;
             for ch in span.text.chars() {
                 if ch == '[' {
@@ -6230,7 +6235,22 @@ impl View {
                     bg: Color::Default,
                     flags,
                 };
-                c += 1;
+                // A double-width glyph claims its second column (the spacer
+                // every renderer skips), or the rest of the strip desyncs
+                // against a standards-compliant terminal.
+                let w = glyph_cols(ch);
+                if w == 2 {
+                    if c + 1 >= cols {
+                        break 'spans;
+                    }
+                    cells[c + 1] = Cell {
+                        c: ' ',
+                        fg,
+                        bg: Color::Default,
+                        flags: flags | cell_flags::WIDE_SPACER,
+                    };
+                }
+                c += w;
                 if is_mark && in_no && ch == ']' {
                     in_no = false;
                 }
@@ -6598,21 +6618,6 @@ fn paint_legacy_row(
     }
 }
 
-/// The status column's word per lattice state, shortened to fit the
-/// 5-column cell (operator, 2026-09-21; the fleet's mail vocabulary keeps
-/// the long forms). `Unmeasured` and `Empty` keep their glyphs.
-fn status_word(s: LatticeState) -> &'static str {
-    match s {
-        LatticeState::Working => "Work",
-        LatticeState::Idle => "Idle",
-        LatticeState::Blocked => "Input",
-        LatticeState::DoneUnseen => "Done",
-        LatticeState::Exited => "Stop",
-        LatticeState::Unmeasured => "?",
-        LatticeState::Empty => "\u{2205}",
-    }
-}
-
 /// The message column's markdown strip: bold markers, backtick code spans
 /// and a leading `#` header marker come off - the row reads the sentence,
 /// not the markup.
@@ -6692,14 +6697,22 @@ enum DisplayRow<'a> {
 /// Display columns a sideline glyph occupies. The client draws chrome one glyph
 /// per cell, so a double-width glyph must claim two columns (plus a WIDE_SPACER)
 /// or it desyncs the rest of the row against a standards-compliant terminal.
-/// ponytail: only the menu trigram block (U+2630..U+2637) is wide in the
-/// sideline today; widen this if a CJK/emoji glyph ever lands here.
+/// ponytail: only the menu trigram block (U+2630..U+2637) and the mark's
+/// full-width `Ｆ` (U+FF26) are wide today; widen this if a CJK/emoji glyph
+/// ever lands here.
 fn glyph_cols(ch: char) -> usize {
-    if ('\u{2630}'..='\u{2637}').contains(&ch) {
+    if ch == '\u{FF26}' || ('\u{2630}'..='\u{2637}').contains(&ch) {
         2
     } else {
         1
     }
+}
+
+/// Display columns a tab-strip span paints, wide glyphs counted - the one
+/// width both the painter, the scroll-window fitter and the hit-test walk,
+/// so a span's painted width and its clickable width can never disagree.
+fn tab_text_cols(text: &str) -> usize {
+    text.chars().map(glyph_cols).sum()
 }
 
 /// A squad's [`SectionKey`]. Deliberately NOT keyed on `name`: a derived squad
@@ -6850,7 +6863,7 @@ fn blank_straddling_pair(cells: &mut [Cell], cols: usize, row: usize, start: usi
 /// counter takes it on, because a count computed before the hiding is precisely
 /// the confidently-wrong number the rest of this function exists to avoid.
 fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
-    let w = |s: &TabSpan| s.text.chars().count();
+    let w = |s: &TabSpan| tab_text_cols(&s.text);
     let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
     // Keeps the first and last character: the brackets or padding spaces that
     // mark the active tab, and the squad label's own surrounding spaces.
@@ -7663,53 +7676,12 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
 
-/// The unified icon lattice: ONE state->style mapping every renderer
-/// (sideline rows, tab rollups, overlays) calls, so glyph, weight,
-/// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
-/// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
-/// a new variant is a compile error at every call site, never a silent glyph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LatticeState {
-    Working,
-    Idle,
-    Blocked,
-    DoneUnseen,
-    Exited,
-    /// A terminal row with no positive corroboration: no confirmed-
-    /// dead pid, no confirmed-gone pane. Distinct from `Exited` because the
-    /// operator's routing decision turns on it - `Exited` means respawn is
-    /// safe, `Unmeasured` means look before you spawn.
-    Unmeasured,
-    /// A live pane that positively read as nothing-running-yet: OSC
-    /// 133 markers active, no command open, no completed block. Distinct from
-    /// `Idle` (a completed block, the prompt back) and from `Unmeasured` (no
-    /// reading at all): a pristine shell is an honest zero, not a waiting
-    /// worker and not an unknown.
-    Empty,
-}
-
-/// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
-/// as the reference value the lattice tests assert against. Production reads the
-/// live theme's accent (`self.theme.accent`), so this is test-only - under the
-/// default `terminal` theme the two are the same `Indexed(3)`.
+// The icon lattice itself lives in `crate::lattice`; these re-exports keep
+// every `use super::*` renderer and test reading the same paths as before.
 #[cfg(test)]
-const LATTICE_ACCENT: Color = Color::Indexed(3);
+pub(crate) use crate::lattice::LATTICE_ACCENT;
+pub(crate) use crate::lattice::{lattice_glyph, lattice_style, status_word, LatticeState};
 
-struct LatticeStyle {
-    glyph: char,
-    flags: u8,
-    fg: Color,
-}
-
-/// The single source of glyph/weight/color per state. Every state differs from
-/// every other by GLYPH alone (BOLD/DIM/accent are reinforcement, never the
-/// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
-///
-/// `accent` is the needs-attention color, now the active theme's accent rather
-/// than a hardcoded yellow: under `terminal` it is `Indexed(3)` (the
-/// emulator's own amber, preserved exactly), under a named theme it is the
-/// palette's pick. Only the one caller that reads `.fg` supplies it; callers
-/// that want only the glyph/flags use [`lattice_glyph`] and stay out of color.
 /// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
 /// on Blocked (attention is never re-colored) and the lattice fg as the
@@ -7725,27 +7697,6 @@ fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
         a.account.as_deref(),
     )
     .unwrap_or(fallback)
-}
-
-fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
-    let (glyph, flags, fg) = match s {
-        LatticeState::Working => ('●', cell_flags::BOLD, Color::Default),
-        LatticeState::Idle => ('○', 0, Color::Default),
-        LatticeState::Blocked => ('▲', cell_flags::BOLD, accent),
-        LatticeState::DoneUnseen => ('✓', cell_flags::BOLD, Color::Default),
-        LatticeState::Exited => ('✗', cell_flags::DIM, Color::Default),
-        LatticeState::Unmeasured => ('?', cell_flags::DIM, Color::Default),
-        LatticeState::Empty => ('∅', cell_flags::DIM, Color::Default),
-    };
-    LatticeStyle { glyph, flags, fg }
-}
-
-/// The glyph + flags for a state, with no color. For every caller that does not
-/// read `.fg` (i.e. every caller except the one accent-colored span), so they
-/// do not have to thread a theme accent they never use.
-fn lattice_glyph(s: LatticeState) -> (char, u8) {
-    let st = lattice_style(s, Color::Default);
-    (st.glyph, st.flags)
 }
 
 /// (US2) Severity order for the header rollup strip: most-severe first,
@@ -11777,7 +11728,13 @@ async fn execute_aux_action(
             // it never writes the graph. On a write failure the in-memory theme
             // STAYS (applied this session) and the notice says so honestly,
             // never claiming a persistence it did not achieve.
-            let (theme, warn) = Theme::from_name(&name);
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (theme, warn) = crate::digest_overlay::theme_role_overrides(
+                Path::new(&cwd),
+                Theme::from_name(&name),
+            );
             view.theme = theme;
             let notice = match spawn_config_set("mux.theme", &name).await {
                 Ok(()) => match warn {
