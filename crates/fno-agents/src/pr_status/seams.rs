@@ -156,19 +156,29 @@ pub(crate) fn merge_authority(cwd: &Path) -> Value {
     })
 }
 
-/// The PR's dispatch-hold word through the same probe the merge path reads:
-/// exit 0 clear (None), 3 held (the reason), anything else unreadable (None,
-/// like Python's fail-open hold read).
-pub(crate) fn hold_reason(cwd: &Path, pr: u64) -> Option<String> {
-    let out = std::process::Command::new(crate::scrape::fno_bin())
+/// The dispatch-hold probe's full tri-state: the exit codes distinguish a
+/// clean probe from a crashed one, and a preview that reuses the answer must
+/// never read a crashed probe as clear.
+pub(crate) enum HoldVerdict {
+    Clear,
+    Held(String),
+    Unreadable,
+}
+
+/// The PR's dispatch-hold word through the same probe the merge path reads.
+pub(crate) fn hold_verdict(cwd: &Path, pr: u64) -> HoldVerdict {
+    let out = match std::process::Command::new(crate::scrape::fno_bin())
         .args(["do", "pr", "hold-check", &pr.to_string()])
         .current_dir(cwd)
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(_) => return HoldVerdict::Unreadable,
+    };
     match out.status.code() {
-        Some(0) => None,
-        Some(3) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        _ => None,
+        Some(0) => HoldVerdict::Clear,
+        Some(3) => HoldVerdict::Held(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        _ => HoldVerdict::Unreadable,
     }
 }
 
