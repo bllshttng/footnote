@@ -758,8 +758,8 @@ def test_resume_unpinned_refusal_reports_wake_unpinned(monkeypatch):
 
 
 def test_lost_route_file_refusal_reports_wake_unrouted(monkeypatch):
-    # x-b4aa: a route-restore refusal carries exit 2 like the name collision,
-    # but it started NOTHING - the recorded route file is gone and the relaunch
+    # A route-restore refusal carries exit 2 like the name collision, but it
+    # started NOTHING - the recorded route file is gone and the relaunch
     # refused before it spawned. The receipt must say wake-unrouted(...), never
     # wake-already-in-flight, which claims a concurrent wake won the race.
     from fno.agents.dispatch_errors import RouteRestoreRefused
