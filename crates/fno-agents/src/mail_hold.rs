@@ -818,6 +818,58 @@ fn run_parked(session_id: &str) -> i32 {
     0
 }
 
+/// How far past its `until` a clock must sit before the sweep considers its
+/// release timer dead: the live timer polls every 15 s, so 60 s of silence
+/// means it is gone.
+const LAPSED_TIDY_MARGIN_S: i64 = 60;
+
+/// The registry rows whose `bus-only` stamp outlived its clock by more than
+/// [`LAPSED_TIDY_MARGIN_S`]: the handles a stale-hold tidy re-arms a release
+/// timer for (C16). A live clock is not picked (its own timer is winning),
+/// a hand-stamped hold with no clock is never touched, and an unstamped row
+/// is none of this sweep's business. Pure so the pick is testable without a
+/// spawner.
+pub(crate) fn lapsed_hold_handles(
+    registry: &crate::state::Registry,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in registry
+        .entries
+        .iter()
+        .filter(|e| e.delivery_policy.as_deref() == Some("bus-only"))
+    {
+        let Some(sid) = entry.harness_session_id.as_deref() else {
+            continue;
+        };
+        let Some(clock) = gate_clock_addresses(sid, sid)
+            .iter()
+            .find_map(|h| read_clock(h))
+        else {
+            continue;
+        };
+        if matches!(clock.until, Some(u) if u < now - chrono::Duration::seconds(LAPSED_TIDY_MARGIN_S))
+        {
+            out.push(identity_key(sid));
+        }
+    }
+    out
+}
+
+/// The C16 sweep arm: every lapsed hold gets its release timer re-armed, so
+/// the [DND] badge, the delivery gate and the DND column all read a flag
+/// that cannot outlive its clock by more than a sweep plus a poll. The
+/// Python release sees a lapsed clock, unstamps the row and delivers what
+/// was held.
+pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono::Utc>) {
+    let Ok(registry) = load_registry(&home.registry_json()) else {
+        return;
+    };
+    for handle in lapsed_hold_handles(&registry, now) {
+        spawn_release_timer(&handle);
+    }
+}
+
 /// `fno-agents mail-hold --session <id> [--off | --gate]`
 ///
 /// Arm (default): run the conversation arm and report its outcome.
@@ -1749,6 +1801,63 @@ pub(crate) mod tests {
 
             assert!(!drain_parked_once(SID), "a failed send stops the drain");
             assert!(pdir.join("1-test.txt").exists(), "the payload stays parked");
+        });
+    }
+
+    #[test]
+    fn the_tidy_picks_only_lapsed_clocks_past_the_margin() {
+        with_hold_env(|dir| {
+            let now = chrono::Utc::now();
+            let sid_a = "aaaaaaaa-1111-2222-3333-444455556666";
+            let sid_b = "bbbbbbbb-1111-2222-3333-444455556666";
+            let sid_c = "cccccccc-1111-2222-3333-444455556666";
+            let sid_d = "dddddddd-1111-2222-3333-444455556666";
+            let sid_e = "eeeeeeee-1111-2222-3333-444455556666";
+            write_registry(
+                dir,
+                serde_json::json!([
+                    stamped_row("a", sid_a),
+                    stamped_row("b", sid_b),
+                    stamped_row("c", sid_c),
+                    stamped_row("d", sid_d),
+                    registry_row("e", sid_e),
+                ]),
+            );
+            // a: lapsed 90s past its until -> picked.
+            write_clock(
+                &identity_key(sid_a),
+                now - chrono::Duration::seconds(90),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // b: lapsed only 30s -> inside the margin, the live timer may
+            // still be circling.
+            write_clock(
+                &identity_key(sid_b),
+                now - chrono::Duration::seconds(30),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // c: live clock -> its own timer is winning.
+            write_clock(
+                &identity_key(sid_c),
+                now + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // d: hand-stamped, no clock -> never touched.
+            let registry = crate::state::load_registry(&dir.join("registry.json")).unwrap();
+            let picked = lapsed_hold_handles(&registry, now);
+            assert_eq!(picked, vec![identity_key(sid_a)], "only a lapsed 90s");
         });
     }
 }
