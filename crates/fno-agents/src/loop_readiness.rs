@@ -311,8 +311,17 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
         .and_then(Value::as_array)
         .map(|rows| rows.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let measured_partial =
-        !complete && !errors.is_empty() && errors.iter().all(|e| e.contains("timed out after"));
+    // A slow startup producer times out and lands in measurement_errors: the
+    // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
+    // crown admission on it starved a fresh heir for its whole session life.
+    // The producer's structured `measurement_timeouts` count is the contract;
+    // the substring fallback reads journals written before the field existed.
+    let all_timeouts = !errors.is_empty()
+        && match data.get("measurement_timeouts").and_then(Value::as_u64) {
+            Some(timeouts) => timeouts as usize == errors.len(),
+            None => errors.iter().all(|e| e.contains("timed out after")),
+        };
+    let measured_partial = !complete && all_timeouts;
     if (!complete && !measured_partial)
         || !matches!(entry_state, "startup" | "resume" | "clear" | "post_compact")
     {
@@ -632,6 +641,41 @@ mod tests {
         let events = format!("{snapshot}\n{stop}\n");
         let leg = stop_leg_from_events(&events, "claude", "thread-a");
         assert!(leg.state.is_ready(), "{:?}", leg.reason);
+
+        // The producer's structured timeout count is the contract: with it,
+        // the reader never parses the error wording.
+        let structured = serde_json::json!({
+            "ts": "2026-09-27T10:00:00Z",
+            "type": "context_snapshot",
+            "source": "hook",
+            "data": {
+                "session_id": "thread-a",
+                "harness": "claude",
+                "entry_state": "startup",
+                "measurement_complete": false,
+                "measurement_timeouts": 1,
+                "measurement_errors": ["worktree-peers-session-start: gave up waiting"]
+            }
+        });
+        let leg = stop_leg_from_events(&format!("{structured}\n{stop}\n"), "claude", "thread-a");
+        assert!(leg.state.is_ready(), "{:?}", leg.reason);
+
+        // A structured count below the error count is still incomplete.
+        let short = serde_json::json!({
+            "ts": "2026-09-27T10:00:00Z",
+            "type": "context_snapshot",
+            "source": "hook",
+            "data": {
+                "session_id": "thread-a",
+                "harness": "claude",
+                "entry_state": "startup",
+                "measurement_complete": false,
+                "measurement_timeouts": 0,
+                "measurement_errors": ["worktree-peers-session-start: timed out after 45s"]
+            }
+        });
+        let leg = stop_leg_from_events(&format!("{short}\n"), "claude", "thread-a");
+        assert_eq!(leg.state, LegState::Blocked);
 
         // A non-timeout producer error is still an incomplete snapshot.
         let crashed = serde_json::json!({

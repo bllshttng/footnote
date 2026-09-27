@@ -266,20 +266,49 @@ pub fn ensure_named_crown(
     // A succession the predecessor survived leaves the carried label parked
     // on its still-live row. A row holding no live crown keeps nothing: the
     // label and alias move off it in the SAME transaction that names the new
-    // holder, so the label never resolves to two rows.
-    let displaceable = |row: &crate::state::RegistryEntry| {
-        row.harness_session_id.as_deref().is_some_and(|sid| {
-            live.values()
-                .all(|c| c.holder_session.as_deref() != Some(sid))
-                && store
-                    .crowns
-                    .values()
-                    .all(|r| r.holder_session.as_deref() != Some(sid))
-        })
+    // holder, so the label never resolves to two rows. The predicate reads
+    // the store and the transaction's own rows, so the verdict under the
+    // lock is as fresh as the two files allow.
+    let displaceable = |row: &crate::state::RegistryEntry,
+                        entries: &[crate::state::RegistryEntry]| {
+        let Some(sid) = row.harness_session_id.as_deref() else {
+            return false;
+        };
+        if holds_live_crown(entries, sid) {
+            return false;
+        }
+        let Ok(current) = read(store_path) else {
+            return false;
+        };
+        current
+            .crowns
+            .values()
+            .all(|r| r.holder_session.as_deref() != Some(sid))
     };
     crate::state::rename_agent_displacing(registry_path, &crown.holder, &label, None, displaceable)
         .map_err(|e| format!("rename crowned holder: {e}"))?;
     Ok(true)
+}
+
+/// Whether `sid` is the first liveish row over some non-empty canonical
+/// scope - `territory::live_crowns`'s holder rule, run over the caller's
+/// rows so the displacement verdict cannot read a pre-transaction snapshot.
+fn holds_live_crown(entries: &[crate::state::RegistryEntry], sid: &str) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in entries {
+        let raw = row.crown_scope.as_deref().unwrap_or("").trim();
+        if raw.is_empty() || !crate::spawn_gate::status_is_liveish(&row.status) {
+            continue;
+        }
+        let canon = crate::territory::canonical_scope(raw);
+        if canon.is_empty() || !seen.insert(canon) {
+            continue;
+        }
+        if row.harness_session_id.as_deref() == Some(sid) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Move the record from `old_scope` to `new_scope`, keeping name and regnal,

@@ -2433,12 +2433,14 @@ pub fn rename_agent(
     new_name: &str,
     node: Option<&str>,
 ) -> Result<(String, String), String> {
-    rename_agent_displacing(path, token, new_name, node, |_| false)
+    rename_agent_displacing(path, token, new_name, node, |_, _| false)
 }
 
 /// [`rename_agent`] with label displacement: when the target label is held
 /// only by rows that satisfy `may_displace`, the label and alias move off
-/// those rows inside this SAME transaction instead of refusing. The crown
+/// those rows inside this SAME transaction instead of refusing. The predicate
+/// receives the row and the transaction's own entries, so its verdict reads
+/// the state under the lock, not a pre-transaction snapshot. The crown
 /// check-in takes a carried label back from a predecessor row that holds no
 /// live crown; every other caller keeps the plain refusal.
 pub fn rename_agent_displacing(
@@ -2446,7 +2448,7 @@ pub fn rename_agent_displacing(
     token: &str,
     new_name: &str,
     node: Option<&str>,
-    may_displace: impl Fn(&RegistryEntry) -> bool,
+    may_displace: impl Fn(&RegistryEntry, &[RegistryEntry]) -> bool,
 ) -> Result<(String, String), String> {
     if !is_valid_registry_label(new_name) {
         return Err(
@@ -2548,7 +2550,7 @@ pub fn rename_agent_displacing(
         if !held_elsewhere.is_empty() {
             if held_elsewhere
                 .iter()
-                .all(|&i| may_displace(&registry.entries[i]))
+                .all(|&i| may_displace(&registry.entries[i], &registry.entries))
             {
                 for &i in &held_elsewhere {
                     vacate_label(&mut registry.entries, i, new_name, &resolved_name)?;

@@ -179,6 +179,9 @@ event_types:
         measurement_complete:
           type: boolean
           description: "True only when every expected delivery source was observed in the same hook invocation."
+        measurement_timeouts:
+          type: integer
+          description: "How many measurement_errors are producer timeouts; equal to the error count means the snapshot is a measured partial, not an unobserved hook."
         measurement_errors:
           type: array
         node_id:
