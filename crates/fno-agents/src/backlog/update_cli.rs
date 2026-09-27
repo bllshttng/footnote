@@ -69,6 +69,13 @@ const NATIVE_UPDATE_FLAGS: &[&str] = &[
     "--blocked-by",
     "--add-blocker",
     "--remove-blocker",
+    "--pr-number",
+    "--pr-url",
+    "--repo",
+    "--add-pr",
+    "--add-pr-url",
+    "--add-pr-note",
+    "--remove-pr",
     "--type",
     "--help",
     "-h",
@@ -127,6 +134,15 @@ struct UpdateArgs {
     add_blocker: Vec<String>,
     remove_blocker: Vec<String>,
     related: Vec<String>,
+    /// `--pr-number` accepts 'null'; `--add-pr`/`--remove-pr` carry
+    /// typer's int gate as a raw token the PR block validates.
+    pr_number: Option<String>,
+    pr_url: Option<String>,
+    repo: Option<String>,
+    add_pr: Option<String>,
+    add_pr_url: Option<String>,
+    add_pr_note: Option<String>,
+    remove_pr: Option<String>,
     door: Vec<String>,
 }
 
@@ -172,6 +188,13 @@ impl UpdateArgs {
             add_blocker: Vec::new(),
             remove_blocker: Vec::new(),
             related: Vec::new(),
+            pr_number: None,
+            pr_url: None,
+            repo: None,
+            add_pr: None,
+            add_pr_url: None,
+            add_pr_note: None,
+            remove_pr: None,
             door: Vec::new(),
         };
         let mut i = 0;
@@ -292,6 +315,13 @@ impl UpdateArgs {
                 "--parent" => take_value!(a.parent),
                 "--caused-by" => take_value!(a.caused_by),
                 "--source-node" => take_value!(a.source_node),
+                "--pr-number" => take_value!(a.pr_number),
+                "--pr-url" => take_value!(a.pr_url),
+                "--repo" => take_value!(a.repo),
+                "--add-pr" => take_value!(a.add_pr),
+                "--add-pr-url" => take_value!(a.add_pr_url),
+                "--add-pr-note" => take_value!(a.add_pr_note),
+                "--remove-pr" => take_value!(a.remove_pr),
                 "--related" | "--blocked-by" | "--add-blocker" | "--remove-blocker" => {
                     match inline.clone().or_else(|| {
                         if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
@@ -570,8 +600,11 @@ fn run_native(args: &UpdateArgs) -> Result<(), Refusal> {
         ));
     }
 
-    let linked_size = linked_plan_size(args);
+    // U8: PR attribution resolves outside the graph lock; a wrong or
+    // unattributable link refuses before any write.
     let graph = settings::graph_path();
+    let pr = derive_pr_links(args, derived_cwd.as_deref(), &graph)?;
+    let linked_size = linked_plan_size(args);
     write_update(
         &graph,
         args,
@@ -579,8 +612,285 @@ fn run_native(args: &UpdateArgs) -> Result<(), Refusal> {
         details_from_file,
         derived_cwd.as_deref(),
         linked_size.as_deref(),
+        &pr,
     )?;
     Ok(())
+}
+
+/// The PR links a wave-5 call resolves before the lock: the derived values
+/// the mutator stores plus the clearing flag the receipts need. All empty
+/// for a call without PR flags.
+struct DerivedPr {
+    pr_number: Option<i64>,
+    pr_url: Option<String>,
+    add_pr_url: Option<String>,
+    clearing_number: bool,
+}
+
+fn is_digit_token(v: &str) -> bool {
+    let t = v.trim();
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+}
+
+fn derive_pr_links(
+    args: &UpdateArgs,
+    derived_cwd: Option<&str>,
+    graph: &Path,
+) -> Result<DerivedPr, Refusal> {
+    let pr_flags = args.pr_number.is_some()
+        || args.pr_url.is_some()
+        || args.repo.is_some()
+        || args.add_pr.is_some()
+        || args.add_pr_url.is_some()
+        || args.add_pr_note.is_some()
+        || args.remove_pr.is_some();
+    if !pr_flags {
+        return Ok(DerivedPr {
+            pr_number: None,
+            pr_url: None,
+            add_pr_url: None,
+            clearing_number: false,
+        });
+    }
+    for (flag, raw) in [("--add-pr", &args.add_pr), ("--remove-pr", &args.remove_pr)] {
+        if let Some(v) = raw {
+            if v.parse::<i64>().is_err() {
+                return Err(refused(
+                    format!("Error: Invalid value for '{flag}': '{v}' is not a valid integer."),
+                    2,
+                ));
+            }
+        }
+    }
+    // The node as it stands now, for cwd and current-PR reads (the Python
+    // `_node_before_update` cache, read eagerly here).
+    let pre_node: Option<Value> = {
+        let rows = graph_store::read_rows(graph)
+            .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+        node_ref::find_node(&rows, &args.task_id).cloned()
+    };
+    let pre_field =
+        |name: &str| -> Option<Value> { pre_node.as_ref().and_then(|n| n.get(name)).cloned() };
+    let clearing_number = args
+        .pr_number
+        .as_deref()
+        .is_some_and(|v| v.to_lowercase() == "null");
+    let clearing_url = args
+        .pr_url
+        .as_deref()
+        .is_some_and(|v| v.to_lowercase() == "null");
+
+    if args.add_pr.is_none() && (args.add_pr_url.is_some() || args.add_pr_note.is_some()) {
+        return Err(refused(
+            "Error: --add-pr-url and --add-pr-note require --add-pr",
+            2,
+        ));
+    }
+    if args.repo.is_some() {
+        if args.pr_url.is_some() && !clearing_url {
+            return Err(refused(
+                "Error: --repo and --pr-url both name a repo; pass one, not both",
+                2,
+            ));
+        }
+        if args.add_pr_url.is_some() {
+            return Err(refused(
+                "Error: --repo and --add-pr-url both name a repo; pass one, not both",
+                2,
+            ));
+        }
+    }
+    if args.pr_url.is_some() && !clearing_url {
+        let value = args.pr_url.as_deref().unwrap_or_default();
+        let expect: Option<i64> = match args.pr_number.as_deref() {
+            Some(pn) if is_digit_token(pn) => pn.trim().parse().ok(),
+            Some(_) => None,
+            None => pre_field("pr_number").as_ref().and_then(Value::as_i64),
+        };
+        check_url_shape(value, "--pr-url", expect)?;
+    }
+    if let Some(value) = args.add_pr_url.as_deref() {
+        let expect = args.add_pr.as_deref().and_then(|v| v.parse().ok());
+        check_url_shape(value, "--add-pr-url", expect)?;
+    }
+
+    // The cwd a derivation may fall back on: the project workmap expansion,
+    // then the flag (abs-expanded), then the node's recorded cwd.
+    let slug_cwd: Option<String> = derived_cwd
+        .map(str::to_string)
+        .or_else(|| args.cwd.as_deref().map(abs_expand))
+        .or_else(|| {
+            pre_field("cwd")
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let pre_pr_url = pre_field("pr_url")
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut derived_pr_url: Option<String> = None;
+    if args.pr_number.is_some() && !clearing_number {
+        let pn = args.pr_number.as_deref().unwrap_or_default();
+        if !is_digit_token(pn) {
+            return Err(refused(
+                format!("Error: --pr-number '{pn}' is not a number (or 'null')"),
+                2,
+            ));
+        }
+        if clearing_url {
+            return Err(refused(
+                "Error: --pr-url null cannot accompany --pr-number: that writes a \
+                 url-less pr_number. Clear both, or supply a url.",
+                2,
+            ));
+        }
+        if args.pr_url.is_none() {
+            derived_pr_url = Some(resolve_or_refuse(
+                pn.trim().parse().unwrap_or_default(),
+                "--pr-url",
+                true,
+                args.repo.as_deref(),
+                slug_cwd.as_deref(),
+                pre_pr_url.as_deref(),
+            )?);
+        }
+    } else if clearing_url && !clearing_number {
+        if let Some(n) = pre_field("pr_number").as_ref().and_then(Value::as_i64) {
+            return Err(refused(
+                format!(
+                    "Error: --pr-url null would leave this node's pr_number ({n}) \
+                     unattributable. Pass --pr-number null too, or supply a replacement url."
+                ),
+                2,
+            ));
+        }
+    }
+
+    // A url-only update derives pr_number from the url: without it, reconcile
+    // never sees the PR (node_pr_refs gates on the number) and the node stays
+    // invisible to merge detection.
+    let derived_pr_number: Option<i64> =
+        if args.pr_url.is_some() && !clearing_url && args.pr_number.is_none() {
+            super::pr_link::pr_number_from_url(args.pr_url.as_deref())
+        } else {
+            None
+        };
+
+    // additional_prs entries are read by the same repo-scoped matcher as the
+    // primary field, so a bare --add-pr is unattributable for the same reason.
+    let derived_add_pr_url: Option<String> = if args.add_pr.is_some() && args.add_pr_url.is_none() {
+        Some(resolve_or_refuse(
+            args.add_pr
+                .as_deref()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_default(),
+            "--add-pr-url",
+            false,
+            args.repo.as_deref(),
+            slug_cwd.as_deref(),
+            pre_pr_url.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
+    Ok(DerivedPr {
+        pr_number: derived_pr_number,
+        pr_url: derived_pr_url,
+        add_pr_url: derived_add_pr_url,
+        clearing_number,
+    })
+}
+
+fn check_url_shape(value: &str, label: &str, expect: Option<i64>) -> Result<(), Refusal> {
+    if super::pr_link::repo_slug_from_url(Some(value)).is_none() {
+        return Err(refused(
+            format!(
+                "Error: {label} '{value}' is not a GitHub PR url \
+                 (expected https://github.com/<owner>/<repo>/pull/<n>)"
+            ),
+            2,
+        ));
+    }
+    let named = super::pr_link::pr_number_from_url(Some(value));
+    if let Some(expect) = expect {
+        if named != Some(expect) {
+            let shown = named
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "None".into());
+            return Err(refused(
+                format!(
+                    "Error: {label} names PR #{shown}, not #{expect} - a row pointing at \
+                     two different PRs matches neither."
+                ),
+                2,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_or_refuse(
+    number: i64,
+    label: &str,
+    primary: bool,
+    repo: Option<&str>,
+    slug_cwd: Option<&str>,
+    pre_pr_url: Option<&str>,
+) -> Result<String, Refusal> {
+    // A named --repo is an assertion: build the url from it and say so. It
+    // is the one legal way to override a recorded pr_url that names another
+    // repo, so it applies before any derivation.
+    if let Some(repo) = repo {
+        if !super::pr_link::is_repo_slug(repo) {
+            return Err(refused(
+                format!(
+                    "Error: --repo '{repo}' is not an owner/name slug \
+                     (expected <owner>/<repo>, e.g. bllshttng/footnote)"
+                ),
+                2,
+            ));
+        }
+        let url = super::pr_link::pr_url_from_slug(repo.trim(), number);
+        eprintln!("note: stamped --repo {} {url}", repo.trim());
+        return Ok(url);
+    }
+    let Some(url) = super::pr_link::pr_url_for_repo(number, slug_cwd) else {
+        return Err(refused(
+            format!(
+                "Error: cannot resolve the repo for PR #{number} - refusing to stamp an \
+                 unattributable pr_number. Fix with either `gh auth login` or \
+                 `{label} https://github.com/<owner>/<repo>/pull/{number}`."
+            ),
+            2,
+        ));
+    };
+    if primary {
+        // A cwd-derived url is a guess. On the primary PR ref it must not
+        // overwrite recorded truth that names a different repo: PR numbers
+        // collide across repos. --add-pr is exempt: additional_prs are
+        // cross-repo by design.
+        let recorded = super::pr_link::repo_slug_from_url(pre_pr_url).map(|s| s.to_lowercase());
+        let derived = super::pr_link::repo_slug_from_url(Some(&url)).map(|s| s.to_lowercase());
+        if let (Some(recorded), Some(derived)) = (recorded, derived) {
+            if recorded != derived {
+                return Err(refused(
+                    format!(
+                        "Error: derived {label} {url} names repo {derived}, but this node's \
+                         recorded pr_url names {recorded} - refusing to re-stamp a \
+                         cross-repo move on a cwd derivation. Assert it with \
+                         --repo {derived} (or a full {label} url), or clear the link \
+                         with --pr-number null first."
+                    ),
+                    2,
+                ));
+            }
+        }
+    }
+    eprintln!("note: derived {label} {url}");
+    Ok(url)
 }
 
 /// `[A-Za-z0-9._:/-]{1,64}` fullmatch.
@@ -627,6 +937,7 @@ fn write_update(
     details_from_file: bool,
     derived_cwd: Option<&str>,
     linked_size: Option<&str>,
+    pr: &DerivedPr,
 ) -> Result<(), Refusal> {
     const ATTEMPTS: usize = 3;
     for attempt in 0..ATTEMPTS {
@@ -640,6 +951,7 @@ fn write_update(
             details_from_file,
             derived_cwd,
             linked_size,
+            pr,
         )?;
         match planned {
             MutationPlan::Refused(r) => return Err(r),
@@ -648,6 +960,7 @@ fn write_update(
                 rungs,
                 node_id,
                 warnings,
+                ship_stamp,
             } => {
                 match graph_store::locked_mutate(
                     graph,
@@ -667,11 +980,55 @@ fn write_update(
                         for w in &warnings {
                             eprintln!("{w}");
                         }
-                        confirm_readback(graph, args, &node_id)?;
+                        let stored = confirm_readback(graph, args, &node_id)?;
                         if let Some(raw) = &args.locked_by {
                             verify_lock_stamp(graph, &node_id, raw)?;
                         }
+                        // U8 receipts, in cmd_update's order.
+                        if args.add_pr.is_some()
+                            && stored.get("status").and_then(Value::as_str) == Some("ready")
+                        {
+                            eprintln!(
+                                "warning: {} is still offered by ready; bind ownership and \
+                                 the primary PR with --locked-by <worker> --pr-number {}",
+                                stored.get("id").and_then(Value::as_str).unwrap_or(&node_id),
+                                args.add_pr.as_deref().unwrap_or_default()
+                            );
+                        }
+                        if args.pr_number.is_some() && !pr.clearing_number {
+                            let stored_id =
+                                stored.get("id").and_then(Value::as_str).unwrap_or(&node_id);
+                            let stored_owner = stored
+                                .get("locked_by")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("unknown");
+                            let stored_pr = match stored.get("pr_number").and_then(Value::as_i64) {
+                                Some(n) => n.to_string(),
+                                None => "None".to_string(),
+                            };
+                            let stored_status = stored
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("unknown");
+                            let ready_effect = if stored_status == "ready" {
+                                "still offered by ready"
+                            } else {
+                                "not offered by ready"
+                            };
+                            println!(
+                                "ownership: node={stored_id} owner={stored_owner} \
+                                 pr={stored_pr} status={stored_status}; {ready_effect}"
+                            );
+                        }
                         println!("Updated {node_id}");
+                        // The link just committed (lock released), so the ship
+                        // stamp runs here: the session row takes its own lock,
+                        // and stamping inside the mutator would deadlock.
+                        if let Some(target) = ship_stamp {
+                            super::pr_link::stamp_ship_on_link(graph, &target);
+                        }
                         repaint(graph, args, &node_id);
                         return Ok(());
                     }
@@ -707,6 +1064,7 @@ enum MutationPlan {
         rungs: BTreeMap<String, String>,
         node_id: String,
         warnings: Vec<String>,
+        ship_stamp: Option<String>,
     },
 }
 
@@ -719,6 +1077,7 @@ fn plan_mutation(
     details_from_file: bool,
     derived_cwd: Option<&str>,
     linked_size: Option<&str>,
+    pr: &DerivedPr,
 ) -> Result<MutationPlan, Refusal> {
     let _ = graph;
     let rungs: BTreeMap<String, String> = rows
@@ -757,7 +1116,7 @@ fn plan_mutation(
         .iter()
         .position(|r| entry_id(r) == Some(node_id.as_str()))
         .ok_or_else(|| refused(format!("Error: graph node {} not found", args.task_id), 1))?;
-    let warnings = apply_mutators(
+    let (warnings, ship_stamp) = apply_mutators(
         &mut rows,
         idx,
         args,
@@ -765,6 +1124,7 @@ fn plan_mutation(
         details_from_file,
         derived_cwd,
         linked_size,
+        pr,
     )?;
 
     Ok(MutationPlan::Applied {
@@ -772,6 +1132,7 @@ fn plan_mutation(
         rungs,
         node_id,
         warnings,
+        ship_stamp,
     })
 }
 
@@ -787,7 +1148,8 @@ fn apply_mutators(
     details_from_file: bool,
     derived_cwd: Option<&str>,
     linked_size: Option<&str>,
-) -> Result<Vec<String>, Refusal> {
+    pr: &DerivedPr,
+) -> Result<(Vec<String>, Option<String>), Refusal> {
     let node_id = rows[idx]
         .get("id")
         .and_then(Value::as_str)
@@ -947,6 +1309,40 @@ fn apply_mutators(
             }
         }
     }
+    // -- U8: the PR links, directly after the plan binding in cmd_update's
+    // order. The unset->set transition on pr_number is the ship choke point;
+    // the stamp itself runs after the lock releases (write_update), since the
+    // session row takes its own lock.
+    let pr_number_before = node.get("pr_number").and_then(Value::as_i64);
+    {
+        let obj = rows[idx].as_object_mut().expect("row is an object");
+        if let Some(v) = &args.pr_number {
+            let value = if v.to_lowercase() == "null" {
+                Value::Null
+            } else {
+                json!(v.trim().parse::<i64>().unwrap_or_default())
+            };
+            obj.insert("pr_number".into(), value);
+        } else if let Some(n) = pr.pr_number {
+            obj.insert("pr_number".into(), json!(n));
+        }
+    }
+    let pr_number_now = rows[idx].get("pr_number").and_then(Value::as_i64);
+    let ship_stamp =
+        (pr_number_now.is_some() && pr_number_before.is_none()).then(|| node_id.clone());
+    {
+        let obj = rows[idx].as_object_mut().expect("row is an object");
+        if let Some(v) = &args.pr_url {
+            let value = if v.to_lowercase() == "null" {
+                Value::Null
+            } else {
+                json!(v)
+            };
+            obj.insert("pr_url".into(), value);
+        } else if let Some(u) = &pr.pr_url {
+            obj.insert("pr_url".into(), json!(u));
+        }
+    }
     let mut warnings: Vec<String> = {
         let obj = rows[idx].as_object_mut().expect("row is an object");
         if let Some(v) = &args.batch {
@@ -1096,6 +1492,56 @@ fn apply_mutators(
                     obj.insert("completion_note".into(), json!(merged));
                 }
             }
+        }
+        if let Some(v) = &args.add_pr {
+            let num: i64 = v.trim().parse().unwrap_or_default();
+            let mut list: Vec<Value> = obj
+                .get("additional_prs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut entry = Map::new();
+            entry.insert("number".into(), json!(num));
+            entry.insert(
+                "url".into(),
+                args.add_pr_url
+                    .as_deref()
+                    .or(pr.add_pr_url.as_deref())
+                    .map(|s| json!(s))
+                    .unwrap_or(Value::Null),
+            );
+            if let Some(note) = &args.add_pr_note {
+                entry.insert("note".into(), json!(note));
+            }
+            let mut replaced = false;
+            for item in list.iter_mut() {
+                let Some(map) = item.as_object_mut() else {
+                    continue;
+                };
+                if map.get("number").and_then(Value::as_i64) == Some(num) {
+                    for (k, val) in entry.clone() {
+                        map.insert(k, val);
+                    }
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                list.push(Value::Object(entry));
+            }
+            obj.insert("additional_prs".into(), Value::Array(list));
+        }
+        if let Some(v) = &args.remove_pr {
+            let num: i64 = v.trim().parse().unwrap_or_default();
+            let list: Vec<Value> = obj
+                .get("additional_prs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|item| item.get("number").and_then(Value::as_i64) != Some(num))
+                .collect();
+            obj.insert("additional_prs".into(), Value::Array(list));
         }
         warnings
     };
@@ -1288,7 +1734,7 @@ fn apply_mutators(
             }
         }
     }
-    Ok(warnings)
+    Ok((warnings, ship_stamp))
 }
 
 /// The `_parse_blocker_list` twin: comma-split, trim, skip empties.
@@ -1359,7 +1805,7 @@ fn abs_expand(value: &str) -> String {
 
 /// The read-back receipt guard: an `Updated` line the store cannot confirm is
 /// an error, never a success.
-fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<(), Refusal> {
+fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<Value, Refusal> {
     let _ = args;
     let rows =
         graph_store::read_rows(graph).map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
@@ -1369,16 +1815,16 @@ fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<()
         .iter()
         .filter(|r| r.get("archived_at").is_none())
         .collect();
-    if !live.iter().any(|r| entry_id(r) == Some(node_id)) {
-        return Err(refused(
+    match live.iter().find(|r| entry_id(r) == Some(node_id)) {
+        Some(row) => Ok((*row).clone()),
+        None => Err(refused(
             format!(
                 "Error: the update of {node_id} reported success but the row does not \
                  read back; the write did not land"
             ),
             1,
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// The plan-frontmatter size read that flows doc->graph on a (re)link, for a
