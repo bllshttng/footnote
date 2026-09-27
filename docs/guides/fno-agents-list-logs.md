@@ -82,7 +82,7 @@ Returns a canonical object suitable for scripts:
       "requested_model": "glm-5.2",
       "model": "glm-5.2",
       "model_basis": "requested",
-      "node": "x-58e3",
+      "node": "x-aaaa",
       "pr": 2136,
       "pr_basis": "node",
       "pid": 75742,
