@@ -6315,7 +6315,9 @@ def _delivery_policy_refusal(
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
-        return _gate_answer_in_process(token, body)
+        from fno.mail import hold as hold_mod
+
+        return hold_mod.gate_answer_in_process(token)
     try:
         argv = [str(binary), "mail-hold", "--gate"]
         if park:
@@ -6331,19 +6333,6 @@ def _delivery_policy_refusal(
         return BUS_ONLY_POLICY
     except Exception:  # noqa: BLE001 - fail closed: never lift a hold we could not read
         return BUS_ONLY_POLICY
-
-
-def _gate_answer_in_process(token: str, body: Optional[str]) -> Optional[str]:
-    """The gate's C15 own pass and lapsed-clock read in-process (no binary)."""
-    from fno.agents.self_stamp import resolve_self_session_id
-    from fno.mail import hold as hold_mod
-
-    own = resolve_self_session_id()
-    if own and own.casefold() == token.casefold():
-        return None
-    if hold_mod.lapsed(token):
-        return None
-    return BUS_ONLY_POLICY
 
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:

@@ -186,9 +186,7 @@ _ENVIRONMENT: tuple[str, ...] = (
     "USERNAME",
     "TERM",
     "COLORTERM",
-    # The splash reads it to honor a motion accessibility preference, the same
-    # describe-the-terminal class as TERM and COLORTERM above.
-    "REDUCED_MOTION",
+    "REDUCED_MOTION",  # splash honors a motion preference, like TERM above
     "PYTHONPATH",
     "PYTEST_CURRENT_TEST",
     "CI",  # CI-gated behaviour is deliberate; the graph tripwire keys on it
