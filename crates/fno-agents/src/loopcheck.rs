@@ -436,6 +436,14 @@ pub(crate) fn decide_with_payload(
         }
     };
 
+    // The run's merge posture, read once with the same parser finalize uses
+    // to arm. `Some(false)` is a per-run no-merge: the merge belongs to
+    // whoever holds the merge slot at the end (usually the operator), so the
+    // stop-time fidelity gate below must not wedge the worker on a block the
+    // merge gate re-enforces at merge time anyway.
+    let manifest_fields = crate::finalize::parse_manifest_fields(&manifest_content);
+    let manifest_no_merge = manifest_fields.auto_merge_approved == Some(false);
+
     // Lease renewal: keep this session's node claim fresh on every
     // stop, so a worker whose supervisor pid died mid-run (and now runs under a
     // new pid) never loses its claim to TTL expiry. Best-effort and non-fatal:
@@ -1373,33 +1381,66 @@ pub(crate) fn decide_with_payload(
                 // next eval passes. Gated on the same conjuncts as done_probes and
                 // fail-open on a stale/missing fno (the merge gate is the backstop).
                 let mut fidelity_block: Option<String> = None;
+                let mut merge_owner: Option<String> = None;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
+                    // A delegated merge (per-run no-merge manifest, or a valid
+                    // crown ruling hold on this node) skips the stop-time
+                    // fidelity read: someone else merges, the merge gate re-runs
+                    // the same fidelity join at merge time
+                    // (authorized_merge.rs:523), and DonePRGreen is a shipped
+                    // terminal, so the later join sees a delivered row rather
+                    // than the x-9ec5 DoneAwaitingMerge trap. The park names who
+                    // merges so a human (or the merge queue) owns the next act.
+                    let ruling = node_id.as_deref().and_then(awaiting_merge::ruling_hold);
+                    let merge_delegated = manifest_no_merge || ruling.is_some();
+                    if merge_delegated {
+                        merge_owner = Some(if manifest_no_merge {
+                            let source = manifest_fields
+                                .auto_merge_source
+                                .as_deref()
+                                .unwrap_or("unknown");
+                            let repo_slug =
+                                crate::finalize::slug_from_git_remote(&cwd).unwrap_or_default();
+                            format!(
+                                "the operator (per-run no-merge, source {source}); attended grant: {}",
+                                crate::merge_grant::attended_grant_command(
+                                    &repo_slug,
+                                    pr_info.number as i64,
+                                    &pr_info.head_oid,
+                                )
+                            )
+                        } else {
+                            format!("the ruling {}", ruling.unwrap_or_default())
+                        });
+                    }
                     let fno_bin = std::ffi::OsString::from(loopcheck_fno_bin());
-                    match evaluate_plan_fidelity(
-                        manifest.plan_path.as_deref(),
-                        &fno_bin,
-                        &cwd,
-                        // The 60s ceiling, clamped to the fire budget: a
-                        // fidelity probe is a stop-gate read like any other,
-                        // and one read must not spend more than the fire
-                        // still has before the harness kills the hook.
-                        clamp_to_fire_deadline(FIDELITY_TIMEOUT),
-                    ) {
-                        FidelityGate::Refused { reason } => fidelity_block = Some(reason),
-                        // Degraded fails OPEN on the stop decision (same as Absent - a
-                        // hung probe must not wedge the gate that lets a finished
-                        // session stop), but is emitted here so it is never a SILENT
-                        // pass: a probe that keeps timing out stays visible in the
-                        // event log even though it never blocks.
-                        FidelityGate::Degraded { reason } => emit(
-                            "loop_check_fidelity_degraded",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "plan_path": manifest.plan_path,
-                                "reason": reason
-                            }),
-                        ),
-                        _ => {}
+                    if !merge_delegated {
+                        match evaluate_plan_fidelity(
+                            manifest.plan_path.as_deref(),
+                            &fno_bin,
+                            &cwd,
+                            // The 60s ceiling, clamped to the fire budget: a
+                            // fidelity probe is a stop-gate read like any other,
+                            // and one read must not spend more than the fire
+                            // still has before the harness kills the hook.
+                            clamp_to_fire_deadline(FIDELITY_TIMEOUT),
+                        ) {
+                            FidelityGate::Refused { reason } => fidelity_block = Some(reason),
+                            // Degraded fails OPEN on the stop decision (same as Absent - a
+                            // hung probe must not wedge the gate that lets a finished
+                            // session stop), but is emitted here so it is never a SILENT
+                            // pass: a probe that keeps timing out stays visible in the
+                            // event log even though it never blocks.
+                            FidelityGate::Degraded { reason } => emit(
+                                "loop_check_fidelity_degraded",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "plan_path": manifest.plan_path,
+                                    "reason": reason
+                                }),
+                            ),
+                            _ => {}
+                        }
                     }
                 }
 
@@ -1543,6 +1584,10 @@ pub(crate) fn decide_with_payload(
                             pr_info.number
                         ),
                         None => format!("PR #{} is green and reviewed", pr_info.number),
+                    };
+                    let done_msg = match merge_owner {
+                        Some(owner) => format!("{done_msg}; merge owned by {owner}"),
+                        None => done_msg,
                     };
                     term_row("DonePRGreen", &done_msg);
                     fire_row(
