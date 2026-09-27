@@ -614,7 +614,10 @@ jobs:
         # when that binary was built from this checkout.
         run: |
           cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
-          cp crates/fno-agents/target/release/fno-agents "$HOME/.cargo/bin/"
+          # Runner-only: replayed locally this overwrites the deployed binary
+          # in place and macOS SIGKILLs every launch. Pin a local build with
+          # FNO_AGENTS_FRONT instead.
+          if [ "$CI" = true ]; then cp crates/fno-agents/target/release/fno-agents "$HOME/.cargo/bin/"; fi
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -786,7 +789,10 @@ jobs:
         # `fno doctor harness-matrix` execs the *installed* binary by design.
         run: |
           cargo build --bin fno-agents
-          cp target/debug/fno-agents "$HOME/.cargo/bin/"
+          # Runner-only: replayed locally this overwrites the deployed binary
+          # in place and macOS SIGKILLs every launch. Pin a local build with
+          # FNO_AGENTS_FRONT instead.
+          if [ "$CI" = true ]; then cp target/debug/fno-agents "$HOME/.cargo/bin/"; fi
 
       - name: Generated copies match their sources
         # The ONE freshness gate for every build-generated copy. build.rs

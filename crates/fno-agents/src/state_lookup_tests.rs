@@ -26,6 +26,8 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         forked_from_session_id: None,
         launch_account: None,
         related_session_id: None,
+        transcript_path: None,
+        start_source: None,
         node: None,
         node_reason: None,
         pending_session_row: None,

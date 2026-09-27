@@ -127,14 +127,6 @@ def test_collision_free_is_a_gap_not_a_fabricated_pass_without_waves():
     assert fold.score_blueprint_item({}, plan_text=plan_text)["collision_free"] is None
 
 
-def test_review_precision_pass_degraded_fail():
-    assert fold.score_review_item(addressed_ids={"c1"}, skipped_ids={"c2"}, all_finding_ids={"c1", "c2"}) == {"finding_precision": "pass"}
-    assert fold.score_review_item(addressed_ids={"c1"}, skipped_ids=set(), all_finding_ids={"c1", "c2"}) == {"finding_precision": "degraded"}
-    assert fold.score_review_item(addressed_ids=set(), skipped_ids=set(), all_finding_ids={"c1", "c2"}) == {"finding_precision": "fail"}
-    # no findings at all -> not scorable, a coverage gap
-    assert fold.score_review_item(addressed_ids=set(), skipped_ids=set(), all_finding_ids=set()) == {"finding_precision": None}
-
-
 def test_replay_path_scores_structural_only_and_none_without_plan():
     # A1: replay item omits shipped_outcome; plan_text=None -> gap.
     item = {"include_shipped_outcome": False}

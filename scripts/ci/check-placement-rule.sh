@@ -114,6 +114,9 @@
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
 #      state), the same multi-account convention managed.py already uses.
+#      capability_leaves.rs pins a loop-gate refusal whose message NAMES the
+#      untrusted plugin-cache path Claude Code itself owns; its test asserts
+#      on that message. Comparison only; footnote stores nothing there.
 #      crates/fno/src/transcript_tail.rs reads Claude Code's own
 #      ~/.claude/projects transcript tree (the sideline's last-msg column) -
 #      read-only, same category as agents_view.rs above.
@@ -249,6 +252,7 @@ cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
 crates/fno-agents/src/claude_vault.rs
+crates/fno-agents/src/capability_leaves.rs
 crates/fno-agents/src/slot_cutover.rs
 cli/src/fno/backlog/advance.py
 cli/src/fno/backlog/batch.py
