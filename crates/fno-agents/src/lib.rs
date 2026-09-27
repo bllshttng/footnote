@@ -334,6 +334,7 @@ pub mod session_activity;
 pub mod session_backfill;
 pub mod session_cost;
 pub mod session_names_fold;
+pub mod session_report;
 pub mod session_start_bytes;
 pub mod single_flight;
 pub mod slot_cutover;
@@ -1602,6 +1603,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // daemon dropped a report (stale seq / unknown session) without storing it.
     "inside_leg_report",
     "inside_leg_report_dropped",
+    // Session-start report (daemon-emitted): a harness hook's raw SessionStart
+    // payload was stamped onto the matching registry row, or was dropped
+    // (unknown session / third distinct id) without storing.
+    "session_report_stored",
+    "session_report_dropped",
     // Ordered exit teardown (daemon-emitted, inside-out E3.3): a claude row with
     // an inside-leg report is going Exited; the completion is published before
     // the registry clears the report (AC-X2-4).

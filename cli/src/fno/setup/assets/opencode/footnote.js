@@ -137,6 +137,25 @@ function makeHandler(io, dir) {
   return async function handle(kind, sid) {
     try {
       if (kind === "created") {
+        // Report this session's id to the daemon (the registry holds it; mail
+        // and liveness stop guessing). Fire-and-forget, best-effort: never
+        // awaited, so the created handler never blocks on the RPC. A spawned
+        // pane carries FNO_AGENT_SELF: an interactive pane's row cannot hold
+        // the callee-minted id yet, so the name is what lets the daemon match.
+        if (sid) {
+          const reportArgs = [
+            process.env.FNO_AGENTS_BIN || "fno-agents",
+            "report", "--kind", "session",
+            "--harness", "opencode",
+            "--session-id", sid,
+          ]
+          if (process.env.FNO_AGENT_SELF) {
+            reportArgs.push("--agent-self", process.env.FNO_AGENT_SELF)
+          }
+          io.run(reportArgs, dir).catch((e) =>
+            console.error(`[footnote] session report failed: ${e}`),
+          )
+        }
         // Presence via the resolver: a plain native session pays nothing.
         if (sid && (await resolveManifest(dir, io))) {
           try {
