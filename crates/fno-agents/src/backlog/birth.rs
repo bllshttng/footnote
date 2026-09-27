@@ -418,8 +418,16 @@ pub fn maybe_spawn_think(
         .to_uppercase();
     if node_type == "bug" || node_size == "S" {
         // The `or '?'` spelling: an absent word reads as ?, never empty.
-        let type_word = if node_type.is_empty() { "?" } else { node_type.as_str() };
-        let size_word = if node_size.is_empty() { "?" } else { node_size.as_str() };
+        let type_word = if node_type.is_empty() {
+            "?"
+        } else {
+            node_type.as_str()
+        };
+        let size_word = if node_size.is_empty() {
+            "?"
+        } else {
+            node_size.as_str()
+        };
         return skip(
             "not-design-warranting",
             Some(format!("type={type_word} size={size_word}")),

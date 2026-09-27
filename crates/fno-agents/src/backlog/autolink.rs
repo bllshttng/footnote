@@ -338,6 +338,7 @@ pub fn receipt_lines(resolution: &Resolution, node_id: &str, entries: &[Value]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn epic(id: &str, title: &str, domain: &str, status: &str) -> Value {
         json!({"id": id, "title": title, "type": "epic", "status": status, "domain": domain})

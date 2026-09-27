@@ -39,10 +39,10 @@ pub mod relatedness;
 pub mod relations;
 pub mod render;
 pub mod schema_v4;
-pub mod style_check;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod style_check;
 pub mod title_gate;
 pub mod update_cli;
 
