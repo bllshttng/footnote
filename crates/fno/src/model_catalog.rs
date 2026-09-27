@@ -569,7 +569,12 @@ fn facts_for<'a>(
             if !base.is_empty() {
                 let host = host_of(base);
                 if let Some(cat) = catalog {
-                    for (_, cp) in &cat.providers {
+                    // Sorted ids: the link is the first matching catalog id,
+                    // never whichever row a HashMap iteration hits first.
+                    let mut ids: Vec<&String> = cat.providers.keys().collect();
+                    ids.sort();
+                    for id in ids {
+                        let cp = &cat.providers[id];
                         if cp.api.as_deref().map(host_of).as_deref() == Some(host.as_str()) {
                             linked = Some(cp);
                             break;
@@ -730,7 +735,13 @@ fn rows_for_provider(
         }
     } else if !key_ok {
         let mut steps = Vec::new();
-        if !key_env_s.is_empty() {
+        if key_env_s.is_empty() {
+            // No env var name anywhere: the record itself is missing the
+            // api_key_env field, so name that instead of a bare export.
+            steps.push(format!(
+                "fno config set model_routing.providers.{provider}.api_key_env=<ENV VAR>"
+            ));
+        } else {
             steps.push(format!("export {key_env_s}=<your key>"));
         }
         if let Some(kf) = &key_file {
