@@ -124,3 +124,45 @@ fn parent_edge_join_never_resolves_through_an_absent_parent() {
     let row = rows.iter().find(|r| r.name == "think-thread").unwrap();
     assert_eq!(row.squad, None);
 }
+
+// An id two parent rows claim that resolve to DIFFERENT squads is ambiguous:
+// the child reads as absent rather than picking a confident wrong squad.
+#[test]
+fn parent_edge_join_reads_an_ambiguous_parent_as_absent() {
+    let mut core = empty_core();
+    core.session_name = "main".into();
+    core.session.add_squad(
+        1,
+        vec!["/repo/one".into()],
+        None,
+        Tab {
+            name: None,
+            id: 1,
+            root: Node::Leaf(42),
+            focus: 42,
+        },
+    );
+    core.session.add_squad(
+        2,
+        vec!["/repo/two".into()],
+        None,
+        Tab {
+            name: None,
+            id: 2,
+            root: Node::Leaf(50),
+            focus: 50,
+        },
+    );
+    let mut parent_a = bg_row("lead-a", "/repo/one", None);
+    parent_a.harness_session_id = Some("twin-sid".into());
+    let mut parent_b = bg_row("lead-b", "/repo/two", None);
+    parent_b.harness_session_id = Some("twin-sid".into());
+    let mut child = bg_row("think-thread", "/elsewhere/tools", None);
+    child.harness = Some("codex".into());
+    child.harness_session_id = Some("child-sid".into());
+    child.spawned_by_session = Some("twin-sid".into());
+    core.agents = vec![parent_a, parent_b, child];
+    let rows = core.agent_rows();
+    let row = rows.iter().find(|r| r.name == "think-thread").unwrap();
+    assert_eq!(row.squad, None);
+}

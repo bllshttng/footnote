@@ -1440,10 +1440,10 @@ mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
+mod questions;
 // The per-section view defaults (Expanded/LiveOnly/Collapsed), moved out of
 // this file (file budget); the elsewhere section now takes the Expanded-tier
 // default with the active squad.
-mod questions;
 mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .

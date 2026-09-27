@@ -17,17 +17,29 @@ impl Core {
     /// that parent's own attribution (membership, then cwd) answers. A spawn
     /// joins the spawner's workspace, so the edge outranks the row's cwd. An
     /// edge naming an absent parent keeps `None` - the `~ elsewhere` reader
-    /// must still see that absence.
+    /// must still see that absence - and so does an id two parent rows claim
+    /// that resolve to DIFFERENT squads: an ambiguous parent reads as absent,
+    /// never as a confident wrong answer (the spawned_by_name rule).
     fn parent_edge_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
         let edge = agent.spawned_by_session.as_deref()?.trim();
         if edge.is_empty() {
             return None;
         }
-        let parent = self.agents.iter().find(|p| {
-            agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
-        })?;
-        self.member_squad_for_agent(parent)
-            .or_else(|| self.session.find_by_cwd(&parent.cwd))
+        let mut squads = self
+            .agents
+            .iter()
+            .filter(|p| {
+                agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
+            })
+            .filter_map(|p| {
+                self.member_squad_for_agent(p)
+                    .or_else(|| self.session.find_by_cwd(&p.cwd))
+            });
+        let first = squads.next()?;
+        if squads.any(|s| s != first) {
+            return None;
+        }
+        Some(first)
     }
 }
 
