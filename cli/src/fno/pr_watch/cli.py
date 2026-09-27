@@ -201,7 +201,7 @@ def _run_notify_watch_phase(
     store and the ``[notify]`` config are all read in Rust, so this phase is
     only spawn, parse and emit. ``interval_s`` rides the tick's own bucket:
     the row claims the cadence it really runs at, so the reader's stale bound
-    is honest (x-0fc2). The subprocess runs inside the first catch-up
+    is honest. The subprocess runs inside the first catch-up
     root: launchd starts this daemon in ``/``, where a board read would read
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
@@ -426,8 +426,8 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     "king_wake": 45,
     # The notify phase pays the arm subprocess over every catch-up root
     # (idle: 2.03s roots scan over 12 roots + 0.13s subprocess). The old
-    # 10s cap fired on a loaded machine and paged a healthy arm (x-0fc2,
-    # 12:35Z specimen: "phase slice 10s spent"). 15s is the largest value
+    # 10s cap fired on a loaded machine and paged a healthy arm (the
+    # 12:35Z specimen read "phase slice 10s spent"). 15s is the largest value
     # the caps-fit invariant allows: sum(caps) + fleet max + the 150s
     # merge floor must stay inside the 480s deadline (test_phase_caps_fit).
     "notify_watch": 15,
@@ -1299,7 +1299,7 @@ def tick() -> None:
         def _phase_notify(slice_s: float) -> None:
             # The row carries the arm's real cadence - one run per launchd
             # bucket, not the 300s literal - so the reader's stale bound is
-            # honest about a healthy rotation (x-0fc2).
+            # honest about a healthy rotation.
             nw_interval = (int(getattr(cfg, "interval_seconds", 600))
                            if cfg is not None else 600)
             _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0),

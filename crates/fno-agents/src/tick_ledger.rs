@@ -87,7 +87,7 @@ pub fn upstream_of(arm: &str) -> Option<&'static str> {
 /// interval buckets (cli.py `_run_phase(..., cadence=3, slot=k)`): a healthy
 /// rotation spans three intervals, with an `off_cadence` rest row in the
 /// buckets between. The stale bound rides the rotation, not one bucket, so
-/// a healthy rest tick never reads STALE (x-0fc2).
+/// a healthy rest tick never reads STALE.
 const FLEET_TAIL_CADENCE: u64 = 3;
 
 /// The interval multiplier a row's staleness is judged against: 3 for the
@@ -2127,7 +2127,7 @@ mod tests {
         // fresh. The row claims interval 300, and 700 > 2x300 flips it
         // stale: the row's own interval, not the table default, drives the
         // verdict. (The arm was watchdog before the fleet-tail cadence gave
-        // that name a 3-bucket stale bound - x-0fc2.)
+        // that name a 3-bucket stale bound.)
         write_rows(
             &journal,
             &[tick_envelope(
@@ -2160,7 +2160,7 @@ mod tests {
     /// A fleet-tail arm runs one real run every three buckets, so mid-rotation
     /// silence up to three intervals is its rest tick, not staleness. The old
     /// one-bucket bound (2 x interval) called exactly this shape STALE and the
-    /// king check-in paged a healthy rotation (x-0fc2).
+    /// king check-in paged a healthy rotation.
     #[test]
     fn a_one_in_three_arm_on_its_rest_tick_is_not_stale() {
         let dir = temp_dir();
