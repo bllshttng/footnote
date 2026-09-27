@@ -786,6 +786,67 @@ fn a_waiter_admitted_after_a_fleet_stop_refuses() {
         .output()
         .expect("clear the fleet stop");
     assert!(cleared.status.success(), "the clear must land");
+    let session_id = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+    let targeted = Command::new(bin())
+        .args([
+            "fleet-incident",
+            "stop",
+            "--session",
+            session_id,
+            "--reason",
+            "targeted status probe",
+        ])
+        .env("FNO_AGENTS_HOME", &home)
+        .output()
+        .expect("write the targeted stop");
+    assert!(targeted.status.success(), "the targeted stop must land");
+    let status = Command::new(bin())
+        .args(["fleet-incident", "status", "--json"])
+        .env("FNO_AGENTS_HOME", &home)
+        .output()
+        .expect("read machine and targeted status");
+    assert!(
+        status.status.success(),
+        "a targeted stop does not stop the machine"
+    );
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["state"], "clear");
+    assert_eq!(
+        status["targets"][0]["target"],
+        format!("session:{session_id}")
+    );
+    assert_eq!(status["targets"][0]["state"], "stopped");
+    assert_eq!(status["targets"][0]["holds"], serde_json::json!(["loops"]));
+    assert!(status["targets"][0]["expires_at"].is_string());
+    let record_count = std::fs::read_dir(home.join("fleet-stop.d"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+        .count();
+    let unsafe_scope = Command::new(bin())
+        .args([
+            "fleet-incident",
+            "stop",
+            "--territory",
+            "../escape",
+            "--reason",
+            "invalid scope",
+        ])
+        .env("FNO_AGENTS_HOME", &home)
+        .output()
+        .expect("refuse an unsafe territory path");
+    assert_eq!(unsafe_scope.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unsafe_scope.stderr).contains("unsafe territory scope"),
+        "{}",
+        String::from_utf8_lossy(&unsafe_scope.stderr)
+    );
+    let record_count_after = std::fs::read_dir(home.join("fleet-stop.d"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+        .count();
+    assert_eq!(record_count_after, record_count);
     let third = test_run(&root)
         .env("FNO_AGENTS_HOME", &home)
         .args(["--timeout", "10"])

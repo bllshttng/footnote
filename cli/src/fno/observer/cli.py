@@ -1029,7 +1029,7 @@ def _replay(
 
     # Pause gate at the corpus-item boundary (AC / Locked Decision 10).
     if loops_paused():
-        typer.echo("paused: loops pause-all sentinel in effect; stopping cleanly before replay.")
+        typer.echo("paused: loop halt in effect; stopping cleanly before replay.")
         raise typer.Exit(0)
 
     corpus, by_id = _load_corpus(skill, since)
