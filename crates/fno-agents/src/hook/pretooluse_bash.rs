@@ -21,7 +21,10 @@ pub fn run(_args: &[String]) -> i32 {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let process_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let plugin_root = crate::provider::plugin_root();
+    let plugin_root = std::env::var_os("FNO_REPO_ROOT")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .or_else(crate::provider::plugin_root);
     let mut refusals = Vec::new();
 
     if let Some(root) = plugin_root.as_deref() {
