@@ -92,8 +92,11 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
         return entries
     commit_rows_via_store(p, mutator)
     saved = read_graph_strict(p)[0]
-    assert saved["session_id"] == "worker-7"  # carried verbatim
+    assert saved["plan_path"] == "p.md"  # carried verbatim
     assert saved["details"] == "touched"  # the mutation landed on the raw row
+    # The lock family is the one exception: it projects from the claim
+    # store, so the unbacked legacy session_id reads unheld.
+    assert saved["session_id"] is None
 
 
 def test_the_raw_flock_helpers_are_retired():

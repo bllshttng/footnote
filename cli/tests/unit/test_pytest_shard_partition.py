@@ -21,6 +21,11 @@ class _Item:
     def add_marker(self, marker: object) -> None:
         del marker
 
+    def get_closest_marker(self, name: str) -> None:
+        # The fake carries no markers, so the dev-build skip arm never fires.
+        del name
+        return None
+
 
 def test_AC2_HP_shard_selects_one_disjoint_slice(monkeypatch) -> None:
     nodeids = [f"tests/unit/test_real_{index}.py::test_case" for index in range(8)]
