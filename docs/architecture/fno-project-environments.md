@@ -22,7 +22,7 @@ Most people asking for "a clean instance" want the slice. The graph is one store
 
 `repo` needs no configuration. `project.id` resolves through git, so every worktree layout of a checkout answers with the same project.
 
-`workspace:<name>` reuses the project set you already declared. The `work.workspaces.<name>` key is a project group: a named set of repos this board value scopes to. It is not the mux workspace object that houses threads; that ruling lives in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md). A project group named `main` holding `web`, `backend` and `marketing` scopes the board to those three:
+`workspace:<name>` reuses the project set you already declared. The `work.workspaces.<name>` key is a project group: a named set of repos this board value scopes to. It is not the mux workspace object that houses threads. That ruling lives in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md). A project group named `main` holding `web`, `backend` and `marketing` scopes the board to those three:
 
 ```toml
 [[work.workspaces.main.projects]]

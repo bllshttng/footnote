@@ -169,7 +169,7 @@ A receipt that said a plan was claimed stated a fact about the first sense while
 
 The old spellings stay as deprecated aliases that work and warn: `--session`, `FNO_SESSION`, `--mux-session` on `dispatch next`, and pane-identity `--session-id`. Each prints one stderr line naming the replacement, and the alias will be removed in a future release. Env precedence is: flag, then `FNO_SERVER`, then `FNO_SESSION`, then `main`. When `FNO_SESSION` is the value that decided the server, its warning prints. A pane's writers set `FNO_SERVER` and `FNO_SESSION` to the same value, so new panes never warn and old readers keep working.
 
-Workspace and squad are one object under two names; the ruling and its senses table live in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md) under "Workspace, squad, project, project group". A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
+Workspace and squad are one object under two names. The ruling and its senses table live in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md) under "Workspace, squad, project, project group". A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
 
 ## Recognized and unrecognized harness values
 
