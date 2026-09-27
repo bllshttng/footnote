@@ -13,7 +13,7 @@
 //! case's minted node id reads `<MINTED>` (add/idea mint one node per case).
 
 use fno_agents::event_store::{query_events, EventQuery};
-use fno_agents::graph_store::seed_rows;
+use fno_agents::graph_store::seed_rows_with_slugs;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -419,7 +419,7 @@ fn materialize(case: &Case) -> Fixture {
         )
         .expect("settings.yaml");
     }
-    seed_rows(&fixture.join("graph.json"), &seed_entries()).expect("seed");
+    seed_rows_with_slugs(&fixture.join("graph.json"), &seed_entries()).expect("seed");
     let fixture_str = fixture.to_string_lossy().to_string();
     let mut env = vec![
         ("PATH".into(), "/usr/bin:/bin".into()),

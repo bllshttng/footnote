@@ -311,7 +311,7 @@ def test_sidecar_external_mode_missing_file_is_empty(tmp_path, monkeypatch, exte
 )
 def test_create_verbs_refuse_on_external_backend(verb, args, monkeypatch):
     # Every creation entry point must refuse on an external backend. The guard
-    # lives in _create_node_impl (add/idea) AND at the top of cmd_new,
+    # lives at the top of the native create path AND of cmd_new,
     # cmd_decompose, cmd_intake, which write through their own mutators. A guard
     # on only some reachable paths is decorative, so this exercises each path:
     # if a future creation verb bypasses the helper, this fails loudly.

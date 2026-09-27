@@ -2515,8 +2515,17 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
 #[doc(hidden)]
 pub fn seed_rows(path: &Path, rows: &[Value]) -> Result<(), StoreError> {
     let _lock = BoundedLock::acquire(path, Duration::from_secs(10))?;
-    // The Python fixture path derived slugs on every store write, so the
-    // golden fixtures this door replays carry them; the raw sync would not.
+    crate::backlog::authoritative_sync(path, &[], rows)
+        .map(|_| ())
+        .map_err(StoreError::Sqlite)
+}
+
+/// Fixture door for the create-surface golden replays: the Python fixture
+/// path derived slugs on every store write, so the captured fixtures carry
+/// them; the plain seed does not assign them.
+#[doc(hidden)]
+pub fn seed_rows_with_slugs(path: &Path, rows: &[Value]) -> Result<(), StoreError> {
+    let _lock = BoundedLock::acquire(path, Duration::from_secs(10))?;
     let mut seeded = rows.to_vec();
     ensure_slugs(&mut seeded);
     crate::backlog::authoritative_sync(path, &[], &seeded)
