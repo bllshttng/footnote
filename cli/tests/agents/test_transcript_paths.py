@@ -75,11 +75,8 @@ def test_cli_prints_one_json_map(tmp_path: Path) -> None:
 
     app = typer.Typer()
     app.command()(cmd_transcript_paths)
-    result = CliRunner().invoke(
-        app,
-        ["--ids", f"{SHORT},missing", "--projects-root", str(projects)],
-        catch_exceptions=False,
-    )
+    payload = json.dumps({"ids": [SHORT, "missing"], "projects_root": str(projects)})
+    result = CliRunner().invoke(app, [], input=payload, catch_exceptions=False)
 
     assert result.exit_code == 0
     answered = json.loads(result.output)

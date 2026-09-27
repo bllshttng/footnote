@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import typer
@@ -17,5 +18,8 @@ def resolve_paths(ids, projects_root=None):
     return out
 
 
-def cmd_transcript_paths(ids=typer.Option(..., "--ids"), projects_root: Path | None = typer.Option(None, "--projects-root")):
-    typer.echo(json.dumps(resolve_paths([v for v in ids.split(",") if v.strip()], projects_root=projects_root)))
+def cmd_transcript_paths():
+    """One JSON map of id -> transcript path; the batch rides stdin (flagless)."""
+    payload = json.load(sys.stdin)
+    root = Path(p) if (p := payload.get("projects_root")) else None
+    typer.echo(json.dumps(resolve_paths(payload.get("ids") or [], projects_root=root)))

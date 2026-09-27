@@ -23,7 +23,7 @@ const OK_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-22T07:00:00.00
 const FOUR29_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-22T08:15:00.000Z","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-22 09:41:13]"}]}}"#;
 
 /// The stand-in `fno` binary: pins the child contract (argv head, python
-/// runtime) and answers through the checkout's real resolver.
+/// runtime, stdin payload) and answers through the checkout's real resolver.
 fn write_fake_fno(dir: &std::path::Path) -> PathBuf {
     let script = format!(
         r#"#!/usr/bin/env python3
@@ -35,14 +35,11 @@ assert os.environ.get("FNO_AGENTS_RUNTIME") == "python", "the child must run the
 sys.path.insert(0, {cli_src:?})
 from fno.provenance.resolver import resolve_transcript
 
-
-def val(flag):
-    return argv[argv.index(flag) + 1]
-
-
+payload = json.load(sys.stdin)
 answer = {{}}
-for sid in (v for v in val("--ids").split(",") if v):
-    rt = resolve_transcript("claude", sid, "/", projects_root=Path(val("--projects-root")))
+for sid in payload.get("ids") or []:
+    root = payload.get("projects_root")
+    rt = resolve_transcript("claude", sid, "/", projects_root=Path(root) if root else None)
     answer[sid] = rt.transcript_path if rt.resolved and rt.transcript_path else None
 print(json.dumps(answer))
 "#,
@@ -82,6 +79,7 @@ fn thread_row_resolves_its_transcript_where_peek_finds_it() {
     let fno = write_fake_fno(root);
     let output = Command::new(CLIENT)
         .args(["provider-cap", "status", "--json"])
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", &home)
         .env("FNO_BIN", &fno)
         .env("FNO_CLAUDE_PROJECTS_DIR", &projects)

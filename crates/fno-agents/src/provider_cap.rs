@@ -610,21 +610,18 @@ pub fn python_transcript_paths(projects_root: std::path::PathBuf) -> ClaudePaths
         if ids.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let root = projects_root.to_string_lossy().to_string();
-        let id_list = ids.join(",");
-        let args: Vec<&str> = vec![
-            "agents",
-            "transcript-paths",
-            "--ids",
-            &id_list,
-            "--projects-root",
-            &root,
-        ];
+        let payload = json!({
+            "ids": ids,
+            "projects_root": projects_root.to_string_lossy(),
+        })
+        .to_string();
+        let args: Vec<&str> = vec!["agents", "transcript-paths"];
         let answer = crate::provider_cap_verbs::run_fno_output_env(
             &args,
             None,
             std::time::Duration::from_secs(60),
             &[("FNO_AGENTS_RUNTIME", "python")],
+            Some(payload.as_str()),
         )
         .ok_or_else(|| "transcript-paths child failed".to_string())?;
         let v: Value = serde_json::from_str(&answer)
@@ -747,9 +744,6 @@ pub fn snapshot_with(
         // The compaction stamp keeps the sessions-dir key (a stamp is written
         // by the PreCompact hook with the full uuid); the transcript
         // location comes from the bridge keyed by the row's own id.
-        let compaction_id = session_id
-            .clone()
-            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()));
         let bridge_key = session_id
             .clone()
             .or_else(|| s_field(row, "short_id").map(String::from));
@@ -763,6 +757,24 @@ pub fn snapshot_with(
                 .get(bridge_key.as_deref().unwrap_or(""))
                 .map(PathBuf::from)
         };
+        // The compaction stamp keeps the sessions-dir key (a stamp is written
+        // by the PreCompact hook with the full uuid). When the sessions-dir
+        // hop misses - the exact rows the bridge now reaches - the resolved
+        // transcript's stem names the full uuid the short id prefixes, so the
+        // stamp is still probed and a compacting capped worker reads held.
+        let compaction_id = session_id
+            .clone()
+            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()))
+            .or_else(|| {
+                s_field(row, "short_id").and_then(|jid| {
+                    transcript
+                        .as_ref()
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .filter(|stem| stem.starts_with(jid))
+                        .map(String::from)
+                })
+            });
         member.transcript = transcript.as_ref().map(|p| p.to_string_lossy().to_string());
         if let Some(t) = &transcript {
             let (ts, excerpt, unknown) = if harness == "codex" {
@@ -2866,6 +2878,51 @@ mod tests {
         .unwrap();
         let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
         assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
+    }
+
+    /// A thread row whose sessions-dir record is missing still reads held
+    /// while compacting: the bridge-resolved transcript's stem names the full
+    /// uuid, so the compaction stamp is probed by the right key.
+    #[test]
+    fn ac2_compact_thread_row_without_sessions_record_is_held_through_the_bridge() {
+        let root = std::env::temp_dir().join(format!("pc-cm2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let state_path = root.join("runtime-state.json");
+        let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"z","launch_account":"default","state":"working"}]}"#,
+        );
+        write(
+            &projects.join(format!("{uuid}.jsonl")),
+            &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
+        );
+        let now = now_epoch_secs();
+        crate::compaction::mark(&AgentsHome::at(claude_home.clone()), uuid, now).unwrap();
+
+        let scan = CapScan {
+            claude_paths: answered(vec![(
+                "d8996f9b".to_string(),
+                Some(
+                    projects
+                        .join(format!("{uuid}.jsonl"))
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            )]),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path,
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, now, &cfg(99)).unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "z").unwrap();
+        assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
+        let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
     fn ac2_arm_config_defaults_off_and_reads_overrides() {
