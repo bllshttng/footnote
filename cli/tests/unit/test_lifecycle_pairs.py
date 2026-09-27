@@ -63,12 +63,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # state `done` does and is corrected by the same verb.
     Pair("backlog", "reconcile", "reopen"),
     Pair("backlog", "archive", "unarchive"),
-    Pair(
-        "backlog",
-        "decide-retract",
-        None,
-        "retractions are append-only and have no inverse",
-    ),
     # An edit path would make the record deniable, which is the property the
     # demand signal exists to prevent. A later correction is a progress note.
     Pair(
