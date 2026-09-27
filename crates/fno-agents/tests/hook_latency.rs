@@ -732,8 +732,8 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
 
     if macos {
         println!(
-            "not gated: macOS run is advisory: {name} p90 {observed_p90:.1}ms (budget {:.0}ms, ceiling {:.0}ms) max {max:.1}ms",
-            spec.budget_p90_ms, spec.ceiling_ms
+            "not gated: macOS run is advisory: {name} p90 {observed_p90:.1}ms (budget {:.0}ms, ceiling {:.0}ms) max {max:.1}ms partial_exec_count={}",
+            spec.budget_p90_ms, spec.ceiling_ms, execs.len()
         );
     } else {
         assert!(
@@ -747,8 +747,9 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
             spec.ceiling_ms
         );
         println!(
-            "{name}: p90 {observed_p90:.1}ms within budget ({:.0}ms)",
-            spec.budget_p90_ms
+            "{name}: p90 {observed_p90:.1}ms within budget ({:.0}ms), max {max:.1}ms, exec_count={}",
+            spec.budget_p90_ms,
+            execs.len()
         );
     }
 }

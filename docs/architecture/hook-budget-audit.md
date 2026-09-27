@@ -15,7 +15,7 @@ The command counts include every command entry in each harness event registratio
 | AGY | 2 command hooks | `Stop`, `PreInvocation` |
 | DeepSeek Harness | 0 in-repository hook registrations | none found |
 
-For a Bash event, the former chain started six registered commands and three additional `fno-agents` binaries from the shell shims. That is nine direct process starts before guard-internal subprocesses. The dispatcher starts one shell wrapper, one `fno-agents` binary, and the same three Python guards. That is five direct process starts and four fewer starts per Bash PreToolUse.
+The Bash registration count drops by five commands per event. The dispatcher keeps all three Rust predicates in one `fno-agents` process and calls the same three Python guards in their existing order. This removes two `fno-agents` binary launches made by the former shell shims.
 
 | Harness | Event | Before | After | Notes |
 |---|---:|---:|---:|---|
@@ -138,4 +138,4 @@ Other configured commands do not emit a per-invocation marker that can serve as 
 
 ## Timing
 
-CI runs `hook_budget_bash_pretooluse_dispatch` through the existing hook-latency harness. The artifact records each elapsed time, and the job prints p90, maximum, and captured execs. The measured result is added here after CI completes. The native event journal cannot measure harness dispatch overhead.
+CI runs `hook_budget_bash_pretooluse_dispatch` through the existing hook-latency harness. The artifact records each elapsed time. The job prints p90, maximum, and `exec_count`. The measured result is added here after CI completes. The native event journal cannot measure harness dispatch overhead.
