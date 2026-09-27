@@ -12,7 +12,7 @@ mod common;
 use common::{screen_has_line, worker_bin, ClientHarness, Scratch};
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 fn agents_home(scratch: &Scratch) -> PathBuf {
