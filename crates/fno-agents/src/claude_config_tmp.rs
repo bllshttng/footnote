@@ -111,48 +111,44 @@ pub fn sweep_with_min_age(apply: bool, now: SystemTime, min_age: Duration) -> Tm
             let age = now
                 .duration_since(meta.modified().unwrap_or(now))
                 .unwrap_or(Duration::ZERO);
+            let mut removed = false;
             let reason = if pid.is_none() {
-                Some("kept: no pid in name".to_string())
+                "kept: no pid in name".to_string()
             } else if pid_alive(pid.unwrap()) {
-                Some("kept: pid alive".to_string())
+                "kept: pid alive".to_string()
             } else if age < min_age {
-                Some(format!(
+                format!(
                     "kept: age {}s is under the {}s floor",
                     age.as_secs(),
                     min_age.as_secs()
-                ))
+                )
             } else if !apply {
-                Some("dry-run: pass --apply to remove".to_string())
+                // Eligible but reported only: the dry run names the file in
+                // `reaped` so the lane prints what --apply would remove.
+                "dry-run: pass --apply to remove".to_string()
             } else {
                 match std::fs::remove_file(&path) {
-                    Ok(()) => None,
-                    Err(e) => Some(format!("remove failed: {e}")),
+                    Ok(()) => {
+                        removed = true;
+                        "removed".to_string()
+                    }
+                    Err(e) => format!("kept: remove failed: {e}"),
                 }
             };
             let bytes = meta.len();
-            match reason {
-                Some(reason) => {
-                    rep.kept += !reason.starts_with("dry-run") as usize;
-                    rep.rows.push(TmpRow {
-                        path,
-                        pid,
-                        bytes,
-                        reaped: false,
-                        reason,
-                    });
-                }
-                None => {
-                    rep.reaped.push(path.clone());
-                    rep.bytes_reaped += bytes;
-                    rep.rows.push(TmpRow {
-                        path,
-                        pid,
-                        bytes,
-                        reaped: true,
-                        reason: "removed".to_string(),
-                    });
-                }
+            if removed || reason.starts_with("dry-run") {
+                rep.reaped.push(path.clone());
+                rep.bytes_reaped += bytes;
+            } else {
+                rep.kept += 1;
             }
+            rep.rows.push(TmpRow {
+                path,
+                pid,
+                bytes,
+                reaped: removed,
+                reason,
+            });
         }
     }
     rep
@@ -248,7 +244,11 @@ mod tests {
         let orphan = write_tmp(&dir, 999_999_999, "dddddddddddd");
         let rep = sweep_with_min_age(false, SystemTime::now(), Duration::ZERO);
         assert!(orphan.exists());
-        assert_eq!(rep.reaped.len(), 0);
+        // The eligible file is REPORTED (so the lane prints it) but not
+        // removed: reaped carries it, the row reads reaped=false.
+        assert_eq!(rep.reaped, vec![orphan.clone()]);
+        assert_eq!(rep.bytes_reaped, 1);
+        assert!(!rep.rows[0].reaped);
         assert!(rep.rows[0].reason.contains("dry-run"));
         let _ = std::fs::remove_dir_all(&dir);
     }
