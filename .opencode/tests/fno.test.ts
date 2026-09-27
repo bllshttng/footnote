@@ -450,6 +450,7 @@ test("the payload the seam builds is the claude shape the scripts already read (
 test("tool matching mirrors the claude matchers (AC8-HP)", () => {
   expect(protectionScriptsFor("bash").map((e) => e.script)).toEqual([
     "graph-write-protect.sh",
+    "generated-write-guard.sh",
     "git-protection.py",
     "pipe-guard.sh",
     "recursive-grep-guard.py",
