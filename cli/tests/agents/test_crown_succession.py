@@ -305,6 +305,41 @@ def test_an_attended_shell_reclaims_by_handle(court, monkeypatch) -> None:
     assert _row("heir").crown_scope is None
 
 
+def test_a_reclaim_refuses_a_holder_name_rebound_inside_the_lock_window(
+    court, monkeypatch
+) -> None:
+    """x-eb49: the holder resolved before the lock is matched by name AND
+    session under the lock. A name rebound to a row crowned over the same
+    scope passes the old scope-and-level check and would return the crown
+    to the grantor from a session that never held it."""
+    from dataclasses import replace
+
+    import fno.agents.registry as registry_mod
+    from fno.agents.crown import CrownPromotionError, reclaim_crown
+
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("grantor", "grantor-session", scope=None)
+    _seat("heir", "heir-session", scope=SCOPE, grantor="grantor-session")
+    stale = _row("heir")
+    # The rebind: same name, same crown, a new session inside the window.
+    update_registry(
+        lambda rows: [replace(stale, harness_session_id="heir-session-2") if row.name == "heir" else row for row in rows]
+    )
+
+    class _StaleResolution:
+        entry = stale
+
+    monkeypatch.setattr(
+        registry_mod, "resolve_agent", lambda handle, **kw: _StaleResolution()
+    )
+
+    with pytest.raises(CrownPromotionError, match="no longer live"):
+        reclaim_crown(handle="heir")
+    assert _row("heir").crown_scope == SCOPE, "the rebound row keeps its crown"
+    assert _row("heir").harness_session_id == "heir-session-2"
+    assert _row("grantor").crown_scope is None, "the crown never returned"
+
+
 # --- you cannot hand down authority you do not hold --------------------------
 #
 # The strict-subset rule was documented from the start and enforced by the

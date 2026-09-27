@@ -301,6 +301,7 @@ def done_cmd(
         REGISTRY_UNREADABLE,
         _canonical_members,
         _derived_level,
+        _locked_identity,
         calling_agent_row,
         canonical_scope,
         crown_answers_to,
@@ -425,6 +426,9 @@ def done_cmd(
                        and r.status not in _TERMINAL_ROW_STATUSES for r in rows):
                     raise ValueError("a live holder crowned mid-expiry")
                 return rows
+            # The caller's row, matched by name AND session (x-eb49); a name
+            # rebound to a successor inside the window refuses below.
+            holder_row = None if attended_named else _locked_identity(rows, caller)
             for index, row in enumerate(rows):
                 if attended_named:
                     # Attended + named scope: vacate whatever live row holds
@@ -441,7 +445,7 @@ def done_cmd(
                             crown_grantor=None,
                         )
                         vacated = True
-                elif row.name == holder_name and row.crown_scope == scope:
+                elif holder_row is not None and row is holder_row and row.crown_scope == scope:
                     vacated_rows.append(row)
                     rows[index] = _replace(
                         row, crown_level=None, crown_scope=None, crown_grantor=None
