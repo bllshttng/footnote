@@ -1,7 +1,18 @@
-//! parity-stage: differential
+//! parity-stage: characterization
 //! parity-oracle: fno.paths.plan_doc_filename
 //!
-//! Differential parity for the plans-path port: the Rust chain
+//! Characterization for the plans-path port: the Rust chain
+//! (`plans_path`, reached through the `fno-agents state plan-path` client
+//! verb) is pinned by the frozen goldens under tests/golden/plans-path/.
+//! While the Python leg lived, this file ran as a LIVE differential: both
+//! implementations answered the same fixture with the same env pins and the
+//! run asserted byte-identity across all nine chain-step cases before the
+//! goldens froze. The Python leg (`plan_doc_filename`, `plans_dir`, the
+//! `plans_content_dir` chain) was deleted in the same change that landed the
+//! port, so the goldens now stand as the contract and capture mode refuses.
+//! `plans_content_dir` and `plan_doc_path` survive in `fno.paths` as thin
+//! pydoor forwards; they are not the oracle - the oracle is the deleted
+//! renderer.
 //! (`plans_path`, reached through the `fno-agents state plan-path` client
 //! verb) and the Python leg (`fno.paths.plan_doc_filename` /
 //! `plan_doc_path`) answer the same fixture with the same env pins, and the

@@ -824,7 +824,7 @@ mod tests {
         fs::write(fx.config(), "plans_dir = \".fno/plans/\"\n").unwrap();
         let legacy = fx.root().join(".fno/plans");
         fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("20260101-old.md"), "x").unwrap();
+        fs::write(legacy.join("20260101-old.md"), "zz").unwrap();
         let dir = plans_content_dir(&fx.root()).unwrap();
         let slug = space_slug(&fs::canonicalize(&fx.root()).unwrap());
         let spaces = fs::canonicalize(&fx.base)
@@ -868,11 +868,11 @@ mod tests {
         let name = plan_doc_filename(
             &fx.root(),
             "my-slug",
-            "x-aaeb",
+            "zz-11aa",
             LocalTimestamp::from_epoch(NOW),
         )
         .unwrap();
-        assert_eq!(name, "20260927-my-slug-x-aaeb.md");
+        assert_eq!(name, "20260927-my-slug-zz-11aa.md");
 
         // Cleanup: doubled dashes collapse, a dangling `-.md` degrades, and
         // leading dashes strip. An empty slug and node leave only the date.
@@ -889,22 +889,22 @@ mod tests {
         let err = plan_doc_filename(
             &fx.root(),
             "feature",
-            "x-aaeb",
+            "zz-11aa",
             LocalTimestamp::from_epoch(NOW),
         )
         .unwrap_err();
-        assert!(err.contains("x-aaeb"), "the refusal names the node: {err}");
+        assert!(err.contains("zz-11aa"), "the refusal names the node: {err}");
     }
 
     #[test]
     fn filename_node_id_extraction_matches_python_shape() {
         assert_eq!(
-            plan_filename_node_id("20260927-s-x-aaeb.md", "x").as_deref(),
-            Some("x-aaeb")
+            plan_filename_node_id("20260927-s-zz-11aa.md", "zz").as_deref(),
+            Some("zz-11aa")
         );
-        assert_eq!(plan_filename_node_id("20260927-s.md", "x"), None);
+        assert_eq!(plan_filename_node_id("20260927-s.md", "zz"), None);
         assert_eq!(
-            plan_filename_node_id("20260927-s-y-1234.md", "x"),
+            plan_filename_node_id("20260927-s-y-1234.md", "zz"),
             None,
             "prefix mismatch contributes nothing"
         );

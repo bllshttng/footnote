@@ -49,7 +49,6 @@ crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_b
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/pane_stop.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pane_stop.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/plans_dirs.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pr_status/reviews.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pr_status/seams.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pr_status_facts.rs	let hold_word = Command::new(crate::scrape::fno_bin())
