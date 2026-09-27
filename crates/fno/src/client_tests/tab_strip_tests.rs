@@ -167,7 +167,7 @@ fn the_tab_bar_mark_paints_a_fullwidth_f_and_a_reverse_stamp() {
     // x-8c5a: the mark is the full-width `Ｆ` (two cells) with the `[no]`
     // stamp directly after it, no gap; the stamp is reverse video. The pin
     // paints in EVERY workspace, so the default fixture shows it.
-    let mut view = two_pane_view();
+    let view = two_pane_view();
     let frame = view.compose();
     let panel_w = view.panel_w() as usize;
     let cols = frame.cols as usize;

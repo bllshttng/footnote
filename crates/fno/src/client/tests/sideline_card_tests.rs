@@ -436,7 +436,7 @@ fn a_named_theme_bands_on_its_surface_and_never_paints_the_brand_across_a_row() 
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     v.hover_row = Some(agent_i);
     let frame = v.compose();
-    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
+    let (band_fg, _, _) = crate::theme::band_style(&v.theme);
     assert_eq!(band_fg, v.theme.stamp, "the band text is the neutral stamp");
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
