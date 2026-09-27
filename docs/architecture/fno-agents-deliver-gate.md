@@ -176,6 +176,21 @@ Two consequences landed from this measurement:
 - `crates/fno/src/server.rs`'s `rerun_allowed` doc comment no longer blames a corrupted composer for staying conservative on the `rerun` verb. That verb writes raw bytes via `pty.write_input`. This is a different write with no such measurement behind it. The guard's rationale is now scoped to that write specifically.
 - `cli/src/fno/agents/dispatch.py`'s `_mux_pane_send` dropped the equivalent busy-veto for mail delivery. That veto (`guarded=True`) rode `rerun_allowed` itself. It is replaced with a content confirm: poll the recipient's own transcript for the injected marker after the paste. This mirrors `crates/fno-agents/src/mail_inject.rs`'s `confirm_content_after`/`escaped_marker` pair. Both claude keystroke lanes, control.sock and mux pane, now confirm delivery the same way.
 
+## Mail is typed as one line, never a paste (C17)
+
+The typed lanes (`inject_with_submit` in `crates/fno-agents/src/mail_inject.rs`) no longer bracket-paste a multi-line mail body. A delivery is flattened to ONE line by `one_line`: every newline run becomes the return glyph ` ⏎ `, a tab becomes a space, and every other control byte (ESC included) is dropped. The typed turn is one write, then the separate wire-level CR. The durable bus copy keeps the real newlines; only the keystrokes are flattened (crown ruling d-9187ccf6: one constant, `NEWLINE_GLYPH`, and the user may change it). A paste is only the user's own, so a delivered message never wears the pasted-content label.
+
+Two consequences:
+
+- The raw door's multi-line refusal ("an unframed payload must be a single line") is gone. Its premise was that a second line rides in as a second submitted turn; flattening removed that harm. The held-mail drain (hold.py `release` -> `_deliver_live`) was the caller this stranded: its digest now delivers, and stays audited as a raw inject. A single-line unframed payload is still a command (starts with `/` or `$`, law d-f6570dc9).
+- The confirm marker derives from the typed text up to the first glyph, which is the same first line `text.lines().next()` always gave, so transcript confirms are unchanged.
+
+## The quiet wait, the one extra Enter, and the withdraw (C11, C12, C14)
+
+Before the claude, keeper or pane lane types, `wait_for_quiet_in` polls (1 s ticks, 30 s budget) until the operator is neither typing nor holding an unfinished draft (`typing_state` over the `operator_typing` feed: recent = a row within 15 s, draft = the newest typing row later than the newest submit) and the recipient's effective state is not Blocked (a question picker or permission wall). On timeout the reason is `user-typing` or `session-asking`, and Python queues the mail durable.
+
+`confirm_or_withdraw` replaces the re-Enter-every-8-polls cadence. It polls half the confirm budget, sends exactly ONE extra CR (the swallowed-Enter fix the codex pane needed), polls the rest, and on total silence withdraws the typed line with one write of DEL bytes equal to the typed length. The withdraw never fires when the operator typed since the inject: their text is in the composer now, and the DEL would eat it with ours. The keeper `Unconfirmable` arm (cursor-agent, agy) keeps typing and never withdraws, because no landing can be seen there.
+
 ## What Group 3 changes
 
 Group 3 of the cross-agent bus epic swaps the inbox store backing from the current per-recipient markdown thread files to a single global JSONL bus log (`~/.fno/bus/messages.jsonl`). The `write_new_thread` call in `dispatch_send` (step 4c, the durable envelope write) becomes a write to that log. The `send` verb's call sites, CLI flags, stdout contract, and delivery tier logic do not change - only the storage layer underneath the store API rotates.
