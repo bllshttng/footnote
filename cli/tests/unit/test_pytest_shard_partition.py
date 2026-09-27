@@ -22,7 +22,6 @@ class _Item:
         del marker
 
     def get_closest_marker(self, name: str) -> None:
-        # The fake carries no markers, so the dev-build skip arm never fires.
         del name
         return None
 
