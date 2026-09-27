@@ -45,6 +45,12 @@ pub(crate) struct HarnessChoice {
     /// This harness's configured model choices. OpenCode uses its own model
     /// list because its model IDs carry `provider/model`.
     pub models: Vec<ModelChoice>,
+    /// Launchable catalog rows beyond the main list (searchable by group 2's
+    /// more row). Never rendered in the main body.
+    pub more: Vec<ModelChoice>,
+    /// The models.dev cache failure, when the catalog could not be read.
+    /// Never degrades the harness rows.
+    pub catalog_error: Option<String>,
     /// A harness-specific model catalog failure, such as OpenCode's own list.
     pub models_error: Option<String>,
     /// See harness_capabilities.toml `efforts`: `None` = no surface at all,
@@ -1422,11 +1428,16 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
         return;
     };
     if let Some(name) = &draft.model_row {
-        if !row
-            .models
-            .iter()
-            .any(|m| &m.name == name && m.provider.as_deref().unwrap_or_default() == draft.provider)
-        {
+        let offered = row.models.iter().any(|m| {
+            &m.name == name && m.provider.as_deref().unwrap_or_default() == draft.provider
+        }) || row.more.iter().any(|m| {
+            // A pin on a Ready row under more survives: the row exists, it
+            // just waits beyond the main list.
+            matches!(m.state, ModelState::Ready)
+                && &m.name == name
+                && m.provider.as_deref().unwrap_or_default() == draft.provider
+        });
+        if !offered {
             draft.model.clear();
             draft.model_row = None;
             draft.bump();
@@ -1530,6 +1541,8 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                 native: true,
                 installed: on_path(name),
                 models: models.unwrap_or_default(),
+                more: Vec::new(),
+                catalog_error: None,
                 models_error: None,
                 efforts,
                 permission_modes,
@@ -1545,14 +1558,16 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     // list command. Both reads are bounded and run off the UI loop.
     let bin = crate::server::fno_bin().to_string_lossy().into_owned();
     let account_argv = [bin.as_str(), "config", "get", "accounts.records", "-J"];
+    let routing_argv = [bin.as_str(), "config", "get", "model_routing", "-J"];
     let opencode_argv = ["opencode", "models", "--pure"];
     let opencode_installed = rows
         .iter()
         .any(|row| row.name == "opencode" && row.selectable());
     let timeout = std::time::Duration::from_secs(30);
     let deadline = tokio::time::Instant::now() + timeout;
-    let (accounts, opencode) = tokio::join!(
+    let (accounts, routing, opencode) = tokio::join!(
         crate::dispatch_launch::run_fno_captured(&account_argv, timeout, deadline),
+        crate::dispatch_launch::run_fno_captured(&routing_argv, timeout, deadline),
         async {
             if opencode_installed {
                 crate::dispatch_launch::run_fno_captured(&opencode_argv, timeout, deadline).await
@@ -1597,6 +1612,28 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     } else {
         (Vec::new(), None)
     };
+    // The models.dev catalog: read whatever cache exists now and refresh in
+    // the background when stale. The picker never waits on the network; a
+    // failed or missing cache only fills `catalog_error`.
+    let state = crate::model_catalog::state_dir();
+    let cache = crate::model_catalog::cache_path(&state);
+    let mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
+    if crate::model_catalog::needs_refresh(mtime, std::time::SystemTime::now()) {
+        let spawn_state = state.clone();
+        tokio::spawn(async move {
+            let _ = crate::model_catalog::refresh(&spawn_state).await;
+        });
+    }
+    let (catalog, catalog_error) = match crate::model_catalog::load(&state) {
+        Ok(catalog) => (Some(catalog), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let routing_value: serde_json::Value = match routing {
+        Some((true, stdout, _)) => serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    };
+    let reach = crate::model_catalog::parse_reach(crate::model_catalog::REACH_TOML);
+
     // The floor stands; codex tops up from its own models cache and every
     // harness merges its configured account rows over the floor. opencode
     // owns its list outright (above).
@@ -1625,6 +1662,40 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                 merge_model_choices(&mut row.models, list);
             }
         }
+        // The reach rows: Ready provider models join the main list; the rest
+        // wait under `more`. The native catalog's rows are Ready by
+        // definition (they launch through the harness's own routing), but
+        // they live under more so the floor and the configured rows lead.
+        let (ready, mut more) = crate::model_catalog::reach_rows(
+            &row.name,
+            &reach,
+            &routing_value,
+            &by_harness,
+            catalog.as_ref(),
+            &|env, file| crate::provider_key::key_present(env, file),
+        );
+        let (ready, native_more) = match reach
+            .harness
+            .get(&row.name)
+            .and_then(|h| h.native_catalog.clone())
+        {
+            Some(native_id) => {
+                let floor_ids: Vec<&str> = row.models.iter().map(|m| m.model.as_str()).collect();
+                let (native_rows, rest): (Vec<_>, Vec<_>) = ready
+                    .into_iter()
+                    .partition(|r| r.provider.as_deref() == Some(native_id.as_str()));
+                let kept: Vec<ModelChoice> = native_rows
+                    .into_iter()
+                    .filter(|r| !floor_ids.contains(&r.model.as_str()))
+                    .collect();
+                (rest, kept)
+            }
+            None => (ready, Vec::new()),
+        };
+        more.extend(native_more);
+        merge_model_choices(&mut row.models, &ready);
+        row.more = more;
+        row.catalog_error = catalog_error.clone();
     }
     CatalogOutcome::Ok(rows, models_err)
 }

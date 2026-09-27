@@ -54,6 +54,8 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
                 native: *native,
                 installed: *installed,
                 models: Vec::new(),
+                more: Vec::new(),
+                catalog_error: None,
                 models_error: None,
                 // Free-text surface by default: the effort chip stays
                 // offered in tests that do not name a list.
@@ -935,6 +937,8 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
             native: true,
             installed: true,
             models: Vec::new(),
+            more: Vec::new(),
+            catalog_error: None,
             models_error: None,
             efforts: Some(Vec::new()),
             permission_modes: Some(Vec::new()),
@@ -1421,4 +1425,90 @@ fn request_drops_a_stale_node_binding_when_the_message_moves() {
             "message {message:?} binds {want:?}"
         );
     }
+}
+
+
+#[test]
+fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
+    // AC4-HP: a Ready row beyond the main list is still offered, so the
+    // pin survives the post-pick judgment.
+    let mut v = view_with_launcher();
+    let more_row = crate::model_catalog::ModelChoice {
+        name: "glm-5.3-flash".into(),
+        model: "glm-5.3-flash".into(),
+        route: String::new(),
+        provider: Some("zai".into()),
+        state: ModelState::Ready,
+        key_env: Some("ZAI_API_KEY".into()),
+        key_file: None,
+    };
+    v.launcher_catalog = Some(CatalogOutcome::Ok(
+        vec![HarnessChoice {
+            name: "claude".into(),
+            native: true,
+            installed: true,
+            models: Vec::new(),
+            more: vec![more_row],
+            catalog_error: None,
+            models_error: None,
+            efforts: Some(Vec::new()),
+            permission_modes: Some(Vec::new()),
+        }],
+        None,
+    ));
+    let action = super::agent_launcher::PickerAction::PickRow {
+        harness: "claude".into(),
+        name: "glm-5.3-flash".into(),
+        model: "glm-5.3-flash".into(),
+        route: String::new(),
+        provider: Some("zai".into()),
+    };
+    super::agent_launcher::apply_picker_action(
+        v.launcher.as_mut().unwrap(),
+        &v.launcher_catalog,
+        action,
+        0,
+    );
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.model, "glm-5.3-flash", "the pin survives");
+    assert_eq!(l.draft.provider, "zai");
+}
+
+
+#[test]
+fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
+    // AC4-ERR: no cache and a failing fetch leaves the floor standing; the
+    // catalog failure lands in catalog_error, never on the harness rows.
+    // One shared FNO_STATE_DIR lock with the model_catalog tests, held for
+    // the whole body.
+    let _env = crate::model_catalog::state_env_lock();
+    let dir = fresh_state_dir();
+    std::env::set_var("FNO_STATE_DIR", &dir);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let outcome = rt.block_on(super::agent_launcher::load_catalog());
+    let rows = match outcome {
+        CatalogOutcome::Ok(rows, _) => rows,
+        CatalogOutcome::Degraded(reason) => panic!("harness rows must not degrade: {reason}"),
+    };
+    let claude = rows.iter().find(|r| r.name == "claude").expect("claude row");
+    assert!(!claude.models.is_empty(), "the capability floor still loads");
+    assert!(
+        claude.catalog_error.is_some(),
+        "catalog_error names the reason: {:?}",
+        claude.catalog_error
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fresh state root with no cache/ subdir, so a fetch cannot even write.
+fn fresh_state_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "fno-launcher-catalog-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }

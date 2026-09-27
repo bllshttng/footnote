@@ -295,6 +295,12 @@ pub(crate) fn merge_model_choices(base: &mut Vec<ModelChoice>, extra: &[ModelCho
     }
 }
 
+#[cfg(test)]
+pub(crate) fn state_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The state root: `FNO_STATE_DIR` when set, else `$HOME/.fno`. The same
 /// resolution Python's `fno.paths` applies.
 pub fn state_dir() -> PathBuf {
@@ -897,8 +903,7 @@ mod tests {
     /// A hermetic state root: FNO_STATE_DIR is one of the vars the cache
     /// reads, so tests pin it and hold an env lock.
     fn state_fixture() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = state_env_lock();
         let dir = std::env::temp_dir().join(format!(
             "fno-model-catalog-test-{}-{}",
             std::process::id(),
