@@ -92,6 +92,11 @@ fn newest<'a>(hits: impl Iterator<Item = &'a Hit>) -> Option<PathBuf> {
 
 /// One id's transcript: the store walk's best answer, or `None`.
 fn resolve_one(projects_root: &Path, id: &str) -> Option<PathBuf> {
+    // An empty id matches every transcript (the ambiguous branch would hand
+    // back the store's first file); it reads missing-input, never an answer.
+    if id.is_empty() {
+        return None;
+    }
     let hits = store_hits(projects_root, id);
     let first = hits.first()?;
     if hits.iter().any(|h| h.name != first.name) {
@@ -166,13 +171,13 @@ mod tests {
     fn full_uuid_and_short_prefix_resolve_across_project_dirs() {
         let root = tmp("uuid");
         let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
-        let canonical = plant(&root, "-repo", &format!("{uuid}.jsonl"), CONVO);
-        // A worktree copy of the SAME session resolves to the same id.
+        plant(&root, "-repo", &format!("{uuid}.jsonl"), CONVO);
+        // A worktree copy of the SAME session resolves to the same id; the
+        // worktree copy is the newest write, so it wins the shared-name rule.
         let worktree = plant(&root, "-repo-worktrees-x", &format!("{uuid}.jsonl"), CONVO);
         assert_eq!(resolve_one(&root, uuid).unwrap(), worktree);
         assert_eq!(resolve_one(&root, "d8996f9b").unwrap(), worktree);
         let _ = std::fs::remove_dir_all(&root);
-        let _ = canonical;
     }
 
     #[test]
@@ -210,12 +215,10 @@ mod tests {
     fn all_stub_copies_fall_back_to_newest() {
         let root = tmp("allstub");
         let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
-        let first = plant(&root, "-repo", &format!("{uuid}.jsonl"), STUB);
+        plant(&root, "-repo", &format!("{uuid}.jsonl"), STUB);
+        // Planted second, so it is the newest write: the fallback's answer.
         let second = plant(&root, "-repo-wt", &format!("{uuid}.jsonl"), STUB);
-        assert!(
-            resolve_one(&root, uuid).unwrap() == first
-                || resolve_one(&root, uuid).unwrap() == second
-        );
+        assert_eq!(resolve_one(&root, uuid).unwrap(), second);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -239,6 +242,8 @@ mod tests {
             "d8996f9b-8854-4f22-8c28-c7819c6d0316.jsonl",
             CONVO,
         );
+        // An empty id would match every transcript; it answers None.
+        assert_eq!(resolve_one(&projects, ""), None);
         let paths = claude_transcript_paths(projects.clone());
         let out = paths(&["d8996f9b".to_string(), "ffffffff".to_string()]).unwrap();
         assert_eq!(out.len(), 1, "only the resolved id is present: {out:?}");
