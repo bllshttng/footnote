@@ -717,7 +717,12 @@ impl Popup {
                             segs.push((swatch_start, 2usize, Role::Swatch(*color)));
                             segs.push((swatch_start + 2, tail, Role::BodyCursor));
                         } else {
-                            segs.push((1usize, kw, Role::BodyAccent));
+                            // The accent marks the CHOSEN row only: the
+                            // builder's `●` glyph. Unchosen radios read as
+                            // ordinary text, never a wall of brand marks.
+                            if glyph == "\u{25cf}" {
+                                segs.push((1usize, kw, Role::BodyAccent));
+                            }
                             segs.push((swatch_start, 2usize, Role::Swatch(*color)));
                         }
                     }

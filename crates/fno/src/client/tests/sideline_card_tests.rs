@@ -423,6 +423,34 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
 }
 
 #[test]
+fn a_named_theme_bands_on_its_surface_and_never_paints_the_brand_across_a_row() {
+    // The named-theme band pair is stamp-on-sel: neutral text on the sel
+    // surface. The brand never fills a banded row's text - the highlight
+    // pass alone restores the lane accent, on the glyph and state word
+    // only. (A red band across every cell was the bug this PR fixes; the
+    // default-theme tests could not see it.)
+    let mut v = card_view(king_and_worker());
+    v.theme = crate::theme::Theme::from_name("footnote-superscript").0;
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let (agent_i, detail_i) = card_rows_for(&v, "w1");
+    v.hover_row = Some(agent_i);
+    let frame = v.compose();
+    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
+    assert_eq!(band_fg, v.theme.stamp, "the band text is the neutral stamp");
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    for display_i in [agent_i, detail_i] {
+        let row = display_i - offset;
+        for cell in &frame.cells[row * cols..row * cols + text_w] {
+            assert_eq!(cell.bg, v.theme.sel, "the band is the sel surface");
+            assert_ne!(cell.fg, v.theme.brand, "the brand never fills a banded row");
+        }
+    }
+}
+
+#[test]
 fn card_pr_and_age_snapshots_share_the_panel_right_edge() {
     let mut agents = king_and_worker();
     agents[1].last_activity_age_s = Some(42);
@@ -533,10 +561,10 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     let frame = v.compose();
 
     // Re-frozen when the band change (x-b5b8) moved the lane color off the
-    // name row: the status column alone carries it now.
+    // name row and the Ｆ[no] mark was pinned at the strip's top-left.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0xd8948ddbcb4651ac,
+        828733737252577218,
         "List frame-cell snapshot"
     );
 }

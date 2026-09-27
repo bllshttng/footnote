@@ -5967,6 +5967,18 @@ impl View {
     /// and `chrome_hit` walk, so a click always lands on the glyph under it.
     fn tab_bar_spans(&self) -> Vec<TabSpan> {
         let mut spans = Vec::new();
+        // The brand mark is pinned at the tab bar's top-left in EVERY
+        // workspace, before tab 1 (user ruling, 2026-09-27): `Ｆ` bold,
+        // `[no]` the reverse-video stamp (draw_tab_bar splits the two
+        // tones). It rides ahead of the workspace label, whatever it is.
+        let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
+        spans.push(TabSpan {
+            text: format!(" {text} "),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            role: SpanRole::Squad,
+        });
         let Some(s) = self
             .layout
             .squads
@@ -5975,27 +5987,13 @@ impl View {
         else {
             return spans;
         };
-        // The home workspace wears the Ｆ[no] brand mark in place of its name:
-        // `Ｆ` bold, `[no]` the reverse-video stamp (draw_tab_bar splits the
-        // two tones).
-        if s.name == "fno" {
-            let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
-            spans.push(TabSpan {
-                text: format!(" {text} "),
-                flags: cell_flags::BOLD,
-                fg: Color::Default,
-                hit: None,
-                role: SpanRole::Squad,
-            });
-        } else {
-            spans.push(TabSpan {
-                text: format!(" {} ", brand_label(&s.name)),
-                flags: cell_flags::BOLD,
-                fg: Color::Default,
-                hit: None,
-                role: SpanRole::Squad,
-            });
-        }
+        spans.push(TabSpan {
+            text: format!(" {} ", brand_label(&s.name)),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            role: SpanRole::Squad,
+        });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
             // US4: a leading max-severity rollup glyph so a background

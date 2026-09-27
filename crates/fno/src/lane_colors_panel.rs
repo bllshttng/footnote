@@ -158,7 +158,7 @@ fn push_lane_axis_rows(
     }
     if let Some(label) = add_label {
         rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
+            glyph: "+".into(),
             label,
             hint: String::new(),
             enabled: true,
@@ -603,15 +603,8 @@ mod tests {
                 "row {i} closes its right border on one column: {:?}",
                 line.text
             );
-            if line.text.contains('＋') {
+            if line.text.contains("+ add") {
                 add_rows += 1;
-                let lead = (c0..c0 + w)
-                    .find(|&col| cells[row * cols + col].c == '＋')
-                    .expect("the lead glyph is painted");
-                assert!(
-                    cells[row * cols + lead + 1].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
-                    "the fullwidth glyph claims its spacer cell"
-                );
             }
             // Body rows sit between the top chrome (title + tabs) and the
             // bottom chrome (footer + border); the scrollbar column rides

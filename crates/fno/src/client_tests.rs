@@ -2136,13 +2136,14 @@ fn layout_push_clears_stale_hover_row() {
 fn chrome_hit_tab_bar_routes_tabs_and_new_tab() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
                                 // (x-cd67 US1) The strip is scoped to the content area (origin
-                                // panel_w=28): " footnote "=28..37, " 1 "=38..40, the padded
-                                // "[ 2 ]"=41..45, " + "=46..48.
-    assert_eq!(cmds(view.chrome_hit(0, 39)), vec![Command::SelectTab(0)]);
-    assert_eq!(cmds(view.chrome_hit(0, 42)), vec![Command::SelectTab(1)]);
-    assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::NewTab]);
+                                // panel_w=28); the pinned Ｆ[no] mark leads it, so
+                                // " footnote "=36..45, " 1 "=46..48, the padded "[ 2 ]"=49..53,
+                                // " + "=54..56.
+    assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::SelectTab(0)]);
+    assert_eq!(cmds(view.chrome_hit(0, 50)), vec![Command::SelectTab(1)]);
+    assert_eq!(cmds(view.chrome_hit(0, 55)), vec![Command::NewTab]);
     // The squad-name label is inert.
-    assert!(view.chrome_hit(0, 33).is_none());
+    assert!(view.chrome_hit(0, 41).is_none());
 }
 
 // (x-cd67 US1, AC1-HP) The tab strip is scoped to the content columns: its
@@ -2159,11 +2160,13 @@ fn tab_strip_scoped_to_content_area_row0_is_sideline() {
     assert_eq!(frame.cells[0].c, '▾', "row 0 col 0 is the squad-1 caret");
     // The divider column runs full height, including row 0.
     assert_eq!(frame.cells[panel_w - 1].c, '│', "divider at row 0");
-    // The strip's first span (the active squad name) begins at panel_w.
+    // The strip's first span (the pinned Ｆ[no] mark) begins at panel_w; the
+    // workspace label follows it. The collected cell string shows a space
+    // after the Ｆ - that is the wide glyph's WIDE_SPACER cell, not a gap.
     let strip: String = (panel_w..cols).map(|c| frame.cells[c].c).collect();
     assert!(
-        strip.trim_start().starts_with("footnote"),
-        "strip begins at panel_w: {strip:?}"
+        strip.trim_start().starts_with("\u{FF26} [no]"),
+        "strip begins at panel_w with the pinned mark: {strip:?}"
     );
     // A row-0 click left of the divider toggles squad 1 (the active squad row),
     // never a tab.

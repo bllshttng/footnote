@@ -274,8 +274,11 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
         // gray bar over it.
         (Color::Indexed(3), Color::Indexed(0), 0)
     } else {
-        // A named theme pairs its brand with its `sel` surface.
-        (t.brand, t.sel, 0)
+        // A named theme bands on its `sel` surface with `stamp` text: the
+        // neutral text-on-surface pair. The brand belongs to the glyph and
+        // state word (the highlight pass restores the lane accent there),
+        // never to the whole band.
+        (t.stamp, t.sel, 0)
     }
 }
 
