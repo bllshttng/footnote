@@ -957,7 +957,7 @@ def test_armed_breaker_completes_the_tick(monkeypatch, _no_global_tick_events, t
         lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
@@ -1014,7 +1014,7 @@ def test_armed_breaker_leaves_the_report_legs_alone(
         lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda _cfg, **_kw: 3)
     monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_kw: ([], 0))
@@ -1146,7 +1146,7 @@ def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_e
         "fno.pr_watch._king_wake.run_king_wake", _saturate, raising=True,
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
