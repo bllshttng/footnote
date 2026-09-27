@@ -2037,12 +2037,14 @@ fn picker_rows(
                                 &m.name,
                                 &hint,
                                 matches!(m.state, ModelState::Ready),
-                                matches!(m.state, ModelState::Ready).then(|| PickerAction::PickRow {
-                                    harness: harness.clone(),
-                                    name: m.name.clone(),
-                                    model: m.model.clone(),
-                                    route: m.route.clone(),
-                                    provider: m.provider.clone(),
+                                matches!(m.state, ModelState::Ready).then(|| {
+                                    PickerAction::PickRow {
+                                        harness: harness.clone(),
+                                        name: m.name.clone(),
+                                        model: m.model.clone(),
+                                        route: m.route.clone(),
+                                        provider: m.provider.clone(),
+                                    }
                                 }),
                             );
                         }
@@ -2249,8 +2251,8 @@ pub(crate) fn apply_picker_action(
                 route,
                 provider: non_empty(&l.draft.provider),
                 state: ModelState::Ready,
-                        key_env: None,
-                        key_file: None,
+                key_env: None,
+                key_file: None,
             };
             l.recent_models
                 .retain(|recent| recent.harness != harness || recent.choice.name != name);

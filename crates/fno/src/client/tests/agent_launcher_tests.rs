@@ -190,8 +190,8 @@ fn tab_walks_the_field_order() {
             route: String::new(),
             provider: Some("anthropic".into()),
             state: ModelState::Ready,
-                key_env: None,
-                key_file: None,
+            key_env: None,
+            key_file: None,
         });
     }
     v.launcher_catalog = Some(one_provider);
@@ -861,8 +861,8 @@ fn account_pins_merge_over_the_model_floor_without_duplicates() {
         route: String::new(),
         provider: None,
         state: ModelState::Ready,
-                key_env: None,
-                key_file: None,
+        key_env: None,
+        key_file: None,
     }];
     let pins = super::agent_launcher::parse_configured_account_models(
         r#"{"value":[{"id":"a","harness":"claude","route_provider_id":"zai","model_name":"glm-5.3-flash[1m]","route":"zai/glm-5.3-flash[1m]"}]}"#,
@@ -1427,7 +1427,6 @@ fn request_drops_a_stale_node_binding_when_the_message_moves() {
     }
 }
 
-
 #[test]
 fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
     // AC4-HP: a Ready row beyond the main list is still offered, so the
@@ -1474,7 +1473,6 @@ fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
     assert_eq!(l.draft.provider, "zai");
 }
 
-
 #[test]
 fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
     // AC4-ERR: no cache and a failing fetch leaves the floor standing; the
@@ -1490,8 +1488,14 @@ fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
         CatalogOutcome::Ok(rows, _) => rows,
         CatalogOutcome::Degraded(reason) => panic!("harness rows must not degrade: {reason}"),
     };
-    let claude = rows.iter().find(|r| r.name == "claude").expect("claude row");
-    assert!(!claude.models.is_empty(), "the capability floor still loads");
+    let claude = rows
+        .iter()
+        .find(|r| r.name == "claude")
+        .expect("claude row");
+    assert!(
+        !claude.models.is_empty(),
+        "the capability floor still loads"
+    );
     assert!(
         claude.catalog_error.is_some(),
         "catalog_error names the reason: {:?}",

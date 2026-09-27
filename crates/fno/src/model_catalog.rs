@@ -75,20 +75,14 @@ pub struct CatalogModel {
     pub name: Option<String>,
 }
 
-
 /// One model row's launchability: the user-confirmed 2026-09-26 row states.
 /// `Ready` fills the main list; `NoKey` names the missing key (hollow dot)
 /// and Enter shows the connect steps; `Unreachable` names the protocol gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelState {
     Ready,
-    NoKey {
-        key_env: String,
-        steps: Vec<String>,
-    },
-    Unreachable {
-        reason: String,
-    },
+    NoKey { key_env: String, steps: Vec<String> },
+    Unreachable { reason: String },
 }
 
 /// One configured model choice: `name` is what the model chip shows, `model`
@@ -197,8 +191,8 @@ pub(crate) fn parse_configured_account_models(
             route,
             provider,
             state: ModelState::Ready,
-        key_env: None,
-        key_file: None,
+            key_env: None,
+            key_file: None,
         });
     }
     Ok(by_harness)
@@ -219,8 +213,8 @@ pub(crate) fn parse_opencode_models(stdout: &str) -> Vec<ModelChoice> {
             route: String::new(),
             provider: Some(provider),
             state: ModelState::Ready,
-        key_env: None,
-        key_file: None,
+            key_env: None,
+            key_file: None,
         });
     }
     models
@@ -273,8 +267,8 @@ pub(crate) fn parse_codex_models(text: &str) -> (Vec<ModelChoice>, Vec<String>) 
             route: String::new(),
             provider: None,
             state: ModelState::Ready,
-        key_env: None,
-        key_file: None,
+            key_env: None,
+            key_file: None,
         });
     }
     (models_out, hidden)
@@ -406,7 +400,6 @@ pub fn load(state: &Path) -> Result<Catalog, String> {
     parse(&text).map_err(|e| format!("{e} ({})", path.display()))
 }
 
-
 // -- reach --------------------------------------------------------------------
 
 /// One provider's launchability facts after the precedence: config record >
@@ -423,11 +416,9 @@ struct ProviderFacts {
 /// The URL's host part, lowercase, for the catalog host match.
 fn host_of(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let auth = rest.split(['/','?','#']).next().unwrap_or(rest);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     auth.to_lowercase()
 }
-
-
 
 /// The compiled-in reach map.
 pub(crate) const REACH_TOML: &str = include_str!("model_reach.toml");
@@ -515,11 +506,12 @@ pub(crate) fn parse_reach(toml_text: &str) -> ModelReach {
                                 .get("catalog")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string),
-                            builtin: caps.get("builtin").and_then(|v| v.as_bool()).unwrap_or(false),
-                            anthropic: caps
-                                .get("anthropic")
-                                .and_then(|v| v.as_table())
-                                .map(|ep| VendorEndpoint {
+                            builtin: caps
+                                .get("builtin")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            anthropic: caps.get("anthropic").and_then(|v| v.as_table()).map(|ep| {
+                                VendorEndpoint {
                                     base_url: ep
                                         .get("base_url")
                                         .and_then(|v| v.as_str())
@@ -534,7 +526,8 @@ pub(crate) fn parse_reach(toml_text: &str) -> ModelReach {
                                         .get("key_file")
                                         .and_then(|v| v.as_str())
                                         .map(str::to_string),
-                                }),
+                                }
+                            }),
                         },
                     )
                 })
@@ -569,7 +562,10 @@ fn facts_for<'a>(
     }
     if linked.is_none() {
         if let Some(record) = record {
-            let base = record.get("base_url").and_then(|v| v.as_str()).unwrap_or_default();
+            let base = record
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             if !base.is_empty() {
                 let host = host_of(base);
                 if let Some(cat) = catalog {
@@ -586,7 +582,9 @@ fn facts_for<'a>(
     let npm_protocol = |cp: &CatalogProvider| -> Option<String> {
         match cp.npm.as_deref() {
             Some("@ai-sdk/anthropic") => Some("anthropic".to_string()),
-            Some("@ai-sdk/openai-compatible") | Some("@ai-sdk/openai") => Some("openai".to_string()),
+            Some("@ai-sdk/openai-compatible") | Some("@ai-sdk/openai") => {
+                Some("openai".to_string())
+            }
             _ => None,
         }
     };
@@ -633,7 +631,6 @@ fn facts_for<'a>(
         linked,
     ))
 }
-
 
 /// The `provider -> model ids` the config names: tier_models values,
 /// haiku_model, and the account records' routes for this harness.
@@ -696,9 +693,7 @@ fn rows_for_provider(
     let has_access = facts.has_record || facts.builtin || native;
     let unreachable = !routes.routes.iter().any(|r| r == &protocol);
 
-    let mut model_ids: Vec<String> = linked
-        .map(|cp| cp.model_ids())
-        .unwrap_or_default();
+    let mut model_ids: Vec<String> = linked.map(|cp| cp.model_ids()).unwrap_or_default();
     if let Some(ms) = named.get(provider) {
         for m in ms {
             if !model_ids.iter().any(|k| k == m) {
@@ -711,9 +706,7 @@ fn rows_for_provider(
     }
     let state = if unreachable {
         let reason = if routes.routes.is_empty() {
-            format!(
-                "fno cannot launch a routed codex model yet ({provider} serves {protocol})"
-            )
+            format!("fno cannot launch a routed codex model yet ({provider} serves {protocol})")
         } else {
             format!(
                 "{} speaks {}; {provider} serves {protocol}",
@@ -880,7 +873,6 @@ pub(crate) fn reach_rows(
     (ready, more)
 }
 
-
 /// The vendor endpoint's base_url for one protocol, read from the
 /// compiled-in map.
 pub(crate) fn vendor_base_url(vendor: &str, protocol: &str) -> Option<String> {
@@ -1008,7 +1000,11 @@ mod tests {
         assert!(reason.contains("models-dev.json"), "{reason}");
         let _ = std::fs::remove_dir_all(&dir);
     }
-    fn reach_fixture() -> (ModelReach, serde_json::Value, std::collections::HashMap<String, Vec<ModelChoice>>) {
+    fn reach_fixture() -> (
+        ModelReach,
+        serde_json::Value,
+        std::collections::HashMap<String, Vec<ModelChoice>>,
+    ) {
         let reach = parse_reach(REACH_TOML);
         // The real `fno config get model_routing -J` wraps the table in "value".
         let cfg: serde_json::Value = serde_json::json!({
@@ -1041,7 +1037,10 @@ mod tests {
         assert!(reach.harness.get("opencode").unwrap().own_list);
         let zai = reach.vendor.get("zai").unwrap();
         assert!(zai.builtin);
-        assert_eq!(zai.anthropic.as_ref().unwrap().base_url, "https://api.z.ai/api/anthropic");
+        assert_eq!(
+            zai.anthropic.as_ref().unwrap().base_url,
+            "https://api.z.ai/api/anthropic"
+        );
         assert_eq!(zai.anthropic.as_ref().unwrap().key_env, "ZAI_API_KEY");
     }
 
@@ -1050,12 +1049,23 @@ mod tests {
         let (reach, cfg, records) = reach_fixture();
         let catalog = parse(FIXTURE).unwrap();
         let key_present = |env: &str, _file: Option<&str>| env == "FNO_TEST_DS_KEY";
-        let (ready, more) = reach_rows("claude", &reach, &cfg, &records, Some(&catalog), &key_present);
+        let (ready, more) = reach_rows(
+            "claude",
+            &reach,
+            &cfg,
+            &records,
+            Some(&catalog),
+            &key_present,
+        );
         assert!(
-            more.iter().all(|r| r.provider.as_deref() != Some("deepseek")),
+            more.iter()
+                .all(|r| r.provider.as_deref() != Some("deepseek")),
             "keyed deepseek rows belong in ready, not more: {more:?}"
         );
-        let ds: Vec<&ModelChoice> = ready.iter().filter(|r| r.provider.as_deref() == Some("deepseek")).collect();
+        let ds: Vec<&ModelChoice> = ready
+            .iter()
+            .filter(|r| r.provider.as_deref() == Some("deepseek"))
+            .collect();
         assert!(!ds.is_empty());
         for row in ds {
             assert!(matches!(row.state, ModelState::Ready), "{row:?}");
@@ -1066,21 +1076,39 @@ mod tests {
     fn unrecorded_catalog_provider_is_nokey_with_config_set_step() {
         let (reach, mut cfg, records) = reach_fixture();
         // Drop the deepseek record: the catalog npm rule alone must place it.
-        cfg["value"]["providers"].as_object_mut().unwrap().remove("deepseek");
+        cfg["value"]["providers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("deepseek");
         let catalog = parse(FIXTURE).unwrap();
         // DEEPSEEK_API_KEY is set but no record exists: the door refuses an
         // unknown provider, so the row stays NoKey with the one config step.
         let key_present = |env: &str, _file: Option<&str>| env == "DEEPSEEK_API_KEY";
-        let (ready, more) = reach_rows("claude", &reach, &cfg, &records, Some(&catalog), &key_present);
-        assert!(ready.iter().all(|r| r.provider.as_deref() != Some("deepseek")));
-        let ds: Vec<&ModelChoice> = more.iter().filter(|r| r.provider.as_deref() == Some("deepseek")).collect();
+        let (ready, more) = reach_rows(
+            "claude",
+            &reach,
+            &cfg,
+            &records,
+            Some(&catalog),
+            &key_present,
+        );
+        assert!(ready
+            .iter()
+            .all(|r| r.provider.as_deref() != Some("deepseek")));
+        let ds: Vec<&ModelChoice> = more
+            .iter()
+            .filter(|r| r.provider.as_deref() == Some("deepseek"))
+            .collect();
         assert!(!ds.is_empty());
         for row in ds {
             let ModelState::NoKey { key_env, steps } = &row.state else {
                 panic!("expected NoKey, got {:?}", row.state);
             };
             assert_eq!(key_env, "DEEPSEEK_API_KEY");
-            assert!(steps[0].starts_with("fno config set model_routing.providers.deepseek"), "{steps:?}");
+            assert!(
+                steps[0].starts_with("fno config set model_routing.providers.deepseek"),
+                "{steps:?}"
+            );
             assert!(steps[0].contains("DEEPSEEK_API_KEY"), "{steps:?}");
             assert_eq!(steps.len(), 1, "key is set; only the config step shows");
         }
@@ -1094,8 +1122,17 @@ mod tests {
             env == "FNO_TEST_DS_KEY" || env == "FNO_TEST_ZAI_OPENAI_KEY"
         };
         // claude + an openai-protocol record.
-        let (ready, more) = reach_rows("claude", &reach, &cfg, &records, Some(&catalog), &key_present);
-        assert!(ready.iter().all(|r| r.provider.as_deref() != Some("zai-openai")));
+        let (ready, more) = reach_rows(
+            "claude",
+            &reach,
+            &cfg,
+            &records,
+            Some(&catalog),
+            &key_present,
+        );
+        assert!(ready
+            .iter()
+            .all(|r| r.provider.as_deref() != Some("zai-openai")));
         let row = more
             .iter()
             .find(|r| r.provider.as_deref() == Some("zai-openai"))
@@ -1105,7 +1142,14 @@ mod tests {
         };
         assert_eq!(reason, "claude speaks anthropic; zai-openai serves openai");
         // codex + a routed provider: the door refuses a routed codex pick.
-        let (ready, more) = reach_rows("codex", &reach, &cfg, &records, Some(&catalog), &key_present);
+        let (ready, more) = reach_rows(
+            "codex",
+            &reach,
+            &cfg,
+            &records,
+            Some(&catalog),
+            &key_present,
+        );
         assert!(ready.is_empty(), "codex launches nothing routed: {ready:?}");
         let row = more
             .iter()
@@ -1114,26 +1158,47 @@ mod tests {
         let ModelState::Unreachable { reason } = &row.state else {
             panic!("expected Unreachable, got {:?}", row.state);
         };
-        assert!(reason.starts_with("fno cannot launch a routed codex model yet"), "{reason}");
+        assert!(
+            reason.starts_with("fno cannot launch a routed codex model yet"),
+            "{reason}"
+        );
     }
 
     #[test]
     fn builtin_vendor_key_from_env_file_is_ready_on_claude() {
         let (reach, mut cfg, records) = reach_fixture();
         // Remove the test deepseek record; zai is builtin via the map.
-        cfg["value"]["providers"].as_object_mut().unwrap().remove("deepseek");
-        cfg["value"]["providers"].as_object_mut().unwrap().remove("zai-openai");
+        cfg["value"]["providers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("deepseek");
+        cfg["value"]["providers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("zai-openai");
         let catalog = parse(FIXTURE).unwrap();
         let key_present = |env: &str, file: Option<&str>| {
             // The user's shape: ZAI_API_KEY only in the dotenv file.
             env == "ZAI_API_KEY" && file == Some("~/.fno/.env")
         };
-        let (ready, more) = reach_rows("claude", &reach, &cfg, &records, Some(&catalog), &key_present);
-        let zai: Vec<&ModelChoice> = ready.iter().filter(|r| r.provider.as_deref() == Some("zai")).collect();
-        assert!(!zai.is_empty(), "builtin zai with a file key is Ready; more was {more:?}");
+        let (ready, more) = reach_rows(
+            "claude",
+            &reach,
+            &cfg,
+            &records,
+            Some(&catalog),
+            &key_present,
+        );
+        let zai: Vec<&ModelChoice> = ready
+            .iter()
+            .filter(|r| r.provider.as_deref() == Some("zai"))
+            .collect();
+        assert!(
+            !zai.is_empty(),
+            "builtin zai with a file key is Ready; more was {more:?}"
+        );
         for row in zai {
             assert!(matches!(row.state, ModelState::Ready), "{row:?}");
         }
     }
-
 }
