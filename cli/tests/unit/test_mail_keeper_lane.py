@@ -291,7 +291,7 @@ def test_the_keeper_verb_miss_records_the_reason_token(monkeypatch):
 def test_a_bus_only_keeper_recipient_is_refused_before_the_binary(monkeypatch):
     import fno.agents.dispatch as d
 
-    monkeypatch.setattr(d, "_delivery_policy_refusal", lambda _t: d.BUS_ONLY_POLICY)
+    monkeypatch.setattr(d, "_delivery_policy_refusal", lambda *_a: d.BUS_ONLY_POLICY)
 
     def _run(_argv, **_k):
         raise AssertionError("a bus-only recipient reached the binary")

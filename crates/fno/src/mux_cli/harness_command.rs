@@ -1006,6 +1006,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         args.text.clone().into_bytes(),
         true,
         Some(&expected_identity),
+        false,
     ) {
         let status = classify_text_submission_error(&error);
         let receipt = CommandReceipt {
@@ -1040,6 +1041,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         vec![b'\r'],
         false,
         Some(&expected_identity),
+        false,
     ) {
         let receipt = CommandReceipt {
             request_id,

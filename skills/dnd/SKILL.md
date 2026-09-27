@@ -28,6 +28,8 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 
 A real message (not a slash command, a `!` line, or a raw send) starts the conversation hold by itself. It lasts while the session answers plus the configured grace (2 minutes by default) and restarts with each message. `Off` or `cancel` ends it now. A DND you set with a duration keeps its full length. The conversation rules never shorten or replace it.
 
+While a hold is live: `control:` mail and the session's own sends pass, so you can always reach yourself. When the hold ends, a `--raw` send parked at the gate runs once through the raw door. Mail never lands while you are typing in the pane. It also waits out a question the session is asking. When you go quiet, it delivers. The sender's receipt names the time the hold ends. Relay the receipt verbatim.
+
 ## Report the real receipt
 
 Run the genuine command and report its receipt line verbatim. The CLI calls the hold busy mode. That is DND. The proof is the receipt line, the `fno agents list` DND column, and the mux `[DND]` marker. Relay a nonzero exit or a `hold NOT off` line verbatim, and claim no DND state. Exit 3 is no provable harness identity.

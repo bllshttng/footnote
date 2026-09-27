@@ -1116,9 +1116,9 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
 #[test]
 fn extra_flags_chip_parses_argv_without_shell_expansion() {
     let mut v = view_with_launcher();
-    // Wire 94: the worktree default (checked, policy external) must ride
+    // Wire 95: the worktree default (checked, policy external) must ride
     // the request, so the sidecar answers at the worktree generation.
-    let (session, _wire_fixture) = wire_fixture_at(94);
+    let (session, _wire_fixture) = wire_fixture_at(95);
     v.session = session;
     let own = std::env::current_dir().unwrap().display().to_string();
     v.launcher_catalog = Some(CatalogOutcome::Ok(
@@ -1179,9 +1179,10 @@ fn launch_extra_axes_require_a_stamped_compatible_server() {
     assert!(!version_at_least(Some(90), LAUNCH_EXTRA_AXES_PROTO));
     assert!(version_at_least(Some(91), LAUNCH_EXTRA_AXES_PROTO));
     assert!(version_at_least(Some(92), LAUNCH_EXTRA_AXES_PROTO));
-    // The worktree gate sits one generation later.
+    // The worktree gate sits one generation later than the launch extras.
     assert!(!version_at_least(Some(93), LAUNCH_WORKTREE_PROTO));
-    assert!(version_at_least(Some(94), LAUNCH_WORKTREE_PROTO));
+    assert!(!version_at_least(Some(94), LAUNCH_WORKTREE_PROTO));
+    assert!(version_at_least(Some(95), LAUNCH_WORKTREE_PROTO));
 }
 
 #[test]
@@ -2021,7 +2022,7 @@ fn unread_facts_refuse_the_launch_instead_of_guessing() {
         "worktree ?",
         "the unknown state names itself"
     );
-    let (session, _wire_fixture) = wire_fixture_at(94);
+    let (session, _wire_fixture) = wire_fixture_at(95);
     v.session = session;
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
@@ -2089,7 +2090,7 @@ fn a_failed_policy_read_refuses_like_an_unread_one() {
         "worktree ?",
         "a failed read names itself"
     );
-    let (session, _wire_fixture) = wire_fixture_at(94);
+    let (session, _wire_fixture) = wire_fixture_at(95);
     v.session = session;
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;

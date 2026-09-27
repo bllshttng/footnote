@@ -90,16 +90,16 @@ class TestPickAtLaunch:
         self, armed: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """AC7-HP: the worker's env carries the healthy account's config dir."""
-        env = dispatch_mod._pick_account_env()
-        assert env is not None
-        assert env["CLAUDE_CONFIG_DIR"] == str(armed / "claude-main")
+        overlay = dispatch_mod._pick_account_overlay()
+        assert overlay is not None
+        assert overlay.env["CLAUDE_CONFIG_DIR"] == str(armed / "claude-main")
 
     def test_receipt_names_the_picked_account_and_its_headroom(
         self, armed: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # A launch landing on a different account than expected is a billing
         # surprise; the receipt is the whole mitigation.
-        dispatch_mod._pick_account_env()
+        dispatch_mod._pick_account_overlay()
         err = capsys.readouterr().err
         assert "account: makers (picked by accounts.quota.pick_on_launch," in err
         assert "32%" in err
@@ -107,7 +107,7 @@ class TestPickAtLaunch:
     def test_off_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_config(tmp_path, pick_on_launch=False)
         _pin_config(tmp_path, monkeypatch)
-        assert dispatch_mod._pick_account_env() is None
+        assert dispatch_mod._pick_account_overlay() is None
 
     def test_no_candidate_degrades_to_today_with_a_reason(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -125,7 +125,7 @@ class TestPickAtLaunch:
             encoding="utf-8",
         )
         _pin_config(tmp_path, monkeypatch)
-        assert dispatch_mod._pick_account_env() is None
+        assert dispatch_mod._pick_account_overlay() is None
         assert "pick unavailable" in capsys.readouterr().err
 
 
@@ -169,7 +169,7 @@ class TestSpawnSeam:
         def _never(*a, **k):
             raise AssertionError("picker consulted despite an explicit account")
 
-        monkeypatch.setattr(dispatch_mod, "_pick_account_env", _never)
+        monkeypatch.setattr(dispatch_mod, "_pick_account_overlay", _never)
         explicit = {"CLAUDE_CONFIG_DIR": str(armed / "claude-alt")}
         dispatch_mod.dispatch_spawn(
             name="w2", message="hi", harness="claude", cwd=armed,
@@ -211,15 +211,15 @@ class TestRoutedSpawnsAreNotPicked:
     """
 
     def test_an_explicit_route_skips_the_picker(self, armed: Path) -> None:
-        assert dispatch_mod._pick_account_env(
+        assert dispatch_mod._pick_account_overlay(
             route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"}
         ) is None
 
     def test_a_role_skips_the_picker(self, armed: Path) -> None:
-        assert dispatch_mod._pick_account_env(role="code_reviewer") is None
+        assert dispatch_mod._pick_account_overlay(role="code_reviewer") is None
 
     def test_an_unrouted_spawn_still_picks(self, armed: Path) -> None:
-        assert dispatch_mod._pick_account_env(role=None, route_env=None) is not None
+        assert dispatch_mod._pick_account_overlay(role=None, route_env=None) is not None
 
     def test_spawn_does_not_pick_for_a_routed_worker(
         self, armed: Path, monkeypatch: pytest.MonkeyPatch

@@ -28,7 +28,7 @@ use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchSt
 const MAX_PASTE_CARRY: usize = 16 * 1024;
 const MAX_LAUNCH_FLAGS_CHARS: usize = 1024;
 pub(crate) const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
-pub(crate) const LAUNCH_WORKTREE_PROTO: u32 = 94;
+pub(crate) const LAUNCH_WORKTREE_PROTO: u32 = 95;
 
 /// The editor's prompt gutter: the marker glyph and one space, before the
 /// first message row. The message wraps inside what remains.

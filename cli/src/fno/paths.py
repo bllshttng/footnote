@@ -1607,16 +1607,20 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
          file in EVERY repo - not the fno-area default, which is the wrong
          file outside this repo (and would make producer-written items invisible
          to the read commands).
-      3. With Obsidian enabled: ``<project_root>/internal/fno/backlog/parking-lot.md``
+      3. With Obsidian enabled AND this repo already carries an ``internal/``
+         (the vault symlink setup-worktree creates): ``<project_root>/internal/fno/backlog/parking-lot.md``
          (canonical default), unless a legacy
          ``internal/fno/backlog/inbox.md`` already exists, in which case that
          file keeps being used (back-compat, so old captures still resolve).
+         The global Obsidian flag is machine-level consent, not per-project:
+         a repo without its own ``internal/`` never gets one created.
       4. Without a vault, but a legacy ``internal/fno/backlog/inbox.md``
          already exists under the repo: keep using it (back-compat, so an
          upgrade never strands previously captured fu-* items).
       5. Without a vault, but a legacy ``.fno/backlog/inbox.md`` exists: keep it.
-      6. Without a vault and no legacy file: ``<project_root>/.fno/backlog/parking-lot.md``
-         so a non-vault repo never has a stray ``internal/`` directory materialized.
+      6. Otherwise: ``<project_root>/.fno/backlog/parking-lot.md``
+         so a repo without its own vault link never has a stray ``internal/``
+         directory materialized.
 
     The Obsidian default is plain-relative and anchors to the repo root
     (mirrors plans_dir). ``.resolve()`` follows the ``internal/`` symlink to
@@ -1637,7 +1641,7 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
         raw = override
     elif post_merge_parking_lot is not None:
         raw = post_merge_parking_lot
-    elif settings.obsidian.enabled:
+    elif settings.obsidian.enabled and (root / "internal").exists():
         if (root / "internal/fno/backlog/inbox.md").exists():
             raw = "internal/fno/backlog/inbox.md"
         else:
