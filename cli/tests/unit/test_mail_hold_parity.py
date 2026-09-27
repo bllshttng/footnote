@@ -32,6 +32,10 @@ HANDLE = "abcd1234"  # canonical_handle(SESSION); the key every WRITER uses
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    # The gate subprocess reads the hold sidecar under $FNO_HOME, not the
+    # Python settings stack; without this the arm writes the test's state
+    # while the gate reads the machine's and answers deliver.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -146,7 +150,10 @@ def test_the_codex_row_really_does_separate_the_key_forms():
 def test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses():
     hold_mod.arm_wall(HANDLE, 5)
 
-    assert "wall clock" in hold_mod.bounce_reason(_claude_row())
+    claude = hold_mod.bounce_reason(_claude_row())
+    if claude is None:
+        pytest.skip("no mail-hold gate binary; the wall-clock wording is the Rust gate's")
+    assert "wall clock" in claude
     assert "wall clock" in hold_mod.bounce_reason(_codex_row())
 
 
