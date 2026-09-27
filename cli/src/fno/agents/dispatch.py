@@ -5509,7 +5509,7 @@ def _switchboard_exchange(
 
 # Subprocess budget for the mail-inject verb. It polls the recipient transcript
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
-_MAIL_INJECT_TIMEOUT_S = 20.0
+_MAIL_INJECT_TIMEOUT_S = 60.0
 
 # Liveness-scaled confirm budget (node, change 2). The enqueue record is
 # written at submit time, not at turn end, so a healthy busy recipient confirms

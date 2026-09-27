@@ -636,11 +636,16 @@ fn gate_json(verdict: &GateVerdict) -> String {
 }
 
 /// The `--gate --park-on-hold` answer for a held body (C15): park the
-/// payload and answer the `parked` JSON line with the park receipt. A
-/// deliver or pass verdict, an empty body, or a failed park answers None
-/// and the caller prints the plain verdict instead.
+/// payload and answer the `parked` JSON line with the park receipt. The
+/// session's own sends type now (the pane's hold-pass stands down for them),
+/// and so does a genuinely deliverable body; a `control:`-prefixed body on
+/// the raw door parks too, because typed text carries no control envelope
+/// for anything downstream to honor. An empty body or a failed park answers
+/// None and the caller prints the plain verdict instead.
 fn gate_parked_line(verdict: &GateVerdict, session_id: &str, body: &str) -> Option<String> {
-    if body.trim().is_empty() || verdict.deliver || verdict.pass.is_some() {
+    let typable =
+        verdict.pass.as_deref() == Some("own") || (verdict.deliver && verdict.pass.is_none());
+    if body.trim().is_empty() || typable {
         return None;
     }
     let receipt = park_payload_inner(session_id, body).ok()?;
@@ -1817,16 +1822,21 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(parked.len(), 1, "the body sits in the hold store");
 
-            // A control pass and an empty body never park.
+            // A control body parks too: typed text carries no control
+            // envelope, so the hold keeps it until the hold ends. An empty
+            // body never parks.
             let control = gate(SID, Some("control: stop"), chrono::Utc::now());
-            assert!(gate_parked_line(&control, SID, "control: stop").is_none());
+            let parked_control =
+                gate_parked_line(&control, SID, "control: stop").expect("control body parks");
+            let parsed_control: serde_json::Value = serde_json::from_str(&parked_control).unwrap();
+            assert_eq!(parsed_control["verdict"], "parked");
             assert!(gate_parked_line(&verdict, SID, "   ").is_none());
             let files_after: usize = std::fs::read_dir(&pdir)
                 .unwrap()
                 .flatten()
                 .filter(|e| e.path().extension().is_some_and(|x| x == "txt"))
                 .count();
-            assert_eq!(files_after, 1, "no extra park");
+            assert_eq!(files_after, 2, "the body and the control body parked");
         });
     }
 
