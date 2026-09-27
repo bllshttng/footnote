@@ -2418,7 +2418,7 @@ class TestTickRecordsAndDeadline:
         # king_wake finished early and reads as quiet, not saturated.
         assert ends[-1].get("saturated") == ["sweep"]
 
-    def test_a_notify_slice_below_its_real_cost_mints_the_timeout_row(
+    def test_a_notify_slice_below_its_real_cost_mints_the_starved_row(
         self, monkeypatch, tmp_path
     ):
         """x-0fc2 (12:35Z specimen): the notify_watch phase spent its slice
