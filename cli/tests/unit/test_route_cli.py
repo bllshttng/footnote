@@ -7,12 +7,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.rust_binary import find_dev_binary
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 from fno.agents import model_routing as mr
