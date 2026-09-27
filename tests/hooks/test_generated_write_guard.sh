@@ -86,6 +86,9 @@ expect "AC6: codex apply_patch header blocks" block \
     "$(jq -nc --arg cwd "$REPO" --arg cmd $'*** Begin Patch\n*** Update File: .codex/agents/archer.toml\n@@\n-a\n+b\n*** End Patch' '{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}')" \
     "agents/*.md"
 
+expect "AC6: patch body mentioning a redirect is not read as a Bash write" approve \
+    "$(jq -nc --arg cwd "$REPO" --arg cmd $'*** Begin Patch\n*** Update File: docs/hand.md\n@@\n-a\n+run make gen > docs/gen.md\n*** End Patch' '{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}')"
+
 expect "AC7: installed plugin copy blocks" block \
     "$(edit "/tmp/x" "/tmp/x/.fno/plugin-stage/fno/hooks/a.sh")" "hooks/a.sh" "fno doctor update"
 
@@ -100,6 +103,88 @@ expect "AC8: repo without manifests approves" approve \
 
 expect "outside any repo approves" approve \
     "$(edit "$TMP" "$TMP/loose.md")"
+
+# Bash write forms: one expect per form the extractor covers.
+bashp() { jq -nc --arg cwd "$REPO" --arg cmd "$1" '{tool_name:"Bash",cwd:$cwd,tool_input:{command:$cmd}}'; }
+
+expect "Bash: redirect > blocks" block \
+    "$(bashp "echo x > docs/gen.md")" "docs/gen.src" "make gen"
+
+expect "Bash: append >> blocks" block \
+    "$(bashp "echo x >> docs/gen.md")" "docs/gen.src"
+
+expect "Bash: stderr 2> blocks" block \
+    "$(bashp "ls nope 2> docs/gen.md")" "docs/gen.src"
+
+expect "Bash: &> blocks" block \
+    "$(bashp "make gen &> docs/gen.md")" "docs/gen.src"
+
+expect "Bash: tee blocks" block \
+    "$(bashp "echo x | tee docs/gen.md")" "docs/gen.src"
+
+expect "Bash: sponge blocks" block \
+    "$(bashp "echo x | sponge docs/gen.md")" "docs/gen.src"
+
+expect "Bash: cp blocks" block \
+    "$(bashp "cp docs/gen.src docs/gen.md")" "docs/gen.src"
+
+expect "Bash: mv blocks" block \
+    "$(bashp "mv docs/hand.md docs/gen.md")" "docs/gen.src"
+
+expect "Bash: install blocks" block \
+    "$(bashp "install -m 644 docs/gen.src docs/gen.md")" "docs/gen.src"
+
+expect "Bash: truncate blocks" block \
+    "$(bashp "truncate -s 0 docs/gen.md")" "docs/gen.src"
+
+expect "Bash: dd of= blocks" block \
+    "$(bashp "dd if=docs/gen.src of=docs/gen.md bs=1")" "docs/gen.src"
+
+expect "Bash: sed -i blocks" block \
+    "$(bashp "sed -i s/a/b/ docs/gen.md")" "docs/gen.src"
+
+expect "Bash: perl -i blocks" block \
+    "$(bashp "perl -pi -e s/a/b/ docs/gen.md")" "docs/gen.src"
+
+expect "Bash: jq -i blocks" block \
+    "$(bashp "jq -i . docs/gen.md")" "docs/gen.src"
+
+expect "Bash: ex -s blocks" block \
+    "$(bashp "ex -s docs/gen.md")" "docs/gen.src"
+
+expect "Bash: trailing 2>/dev/null does not hide the cp target" block \
+    "$(bashp "cp docs/gen.src docs/gen.md 2>/dev/null")" "docs/gen.src"
+
+expect "Bash: quoted cp destination blocks" block \
+    "$(bashp "cp docs/gen.src \"docs/gen.md\"")" "docs/gen.src"
+
+expect "Bash: quoted redirect target blocks" block \
+    "$(bashp "echo x > \"docs/gen.md\"")" "docs/gen.src"
+
+expect "Bash: second write in a compound command blocks" block \
+    "$(bashp "echo x > README.tmp; echo y > docs/gen.md")" "docs/gen.src"
+
+expect "Bash: second cp in a compound command blocks" block \
+    "$(bashp "cp a README.tmp; cp docs/gen.src docs/gen.md")" "docs/gen.src"
+
+expect "Bash: force-clobber >| blocks" block \
+    "$(bashp "echo x >| docs/gen.md")" "docs/gen.src"
+
+expect "Bash: noclobber >| with flags blocks" block \
+    "$(bashp "set -o noclobber; echo x >| docs/gen.md")" "docs/gen.src"
+
+expect "Bash: fd dup 2>&1 is not a write target" approve \
+    "$(bashp "make gen 2>&1")"
+
+expect "Bash: cp over the installed plugin copy blocks" block \
+    "$(jq -nc --arg cwd "$TMP" --arg cmd "cp $REPO/docs/gen.md $TMP/stage/plugin-stage/fno/hooks/a.sh" '{tool_name:"Bash",cwd:$cwd,tool_input:{command:$cmd}}')" \
+    "installed plugin copy" "fno doctor update"
+
+expect "Bash: redirect to unlisted path approves" approve \
+    "$(bashp "echo x > docs/hand.md")"
+
+expect "Bash: read-only command approves" approve \
+    "$(bashp "grep -c gen docs/gen.md")"
 
 echo ""
 printf '[gwg] RESULTS: %d passed, %d failed\n' "$PASS" "$FAIL"

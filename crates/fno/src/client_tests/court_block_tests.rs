@@ -47,3 +47,52 @@ fn the_court_block_shrinks_the_sideline_and_yields_when_too_short() {
         3 - view.bottom_row_is_chrome() as usize
     );
 }
+
+// the block is agents-view chrome. The board view paints its own
+// full-column surface, so an expanded fold must not hold rows there - the
+// reserved rows came off the hit math's region and pinned the pinned-footer
+// row inside the board's painted area.
+#[test]
+fn the_court_fold_holds_no_rows_in_the_board_view() {
+    let mut view = View::new(
+        (24, 100),
+        "main".into(),
+        LayoutView {
+            squads: Vec::new(),
+            active_squad: 0,
+            panes: Vec::new(),
+            focus: 0,
+            area: (0, 0),
+            agents: Vec::new(),
+            focus_node: None,
+        },
+    );
+    assert!(view.court.take_want());
+    view.court.apply(Some(crate::court_overlay::Court {
+        lane_count: None,
+        per_lane_cpu_cores: None,
+        per_lane_mem_gb: None,
+        cost_source: String::new(),
+        refused_reason: String::new(),
+        census: Default::default(),
+        arms: Vec::new(),
+    }));
+    view.court.toggle();
+    view.sideline_view = crate::view_store::SidelineView::Backlog;
+
+    assert_eq!(
+        view.court_block_rows(),
+        0,
+        "the expanded fold holds no rows under the board"
+    );
+    assert_eq!(
+        view.questions_block_rows(),
+        0,
+        "same for the questions block"
+    );
+    assert_eq!(
+        view.sideline_visible_rows(),
+        24 - view.bottom_row_is_chrome() as usize,
+        "the full column is the list region again"
+    );
+}

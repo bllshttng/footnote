@@ -17,7 +17,7 @@
 //! geometry does not.
 use super::*;
 
-const RESEAT_USAGE: &str = "usage: fno mux thread reseat <agent-name | pane-id> [--portal N] [--server S]\n  move a live pane-hosted worker into a portal seat, keeping its PTY.\n  trade: the row stops being a squad member, so restore never rebuilds it,\n  and `fno agents rm` removes the row without killing the pane child.";
+const RESEAT_USAGE: &str = "usage: fno mux thread reseat <agent-name | pane-id> [--portal N] [--server S]\n  move a live pane-hosted worker into a portal seat, keeping its PTY.\n  trade: the row stops being a workspace member, so restore never rebuilds it,\n  and `fno agents rm` removes the row without killing the pane child.";
 
 /// A typed refusal from the reseat move. Printed once at the verb's edge,
 /// each with its own exit code; nothing downstream matches message text.

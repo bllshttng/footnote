@@ -712,7 +712,34 @@ def test_heal_only_sweep_does_not_claim_there_were_PRs(world, monkeypatch,
     assert "already-merged delivery units" in out
 
 
-def test_reparenting_away_from_the_unit_un_adopts(world, dispatches):
+def _native_update(tmp_path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FNO_STATE_DIR": str(tmp_path),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_path),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_reparenting_away_from_the_unit_un_adopts(world, dispatches, tmp_path):
     """The only escape from a mistyped `adopt` id, and it must exist.
 
     Nothing else clears `contained_in`: decompose is the sole writer, re-running
@@ -721,75 +748,53 @@ def test_reparenting_away_from_the_unit_un_adopts(world, dispatches):
     unit permanently AND had the cascade later stamp it "shipped inside
     <owner>" - a false completion note on work that never shipped.
     """
-    from typer.testing import CliRunner
-
-    from fno.graph.cli import cli
-
     write, read = world
     write(_world(Path("/tmp")))
 
-    assert CliRunner().invoke(
-        cli, ["update", KID_A, "--parent", "null"]
-    ).exit_code == 0
+    assert _native_update(tmp_path, KID_A, "--parent", "null")[0] == 0
     assert read()[KID_A].get("contained_in") is None
 
 
-def test_reparenting_within_the_unit_keeps_containment(world, dispatches):
+def test_reparenting_within_the_unit_keeps_containment(world, dispatches, tmp_path):
     """Keyed on moving away from THE OWNER, not on any re-parent at all.
 
     A contained node re-parented to its own delivery unit is still contained;
     clearing on every `--parent` would silently re-arm it.
     """
-    from typer.testing import CliRunner
-
-    from fno.graph.cli import cli
-
     write, read = world
     write(_world(Path("/tmp")))
 
-    assert CliRunner().invoke(
-        cli, ["update", KID_A, "--parent", UNIT]
-    ).exit_code == 0
+    assert _native_update(tmp_path, KID_A, "--parent", UNIT)[0] == 0
     assert read()[KID_A]["contained_in"] == UNIT
 
 
 def test_reparenting_onto_a_descendant_of_the_unit_keeps_containment(world,
-                                                                     dispatches):
+                                                                     dispatches,
+                                                                     tmp_path):
     """codex P2: an identity test contradicted its own comment.
 
     A node moved onto a DESCENDANT of its delivery unit is still inside that
     unit, but `== owner` un-contained it - making it independently dispatchable
     and costed again, and dropping it from the owner's merge cascade.
     """
-    from typer.testing import CliRunner
-
-    from fno.graph.cli import cli
-
     write, read = world
     entries = _world(Path("/tmp"))
     entries.append(_node("x-7c2a", parent=UNIT))   # a node under the unit
     write(entries)
 
-    assert CliRunner().invoke(
-        cli, ["update", KID_A, "--parent", "x-7c2a"]
-    ).exit_code == 0
+    assert _native_update(tmp_path, KID_A, "--parent", "x-7c2a")[0] == 0
     assert read()[KID_A]["contained_in"] == UNIT
 
 
-def test_reparenting_outside_the_unit_subtree_still_un_contains(world, dispatches):
+def test_reparenting_outside_the_unit_subtree_still_un_contains(world, dispatches,
+                                                                tmp_path):
     """The escape hatch must survive the subtree widening."""
-    from typer.testing import CliRunner
-
-    from fno.graph.cli import cli
-
     write, read = world
     entries = _world(Path("/tmp"))
     entries.append(_node("x-5e11"))   # unrelated, not under the unit
     write(entries)
 
-    assert CliRunner().invoke(
-        cli, ["update", KID_A, "--parent", "x-5e11"]
-    ).exit_code == 0
+    assert _native_update(tmp_path, KID_A, "--parent", "x-5e11")[0] == 0
     assert read()[KID_A].get("contained_in") is None
 
 

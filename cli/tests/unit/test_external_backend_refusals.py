@@ -10,6 +10,8 @@ from __future__ import annotations
 from tests.fixtures.graph_seed import seed_graph
 
 import json
+import os
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
@@ -74,9 +76,27 @@ def test_tracker_owned_verbs_refuse_under_external(argv, tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
-    r = runner.invoke(app, argv, catch_exceptions=False)
-    assert r.exit_code == 1, r.output
-    assert "github" in r.output and "refused" in r.output
+    if argv[:2] == ["backlog", "update"]:
+        # The update leaf answers natively now; its guard rode along, so the
+        # refusal asserts at the binary under the same backend env.
+        from fno.rust_binary import find_dev_binary
+
+        binary = find_dev_binary()
+        if binary is None:
+            pytest.skip("no dev fno-agents build")
+        proc = subprocess.run(
+            [str(binary), *argv],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "FNO_STATE_DIR": str(tmp_path)},
+        )
+        out = proc.stderr
+        assert proc.returncode == 1, out
+    else:
+        r = runner.invoke(app, argv, catch_exceptions=False)
+        assert r.exit_code == 1, r.output
+        out = r.output
+    assert "github" in out and "refused" in out
     assert (read_graph_strict(g), store_export_status(g)) == before
 
 

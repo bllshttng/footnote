@@ -16,7 +16,6 @@ const OPEN: &[u8] = b"i"; // prefix+i: toggle-composer
 const FULL: &[u8] = b"F"; // prefix+F: full-screen sideline
 const DOWN: &[u8] = b"\x1b[B";
 const UP: &[u8] = b"\x1b[A";
-const RIGHT: &[u8] = b"\x1b[C"; // next tab
 
 fn type_and_settle(h: &mut ClientHarness, bytes: &[u8]) {
     h.type_bytes(bytes);
@@ -67,27 +66,35 @@ fn open_composer(h: &mut ClientHarness) {
     type_and_settle(h, OPEN);
 }
 
-/// From the sheet's Harness tab: filter to the installed Claude row, commit
-/// it, then step one tab right to the Model body. This follows the tabbed
-/// modal's grammar - the body is always visible, there is nothing to open.
-fn pick_claude_and_open_model_tab(h: &mut ClientHarness) {
-    // The body lists the catalog's selectable (installed) harnesses once
+/// Pick Claude through the harness chip's picker, then open the model
+/// picker. Chip-row grammar: Enter on a chip opens its picker, typing
+/// filters, Enter commits and closes.
+fn pick_claude_and_open_model_picker(h: &mut ClientHarness) {
+    // A fresh open focuses the input; three Tabs walk Message -> Plus ->
+    // Permission -> Harness.
+    type_and_settle(h, b"\t\t\t");
+    type_and_settle(h, b"\r");
+    // The picker lists the catalog's selectable (installed) harnesses once
     // the read lands. A clean CI home has only the fake bins, so the draft
     // default (agy) may have no row at all: wait for installed rows, never
     // for the check glyph.
-    h.wait_screen(10, |s| {
+    h.wait_screen(35, |s| {
         s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
     });
     type_and_settle(h, b"claude");
-    // codex vanishing proves the query narrowed the body; claude alone
+    // codex vanishing proves the query narrowed the picker; claude alone
     // stays. Neither side of this test leans on the draft default.
-    h.wait_screen(10, |s| {
+    h.wait_screen(35, |s| {
         !s.contains("\u{2022} codex") && s.contains("\u{2022} claude")
     });
     type_and_settle(h, b"\r");
-    h.wait_screen(10, |s| s.contains("claude · default"));
-    type_and_settle(h, RIGHT);
-    h.wait_screen(10, |s| s.contains("harness default"));
+    // The committed chip reads `claude` with its caret padding; the filter
+    // title never does.
+    h.wait_screen(35, |s| s.contains("claude  \u{25be}"));
+    // One Tab lands on the Model chip; Enter drops its picker.
+    type_and_settle(h, b"\t");
+    type_and_settle(h, b"\r");
+    h.wait_screen(35, |s| s.contains("harness default"));
 }
 
 fn pane_region(screen: &str) -> String {
@@ -102,8 +109,9 @@ fn pane_region(screen: &str) -> String {
 
 #[test]
 fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
-    // AC1-HP, first half: from the regular sidebar the composer is the
-    // centered sheet, and the values strip carries the choices untruncated.
+    // AC1-HP: from the regular sidebar the composer is the centered sheet
+    // with the chip row: the Where chip reads Local, the input asks the
+    // working question, and the harness chip carries its value untruncated.
     let scratch = Scratch::new("composer-sheet");
     seed_routing_config(&scratch);
     let envs = with_fake_harnesses(&scratch);
@@ -112,47 +120,45 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
     wait_input(&mut h);
     open_composer(&mut h);
     let screen = h.wait_screen(10, |s| s.contains("new agent"));
-    // The sheet, not the 28-column dock: the title chrome is on screen and
-    // the full chosen value reads untruncated. The chip value lands when
-    // the catalog read does, so wait for it instead of reading once.
     assert!(screen.contains("new agent"), "sheet title: {screen}");
-    // The chip's value comes from the compile-time capability table (agy
-    // sorts first), not the fake PATH bins; it lands when the catalog read
-    // does, so wait for it instead of reading once.
-    let screen = h.wait_screen(30, |s| s.contains("agy · default"));
+    // The chip row paints before any catalog read lands.
     assert!(
-        screen.contains("agy · default"),
-        "the values strip shows the harness and model choices: {screen}"
+        screen.contains("Local") && screen.contains("What do you want to work on?"),
+        "the Where chip and the placeholder paint: {screen}"
     );
-    // The tab bar names its axes.
-    for tab in ["Harness", "Model", "Project", "Message"] {
-        assert!(screen.contains(tab), "tab {tab} is named: {screen}");
+    assert!(
+        screen.contains("+") && screen.contains("auto"),
+        "the bottom row paints the plus and mode chips: {screen}"
+    );
+    // The harness chip's value lands when the catalog read does (agy sorts
+    // first off the compile-time table).
+    let screen = h.wait_screen(35, |s| s.contains("agy"));
+    assert!(
+        screen.contains("agy"),
+        "the harness chip shows its value: {screen}"
+    );
+    // The tab strip is gone: no axis names paint.
+    for tab in ["Harness", "Flags", "Message"] {
+        assert!(!screen.contains(tab), "no tab label {tab}: {screen}");
     }
 }
 
 #[test]
-fn project_tab_lists_projects_and_enter_never_launches() {
-    // AC2-HP: the Project tab body lists the candidate cwds; Enter on a row
-    // sets the project without launching. The list grammar in the keybar is
-    // the open signal.
+fn project_picker_lists_projects_and_enter_never_launches() {
+    // AC2-HP: Enter on the Project chip drops its picker; Enter on a row
+    // sets the project without launching.
     let scratch = Scratch::new("composer-project");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
-    type_and_settle(&mut h, RIGHT);
-    type_and_settle(&mut h, RIGHT);
-    let screen = h.wait_screen(10, |s| s.contains("\u{21b5} pick"));
-    assert!(
-        screen.contains("\u{21b5} pick"),
-        "the Project tab body is a list: {screen}"
-    );
-    // Enter picks the highlighted row: still editing, nothing launched.
+    // Shift-Tab from the input lands on the Project chip; Enter drops its
+    // picker (title `project`).
+    type_and_settle(&mut h, b"\x1b[Z");
     type_and_settle(&mut h, b"\r");
-    std::thread::sleep(Duration::from_millis(400));
-    let screen = h.screen();
+    let screen = h.wait_screen(10, |s| s.contains("project"));
     assert!(
         !screen.contains("starting..."),
-        "Enter on a project row never launches: {screen}"
+        "opening the project picker never launches: {screen}"
     );
 }
 
@@ -169,8 +175,8 @@ fn agent_list_offers_default_rows_and_no_free_text_model_row() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    pick_claude_and_open_model_tab(&mut h);
-    let screen = h.wait_screen(30, |s| s.contains("harness default"));
+    pick_claude_and_open_model_picker(&mut h);
+    let screen = h.wait_screen(35, |s| s.contains("harness default"));
     assert!(
         screen.contains("harness default"),
         "the model body names the harness default: {screen}"
@@ -201,8 +207,8 @@ fn focus_report_then_arrow_never_lands_as_text() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
-    // Six tabs walk the bar to the Message editor.
-    type_and_settle(&mut h, b"\t\t\t\t\t\t");
+    // The input already holds focus; a focus report is dropped whole and a
+    // following arrow still navigates (cursor move, never a launch).
     type_and_settle(&mut h, b"\x1b[I");
     type_and_settle(&mut h, DOWN);
     std::thread::sleep(Duration::from_millis(300));
@@ -252,9 +258,7 @@ fn arrows_inside_the_repeat_window_type_letters_not_resizes() {
     type_and_settle(&mut h, PREFIX);
     type_and_settle(&mut h, b"L");
     open_composer(&mut h);
-    // Six tabs walk the bar to the Message editor, then hold L inside the
-    // window: the letter is draft text.
-    type_and_settle(&mut h, b"\t\t\t\t\t\t");
+    // The input holds focus; holding L inside the window is draft text.
     type_and_settle(&mut h, b"L");
     std::thread::sleep(Duration::from_millis(300));
     let screen = h.screen();
@@ -265,19 +269,87 @@ fn arrows_inside_the_repeat_window_type_letters_not_resizes() {
 }
 
 #[test]
+fn narrow_terminal_wraps_the_right_chip_group() {
+    // AC1-EDGE: a narrow sheet wraps the right group (harness/model/effort)
+    // to its own row; every chip value paints whole.
+    let scratch = Scratch::new("composer-chip-wrap");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 50);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    h.wait_screen(10, |s| s.contains("new agent"));
+    let screen = h.wait_screen(35, |s| s.contains("agy"));
+    // The left group's `+  auto` row and the right group's harness chip sit
+    // on different screen rows. The two-space gap pins the match to the
+    // sheet's chip row, never the sidebar's `+ new workspace`.
+    let plus_row = screen
+        .lines()
+        .position(|l| l.contains("+  auto"))
+        .expect("the left chip group paints");
+    let harness_row = screen
+        .lines()
+        .position(|l| l.contains("agy"))
+        .expect("the harness chip paints");
+    assert_ne!(
+        plus_row, harness_row,
+        "the right group wrapped to its own row:\n{screen}"
+    );
+}
+
+#[test]
+fn project_chip_focus_shows_the_working_directory_line() {
+    // AC3-HP: focusing the Project chip paints `Working directory` beside
+    // the path.
+    let scratch = Scratch::new("composer-cwd-line");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    type_and_settle(&mut h, b"\x1b[Z"); // Project chip
+    let screen = h.wait_screen(10, |s| s.contains("Working directory"));
+    assert!(
+        screen.contains("Working directory"),
+        "the cwd line paints: {screen}"
+    );
+}
+
+#[test]
+fn where_chip_opens_the_local_and_placement_picker() {
+    // AC4-HP: the Where picker lists Local under `Run on` and the four
+    // placement rows under `Open as` - no Cloud, Remote Control or SSH row.
+    let scratch = Scratch::new("composer-where");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    // BackTab BackTab walks Message -> Project -> Where.
+    type_and_settle(&mut h, b"\x1b[Z\x1b[Z");
+    type_and_settle(&mut h, b"\r");
+    let screen = h.wait_screen(10, |s| s.contains("Run on"));
+    for want in ["Run on", "Local", "Open as", "thread", "pane: active tab"] {
+        assert!(
+            screen.contains(want),
+            "the Where picker lists {want}: {screen}"
+        );
+    }
+    assert!(
+        !screen.contains("Cloud") && !screen.contains("SSH"),
+        "no substrate rows are invented: {screen}"
+    );
+}
+
+#[test]
 fn composer_keybar_names_the_keys() {
-    // AC8-HP: the keybar is always painted in the composer and names tab,
-    // enter, the arrows and esc.
+    // AC8-HP: the keybar names the chip-row grammar: Enter opens a picker
+    // or launches, Tab moves, ^j is a newline, esc closes.
     let scratch = Scratch::new("composer-hint");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
-    let screen = h.wait_screen(10, |s| s.contains("\u{2193}"));
-    assert!(screen.contains("esc"), "esc is named: {screen}");
+    let screen = h.wait_screen(10, |s| s.contains("open/launch"));
     assert!(
-        screen.contains("launch") || screen.contains("pick"),
+        screen.contains("open/launch"),
         "enter's action is named: {screen}"
     );
+    assert!(screen.contains("tab next"), "tab is named: {screen}");
+    assert!(screen.contains("esc"), "esc is named: {screen}");
 }
 
 #[test]
@@ -357,7 +429,7 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    pick_claude_and_open_model_tab(&mut h);
+    pick_claude_and_open_model_picker(&mut h);
     // The door's read bound is 30s; 35s covers it plus render.
     let screen = h.wait_screen(35, |s| {
         (s.contains("glm-5.3-flash[1m]") && s.contains("zai/glm-5.3-flash[1m]"))
@@ -371,7 +443,9 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
         screen.contains("glm-5.3-flash[1m]") || screen.contains("model list unavailable"),
         "a configured row or the named unavailable surface: {screen}"
     );
-    // Escape closes the sheet itself; the draft is retained.
+    // Escape closes the open model picker, then the sheet itself; the draft
+    // is retained.
+    type_and_settle(&mut h, b"\x1b");
     type_and_settle(&mut h, b"\x1b");
     let screen = h.wait_screen(10, |s| !s.contains("new agent"));
     assert!(
@@ -392,7 +466,9 @@ fn arrows_in_the_model_body_move_and_up_never_launches() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    type_and_settle(&mut h, RIGHT); // the Model tab
+    // Four tabs land on the Model chip; Enter drops its picker.
+    type_and_settle(&mut h, b"\t\t\t\t");
+    type_and_settle(&mut h, b"\r");
     std::thread::sleep(Duration::from_millis(400));
     type_and_settle(&mut h, UP);
     type_and_settle(&mut h, DOWN);
@@ -425,7 +501,7 @@ fn claude_model_tab_lists_the_claude_families() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    pick_claude_and_open_model_tab(&mut h);
+    pick_claude_and_open_model_picker(&mut h);
     // The floor lands with the catalog read; the accounts door may take up
     // to 30s in CI, so wait like the route-hint test does.
     let screen = h.wait_screen(35, |s| {
@@ -448,18 +524,21 @@ fn codex_model_tab_lists_the_codex_slugs() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    // Narrow the Harness body to codex, commit it, step right to the Model
-    // body. Same grammar pick_claude_and_open_model_tab exercises.
-    h.wait_screen(10, |s| {
+    // Narrow the harness picker to codex, commit it, then Tab to the Model
+    // chip and drop its picker. Same grammar the claude helper exercises.
+    type_and_settle(&mut h, b"\t\t\t");
+    type_and_settle(&mut h, b"\r");
+    h.wait_screen(35, |s| {
         s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
     });
     type_and_settle(&mut h, b"codex");
-    h.wait_screen(10, |s| {
+    h.wait_screen(35, |s| {
         !s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
     });
     type_and_settle(&mut h, b"\r");
-    h.wait_screen(10, |s| s.contains("codex · default"));
-    type_and_settle(&mut h, RIGHT);
+    h.wait_screen(35, |s| s.contains("codex  \u{25be}"));
+    type_and_settle(&mut h, b"\t");
+    type_and_settle(&mut h, b"\r");
     let screen = h.wait_screen(35, |s| {
         s.contains("harness default") && s.contains("gpt-6-luna")
     });

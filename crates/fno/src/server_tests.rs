@@ -5351,10 +5351,10 @@ fn fresh_attach_unknown_target_fails_closed_before_spawn() {
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
         if let ServerMsg::Notice { text } = msg {
-            saw |= text.contains("no such squad");
+            saw |= text.contains("no such workspace");
         }
     }
-    assert!(saw, "the refusal names the missing squad");
+    assert!(saw, "the refusal names the missing workspace");
 }
 
 // -- x-9f75 open-here (PanePlacement.here) ---------------------------

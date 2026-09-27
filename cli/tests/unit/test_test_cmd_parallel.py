@@ -107,6 +107,10 @@ def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
         def add_marker(self, marker):
             self.markers.append(marker)
 
+        def get_closest_marker(self, name):
+            del name
+            return None
+
     racer = _Item(
         "cli/tests/unit/test_graph_sidecar_window.py::"
         "test_ac3hp_concurrent_writes_never_surface_corruption"

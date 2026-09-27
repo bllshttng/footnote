@@ -2146,10 +2146,32 @@ def test_contained_in_survives_a_later_unrelated_mutation(graph_env):
     ).exit_code == 0
     unit = _child(read_entries(), "one")["id"]
 
-    # Any other locked mutation: a priority bump on an unrelated node.
-    assert _invoke(
-        ["backlog", "update", "ab-epic0001", "--priority", "p0", "--blocks-everything"]
-    ).exit_code == 0
+    # Any other locked mutation: a priority bump on an unrelated node. The
+    # update leaf answers natively, so the bump drives the dev binary over
+    # the same store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", "ab-epic0001",
+         "--priority", "p0", "--blocks-everything"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    assert proc.returncode == 0, proc.stderr
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid["contained_in"] == unit

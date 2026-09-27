@@ -45,8 +45,10 @@ use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, Swee
 use self::rename_overlay::RenameTarget;
 use row_menu::build_row_menu;
 
-// The placement pickers (attach `p`, portal `P`) live in their own module;
-// client.rs is shrink-only under the file-budget gate.
+// The placement pickers (attach `p`, portal `P`) and the launch moment
+// (terminal guard + splash) live in their own modules; client.rs is
+// shrink-only under the file-budget gate.
+mod launch;
 mod placement_pickers;
 
 use self::placement_pickers::{
@@ -571,47 +573,6 @@ fn shell_integration_off() -> bool {
 /// (`pty::integration_disabled`): only a trimmed `off` disables injection.
 fn config_says_off(stdout: &str) -> bool {
     stdout.trim() == "off"
-}
-
-/// Restore the terminal on every exit path, including panics.
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn enter() -> Result<Self, String> {
-        terminal::enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
-        let mut out = std::io::stdout();
-        // Surface an alt-screen failure instead of silently painting over the
-        // user's scrollback. The guard exists from here, so raw mode is
-        // restored by Drop on the error path.
-        let guard = TerminalGuard;
-        crossterm::execute!(out, terminal::EnterAlternateScreen)
-            .map_err(|e| format!("alternate screen: {e}"))?;
-        // Mouse capture stays on for the client's whole life (US1/US2/US3): the
-        // server routes every pane-rect event by the pane's live mode. Drop's
-        // MODE_RESET (which lists 1000/1002/1006 off) turns it back off on exit.
-        out.write_all(crate::mouse::ENABLE)
-            .and_then(|_| out.flush())
-            .map_err(|e| format!("enable mouse: {e}"))?;
-        Ok(guard)
-    }
-}
-
-/// Every DEC/private mode `ModeSync` can set, reset. Emitted unconditionally
-/// on exit (codex P2): a focused vim's mouse reporting or bracketed paste
-/// must never survive onto the user's real terminal after `fno` exits, and
-/// tracking exactly-what-was-set buys nothing over resetting the fixed set
-/// `vt::mode_diff` can emit. Unknown sequences (kitty CSI-u on a plain
-/// terminal) are ignored by terminals by design.
-const MODE_RESET: &[u8] =
-    b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?2004l\x1b[=0;1u";
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(MODE_RESET);
-        let _ = crossterm::execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
-        let _ = terminal::disable_raw_mode();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4329,7 +4290,13 @@ impl View {
             return None;
         }
         // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
+        // in full-screen mode). Off/narrow => no panel. Under the docked
+        // board the column is the board's own surface: no agents rows, no
+        // footer, no density button - a click must resolve nothing here or
+        // it acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
         let paint_w = self.sideline_paint_w();
         if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
@@ -8289,6 +8256,9 @@ async fn attach_and_run(
 
     // Raw stdin -> channel; scanned by the prefix layer below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    // A spare sender for the launch splash: it re-queues the chunk that
+    // ended it, so typed-ahead input is never lost.
+    let splash_tx = stdin_tx.clone();
     std::thread::Builder::new()
         .name("fno-mux-stdin".into())
         .spawn(move || {
@@ -8312,10 +8282,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = TerminalGuard::enter()?;
-    if !stashed_modesync.is_empty() {
-        raw_out(&stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
-    }
+    let guard = launch::begin(&mut stdin_rx, &splash_tx, &theme, &stashed_modesync).await?;
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer
@@ -9292,7 +9259,7 @@ async fn attach_and_run(
                     }
                     SweepMsg::Applied { closed, reaped, removed } => {
                         view.set_notice(format!(
-                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} squad row(s)"
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} workspace row(s)"
                         ));
                     }
                     SweepMsg::Failed(reason) => {
@@ -9342,29 +9309,12 @@ async fn attach_and_run(
                 // held: release it to the pane.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
-                    // The composer holds the keyboard while open: a flushed
-                    // candidate feeds its folder (Esc closes the composer),
-                    // never a pane that may not even be painted.
-                    if view.launcher.is_some() {
-                        match event {
-                            Event::Forward(chunk) => {
-                                if let Err(e) = agent_launcher::launcher_keys(
-                                    &mut view, &chunk, &mut sock_w,
-                                )
-                                .await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                            event => {
-                                if let Err(e) =
-                                    dispatch_event(&mut view, event, &mut sock_w).await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                        }
-                    } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                    // A flushed candidate feeds the overlay that holds the
+                    // keyboard (the composer's folder, the board's), never a
+                    // pane that may not even be painted.
+                    if let Err(e) =
+                        overlay_keys::flush_released_chord(&mut view, event, &mut sock_w).await
+                    {
                         break Err(e);
                     }
                 }
@@ -10967,7 +10917,7 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
             )
             .await
-            .map_err(|e| format!("move-squad send failed: {e}"))?;
+            .map_err(|e| format!("move-workspace send failed: {e}"))?;
             return Ok(());
         }
         // A workspace section's Remove opens the SAME confirm the keyboard
@@ -12746,7 +12696,7 @@ async fn selector_keys(
                             &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
                         )
                         .await
-                        .map_err(|e| format!("move-squad send failed: {e}"))?;
+                        .map_err(|e| format!("move-workspace send failed: {e}"))?;
                     }
                     None => view.set_notice("only a workspace row can be reordered".into()),
                 }
@@ -13183,7 +13133,7 @@ async fn nav_goto(
     if let Some(sq) = target.goto_squad.filter(|_| switching_squad) {
         write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
             .await
-            .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+            .map_err(|e| format!("nav select-workspace send failed: {e}"))?;
     }
     if let Some(tid) = target.goto_tab {
         // Skip SelectTab only when the target is already the active view's tab
@@ -13243,7 +13193,7 @@ async fn create_keys(
                                 }),
                             )
                             .await
-                            .map_err(|e| format!("new-squad send failed: {e}"))?;
+                            .map_err(|e| format!("new-workspace send failed: {e}"))?;
                             view.create = None;
                             view.create_esc.clear();
                             break;

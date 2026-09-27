@@ -6,7 +6,7 @@ The long-form prose behind the `--help` one-liners. The CLI carries the one line
 
 `--workspace/-s` sends the new pane to a workspace by its visible name. Without it the pane lands in the cwd-derived default.
 
-`--split/-x` tiles the new pane left, right, up, or down of the squad's focused pane.
+`--split/-x` tiles the new pane left, right, up, or down of the workspace's focused pane.
 
 `--at` pins the new pane next to the calling pane. `--at current` resolves the caller from `FNO_PANE`, so run it inside a mux pane. It fails closed instead of falling back. It requires `--split`.
 

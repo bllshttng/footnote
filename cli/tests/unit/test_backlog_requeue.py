@@ -303,11 +303,31 @@ def test_update_null_locked_by_refuses_wedge(tmp_graph):
     """update --locked-by null earns its Updated line the same way unclaim
     does: an open do row holds in_progress, so the receipt names requeue."""
     _seed(tmp_graph, [_wedged_node()])
-    result = runner.invoke(app, ["backlog", "update", NODE_ID, "--locked-by", "null"])
-    assert result.exit_code != 0
-    assert "Updated" not in _out(result)
-    assert "in_progress" in _out(result)
-    assert "fno backlog requeue" in _out(result)
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", NODE_ID, "--locked-by", "null"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert "Updated" not in out
+    assert "in_progress" in out
+    assert "fno backlog requeue" in out
 
 
 @pytest.mark.skip(

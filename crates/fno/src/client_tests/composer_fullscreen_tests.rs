@@ -95,8 +95,8 @@ async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
         "the Extended table header paints"
     );
     assert!(
-        text.contains("new agent") && text.contains("Harness"),
-        "the composer sheet paints centered, tab bar first"
+        text.contains("new agent") && text.contains("Local"),
+        "the composer sheet paints centered, chip row first"
     );
 }
 

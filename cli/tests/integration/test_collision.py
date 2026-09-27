@@ -57,6 +57,33 @@ def _invoke(*args, input=None):
     return runner.invoke(app, list(args), input=input, catch_exceptions=False)
 
 
+def _native_update(g: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def _read_entries(g: Path) -> list[dict]:
     # The store owns state; graph.json is a frozen export, so read-backs
     # come from store rows.
@@ -946,11 +973,11 @@ def test_acknowledge_collisions_writes_audit_field(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke(
-        "backlog", "update", "ab-new",
+    code, out = _native_update(
+        tmp_graph, "ab-new",
         "--acknowledge-collisions", "ab-old1,ab-old2",
     )
-    assert res.exit_code == 0, res.output
+    assert code == 0, out
     entries = _read_entries(tmp_graph)
     by_id = {e["id"]: e for e in entries}
     assert by_id["ab-new"]["collisions_acknowledged"] == ["ab-old1", "ab-old2"]
@@ -961,11 +988,11 @@ def test_acknowledge_collisions_skipped_sentinel(tmp_graph, tmp_path):
     _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["x.py"])))
     seed_graph(tmp_graph, json.dumps({"entries": entries}, indent=2))
 
-    res = _invoke(
-        "backlog", "update", "ab-new",
+    code, out = _native_update(
+        tmp_graph, "ab-new",
         "--acknowledge-collisions", "__skipped_check__",
     )
-    assert res.exit_code == 0, res.output
+    assert code == 0, out
     entries = _read_entries(tmp_graph)
     by_id = {e["id"]: e for e in entries}
     assert by_id["ab-new"]["collisions_acknowledged"] == ["__skipped_check__"]

@@ -889,7 +889,28 @@ def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
     rows = {e["id"]: e for e in _read_entries(graph_path)}
     assert rows["ab-legacy"].get("model_tier") == "high"
     # decide the band with the verb the advisory names (it clears the key), then migrate
-    runner.invoke(app, ["backlog", "update", "ab-divergent", "--difficulty", "high"])
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    _sp.run(
+        [str(binary), "backlog", "update", "ab-divergent", "--difficulty", "high"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(graph_path.parent),
+            "FNO_STATE_DIR": str(graph_path.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(graph_path.parent),
+        check=True,
+    )
     r_mig2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r_mig2.exit_code == 0, r_mig2.output
     result2 = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])

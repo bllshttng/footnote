@@ -1022,6 +1022,35 @@ fn toggle_full(view: &mut View) {
     view.set_notice(format!("board: {word}"));
 }
 
+/// The board is a modal like the composer: prefix chords still resolve while
+/// it holds the keyboard (which-key parity), so the chunk scans first and
+/// only the plain-byte chunks feed the board's own folder. Before this
+/// fix the prefix byte fell into the board's byte catch-all, so `^B C`
+/// toggled nothing and `^B ?` armed the board's own keys overlay behind the
+/// operator's back; the court fold could not be collapsed while the board
+/// held the sideline.
+pub(crate) async fn route_board_keys(
+    view: &mut View,
+    scanner: &mut crate::keys::Scanner,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    scanner.disarm_repeat();
+    for event in scanner.scan(bytes, std::time::Instant::now()) {
+        match event {
+            Event::Forward(chunk) => {
+                board_keys(view, &chunk, sock_w).await?;
+            }
+            event => match dispatch_event(view, event, sock_w).await? {
+                DispatchFlow::Continue => {}
+                DispatchFlow::Break => break,
+                DispatchFlow::Detach => return Ok(StdinFlow::Detach),
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
 /// Keys while the board owns the keyboard. The drill-down, the find input,
 /// and the facet picker each consume a whole chunk; otherwise the folded
 /// modal keys drive the board itself.
