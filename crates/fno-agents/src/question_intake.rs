@@ -1078,23 +1078,34 @@ stops
 
     #[test]
     fn a_cleared_question_lets_the_re_ask_through() {
-        // The clear commits store-only, so the dedup must read committed
-        // rows; the re-ask of the same subject and node records.
+        // A raw-written ask that a store-only close cleared must not block
+        // the re-ask: the dedup reads committed rows, so it sees the close
+        // that a raw journal read alone would miss.
         let home = tmp_home("re-ask");
         let root = tmp_root("re-ask");
-        let mut first = req("first", &root);
-        first.subject = Some("subject-r".to_string());
-        first.node = Some("x-aaaa".to_string());
-        first.ask = Some("finish the lane".to_string());
-        let a1 = run_intake(&first, &home);
-        assert_eq!(a1.exit_code, 0, "lines: {:?}", a1.lines);
+        let index = questions_path(&home);
+        let ask = json!({
+            "ts": "2026-09-25T00:00:00Z",
+            "type": "operator_question",
+            "source": "agent",
+            "data": {"question_id": "q-old1", "question": "ship?", "subject": "subject-r", "node": "x-aaaa"}
+        });
+        {
+            use std::io::Write;
+            let mut fh = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&index)
+                .unwrap();
+            writeln!(fh, "{ask}").unwrap();
+        }
         let close = json!({
             "ts": "2026-09-26T00:00:00Z",
             "type": "operator_question_closed",
             "source": "agent",
-            "data": {"question_id": a1.qid.clone().unwrap()}
+            "data": {"question_id": "q-old1"}
         });
-        crate::provider_cap::append_questions_row(&questions_path(&home), &close).unwrap();
+        crate::provider_cap::append_questions_row(&index, &close).unwrap();
         let mut second = req("second", &root);
         second.subject = Some("subject-r".to_string());
         second.node = Some("x-aaaa".to_string());
