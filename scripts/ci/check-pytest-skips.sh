@@ -92,10 +92,32 @@ for rel in files:
                 elif a.name in CALL_KINDS:
                     direct[a.asname or a.name] = CALL_KINDS[a.name]
 
+    # Reusable skip markers: X = pytest.mark.skipif(...) defined once, applied
+    # many times as a bare @X. The assignment alone is a site; every @X
+    # application is too, or a PR could pin an existing marker onto any newly
+    # failing test without FOUND moving.
     def is_pytest_mark(value):
         if isinstance(value, ast.Attribute) and value.attr == "mark":
             return isinstance(value.value, ast.Name) and value.value.id in pytest_mods
         return isinstance(value, ast.Name) and value.id in mark_names
+
+    marker_vars = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            kind = None
+            v = node.value
+            if isinstance(v, ast.Call):
+                f = v.func
+                if (isinstance(f, ast.Attribute) and f.attr in MARK_ATTRS
+                        and is_pytest_mark(f.value)):
+                    kind = f"mark.{f.attr}"
+            elif isinstance(v, ast.Attribute):
+                if v.attr in MARK_ATTRS and is_pytest_mark(v.value):
+                    kind = f"mark.{v.attr}"
+            if kind:
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        marker_vars[t.id] = kind
 
     def site_kind(node):
         if isinstance(node, ast.Attribute):
@@ -126,14 +148,25 @@ for rel in files:
             # checked: @pytest.mark.skip(...) is a Call whose mark Attribute is
             # the site, so its children must be walked.
             inner = stack + [node.name]
+            scope = ".".join(inner)
             for dec in node.decorator_list:
                 scan(dec, inner)
+                # A bare @marker_name application is a site in its own right.
+                applied = dec.func if isinstance(dec, ast.Call) else dec
+                if isinstance(applied, ast.Name) and applied.id in marker_vars:
+                    out.append(f"{rel}::{scope}::marker.{applied.id}")
             decorated = {id(d) for d in node.decorator_list}
             for child in ast.iter_child_nodes(node):
                 if id(child) not in decorated:
                     scan(child, inner)
         else:
-            check(node, ".".join(stack) if stack else "<module>")
+            scope = ".".join(stack) if stack else "<module>"
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+                    and node.value.id in marker_vars
+                    and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)):
+                # pytestmark = requires_rust applies the marker module-wide.
+                out.append(f"{rel}::{scope}::marker.{node.value.id}")
+            check(node, scope)
             for child in ast.iter_child_nodes(node):
                 scan(child, stack)
 

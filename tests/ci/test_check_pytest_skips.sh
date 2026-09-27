@@ -145,6 +145,50 @@ EOF
 commit
 check 'a module-level pytestmark is keyed <module>' 1 'tests/test_d.py::<module>::mark.skipif'
 
+# --- reusable marker applications ---------------------------------------------
+fresh
+cat > tests/test_g.py <<'EOF'
+import pytest
+
+requires_x = pytest.mark.skipif(True, reason="env")
+
+@requires_x
+def test_seven():
+    assert True
+EOF
+baseline 'tests/test_g.py::<module>::mark.skipif'
+commit
+check 'an existing marker pinned on a test is a new site even when only the definition is baselined' 1 'tests/test_g.py::test_seven::marker.requires_x'
+
+fresh
+cat > tests/test_g.py <<'EOF'
+import pytest
+
+requires_x = pytest.mark.skipif(True, reason="env")
+
+@requires_x
+def test_seven():
+    assert True
+EOF
+baseline 'tests/test_g.py::<module>::mark.skipif' 'tests/test_g.py::test_seven::marker.requires_x'
+commit
+check 'a marker application whose baseline line carries a reason passes' 0 'site(s) match the baseline'
+
+fresh
+cat > tests/test_h.py <<'EOF'
+import pytest
+
+requires_y = pytest.mark.skipif(True, reason="env")
+
+pytestmark = requires_y
+
+def test_eight():
+    assert True
+EOF
+baseline 'tests/test_h.py::<module>::mark.skipif'
+commit
+check 'a module-wide marker application via pytestmark is a new site' 1 'tests/test_h.py::<module>::marker.requires_y'
+
 # --- the multiset rule --------------------------------------------------------
 fresh
 cat > tests/test_e.py <<'EOF'
