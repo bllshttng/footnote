@@ -869,7 +869,6 @@ pub(super) async fn detail_keys(
                         }
                         Submit::Notice(msg) => d.notice = Some(msg.to_string()),
                         Submit::OpenFree => d.free = Some(String::new()),
-                        Submit::Nothing => {}
                     }
                 }
             }
@@ -885,14 +884,13 @@ pub(super) async fn detail_keys(
 }
 
 /// What submitting the cursor question decided: an answer to queue, a
-/// refusal to show on the view, the answer line to open (a no-option
-/// question), or nothing (a send already in flight). The caller owns every
-/// `View` write, so `submit` never borrows the view.
+/// refusal to show on the view, or the answer line to open (a no-option
+/// question). The caller owns every `View` write, so `submit` never borrows
+/// the view; a send already in flight is the caller's guard.
 enum Submit {
     Queued((String, crate::needs_overlay::AnswerPick)),
     Notice(&'static str),
     OpenFree,
-    Nothing,
 }
 
 /// Compose the cursor question's answer: a pin sends done, a no-option
