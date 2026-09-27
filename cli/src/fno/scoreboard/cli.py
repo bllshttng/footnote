@@ -234,17 +234,14 @@ def scoreboard_command(
         from fno.agents.registry import load_registry
         from fno.agents.spawn_gate import probe_capacity
 
+        probe_lanes = probe_capacity(only=["lanes"]).get("lanes") or {}
         rate_read = _events({"provider_rate_limited"})
         lane_view = build_lanes(
             rows,
             _nodes(),
             [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
             rate_read["events"],
-            {
-                provider: lane["cap"]
-                for provider, lane in (probe_capacity(only=["lanes"]).get("lanes") or {}).items()
-                if isinstance(lane, dict)
-            },
+            {name: lane["cap"] for name, lane in probe_lanes.items() if isinstance(lane, dict)},
             since_days=since,
             now=datetime.now(),
         )
