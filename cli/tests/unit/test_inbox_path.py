@@ -28,9 +28,10 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
 def test_inbox_path_default_anchors_to_repo_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Obsidian on, no override, no legacy file -> canonical parking-lot.md."""
+    """Obsidian on, vault link present, no override -> canonical parking-lot.md."""
     from fno.paths_testing import use_tmpdir
     settings = use_tmpdir(monkeypatch, tmp_path)
+    (tmp_path / "internal").mkdir()
     settings.write_text(
         "schema_version: 1\n"
         "config:\n"
@@ -61,6 +62,66 @@ def test_inbox_path_default_no_vault_uses_state_dir(
     from fno.paths import inbox_path
     result = inbox_path(project_root=tmp_path)
     assert result == (tmp_path / ".fno/backlog/parking-lot.md").resolve()
+
+
+def test_inbox_path_obsidian_on_without_internal_stays_in_fno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Obsidian enabled globally, but this repo has no internal/ vault link.
+
+    The global flag is machine-level consent, not per-project: a foreign repo
+    touched by fno falls to .fno/backlog/parking-lot.md and never grows an
+    internal/ directory of its own.
+    """
+    from fno.paths_testing import use_tmpdir
+    settings = use_tmpdir(monkeypatch, tmp_path)
+    settings.write_text(
+        "schema_version: 1\n"
+        "config:\n"
+        f"  state_dir: {tmp_path}/.fno/\n"
+        "  obsidian:\n"
+        "    enabled: true\n"
+        f"    vault: {tmp_path}/vault\n",
+        encoding="utf-8",
+    )
+    import fno.paths as paths_mod
+
+    result = paths_mod.inbox_path(project_root=tmp_path)
+    assert result == (tmp_path / ".fno/backlog/parking-lot.md").resolve()
+    assert not (tmp_path / "internal").exists()
+
+
+def test_capture_add_without_internal_never_materializes_internal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a parking-lot write in a repo without internal/ keeps it that way.
+
+    add_item mkdirs the resolved parent, so the resolver decides whether a
+    foreign repo grows internal/. Obsidian on globally, no vault link here.
+    """
+    from fno.paths_testing import use_tmpdir
+    settings = use_tmpdir(monkeypatch, tmp_path)
+    settings.write_text(
+        "schema_version: 1\n"
+        "config:\n"
+        f"  state_dir: {tmp_path}/.fno/\n"
+        "  obsidian:\n"
+        "    enabled: true\n"
+        f"    vault: {tmp_path}/vault\n",
+        encoding="utf-8",
+    )
+    import fno.paths as paths_mod
+    from fno.backlog.capture import add_item
+
+    add_item(
+        paths_mod.inbox_path(project_root=tmp_path),
+        title="follow up",
+        source="test",
+        why="the writer must not create internal/",
+    )
+
+    assert (tmp_path / ".fno/backlog/parking-lot.md").exists()
+    assert not (tmp_path / "internal").exists()
 
 
 def test_inbox_path_no_vault_prefers_existing_internal(
