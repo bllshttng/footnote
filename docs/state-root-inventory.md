@@ -256,7 +256,7 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 ## Adding a new root writer
 
-You do not. The root rows are shrink-only (see The rule): the runtime guard refuses a new top-level write and the CI gate fails a PR that adds a row. The remedy for a new surface is a subfolder:
+You do not. The root rows are shrink-only (see The rule). The runtime guard refuses a new top-level write, and the CI gate fails a PR that adds a row. The remedy for a new surface is a subfolder:
 
 1. Put the state in a named subfolder. Reach for the root only through a row that already exists.
 2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. When a bash caller needs it, export it from `cli/src/fno/setup/emit_shell.py`, then regenerate `scripts/lib/paths.sh`.
