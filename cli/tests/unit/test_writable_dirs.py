@@ -209,6 +209,52 @@ def test_codex_pane_grant_leaves_the_sandbox_flag_alone(
     assert one_grant not in argv
 
 
+def test_strip_remote_add_dirs_spares_non_remote_argv() -> None:
+    """The guard keys on the launch form, not the provider: a non-remote codex
+    argv (a future identity change) keeps its grants untouched."""
+    from fno.agents.writable_dirs import strip_remote_add_dirs
+
+    argv = ["codex", "-C", "/repo", "--add-dir", "/repo/.git", "--", "seed"]
+    assert strip_remote_add_dirs(argv) == argv
+
+
+def test_strip_remote_add_dirs_keeps_order_and_seed() -> None:
+    """A grant beside other flags strips by PAIR; the seed behind `--` and the
+    rest of the argv survive verbatim, so the pane still launches seeded."""
+    from fno.agents.writable_dirs import strip_remote_add_dirs
+
+    argv = [
+        "codex",
+        "--remote",
+        "unix://",
+        "-C",
+        "/repo",
+        "--add-dir",
+        "/repo/.git",
+        "--sandbox",
+        "workspace-write",
+        "--add-dir",
+        "/state",
+        "--model",
+        "gpt-6-luna",
+        "--",
+        "seed text",
+    ]
+    assert strip_remote_add_dirs(argv) == [
+        "codex",
+        "--remote",
+        "unix://",
+        "-C",
+        "/repo",
+        "--sandbox",
+        "workspace-write",
+        "--model",
+        "gpt-6-luna",
+        "--",
+        "seed text",
+    ]
+
+
 def test_claude_bg_lane_carries_the_grant(one_grant: str, tmp_path: Path) -> None:
     from fno.agents.harnesses.claude import _build_argv
 

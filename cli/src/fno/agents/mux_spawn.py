@@ -60,6 +60,7 @@ from fno.agents.spawn_defaults import is_verb_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,
+    strip_remote_add_dirs,
     worker_writable_dirs,
 )
 from fno.agents.lock import hold_agent_lock
@@ -974,33 +975,6 @@ def _codex_cli_version() -> Optional[tuple]:
     return tuple(int(part) for part in match.groups())
 
 
-def _strip_remote_add_dirs(argv: list[str]) -> list[str]:
-    """Drop ``--add-dir <dir>`` grants from a codex argv that rides ``--remote``.
-
-    codex >= 0.156.1 refuses the launch outright ("--add-dir is not supported
-    with --remote. Configure additional workspace roots on the server."), so an
-    unstripped pane dies before it paints and the spawn lands as
-    provider-exited-before-readiness or bounded-placement-failed. The resume
-    lanes already make this trade (``resume_cli._build_resume_argv``,
-    ``pane_relaunch.rs``); the create pane was the one launch missing the guard.
-    Everything else - ordering, repeats, the seed behind ``--`` - is preserved
-    verbatim.
-    """
-    if "--remote" not in argv:
-        return argv
-    out: list[str] = []
-    drop_next = False
-    for tok in argv:
-        if drop_next:
-            drop_next = False
-            continue
-        if tok == "--add-dir":
-            drop_next = True
-            continue
-        out.append(tok)
-    return out
-
-
 def build_pane_argv(
     provider: str,
     message: str,
@@ -1137,17 +1111,7 @@ def build_pane_argv(
             argv += effort_tokens("codex", effort)
         argv += tier3
         argv += pane_passthrough_tokens(passthrough, argv)
-        stripped = _strip_remote_add_dirs(argv)
-        if len(stripped) != len(argv):
-            # Self-teaching refusal-side note: the grants are real, and their
-            # absence is a codex 0.156.1+ platform refusal, not an omission.
-            print(
-                "codex pane: dropped --add-dir root grants; codex >= 0.156.1 "
-                "refuses them on a --remote launch, so the roots must come "
-                "from the app-server daemon config",
-                file=sys.stderr,
-            )
-        argv = stripped
+        argv = strip_remote_add_dirs(argv)
         if message:
             # Same fence as the claude arm: clap itself prescribes `--` ("to
             # pass ... as a value, use '-- ...'"), so a leading-flag seed is

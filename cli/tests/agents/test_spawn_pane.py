@@ -1124,40 +1124,6 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     assert "run" not in opencode and "--session-id" not in opencode
 
 
-def test_codex_pane_argv_strips_add_dir_on_remote_launch(
-    no_state_grant: None, tmp_path: Path
-) -> None:
-    """x-0a75: codex >= 0.156.1 refuses `--add-dir` paired with `--remote`, so
-    the unstripped pane died before it painted and the spawn read as
-    provider-exited-before-readiness or bounded-placement-failed. The remote
-    identity is the only codex pane form this lane renders, so every root
-    grant - explicit, computed state roots, git/plan writables - must ride out
-    with the strip, and the seed must survive behind the `--` fence."""
-    from fno.agents.mux_spawn import build_pane_argv
-
-    argv = build_pane_argv(
-        "codex",
-        "seed text",
-        tmp_path,
-        False,
-        None,
-        computed_dirs=("/Users/bb16/.fno", "/Users/bb16/c3po/internal/agents"),
-        add_dir="/tmp/extra-root",
-    )
-    assert "--remote" in argv
-    assert "--add-dir" not in argv
-    assert argv[-2:] == ["--", "seed text"]
-
-
-def test_strip_remote_add_dirs_spares_non_remote_argv() -> None:
-    """The guard keys on the launch form, not the provider: a non-remote codex
-    argv (a future identity change) keeps its grants untouched."""
-    from fno.agents.mux_spawn import _strip_remote_add_dirs
-
-    argv = ["codex", "-C", "/repo", "--add-dir", "/repo/.git", "--", "seed"]
-    assert _strip_remote_add_dirs(argv) == argv
-
-
 def test_generic_pane_arm_hosts_an_undeclared_harness(
     no_state_grant: None, tmp_path: Path
 ) -> None:
