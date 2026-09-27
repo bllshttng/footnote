@@ -71,15 +71,9 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
 
 fn sync_catalog(v: &mut View) {
     // Mirror the run loop's rx arm: land the catalog and sync the draft's
-    // harness names.
-    let names: Vec<String> = match &v.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows, _, _)) => rows.iter().map(|r| r.name.clone()).collect(),
-        _ => vec![],
-    };
+    // harness names through the same seam the client calls.
     if let Some(l) = v.launcher.as_mut() {
-        if l.draft.harnesses.is_empty() && !names.is_empty() {
-            l.draft.harnesses = names;
-        }
+        super::agent_launcher::sync_harness_names(l, &v.launcher_catalog);
     }
 }
 
@@ -2189,4 +2183,53 @@ fn worktree_launches_need_the_worktree_wire_generation() {
         ),
         other => panic!("expected the wire refusal, got {other:?}"),
     }
+}
+
+#[test]
+fn the_harness_preselect_is_claude_then_codex_never_alphabetical() {
+    // First sync on a fresh dock: claude when the catalog has it, codex when
+    // claude is missing, the first row only when neither exists. In-session,
+    // the retained draft IS the last-harness-used memory.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[
+        ("agy", true, true),
+        ("claude", true, true),
+        ("codex", true, true),
+    ]);
+    sync_catalog(&mut v);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.harness(),
+        "claude",
+        "claude preselects over the alphabetical first row"
+    );
+
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("agy", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.harness(),
+        "codex",
+        "a missing claude falls to codex"
+    );
+
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("agy", true, true)]);
+    sync_catalog(&mut v);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.harness(),
+        "agy",
+        "a catalog with neither still shows a value"
+    );
+
+    // The retained draft carries the last harness used across close/open.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.harness_idx = l.draft.harnesses.iter().position(|h| h == "agy").unwrap();
+    }
+    close(&mut v);
+    open(&mut v);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.harness(),
+        "agy",
+        "the retained draft is the last-harness memory"
+    );
 }

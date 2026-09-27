@@ -625,15 +625,29 @@ pub(crate) fn open(view: &mut View) {
 
 /// Offer every catalog name as a harness choice; an unavailable one refuses
 /// AT SUBMIT with its own reason (visible inline), never by disappearing.
+/// The FIRST sync also picks the preselect: the last harness this session
+/// launched (the retained draft carries it), else claude, else codex - the
+/// alphabetical first row never wins.
 pub(crate) fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutcome>) {
     if l.draft.harnesses.is_empty() {
         if let Some(CatalogOutcome::Ok(rows, _, _)) = catalog {
             l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
-            if l.draft.harness_idx >= rows.len() {
-                l.draft.harness_idx = 0;
+            if l.draft.harness_idx == 0 {
+                l.draft.harness_idx = default_harness_idx(&l.draft.harnesses);
             }
         }
     }
+}
+
+/// The preselect ladder over the catalog's names: claude, then codex, then
+/// the first row (a catalog with neither still shows a value).
+fn default_harness_idx(names: &[String]) -> usize {
+    for want in ["claude", "codex"] {
+        if let Some(i) = names.iter().position(|n| n == want) {
+            return i;
+        }
+    }
+    0
 }
 
 /// Open the launcher with a board prefill: the target message, the node's
@@ -3130,13 +3144,14 @@ impl Launcher {
         // `never` policy and paints no caret: there is nothing to drop.
         for (f, r) in &sl.chips {
             let never = *f == Focus::Worktree && self.draft.policy_never(&view.launcher_catalog);
-            // The grey reads through the FOREGROUND role: a dim modifier
-            // alone is too subtle a tell for the one control whose whole
-            // state is "off, and why".
+            // Tab must SHOW where it landed: the focused chip carries the
+            // brand accent (bold, the same emphasis grammar the popups use).
+            // A `never` box is the disabled grammar: present, inert, dim -
+            // the theme's dim color, never the focus accent.
             let style = if never {
-                role_style(Role::PanelMeta, &view.theme)
+                role_style(Role::BodyDim, &view.theme)
             } else if *f == self.focus {
-                role_style(Role::BodySel, &view.theme)
+                role_style(Role::BodyAccent, &view.theme)
             } else {
                 role_style(Role::PanelBody, &view.theme)
             };
