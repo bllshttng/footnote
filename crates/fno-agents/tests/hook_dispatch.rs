@@ -57,7 +57,7 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
         .collect();
-    let expected = [
+    let expected: Vec<String> = [
         "bg-process-guard",
         "bin-install-guard",
         "git-protection",
