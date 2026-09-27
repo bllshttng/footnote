@@ -4904,8 +4904,9 @@ impl View {
     ///        fold behind the header's `✗N` while the live agents stay up;
     ///      - an inactive squad stays `Collapsed` - surfacing live rows across
     ///        every idle workspace is the opposite of attention-focus;
-    ///      - the pull-section `~ elsewhere` defaults
-    ///        `Collapsed`, one click from their own header + rollup.
+    ///      - the pull-section `~ elsewhere` takes the same
+    ///        `Expanded`/`LiveOnly` default: every spawn must appear in the
+    ///        sideline (d-954c2cbf), and a collapsed fold reads as absence.
     /// The active-squad default lives HERE, not in a map-seed: a seed is
     /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
     /// mid-session, and it pollutes the map that should hold only choices.
@@ -4915,7 +4916,8 @@ impl View {
         }
         match key {
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
-            SectionKey::Squad(_) | SectionKey::Elsewhere => SectionView::Collapsed,
+            SectionKey::Squad(_) => SectionView::Collapsed,
+            SectionKey::Elsewhere => self.expanded_or_live_only(key),
         }
     }
 
@@ -4946,9 +4948,10 @@ impl View {
     /// Zero rows is never a majority (an empty section keeps Expanded) and a
     /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
     /// Walks the same membership `section_dead_rows` does, live off the layout
-    /// and never cached, so it tracks agents exiting mid-session. Only the
-    /// Expanded-tier key (the active squad) reaches it; every other key has
-    /// no squad match and reads as "not a majority".
+    /// and never cached, so it tracks agents exiting mid-session. Reached by
+    /// the Expanded-tier keys (the active squad, and `~ elsewhere` since it
+    /// took the same default); a Collapsed-tier squad has no squad match here
+    /// only when its row set is gone, and reads as "not a majority".
     fn majority_exited(&self, key: &SectionKey) -> bool {
         let Some(id) = self
             .layout
@@ -4957,7 +4960,16 @@ impl View {
             .find(|s| squad_matches(s, key))
             .map(|s| s.id)
         else {
-            return false;
+            if *key != SectionKey::Elsewhere {
+                return false;
+            }
+            let mut total = 0usize;
+            let mut exited = 0usize;
+            for a in self.orphans() {
+                total += 1;
+                exited += a.exited as usize;
+            }
+            return exited * 2 > total;
         };
         let mut total = 0usize;
         let mut exited = 0usize;
