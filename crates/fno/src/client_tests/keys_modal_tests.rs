@@ -2,10 +2,47 @@
 //! surfaces (kept out of the over-budget client_tests.rs; each shrink is
 //! banked).
 
-use super::keys_modal::keys_modal_keys;
+use super::keys_modal::{build_keys_modal, keys_modal_keys};
 use super::tests::two_pane_view;
 use super::*;
 use crate::vt::frame_text;
+
+#[test]
+fn which_key_lists_the_dead_row_removal_verbs() {
+    // (x-f300) The gap this node closed was discoverability: if the modal
+    // stops naming these, removal is invisible again.
+    let modal = build_keys_modal();
+    let labels: Vec<String> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { glyph, label, .. } => Some(format!("{glyph} {label}")),
+            PopupRow::Header(h) => Some(h.clone()),
+            _ => None,
+        })
+        .collect();
+    let joined = labels.join("\n");
+    assert!(joined.contains("sideline rows"), "the section renders");
+    assert!(joined.contains("x stop a live row · remove a dead one"));
+    assert!(joined.contains("X reap all exited agents"));
+    // (x-7683) The context-menu row names every trigger, not just the
+    // right-click, and keeps the header-only clear-dead behavior named
+    // too - the only in-app documentation that a header's menu offers it.
+    assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
+    // Display-only: Enter on them must BEL, never dispatch a bogus chord.
+    // Matched by label: bare `X` on a sideline row is display-only, while
+    // prefix+X (questions-show-done) is a real chord that shares the glyph.
+    for (i, r) in modal.popup.rows.iter().enumerate() {
+        if matches!(r, PopupRow::Entry { glyph, label, .. } if glyph == "X" && label.contains("reap"))
+        {
+            assert!(
+                modal.row_events[i].is_none(),
+                "a bare sideline key is not a prefix chord"
+            );
+        }
+    }
+}
 
 #[test]
 fn client_compose_keys_modal_renders_the_which_key_reference() {
