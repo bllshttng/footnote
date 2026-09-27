@@ -2155,7 +2155,12 @@ fn launch_refuses_a_pinned_pick_whose_key_does_not_resolve() {
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
-        let idx = l.draft.harnesses.iter().position(|h| h == "claude").unwrap();
+        let idx = l
+            .draft
+            .harnesses
+            .iter()
+            .position(|h| h == "claude")
+            .unwrap();
         l.draft.harness_idx = idx;
     }
     let mut l = v.launcher.take().unwrap();
@@ -2191,7 +2196,10 @@ fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
     let dir = std::env::temp_dir().join(format!(
         "fno-aad3-keyfile-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let key_file = dir.join(".env");
@@ -2210,7 +2218,12 @@ fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
-        let idx = l.draft.harnesses.iter().position(|h| h == "claude").unwrap();
+        let idx = l
+            .draft
+            .harnesses
+            .iter()
+            .position(|h| h == "claude")
+            .unwrap();
         l.draft.harness_idx = idx;
     }
     let mut l = v.launcher.take().unwrap();
