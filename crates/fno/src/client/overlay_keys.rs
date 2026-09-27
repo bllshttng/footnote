@@ -51,13 +51,6 @@ pub(super) async fn route(
         // US4/US5: the MENU popup / settings modal consumes keys.
         return Some(aux_keys(view, bytes, sock_w).await);
     }
-    if view.backlog_board.is_some() {
-        // the experimental backlog board consumes keys while open; its
-        // inputs, pickers, and facets ride inside it. Prefix chords still
-        // resolve first (which-key parity): the board's folder sees
-        // only the plain-byte chunks.
-        return Some(backlog_board::route_board_keys(view, scanner, bytes, sock_w).await);
-    }
     if view.connections.is_some() {
         // the Connections modal consumes all keys while open (Tab
         // switches tabs, j/k move, R refreshes, Esc closes) - never leaks to a
@@ -160,6 +153,17 @@ pub(super) async fn route(
             return Some(Ok(StdinFlow::Continue));
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
+    }
+    if view.backlog_board.is_some() {
+        // the experimental backlog board consumes keys while open; its
+        // inputs, pickers, and facets ride inside it. Prefix chords still
+        // resolve first (which-key parity): the board's folder sees
+        // only the plain-byte chunks. The board sits BELOW every other
+        // modal: a chord can open one over it (composer, selector,
+        // answers, yard, connections, ...), and a visible child modal owns
+        // the keyboard - or its keys would die in the board's folder
+        // behind it.
+        return Some(backlog_board::route_board_keys(view, scanner, bytes, sock_w).await);
     }
     None
 }

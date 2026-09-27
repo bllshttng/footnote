@@ -1,4 +1,4 @@
-//! x-1a50 end to end: with the backlog board docked in the sideline, the
+//! end to end: with the backlog board docked in the sideline, the
 //! prefix-chord menu keys still reach their surfaces. The real `fno` client
 //! runs on a portable-pty and the harness plays the human (see
 //! `client_e2e.rs`); the assertion is exactly the screen a person sees.
@@ -39,7 +39,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     h.type_bytes(&[PREFIX, b'O']);
     h.wait_screen(15, |s| s.contains("filters"));
 
-    // x-1a50, leg 1: `^B V` (cycle sideline view) still resolves while the
+    // leg 1: `^B V` (cycle sideline view) still resolves while the
     // board holds the keyboard. The old router swallowed it, so the board
     // never handed the sideline back.
     h.type_bytes(&[PREFIX, b'V']);
@@ -52,7 +52,7 @@ fn board_menu_keys_reach_their_surfaces_while_the_board_is_docked() {
     eprintln!("STAGE roundtrip board-again");
     h.wait_screen(15, |s| s.contains("filters"));
 
-    // x-1a50, leg 2: `^B ?` opens the GLOBAL keybinds menu, not the board's
+    // leg 2: `^B ?` opens the GLOBAL keybinds menu, not the board's
     // own keys overlay (its `?` verb, reachable with the bare key).
     h.type_bytes(&[PREFIX, b'?']);
     eprintln!("STAGE leg2 keybinds-after-^B?");

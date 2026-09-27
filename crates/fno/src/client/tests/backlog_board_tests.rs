@@ -340,7 +340,7 @@ fn board_column_resolves_no_agents_rows_or_chrome_hits() {
     assert!(v.chrome_hit(10, 14).is_none());
 }
 
-// x-1a50: the board is a modal like the composer - prefix chords still
+// the board is a modal like the composer - prefix chords still
 // resolve while it holds the keyboard (which-key parity). Before the fix the
 // prefix byte fell into the board's byte catch-all: `^B C` toggled nothing
 // and `^B ?` opened the board's own keys overlay instead of the keybinds.
@@ -380,6 +380,39 @@ fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
             .unwrap_or(false),
         "the board's keys overlay did not arm behind the chord"
     );
+}
+
+// a chord that opens a lower-priority modal over the docked board hands the
+// keyboard to that modal: `^B i` opens the composer, and a Tab then cycles
+// the composer's tab - it never falls through to the board's folder.
+#[test]
+fn a_modal_opened_over_the_board_owns_the_keyboard() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut scanner = crate::keys::Scanner::default();
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'i'], &mut sock)
+            .await
+            .expect("the board owns the chunk")
+            .expect("route runs");
+    });
+    assert!(v.launcher.is_some(), "^B i opened the composer");
+    assert!(v.backlog_board.is_some(), "the board stays docked");
+    let mut scanner = crate::keys::Scanner::default();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[b'\t'], &mut sock)
+            .await
+            .expect("the composer owns the chunk")
+            .expect("route runs");
+    });
+    let l = v.launcher.as_ref().expect("the composer is still open");
+    assert_ne!(
+        l.focus,
+        super::agent_launcher::Focus::Harness,
+        "Tab cycled the composer's tab; the byte reached the composer, not the board"
+    );
+    assert!(v.backlog_board.is_some(), "the board stays docked");
 }
 
 // The composed frame paints the backlog inside the sideline column: the

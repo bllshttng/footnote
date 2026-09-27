@@ -48,7 +48,7 @@ fn the_court_block_shrinks_the_sideline_and_yields_when_too_short() {
     );
 }
 
-// x-1a50: the block is agents-view chrome. The board view paints its own
+// the block is agents-view chrome. The board view paints its own
 // full-column surface, so an expanded fold must not hold rows there - the
 // reserved rows came off the hit math's region and pinned the pinned-footer
 // row inside the board's painted area.
