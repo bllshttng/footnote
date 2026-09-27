@@ -130,6 +130,266 @@ pub fn archive_hit(entries: &[Value], query: &str) -> Option<Value> {
     None
 }
 
+/// Whether setting `node.parent = proposed_parent_id` forms a cycle: the
+/// proposed parent's ancestor chain already reaches the node.
+pub fn would_create_cycle(entries: &[Value], node_id: &str, proposed_parent_id: &str) -> bool {
+    if proposed_parent_id == node_id {
+        return true;
+    }
+    if entries.is_empty() {
+        return false;
+    }
+    let id_to_entry: std::collections::HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
+        .collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    seen.insert(node_id);
+    let mut current = Some(proposed_parent_id);
+    while let Some(cur) = current {
+        if cur == node_id || !seen.insert(cur) {
+            return true;
+        }
+        let Some(ancestor) = id_to_entry.get(cur) else {
+            return false;
+        };
+        current = ancestor.get("parent").and_then(Value::as_str);
+    }
+    false
+}
+
+/// Whether parenting `node` under `parent_node` breaks the two-level epic
+/// cap: both epics, and either the parent is already nested or the node owns
+/// an epic subtree.
+pub fn would_exceed_epic_depth(entries: &[Value], node: &Value, parent_node: &Value) -> bool {
+    if node.get("type").and_then(Value::as_str) != Some("epic")
+        || parent_node.get("type").and_then(Value::as_str) != Some("epic")
+    {
+        return false;
+    }
+    let id_to_entry: std::collections::HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
+        .collect();
+    // (a) walk UP from the parent: any epic ancestor means it is nested.
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut current = parent_node.get("parent").and_then(Value::as_str);
+    while let Some(cur) = current {
+        if !seen.insert(cur.to_string()) {
+            break;
+        }
+        let Some(ancestor) = id_to_entry.get(cur) else {
+            break;
+        };
+        if ancestor.get("type").and_then(Value::as_str) == Some("epic") {
+            return true;
+        }
+        current = ancestor.get("parent").and_then(Value::as_str);
+    }
+    // (b) walk DOWN from the node: an epic descendant means the node is
+    // itself a mission; nesting it under an epic exceeds the cap.
+    if let Some(nid) = node.get("id").and_then(Value::as_str) {
+        for desc_id in crate::backlog_ready::descendants_of(entries, nid) {
+            if let Some(desc) = id_to_entry.get(desc_id.as_str()) {
+                if desc.get("type").and_then(Value::as_str) == Some("epic") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The blocker-ladder validation: every id exists, none is the node itself,
+/// and no (transitive) blocked_by chain already reaches the node.
+pub fn validate_blockers(
+    blockers: &[String],
+    entries: &[Value],
+    task_id: &str,
+) -> Result<(), (String, i32)> {
+    let id_to_entry: std::collections::HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
+        .collect();
+    for bid in blockers {
+        let Some(entry) = id_to_entry.get(bid.as_str()) else {
+            return Err((format!("Error: unknown blocker id '{bid}'"), 2));
+        };
+        if bid == task_id {
+            return Err((format!("Error: node cannot block itself ({task_id})"), 2));
+        }
+        let mut visited: std::collections::HashSet<String> = Default::default();
+        let mut stack = vec![bid.clone()];
+        while let Some(curr) = stack.pop() {
+            if curr == task_id {
+                return Err((
+                    format!("Error: cycle detected - {bid} (transitively) depends on {task_id}"),
+                    2,
+                ));
+            }
+            if !visited.insert(curr.clone()) {
+                continue;
+            }
+            if let Some(entry) = id_to_entry.get(curr.as_str()) {
+                if let Some(blocked) = entry.get("blocked_by").and_then(Value::as_array) {
+                    stack.extend(
+                        blocked
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .map(str::to_string),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `_resolve_asserted_id`: a caller-asserted reference must resolve through
+/// the exact tiers, and never name the node itself.
+pub fn resolve_asserted_id(
+    token: &str,
+    entries: &[Value],
+    flag: &str,
+    self_id: Option<&str>,
+) -> Result<String, (String, i32)> {
+    match resolve_tiers(entries, token) {
+        Some(hit) => {
+            let resolved = hit
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if let Some(self_id) = self_id {
+                if resolved == self_id {
+                    return Err((
+                        format!("Error: {flag} cannot reference the node itself ({self_id})"),
+                        1,
+                    ));
+                }
+            }
+            Ok(resolved)
+        }
+        None => Err((
+            format!("Error: {flag} '{token}' does not resolve to a node"),
+            1,
+        )),
+    }
+}
+
+/// The `(pr_number, pr_url)` refs one node carries: the primary pair first,
+/// then every `additional_prs` entry, deduplicated by number.
+fn node_pr_refs(node: &Value) -> Vec<(i64, Option<String>)> {
+    let mut refs: Vec<(i64, Option<String>)> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = Default::default();
+    if let Some(n) = node.get("pr_number").and_then(Value::as_i64) {
+        refs.push((
+            n,
+            node.get("pr_url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        ));
+        seen.insert(n);
+    }
+    if let Some(extras) = node.get("additional_prs").and_then(Value::as_array) {
+        for extra in extras {
+            let Some(obj) = extra.as_object() else {
+                continue;
+            };
+            if let Some(n) = obj.get("number").and_then(Value::as_i64) {
+                if seen.insert(n) {
+                    refs.push((
+                        n,
+                        obj.get("url").and_then(Value::as_str).map(str::to_string),
+                    ));
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// Un-contain `node_id`, dropping the PR refs inherited from its owner so the
+/// owner's merge cannot close it. The python twin lives in `graph/_contain.py`.
+pub fn release_contained(entries: &mut [Value], node_id: &str) -> Result<(), String> {
+    let idx = entries
+        .iter()
+        .position(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
+        .ok_or_else(|| format!("no node resolves to '{node_id}'"))?;
+    let Some(owner_id) = entries[idx]
+        .get("contained_in")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    entries[idx]
+        .as_object_mut()
+        .expect("row is an object")
+        .remove("contained_in");
+    let owner = entries
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(owner_id.as_str()))
+        .cloned();
+    let keys: std::collections::HashSet<(i64, String)> = owner
+        .as_ref()
+        .map(|o| {
+            node_pr_refs(o)
+                .into_iter()
+                .map(|(n, u)| {
+                    let slug = crate::backlog::pr_link::repo_slug_from_url(u.as_deref())
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    (n, slug)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let own_number = entries[idx].get("pr_number").and_then(Value::as_i64);
+    let own_slug = crate::backlog::pr_link::repo_slug_from_url(
+        entries[idx].get("pr_url").and_then(Value::as_str),
+    )
+    .map(|s| s.to_lowercase());
+    let own_in_keys = own_number
+        .map(|n| keys.contains(&(n, own_slug.clone().unwrap_or_default())))
+        .unwrap_or(false);
+    let obj = entries[idx].as_object_mut().expect("row is an object");
+    if own_in_keys {
+        obj.insert("pr_number".into(), Value::Null);
+        obj.insert("pr_url".into(), Value::Null);
+        obj.insert("merge_status".into(), Value::Null);
+    }
+    if !keys.is_empty() {
+        if let Some(extra) = obj.get("additional_prs").cloned() {
+            let filtered = match extra {
+                Value::Array(items) => Value::Array(
+                    items
+                        .into_iter()
+                        .filter(|item| {
+                            let Some(map) = item.as_object() else {
+                                return false; // python drops non-dict rows here
+                            };
+                            let number: Option<i64> = map.get("number").and_then(Value::as_i64);
+                            let slug: Option<String> = crate::backlog::pr_link::repo_slug_from_url(
+                                map.get("url").and_then(Value::as_str),
+                            )
+                            .map(|s: String| s.to_lowercase());
+                            match (number, slug) {
+                                (Some(n), Some(s)) => !keys.contains(&(n, s)),
+                                _ => true,
+                            }
+                        })
+                        .collect(),
+                ),
+                other => other,
+            };
+            obj.insert("additional_prs".into(), filtered);
+        }
+    }
+    obj.insert("released_from".into(), Value::String(owner_id));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +415,33 @@ mod tests {
         assert!(find_node(&entries, "ab-1234").is_none()); // ambiguous
         assert!(find_node(&entries, "x-bbbb2222").is_some());
         assert!(find_node(&entries, "x-missing").is_none());
+    }
+
+    #[test]
+    fn cycle_and_depth_guards_walk_the_tree() {
+        let entries = vec![
+            json!({"id": "x-eeee5555", "type": "epic", "parent": Value::Null}),
+            json!({"id": "x-9999aaaa", "type": "epic", "parent": "x-eeee5555"}),
+            json!({"id": "x-abcd1234", "type": "feature", "parent": "x-9999aaaa"}),
+        ];
+        // Parenting the top epic under its own child closes a cycle.
+        assert!(would_create_cycle(&entries, "x-eeee5555", "x-9999aaaa"));
+        // Both epics with the parent already nested exceeds the cap.
+        assert!(would_exceed_epic_depth(&entries, &entries[0], &entries[1]));
+        // A feature under an epic is fine.
+        assert!(!would_exceed_epic_depth(&entries, &entries[2], &entries[1]));
+    }
+
+    #[test]
+    fn blocker_validation_refuses_unknown_self_and_cycle() {
+        let entries = vec![
+            json!({"id": "x-aaaa1111"}),
+            json!({"id": "x-bbbb2222", "blocked_by": ["x-aaaa1111"]}),
+        ];
+        assert!(validate_blockers(&["x-11118888".into()], &entries, "x-aaaa1111").is_err());
+        assert!(validate_blockers(&["x-aaaa1111".into()], &entries, "x-aaaa1111").is_err());
+        // x-bbbb2222 transitively depends on x-aaaa1111.
+        assert!(validate_blockers(&["x-bbbb2222".into()], &entries, "x-aaaa1111").is_err());
+        assert!(validate_blockers(&["x-bbbb2222".into()], &entries, "x-dddd4444").is_ok());
     }
 }

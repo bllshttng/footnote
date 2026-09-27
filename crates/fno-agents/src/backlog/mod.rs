@@ -28,6 +28,7 @@ pub mod note_migrate;
 pub mod note_stale;
 pub mod orphan_plans;
 pub mod patch;
+pub mod pr_link;
 pub mod pull_requests;
 pub mod rank_cli;
 pub mod receipt;

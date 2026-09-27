@@ -56,6 +56,20 @@ const NATIVE_UPDATE_FLAGS: &[&str] = &[
     "--untag",
     "--dispatch-verb",
     "--dispatch-brief",
+    "--locked-by",
+    "--locked-by-harness",
+    "--locked-by-harness-session",
+    "--plan-path",
+    "--force",
+    "-F",
+    "--parent",
+    "--caused-by",
+    "--source-node",
+    "--related",
+    "--blocked-by",
+    "--add-blocker",
+    "--remove-blocker",
+    "--type",
     "--help",
     "-h",
     "--status",
@@ -64,9 +78,6 @@ const NATIVE_UPDATE_FLAGS: &[&str] = &[
 ];
 
 const DOOR_FLAGS: &[&str] = &["--status", "--leave", "--set"];
-
-/// `--flag=value` spellings the mechanical kebab rule cannot produce.
-const MODEL_TIER_FLAG: &str = "--model-tier";
 
 /// The lock deadline every update write rides.
 const LOCK_TIMEOUT: Duration = DEFAULT_LOCK_TIMEOUT;
@@ -103,6 +114,19 @@ struct UpdateArgs {
     untag: Vec<String>,
     dispatch_verb: Option<String>,
     dispatch_brief: Option<String>,
+    locked_by: Option<String>,
+    locked_by_harness: Option<String>,
+    locked_by_harness_session: Option<String>,
+    plan_path: Option<String>,
+    force: bool,
+    parent: Option<String>,
+    caused_by: Option<String>,
+    source_node: Option<String>,
+    /// `None` = flag absent; `Some(list)` = the replace spelling.
+    blocked_by: Option<Vec<String>>,
+    add_blocker: Vec<String>,
+    remove_blocker: Vec<String>,
+    related: Vec<String>,
     door: Vec<String>,
 }
 
@@ -136,6 +160,18 @@ impl UpdateArgs {
             untag: Vec::new(),
             dispatch_verb: None,
             dispatch_brief: None,
+            locked_by: None,
+            locked_by_harness: None,
+            locked_by_harness_session: None,
+            plan_path: None,
+            force: false,
+            parent: None,
+            caused_by: None,
+            source_node: None,
+            blocked_by: None,
+            add_blocker: Vec::new(),
+            remove_blocker: Vec::new(),
+            related: Vec::new(),
             door: Vec::new(),
         };
         let mut i = 0;
@@ -245,6 +281,41 @@ impl UpdateArgs {
                 }
                 "--dispatch-verb" => take_value!(a.dispatch_verb),
                 "--dispatch-brief" => take_value!(a.dispatch_brief),
+                "--locked-by" => take_value!(a.locked_by),
+                "--locked-by-harness" => take_value!(a.locked_by_harness),
+                "--locked-by-harness-session" => take_value!(a.locked_by_harness_session),
+                "--plan-path" => take_value!(a.plan_path),
+                "--force" | "-F" => {
+                    a.force = true;
+                    i += 1;
+                }
+                "--parent" => take_value!(a.parent),
+                "--caused-by" => take_value!(a.caused_by),
+                "--source-node" => take_value!(a.source_node),
+                "--related" | "--blocked-by" | "--add-blocker" | "--remove-blocker" => {
+                    match inline.clone().or_else(|| {
+                        if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
+                            i += 1;
+                            Some(tail[i].clone())
+                        } else {
+                            None
+                        }
+                    }) {
+                        Some(v) => {
+                            if name == "--blocked-by" {
+                                a.blocked_by.get_or_insert_with(Vec::new).push(v);
+                            } else if name == "--related" {
+                                a.related.push(v);
+                            } else if name == "--add-blocker" {
+                                a.add_blocker.push(v);
+                            } else {
+                                a.remove_blocker.push(v);
+                            }
+                            i += 1;
+                        }
+                        None => return None,
+                    }
+                }
                 other => {
                     if !other.starts_with('-') && id.is_none() {
                         id = Some(other.to_string());
@@ -348,6 +419,30 @@ fn run_door_relay(args: &UpdateArgs) -> i32 {
     note("--size", args.size.is_some(), &mut legacy);
     note("--title", args.title.is_some(), &mut legacy);
     note("--type", args.type_.is_some(), &mut legacy);
+    note("--locked-by", args.locked_by.is_some(), &mut legacy);
+    note(
+        "--locked-by-harness",
+        args.locked_by_harness.is_some(),
+        &mut legacy,
+    );
+    note(
+        "--locked-by-harness-session",
+        args.locked_by_harness_session.is_some(),
+        &mut legacy,
+    );
+    note("--plan-path", args.plan_path.is_some(), &mut legacy);
+    note("--force", args.force, &mut legacy);
+    note("--parent", args.parent.is_some(), &mut legacy);
+    note("--caused-by", args.caused_by.is_some(), &mut legacy);
+    note("--source-node", args.source_node.is_some(), &mut legacy);
+    note("--related", !args.related.is_empty(), &mut legacy);
+    note("--blocked-by", args.blocked_by.is_some(), &mut legacy);
+    note("--add-blocker", !args.add_blocker.is_empty(), &mut legacy);
+    note(
+        "--remove-blocker",
+        !args.remove_blocker.is_empty(),
+        &mut legacy,
+    );
     if !legacy.is_empty() {
         legacy.sort_unstable();
         eprintln!(
@@ -465,6 +560,17 @@ fn run_native(args: &UpdateArgs) -> Result<(), Refusal> {
         }
     }
 
+    if args.blocked_by.is_some()
+        && (!parse_list(&args.add_blocker).is_empty()
+            || !parse_list(&args.remove_blocker).is_empty())
+    {
+        return Err(refused(
+            "Error: --blocked-by is mutually exclusive with --add-blocker/--remove-blocker",
+            2,
+        ));
+    }
+
+    let linked_size = linked_plan_size(args);
     let graph = settings::graph_path();
     write_update(
         &graph,
@@ -472,6 +578,7 @@ fn run_native(args: &UpdateArgs) -> Result<(), Refusal> {
         details.as_deref(),
         details_from_file,
         derived_cwd.as_deref(),
+        linked_size.as_deref(),
     )?;
     Ok(())
 }
@@ -519,12 +626,21 @@ fn write_update(
     details: Option<&str>,
     details_from_file: bool,
     derived_cwd: Option<&str>,
+    linked_size: Option<&str>,
 ) -> Result<(), Refusal> {
     const ATTEMPTS: usize = 3;
     for attempt in 0..ATTEMPTS {
         let rows = graph_store::read_rows(graph)
             .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
-        let planned = plan_mutation(graph, rows, args, details, details_from_file, derived_cwd)?;
+        let planned = plan_mutation(
+            graph,
+            rows,
+            args,
+            details,
+            details_from_file,
+            derived_cwd,
+            linked_size,
+        )?;
         match planned {
             MutationPlan::Refused(r) => return Err(r),
             MutationPlan::Applied {
@@ -552,6 +668,9 @@ fn write_update(
                             eprintln!("{w}");
                         }
                         confirm_readback(graph, args, &node_id)?;
+                        if let Some(raw) = &args.locked_by {
+                            verify_lock_stamp(graph, &node_id, raw)?;
+                        }
                         println!("Updated {node_id}");
                         repaint(graph, args, &node_id);
                         return Ok(());
@@ -599,6 +718,7 @@ fn plan_mutation(
     details: Option<&str>,
     details_from_file: bool,
     derived_cwd: Option<&str>,
+    linked_size: Option<&str>,
 ) -> Result<MutationPlan, Refusal> {
     let _ = graph;
     let rungs: BTreeMap<String, String> = rows
@@ -637,17 +757,15 @@ fn plan_mutation(
         .iter()
         .position(|r| entry_id(r) == Some(node_id.as_str()))
         .ok_or_else(|| refused(format!("Error: graph node {} not found", args.task_id), 1))?;
-    let warnings = {
-        let obj = rows[idx].as_object_mut().expect("row is an object");
-        apply_mutators(
-            obj,
-            node.clone(),
-            args,
-            details,
-            details_from_file,
-            derived_cwd,
-        )?
-    };
+    let warnings = apply_mutators(
+        &mut rows,
+        idx,
+        args,
+        details,
+        details_from_file,
+        derived_cwd,
+        linked_size,
+    )?;
 
     Ok(MutationPlan::Applied {
         working: rows,
@@ -657,221 +775,546 @@ fn plan_mutation(
     })
 }
 
-/// The wave-2 mutator arms, in cmd_update's field order. Topology, lock,
-/// PR-attribution and dispatch arms land with their waves.
+/// The wave-2/3/4 mutator arms, in cmd_update's field order. The whole rows
+/// vector comes in because related's symmetry writes peer rows, caused-by
+/// and parent resolve against the graph, and parent's contained-release
+/// mutates the owner's subtree.
 fn apply_mutators(
-    obj: &mut Map<String, Value>,
-    node: Value,
+    rows: &mut Vec<Value>,
+    idx: usize,
     args: &UpdateArgs,
     details: Option<&str>,
     details_from_file: bool,
     derived_cwd: Option<&str>,
+    linked_size: Option<&str>,
 ) -> Result<Vec<String>, Refusal> {
-    if let Some(v) = &args.has_brief {
-        obj.insert("has_brief".into(), Value::Bool(v.to_lowercase() == "true"));
+    let node_id = rows[idx]
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let node = rows[idx].clone();
+    // -- U6: topology arms, in cmd_update's order: related first (its
+    // symmetric writes touch peer rows too), then source-node, then the
+    // blocker ladder, then the lock stamps.
+    if !args.related.is_empty() {
+        let tokens = parse_list(&args.related);
+        let desired: Vec<String> = if tokens.len() == 1 && tokens[0] == "null" {
+            Vec::new()
+        } else {
+            tokens
+                .iter()
+                .map(|t| {
+                    node_ref::resolve_asserted_id(t, rows, "--related", Some(&node_id))
+                        .map_err(|(m, e)| refused(m, e))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        crate::graph_keeper::set_related(rows, &node_id, &desired)
+            .map_err(|e| refused(format!("{e}"), 1))?;
     }
-    if let Some(v) = &args.batch {
-        obj.insert(
-            "batch".into(),
+    if let Some(v) = &args.source_node {
+        let resolved = if v == "null" {
+            None
+        } else {
+            Some(
+                node_ref::resolve_asserted_id(v, rows, "--source-node", Some(&node_id))
+                    .map_err(|(m, e)| refused(m, e))?,
+            )
+        };
+        rows[idx].as_object_mut().expect("row is an object").insert(
+            "source_node_id".into(),
+            resolved.map(|s| json!(s)).unwrap_or(Value::Null),
+        );
+    }
+    let has_blocker_edit = args.blocked_by.is_some()
+        || !args.add_blocker.is_empty()
+        || !args.remove_blocker.is_empty();
+    if has_blocker_edit {
+        if let Some(replace) = &args.blocked_by {
+            let desired = dedupe(parse_list(replace));
+            node_ref::validate_blockers(&desired, rows, &args.task_id)
+                .map_err(|(m, e)| refused(m, e))?;
+            rows[idx]
+                .as_object_mut()
+                .expect("row is an object")
+                .insert("blocked_by".into(), json!(desired));
+        } else {
+            let add = parse_list(&args.add_blocker);
+            let remove = parse_list(&args.remove_blocker);
+            node_ref::validate_blockers(&add, rows, &args.task_id)
+                .map_err(|(m, e)| refused(m, e))?;
+            let mut current: Vec<String> = rows[idx]
+                .get("blocked_by")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for b in add {
+                if !current.contains(&b) {
+                    current.push(b);
+                }
+            }
+            current.retain(|b| !remove.contains(b));
+            rows[idx]
+                .as_object_mut()
+                .expect("row is an object")
+                .insert("blocked_by".into(), json!(current));
+        }
+    }
+    if let Some(v) = &args.locked_by {
+        let session = null_if(v);
+        {
+            let obj = rows[idx].as_object_mut().expect("row is an object");
+            obj.insert(
+                "locked_by".into(),
+                session.clone().map(|s| json!(s)).unwrap_or(Value::Null),
+            );
+            obj.insert(
+                "locked_at".into(),
+                session
+                    .is_some()
+                    .then(|| json!(crate::graph_store::now_isoformat()))
+                    .unwrap_or(Value::Null),
+            );
+            // Clearing the lock also clears the harness stamp so an unclaim
+            // never leaves a stale holder identity.
+            if session.is_none() {
+                obj.insert("locked_by_harness".into(), Value::Null);
+                obj.insert("locked_by_harness_session".into(), Value::Null);
+            }
+        }
+    }
+    if let Some(v) = &args.locked_by_harness {
+        rows[idx].as_object_mut().expect("row is an object").insert(
+            "locked_by_harness".into(),
             null_if(v).map(|s| json!(s)).unwrap_or(Value::Null),
         );
     }
-    if let Some(v) = &args.orphan_ok {
+    if let Some(v) = &args.locked_by_harness_session {
+        rows[idx].as_object_mut().expect("row is an object").insert(
+            "locked_by_harness_session".into(),
+            null_if(v).map(|s| json!(s)).unwrap_or(Value::Null),
+        );
+    }
+    if let Some(v) = &args.has_brief {
+        let obj = rows[idx].as_object_mut().expect("row is an object");
+        obj.insert("has_brief".into(), Value::Bool(v.to_lowercase() == "true"));
+    }
+    // -- U7: the plan binding, directly after has_brief in cmd_update's
+    // order. 'null' clears; the one-plan-one-node conflict refuses naming
+    // the owner, and --force binds anyway with the named note.
+    if let Some(v) = &args.plan_path {
         if v.to_lowercase() == "null" {
-            obj.insert("orphan_ok".into(), Value::Null);
-        } else if v.trim().is_empty() {
-            return Err(refused(
-                "Error: --orphan-ok needs a reason (or 'null' to clear)",
-                2,
-            ));
+            rows[idx]
+                .as_object_mut()
+                .expect("row is an object")
+                .insert("plan_path".into(), Value::Null);
         } else {
-            obj.insert("orphan_ok".into(), json!(v));
-        }
-    }
-    let mut warnings: Vec<String> = super::fields::apply_dispatch_overrides(
-        obj,
-        args.dispatch_verb.as_deref(),
-        args.dispatch_brief.as_deref(),
-    )
-    .map_err(|refusal| refused(refusal, 2))?;
-    if let Some(priority) = &args.priority {
-        obj.insert("priority".into(), json!(priority));
-    }
-    if args.blocks_everything {
-        let effective = args.priority.clone().or_else(|| {
-            node.get("priority")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-        if effective.as_deref() == Some("p0") {
-            obj.insert("blocks_everything".into(), Value::Bool(true));
-        } else {
-            let shown = node
-                .get("priority")
-                .map(|p| match p {
-                    Value::String(s) => format!("'{s}'"),
-                    other => other.to_string(),
-                })
-                .unwrap_or_else(|| "None".into());
-            return Err(refused(
-                format!(
-                    "Error: --blocks-everything acknowledges p0; pass --priority p0 too \
-                     (node priority is {shown})"
-                ),
-                2,
-            ));
-        }
-    }
-    if let Some(project) = &args.project {
-        obj.insert("project".into(), json!(project));
-    }
-    if let Some(cwd) = &args.cwd {
-        obj.insert("cwd".into(), json!(abs_expand(cwd)));
-    } else if let Some(derived) = derived_cwd {
-        obj.insert("cwd".into(), json!(derived));
-    }
-    if let Some(title) = &args.title {
-        let trimmed = title.trim();
-        if trimmed.is_empty() {
-            return Err(refused(
-                "Error: --title cannot be empty or whitespace-only",
-                1,
-            ));
-        }
-        obj.insert("title".into(), json!(trimmed));
-    }
-    if let Some(details) = details {
-        let cleared = !details_from_file && details.to_lowercase() == "null";
-        obj.insert(
-            "details".into(),
-            if cleared { Value::Null } else { json!(details) },
-        );
-    }
-    if let Some(domain) = &args.domain {
-        obj.insert("domain".into(), json!(domain));
-    }
-    if let Some(size) = &args.size {
-        obj.insert(
-            "size".into(),
-            if size.to_lowercase() == "null" {
-                Value::Null
-            } else {
-                json!(size.to_uppercase())
-            },
-        );
-    }
-    if let Some(raw) = &args.difficulty {
-        let band = if raw.to_lowercase() == "null" {
-            None
-        } else {
-            match super::fields::normalize_difficulty(raw) {
-                Ok(band) => Some(band),
-                Err(exc) => {
-                    return Err(refused(format!("fno backlog update: {exc}"), 2));
+            let owner = crate::graph_store::plan_path_owner_conflict(rows, Some(&node_id), Some(v));
+            if let Some(owner) = owner {
+                if !args.force {
+                    return Err(refused(
+                        format!(
+                            "error: plan {v} is already the delivery unit of {owner}\n\
+                             \x20 a plan is one PR is one node; binding it to {node_id} would arm both\n\
+                             \x20 to record that {node_id} ships inside that PR: \
+                             fno backlog decompose ... \"adopt\": [\"{node_id}\"]\n\
+                             \x20 to repoint deliberately: --force"
+                        ),
+                        2,
+                    ));
+                }
+                eprintln!(
+                    "note: plan {v} is also held by {owner}; binding {node_id} anyway \
+                     (--force). Both will dispatch and cost independently."
+                );
+            }
+            {
+                let obj = rows[idx].as_object_mut().expect("row is an object");
+                obj.insert("plan_path".into(), json!(v));
+                if linked_size.is_some()
+                    && !obj
+                        .get("size")
+                        .is_some_and(|s| s.is_string() && !s.as_str().unwrap().is_empty())
+                {
+                    obj.insert("size".into(), json!(linked_size.unwrap()));
                 }
             }
-        };
-        super::fields::write_canonical_difficulty(
-            obj,
-            band.as_deref(),
-            "update",
-            &crate::graph_store::now_isoformat(),
-            "change",
-        );
-    }
-    if let Some(model) = &args.model {
-        obj.insert(
-            "model".into(),
-            null_if(model).map(|s| json!(s)).unwrap_or(Value::Null),
-        );
-    }
-    if let Some(type_) = &args.type_ {
-        obj.insert("type".into(), json!(type_));
-    }
-    if let Some(public) = args.public {
-        obj.insert("public".into(), Value::Bool(public));
-    }
-    if let Some(v) = &args.acknowledge_collisions {
-        let ids: Vec<&str> = v
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        obj.insert("collisions_acknowledged".into(), json!(ids));
-    }
-    if let Some(note) = &args.completion_note {
-        if note.to_lowercase() == "null" {
-            obj.insert("completion_note".into(), Value::Null);
-        } else {
-            let trimmed = note.trim();
-            if !trimmed.is_empty() {
-                let existing = node
-                    .get("completion_note")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty());
-                let merged = match existing {
-                    Some(prev) => format!("{prev} + {trimmed}"),
-                    None => trimmed.to_string(),
-                };
-                obj.insert("completion_note".into(), json!(merged));
-            }
         }
     }
-    if let Some(raw) = &args.fixes_pr {
-        match raw.parse::<i64>() {
-            Ok(0) => {
-                obj.insert("fixes_pr".into(), Value::Null);
-            }
-            Ok(n) => {
-                obj.insert("fixes_pr".into(), json!(n));
-            }
-            Err(_) => {
+    let mut warnings: Vec<String> = {
+        let obj = rows[idx].as_object_mut().expect("row is an object");
+        if let Some(v) = &args.batch {
+            obj.insert(
+                "batch".into(),
+                null_if(v).map(|s| json!(s)).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(v) = &args.orphan_ok {
+            if v.to_lowercase() == "null" {
+                obj.insert("orphan_ok".into(), Value::Null);
+            } else if v.trim().is_empty() {
                 return Err(refused(
-                    format!("Error: --fixes-pr {raw:?} is not a number"),
+                    "Error: --orphan-ok needs a reason (or 'null' to clear)",
                     2,
-                ))
+                ));
+            } else {
+                obj.insert("orphan_ok".into(), json!(v));
             }
         }
-    }
-    if let Some(reverted) = args.reverted {
-        obj.insert("reverted".into(), Value::Bool(reverted));
-    }
-    if !args.tag.is_empty() || !args.untag.is_empty() {
-        // Idempotent set semantics, order-preserving: adds skip dupes,
-        // removes are no-ops if absent. Normalization refuses before the
-        // write lands, so a malformed tag never mutates.
-        let mut normalized_tag = Vec::new();
-        for t in &args.tag {
-            normalized_tag.push(
-                super::fields::normalize_tag(t).map_err(|e| refused(format!("Error: {e}"), 1))?,
-            );
+        let mut warnings: Vec<String> = super::fields::apply_dispatch_overrides(
+            obj,
+            args.dispatch_verb.as_deref(),
+            args.dispatch_brief.as_deref(),
+        )
+        .map_err(|refusal| refused(refusal, 2))?;
+        if let Some(priority) = &args.priority {
+            obj.insert("priority".into(), json!(priority));
         }
-        let mut normalized_untag = Vec::new();
-        for t in &args.untag {
-            normalized_untag.push(
-                super::fields::normalize_tag(t).map_err(|e| refused(format!("Error: {e}"), 1))?,
-            );
-        }
-        let mut current: Vec<String> = obj
-            .get("tags")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
+        if args.blocks_everything {
+            let effective = args.priority.clone().or_else(|| {
+                node.get("priority")
+                    .and_then(Value::as_str)
                     .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        for t in normalized_tag {
-            if !current.contains(&t) {
-                current.push(t);
+            });
+            if effective.as_deref() == Some("p0") {
+                obj.insert("blocks_everything".into(), Value::Bool(true));
+            } else {
+                let shown = node
+                    .get("priority")
+                    .map(|p| match p {
+                        Value::String(s) => format!("'{s}'"),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_else(|| "None".into());
+                return Err(refused(
+                    format!(
+                        "Error: --blocks-everything acknowledges p0; pass --priority p0 too \
+                         (node priority is {shown})"
+                    ),
+                    2,
+                ));
             }
         }
-        current.retain(|t| !normalized_untag.contains(t));
-        obj.insert("tags".into(), json!(current));
+        if let Some(project) = &args.project {
+            obj.insert("project".into(), json!(project));
+        }
+        if let Some(cwd) = &args.cwd {
+            obj.insert("cwd".into(), json!(abs_expand(cwd)));
+        } else if let Some(derived) = derived_cwd {
+            obj.insert("cwd".into(), json!(derived));
+        }
+        if let Some(title) = &args.title {
+            let trimmed = title.trim();
+            if trimmed.is_empty() {
+                return Err(refused(
+                    "Error: --title cannot be empty or whitespace-only",
+                    1,
+                ));
+            }
+            obj.insert("title".into(), json!(trimmed));
+        }
+        if let Some(details) = details {
+            let cleared = !details_from_file && details.to_lowercase() == "null";
+            obj.insert(
+                "details".into(),
+                if cleared { Value::Null } else { json!(details) },
+            );
+        }
+        if let Some(domain) = &args.domain {
+            obj.insert("domain".into(), json!(domain));
+        }
+        if let Some(size) = &args.size {
+            obj.insert(
+                "size".into(),
+                if size.to_lowercase() == "null" {
+                    Value::Null
+                } else {
+                    json!(size.to_uppercase())
+                },
+            );
+        }
+        if let Some(raw) = &args.difficulty {
+            let band = if raw.to_lowercase() == "null" {
+                None
+            } else {
+                match super::fields::normalize_difficulty(raw) {
+                    Ok(band) => Some(band),
+                    Err(exc) => {
+                        return Err(refused(format!("fno backlog update: {exc}"), 2));
+                    }
+                }
+            };
+            super::fields::write_canonical_difficulty(
+                obj,
+                band.as_deref(),
+                "update",
+                &crate::graph_store::now_isoformat(),
+                "change",
+            );
+        }
+        if let Some(model) = &args.model {
+            obj.insert(
+                "model".into(),
+                null_if(model).map(|s| json!(s)).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(type_) = &args.type_ {
+            obj.insert("type".into(), json!(type_));
+        }
+        if let Some(public) = args.public {
+            obj.insert("public".into(), Value::Bool(public));
+        }
+        if let Some(v) = &args.acknowledge_collisions {
+            let ids: Vec<&str> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            obj.insert("collisions_acknowledged".into(), json!(ids));
+        }
+        if let Some(note) = &args.completion_note {
+            if note.to_lowercase() == "null" {
+                obj.insert("completion_note".into(), Value::Null);
+            } else {
+                let trimmed = note.trim();
+                if !trimmed.is_empty() {
+                    let existing = node
+                        .get("completion_note")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let merged = match existing {
+                        Some(prev) => format!("{prev} + {trimmed}"),
+                        None => trimmed.to_string(),
+                    };
+                    obj.insert("completion_note".into(), json!(merged));
+                }
+            }
+        }
+        warnings
+    };
+    // -- caused-by: the resolved id is stored, never the raw token.
+    if let Some(v) = &args.caused_by {
+        if v.to_lowercase() == "null" {
+            rows[idx]
+                .as_object_mut()
+                .expect("row is an object")
+                .insert("caused_by".into(), Value::Null);
+        } else {
+            let origin = node_ref::find_node(rows, v)
+                .ok_or_else(|| refused(format!("Error: --caused-by node {v} not found"), 1))?;
+            let origin_id = origin
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if origin_id == node_id {
+                return Err(refused(
+                    "Error: --caused-by cannot reference the node itself",
+                    1,
+                ));
+            }
+            rows[idx]
+                .as_object_mut()
+                .expect("row is an object")
+                .insert("caused_by".into(), json!(origin_id));
+        }
+    }
+    {
+        let obj = rows[idx].as_object_mut().expect("row is an object");
+        if let Some(raw) = &args.fixes_pr {
+            match raw.parse::<i64>() {
+                Ok(0) => {
+                    obj.insert("fixes_pr".into(), Value::Null);
+                }
+                Ok(n) => {
+                    obj.insert("fixes_pr".into(), json!(n));
+                }
+                Err(_) => {
+                    return Err(refused(
+                        format!("Error: --fixes-pr {raw:?} is not a number"),
+                        2,
+                    ))
+                }
+            }
+        }
+        if let Some(reverted) = args.reverted {
+            obj.insert("reverted".into(), Value::Bool(reverted));
+        }
+        if !args.tag.is_empty() || !args.untag.is_empty() {
+            // Idempotent set semantics, order-preserving: adds skip dupes,
+            // removes are no-ops if absent. Normalization refuses before the
+            // write lands, so a malformed tag never mutates.
+            let mut normalized_tag = Vec::new();
+            for t in &args.tag {
+                normalized_tag.push(
+                    super::fields::normalize_tag(t)
+                        .map_err(|e| refused(format!("Error: {e}"), 1))?,
+                );
+            }
+            let mut normalized_untag = Vec::new();
+            for t in &args.untag {
+                normalized_untag.push(
+                    super::fields::normalize_tag(t)
+                        .map_err(|e| refused(format!("Error: {e}"), 1))?,
+                );
+            }
+            let mut current: Vec<String> = obj
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for t in normalized_tag {
+                if !current.contains(&t) {
+                    current.push(t);
+                }
+            }
+            current.retain(|t| !normalized_untag.contains(t));
+            obj.insert("tags".into(), json!(current));
+        }
+    }
+    // -- parent: last in cmd_update's order. A move that leaves the
+    // containing subtree releases the containment (dropping the owner's
+    // inherited PR refs); cycle and the epic-depth cap refuse.
+    if let Some(v) = &args.parent {
+        let new_parent = null_if(v);
+        let owner = node
+            .get("contained_in")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(owner) = owner {
+            let mut cursor: Option<String> = match &new_parent {
+                Some(p) => node_ref::find_node(rows, p)
+                    .and_then(|e| e.get("id").and_then(Value::as_str))
+                    .map(str::to_string),
+                None => None,
+            };
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut still_contained = false;
+            while let Some(cur) = cursor {
+                if cur == owner || seen.contains(&cur) || seen.len() >= 64 {
+                    if cur == owner {
+                        still_contained = true;
+                    }
+                    break;
+                }
+                seen.insert(cur.clone());
+                cursor = node_ref::find_node(rows, &cur)
+                    .and_then(|e| e.get("parent").and_then(Value::as_str))
+                    .map(str::to_string);
+            }
+            if !still_contained {
+                node_ref::release_contained(rows, &node_id)
+                    .map_err(|e| refused(format!("{e}"), 1))?;
+            }
+        }
+        match new_parent {
+            None => {
+                rows[idx]
+                    .as_object_mut()
+                    .expect("row is an object")
+                    .insert("parent".into(), Value::Null);
+            }
+            Some(p) => {
+                let target = node_ref::find_node(rows, &p)
+                    .ok_or_else(|| refused(format!("Error: parent node {p} not found"), 1))?;
+                let target_id = target
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if node_ref::would_create_cycle(rows, &node_id, &target_id) {
+                    return Err(refused(
+                        format!(
+                            "Error: setting parent of {node_id} to {target_id} \
+                             would create a cycle"
+                        ),
+                        1,
+                    ));
+                }
+                let node_row = rows[idx].clone();
+                if node_ref::would_exceed_epic_depth(rows, &node_row, target) {
+                    return Err(refused(
+                        format!(
+                            "Error: parenting epic {node_id} under {target_id} \
+                             would exceed the 2-level cap \
+                             (mission -> epic -> leaf); an epic may nest only \
+                             under a top-level mission"
+                        ),
+                        1,
+                    ));
+                }
+                rows[idx]
+                    .as_object_mut()
+                    .expect("row is an object")
+                    .insert("parent".into(), json!(target_id));
+            }
+        }
+    }
+    // The depth cap must also hold when a --type change alone promotes a
+    // node to epic under an already-nested epic (the --parent guard above
+    // never fires without --parent). Checked against the FINAL parent edge.
+    if args.type_.as_deref() == Some("epic") {
+        let node_row = rows[idx].clone();
+        let parent_id = node_row
+            .get("parent")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(parent_id) = parent_id {
+            if let Some(parent_row) = node_ref::find_node(rows, &parent_id) {
+                let parent_row = parent_row.clone();
+                if node_ref::would_exceed_epic_depth(rows, &node_row, &parent_row) {
+                    return Err(refused(
+                        format!(
+                            "Error: making {node_id} an epic under {parent_id} \
+                             would exceed the 2-level cap \
+                             (mission -> epic -> leaf); an epic may nest only \
+                             under a top-level mission"
+                        ),
+                        1,
+                    ));
+                }
+            }
+        }
     }
     Ok(warnings)
+}
+
+/// The `_parse_blocker_list` twin: comma-split, trim, skip empties.
+fn parse_list(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for v in values {
+        for token in v.split(',') {
+            let t = token.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `dict.fromkeys` order-preserving dedupe.
+fn dedupe(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for v in values {
+        if seen.insert(v.clone()) {
+            out.push(v);
+        }
+    }
+    out
 }
 
 /// The `null` clear-sentinel: "null" (any case) clears, anything else passes.
@@ -936,6 +1379,105 @@ fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<()
         ));
     }
     Ok(())
+}
+
+/// The plan-frontmatter size read that flows doc->graph on a (re)link, for a
+/// node with no size yet. Best-effort: an unreadable plan contributes nothing.
+fn linked_plan_size(args: &UpdateArgs) -> Option<String> {
+    let raw = args.plan_path.as_deref()?;
+    if raw.to_lowercase() == "null" {
+        return None;
+    }
+    let mut pp = PathBuf::from(raw);
+    if !pp.is_absolute() {
+        let root = std::env::current_dir().ok()?;
+        pp = root.join(pp);
+    }
+    let (_, fields, _) = crate::plan_doc::codec::read_plan_file(&pp).ok()?;
+    let size = match fields.get("size")? {
+        crate::plan_doc::codec::Value::Scalar(s) => s.trim().to_uppercase(),
+        _ => return None,
+    };
+    if ["S", "M", "L"].contains(&size.as_str()) {
+        Some(size)
+    } else {
+        None
+    }
+}
+
+/// The post-commit read-back for `--locked-by`: the Updated receipt answers
+/// "was the command accepted", never "is the value there". Refuses a
+/// mismatched owner, warns on a mirror-only stamp, refuses a release that
+/// leaves the node wedged in_progress.
+fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(), Refusal> {
+    let rows =
+        graph_store::read_rows(graph).map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+    let stored: Option<&Value> = rows
+        .iter()
+        .filter(|r| r.get("archived_at").is_none())
+        .find(|r| entry_id(r) == Some(node_id));
+    let stored_owner = stored
+        .and_then(|r| r.get("locked_by"))
+        .and_then(Value::as_str);
+    let expected = null_if(locked_by);
+    if stored_owner != expected.as_deref() {
+        let show = |v: Option<&str>| v.map(|s| format!("'{s}'")).unwrap_or_else(|| "None".into());
+        return Err(refused(
+            format!(
+                "error: {node_id} read back locked_by={}, not {}: the write did not persist.                  A concurrent claim transition may have cleared it; re-check before trusting.",
+                show(stored_owner),
+                show(expected.as_deref())
+            ),
+            1,
+        ));
+    }
+    if expected.is_none() {
+        // Earned-success rule: a lock clear that left the node in_progress on
+        // its own open do rows did not return it to the queue.
+        let row = stored.unwrap_or(&Value::Null);
+        let stored_status = row
+            .get("persisted_status")
+            .and_then(Value::as_str)
+            .or_else(|| row.get("status").and_then(Value::as_str));
+        if stored_status == Some("in_progress") {
+            let open_do = row
+                .get("sessions")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter(|r| graph_store::is_open_do_row(r)).count())
+                .unwrap_or(0);
+            let plural = if open_do != 1 { "s" } else { "" };
+            return Err(refused(
+                format!(
+                    "update: {node_id} still reads in_progress after clearing the claim                      ({open_do} open do row{plural}). The claim was not what held it.                      Use: fno backlog requeue {node_id}"
+                ),
+                3,
+            ));
+        }
+        return Ok(());
+    }
+    if !node_has_live_claim(&format!("node:{node_id}")) {
+        eprintln!(
+            "warning: no live claim lockfile backs node:{node_id}; claim hygiene \
+             (fno agents claim reap) clears locked_by without one. To hold the node: \
+             fno agents claim acquire node:{node_id}"
+        );
+    }
+    Ok(())
+}
+
+/// Does a claim lockfile for `key` exist in any swept root? The global root
+/// plus the cwd/env default - the same pair the Python probe sweeps.
+fn node_has_live_claim(key: &str) -> bool {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = crate::claims::claim_path(key, None) {
+        candidates.push(p);
+    }
+    if let Some(root) = crate::claims::global_claims_root() {
+        if let Ok(p) = crate::claims::claim_path(key, Some(&root)) {
+            candidates.push(p);
+        }
+    }
+    candidates.iter().any(|p| p.exists())
 }
 
 /// The plan repaint: graph-authoritative fields flow onto the linked plan
@@ -1003,7 +1545,7 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(UpdateArgs::parse(&retired).is_none());
-        let later_wave: Vec<String> = ["x-aaaa1111", "--parent", "x-eeee5555"]
+        let later_wave: Vec<String> = ["x-aaaa1111", "--pr", "https://github.com/o/r/pull/9"]
             .iter()
             .map(|s| s.to_string())
             .collect();
