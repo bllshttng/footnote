@@ -340,15 +340,21 @@ CREATE INDEX IF NOT EXISTS events_node_id ON events(node_id) WHERE node_id IS NO
 CREATE INDEX IF NOT EXISTS events_pr_head ON events(pr_number, head_sha);
 CREATE INDEX IF NOT EXISTS events_retention_ts ON events(retention_class, ts_ms);";
 
+/// The `events_meta` key that stamps the first moment this build observed the
+/// store: history proven to be complete starts there, never earlier.
+pub const COVERAGE_EPOCH_KEY: &str = "coverage_complete_since_ms";
+
 /// Ensure the store speaks schema v2: a fresh store is created in the v2
 /// shape; a v1 store (`events` without an `event_id` column) migrates in
 /// place; a v2 store is a no-op. Any failure rolls the transaction back, so
-/// `user_version`, row counts, and completion metadata are untouched.
+/// `user_version`, row counts, and completion metadata are untouched. Every
+/// open also stamps the coverage epoch once (a single indexed select on the
+/// common path).
 pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> {
     let current = refuse_newer_schema(conn, store)?;
     let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
-        return Ok(());
+        return stamp_coverage_epoch(conn, store);
     }
     let has_events: bool = conn
         .query_row(
@@ -393,7 +399,34 @@ pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> 
         stamp_v2(&tx)?;
     }
     tx.commit()
-        .map_err(|e| format!("{}: migration: {e}", store.display()))
+        .map_err(|e| format!("{}: migration: {e}", store.display()))?;
+    stamp_coverage_epoch(conn, store)
+}
+
+/// Stamp [`COVERAGE_EPOCH_KEY`] with the first-open moment of this build,
+/// once per store. The value is never taken from `MIN(ts_ms)` or an imported
+/// row: imported rows widen what is observed, never what is proven.
+fn stamp_coverage_epoch(conn: &Connection, store: &Path) -> Result<(), String> {
+    let present: Option<String> = conn
+        .query_row(
+            "SELECT value FROM events_meta WHERE key = ?1",
+            params![COVERAGE_EPOCH_KEY],
+            |r| r.get(0),
+        )
+        .ok();
+    if present.is_some() {
+        return Ok(());
+    }
+    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as i64,
+        Err(e) => return Err(format!("{}: {e}", store.display())),
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO events_meta (key, value) VALUES (?1, ?2)",
+        params![COVERAGE_EPOCH_KEY, now_ms.to_string()],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("{}: coverage epoch: {e}", store.display()))
 }
 
 fn events_table_has_event_id(conn: &Connection) -> bool {
@@ -1171,6 +1204,128 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+/// How far back a count over this store is proven, for the asked types. The
+/// store keeps every durable and gate row since the coverage epoch and every
+/// unexpired ephemeral row; anything before the proven start is unknown, so a
+/// zero there is never a confident zero.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Coverage {
+    /// `complete` | `partial` | `unknown` | `unreadable`.
+    pub status: &'static str,
+    /// The proven start (epoch, or the later ephemeral cutoff).
+    pub complete_since_ms: Option<i64>,
+    pub requested_since_ms: Option<i64>,
+    /// Earliest and latest surviving row for the asked types; the observed
+    /// span may reach before the epoch (imported history) without proving it.
+    pub observed_first_ms: Option<i64>,
+    pub observed_last_ms: Option<i64>,
+    /// Why the status is not `complete` or `partial`.
+    pub reason: Option<String>,
+}
+
+/// The coverage receipt for one store and an optional `since` bound. Read
+/// only: it never creates or migrates the store, so a pre-epoch store (no
+/// stamp yet) reads `unknown`, and a missing or unopenable store reads
+/// `unreadable`.
+pub fn coverage(journal: &Path, since_ms: Option<i64>, types: &[String]) -> Coverage {
+    let store = store_path(journal);
+    if !store.is_file() {
+        return Coverage {
+            status: "unreadable",
+            complete_since_ms: None,
+            requested_since_ms: since_ms,
+            observed_first_ms: None,
+            observed_last_ms: None,
+            reason: Some(format!("store {} does not exist", store.display())),
+        };
+    }
+    let conn = match open_read(&store) {
+        Ok(c) => c,
+        Err(e) => {
+            return Coverage {
+                status: "unreadable",
+                complete_since_ms: None,
+                requested_since_ms: since_ms,
+                observed_first_ms: None,
+                observed_last_ms: None,
+                reason: Some(e),
+            }
+        }
+    };
+    let epoch: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM events_meta WHERE key = ?1",
+            params![COVERAGE_EPOCH_KEY],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let Some(epoch) = epoch else {
+        return Coverage {
+            status: "unknown",
+            complete_since_ms: None,
+            requested_since_ms: since_ms,
+            observed_first_ms: None,
+            observed_last_ms: None,
+            reason: Some("store predates the coverage epoch (no stamp)".to_string()),
+        };
+    };
+    let last_prune_ms: i64 = conn
+        .query_row(
+            "SELECT value FROM events_meta WHERE key = 'last_prune_ms'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // The proven start per asked kind: durable and gate kinds are kept
+    // forever since the epoch; an ephemeral kind only proves back to the
+    // last prune's retention cutoff. A mixed list takes the later start.
+    let ephemeral_cutoff = last_prune_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
+    let proven_start = types
+        .iter()
+        .map(|t| {
+            if is_ephemeral_event(t) {
+                epoch.max(ephemeral_cutoff)
+            } else {
+                epoch
+            }
+        })
+        .max()
+        .unwrap_or(epoch);
+    let (observed_first_ms, observed_last_ms): (Option<i64>, Option<i64>) = {
+        let (mut where_clauses, mut args): (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) =
+            (Vec::new(), Vec::new());
+        if !types.is_empty() {
+            let placeholders = types.iter().map(|_| "?".to_string()).collect::<Vec<_>>();
+            where_clauses.push(format!("type IN ({})", placeholders.join(", ")));
+            for t in types {
+                args.push(Box::new(t.clone()));
+            }
+        }
+        where_clauses.push("reject_reason IS NULL".to_string());
+        let sql = format!(
+            "SELECT MIN(ts_ms), MAX(ts_ms) FROM events WHERE {}",
+            where_clauses.join(" AND ")
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        conn.query_row(&sql, refs.as_slice(), |r| {
+            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+        })
+        .unwrap_or((None, None))
+    };
+    let complete = since_ms.is_some_and(|s| s >= proven_start);
+    Coverage {
+        status: if complete { "complete" } else { "partial" },
+        complete_since_ms: Some(proven_start),
+        requested_since_ms: since_ms,
+        observed_first_ms,
+        observed_last_ms,
+        reason: None,
+    }
 }
 
 /// Every review-evidence row type a loopcheck parser reads from journal text.

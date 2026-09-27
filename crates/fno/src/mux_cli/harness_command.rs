@@ -276,15 +276,14 @@ fn pane_infos(sock: &Path, session: &str) -> Result<Vec<proto::PaneInfo>, String
     }
 }
 
-struct OwnedPortal {
+struct OwnedView {
     sock: std::path::PathBuf,
     session: String,
     pane: u64,
-    index: u8,
     identity: String,
 }
 
-impl Drop for OwnedPortal {
+impl Drop for OwnedView {
     fn drop(&mut self) {
         let still_owned = pane_infos(&self.sock, &self.session)
             .ok()
@@ -296,8 +295,8 @@ impl Drop for OwnedPortal {
             });
         if !still_owned {
             eprintln!(
-                "fno mux command: leaving portal {} pane {} open because its identity changed",
-                self.index, self.pane
+                "fno mux command: leaving view pane {} open because its identity changed",
+                self.pane
             );
             return;
         }
@@ -311,26 +310,26 @@ impl Drop for OwnedPortal {
         ) {
             Ok(ServerMsg::Ok) => {}
             Ok(ServerMsg::Err { msg, .. }) => eprintln!(
-                "fno mux command: owned portal {} pane {} cleanup refused: {msg}",
-                self.index, self.pane
+                "fno mux command: owned view pane {} cleanup refused: {msg}",
+                self.pane
             ),
             Ok(other) => eprintln!(
-                "fno mux command: owned portal {} pane {} cleanup returned {other:?}",
-                self.index, self.pane
+                "fno mux command: owned view pane {} cleanup returned {other:?}",
+                self.pane
             ),
             Err(error) => eprintln!(
-                "fno mux command: owned portal {} pane {} cleanup failed: {error}",
-                self.index, self.pane
+                "fno mux command: owned view pane {} cleanup failed: {error}",
+                self.pane
             ),
         }
     }
 }
 
-fn open_command_portal(
+fn open_command_view(
     row_name: &str,
     session_id: &str,
     env_session: Option<&str>,
-) -> Result<OwnedPortal, String> {
+) -> Result<OwnedView, String> {
     let session = resolve_session(None, env_session);
     let sock = proto::socket_path(&session).map_err(|error| error.to_string())?;
     let before = pane_infos(&sock, &session)?;
@@ -340,8 +339,10 @@ fn open_command_portal(
     {
         return Err("paneless row already has a pane view; refusing to repoint it".into());
     }
+    // The view door: a screen that is never a portal - no portals entry,
+    // never persisted, and the restore prune reaps a leftover view.
     let placement = PanePlacement {
-        portal_new: true,
+        view: true,
         ..PanePlacement::default()
     };
     let landing = match control_roundtrip(
@@ -353,21 +354,15 @@ fn open_command_portal(
             placement,
         },
     )
-    .map_err(|error| format!("new portal result unknown: {error}"))?
+    .map_err(|error| format!("view open result unknown: {error}"))?
     {
         ServerMsg::Notice { text } => text,
-        ServerMsg::Err { msg, .. } => return Err(format!("new portal refused: {msg}")),
-        other => return Err(format!("unexpected new portal reply: {other:?}")),
+        ServerMsg::Err { msg, .. } => return Err(format!("view open refused: {msg}")),
+        other => return Err(format!("unexpected view open reply: {other:?}")),
     };
-    if !landing.contains("thread pane ->") {
-        return Err(format!("new portal did not confirm a landing: {landing}"));
+    if !landing.contains("view pane ->") {
+        return Err(format!("view open did not confirm a landing: {landing}"));
     }
-    let portal_index = Regex::new(r"\(portal ([0-9]+)\)")
-        .ok()
-        .and_then(|regex| regex.captures(&landing))
-        .and_then(|captures| captures.get(1))
-        .and_then(|index| index.as_str().parse::<u8>().ok())
-        .ok_or_else(|| format!("new portal reply has no owned portal index: {landing}"))?;
     let after = pane_infos(&sock, &session)?;
     let before_ids = before.iter().map(|pane| pane.pane_id).collect::<Vec<_>>();
     let added = after
@@ -378,14 +373,13 @@ fn open_command_portal(
         .collect::<Vec<_>>();
     if added.len() != 1 {
         return Err(format!(
-            "portal {portal_index} landed without exactly one new pane joined to session {session_id}"
+            "view pane landed without exactly one new pane joined to session {session_id}"
         ));
     }
-    Ok(OwnedPortal {
+    Ok(OwnedView {
         sock,
         session,
         pane: added[0].pane_id,
-        index: portal_index,
         identity: session_id.to_string(),
     })
 }
@@ -933,10 +927,10 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             EXIT_CONTROL_UNANSWERED
         };
     }
-    let (session, pane, _owned_portal) = match row.mux.clone() {
+    let (session, pane, _owned_view) = match row.mux.clone() {
         Some((session, pane)) => (session, pane, None),
-        None => match open_command_portal(&row.name, &session_id, env_session) {
-            Ok(portal) => (portal.session.clone(), portal.pane, Some(portal)),
+        None => match open_command_view(&row.name, &session_id, env_session) {
+            Ok(view) => (view.session.clone(), view.pane, Some(view)),
             Err(error) => {
                 let mut receipt = reservation.clone();
                 receipt.detail = format!("paneless portal result unknown: {error}");
@@ -949,8 +943,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             }
         },
     };
-    let sock = if let Some(portal) = _owned_portal.as_ref() {
-        portal.sock.clone()
+    let sock = if let Some(view) = _owned_view.as_ref() {
+        view.sock.clone()
     } else {
         match proto::socket_path(&session) {
             Ok(path) => path,
