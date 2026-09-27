@@ -689,6 +689,9 @@ pub(crate) fn maybe_sweep(
             thread_hosted.as_ref(),
             SweepMode::ServeOnly,
         );
+        // C16: re-arm release timers for holds whose clock lapsed with no
+        // live timer, so a stale bus-only flag cannot outlive its clock.
+        crate::mail_hold::tidy_lapsed_holds(&home, chrono::Utc::now());
     });
 }
 

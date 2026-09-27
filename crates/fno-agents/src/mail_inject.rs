@@ -11,7 +11,8 @@
 //! Reuses the G1 substrate for roster resolution ([`crate::claude_roster`]) ->
 //! `control.sock` + `control.key` and the attach handshake
 //! ([`crate::claude_attach`]). Post-attach the socket is a RAW keystroke pipe, so
-//! the turn is bracketed-PASTED as raw bytes and submitted with a wire-level CR --
+//! the turn is TYPED as one flattened line ([`one_line`], C17: mail is a
+//! delivery, never a paste) and submitted with a wire-level CR --
 //! NOT an `op:'reply'` JSON frame, which would land (auth key included) as literal
 //! text in the recipient input box, unsent (node x-aaaa). The `<fno_mail>` envelope is
 //! rendered Python-side (the single renderer, shared by the codex/gemini + relay
@@ -118,12 +119,9 @@ pub fn keeper_lane_harness(name: &str) -> bool {
     attach_unsupported && resume_supported
 }
 
-/// Interval multiple at which the confirm loop re-sends the wire-level CR. The
-/// initial CR (from `inject_with_submit`) can be swallowed mid-paste by a BUSY
-/// recipient streaming a turn, leaving the envelope sitting unsent; re-Entering
-/// every ~2s (8 * 250ms) lands it once the recipient drains. Idempotent: a bare
-/// Enter on an empty/already-submitted input box is a no-op in CC.
-const CR_RESUBMIT_EVERY: u32 = 8;
+/// The C11 quiet-gate budget, and its 1 s poll: long enough to let a burst
+/// age out, short enough that Python still answers its live-lane timeout.
+const QUIET_WAIT_S: u64 = 30;
 
 /// Live-inject target harness. `claude` is the default `control.sock` path;
 /// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8);
@@ -137,6 +135,10 @@ pub enum MailInjectHarness {
     Codex,
     Opencode,
     Keeper,
+    /// (v94) The mux-pane lane (C11, C12, C15, C17): typed through
+    /// `fno mux pane send --raw`, DND-passed when the hold gate says so,
+    /// confirmed by the hosted harness's own accepted-turn record.
+    Pane,
 }
 
 impl MailInjectHarness {
@@ -150,6 +152,7 @@ impl MailInjectHarness {
             MailInjectHarness::Codex => "codex",
             MailInjectHarness::Opencode => "opencode",
             MailInjectHarness::Keeper => "keeper-hosted",
+            MailInjectHarness::Pane => "pane",
         }
     }
 }
@@ -199,6 +202,9 @@ pub struct MailInjectArgs {
     /// the payload runs that verb; the only spelling that carries a
     /// session-ending or context-destroying verb past the risk guard.
     pub ack_verb_risk: Option<String>,
+    /// `--pane <session>:<pane_id>`: the pane-lane address (which mux server
+    /// hosts the recipient and which pane id to type into).
+    pub pane: Option<String>,
 }
 
 /// Resolution miss: no roster entry for the session, or a roster entry with no
@@ -245,6 +251,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut probe = false;
     let mut lane_heal = false;
     let mut no_rebind = false;
+    let mut pane: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -264,6 +271,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                     "claude" => MailInjectHarness::Claude,
                     "codex" => MailInjectHarness::Codex,
                     "opencode" => MailInjectHarness::Opencode,
+                    "pane" => MailInjectHarness::Pane,
                     name if keeper_lane_harness(name) => MailInjectHarness::Keeper,
                     _ => {
                         return Err((
@@ -295,6 +303,13 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 );
             }
             "--self-send" => self_send = true,
+            "--pane" => {
+                pane = Some(
+                    it.next()
+                        .ok_or((2, "mail-inject: --pane needs session:pane-id".to_string()))?
+                        .to_string(),
+                );
+            }
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
@@ -346,7 +361,10 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     // the --harness value IS the hosted harness's row name, so the delay
     // resolves off that row here; lane A keeps its enum-keyed resolution.
     let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match harness {
-        MailInjectHarness::Keeper => {
+        // Keeper and pane recipients settle on the HOSTED harness's own row
+        // (the TUI receiving the paste); the pane lane labels no capability
+        // row of its own.
+        MailInjectHarness::Keeper | MailInjectHarness::Pane => {
             enter_delay_for_harness(harness_flag.as_deref().unwrap_or("claude"))
         }
         _ => default_enter_delay_ms(harness),
@@ -365,6 +383,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         no_rebind,
         harness_row: harness_flag,
         ack_verb_risk,
+        pane,
     })
 }
 
@@ -463,6 +482,7 @@ pub fn emit_raw_inject_audit_with_origin(
         // The audit records the LANE; the hosted harness's own row resolved
         // the settle delay and the confirm target at delivery time.
         MailInjectHarness::Keeper => ("keeper-hosted", "keeper-pty"),
+        MailInjectHarness::Pane => ("pane", "mux-pane"),
     };
     let payload_for_event: String = text.chars().take(512).collect();
     let mut fields = serde_json::Map::new();
@@ -516,30 +536,59 @@ fn emit(delivered: bool, reason: &str) -> i32 {
     outcome_exit(delivered)
 }
 
-/// Bracketed-paste guards (xterm DEC mode 2004): the recipient TUI treats
-/// everything between them as ONE paste event. Required whenever the payload
-/// carries a control byte (the envelope renderer emits one clean line unless
-/// the body itself does not): a raw multi-line write without them submits
-/// line-by-line -- the recipient records the open tag alone (enough to satisfy
-/// the content confirm) while the body arrives as separate input, dropping the
-/// message; a lone CR or tab fires inside the input box, an ESC opens an
-/// escape sequence. A clean single-line payload is typed as ordinary
-/// keystrokes, unwrapped, so it never wears the operator-clipboard paste
-/// label. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
-const PASTE_BEGIN: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
+/// The glyph every newline in a mail delivery is typed as (C17, crown ruling
+/// d-9187ccf6): one constant, so the user can change the glyph on one line.
+/// Space-padded so the surrounding words survive the flattening.
+const NEWLINE_GLYPH: &str = " ⏎ ";
 
-/// Type the envelope as RAW BYTES on the ATTACHED transport -- bracketed-paste
-/// guards whenever it carries a control byte, so that form lands as ONE paste
-/// while a clean single-line envelope arrives as typed keystrokes, unlabelled
-/// -- settle, then send a separate raw `\r` byte as the Enter. Post-attach the
-/// `control.sock` is a
-/// raw keystroke pipe (node x-aaaa): an `op:'reply'` JSON write here lands its
-/// frames -- auth key included -- as literal text in the recipient input box,
-/// unsent. So we type the turn exactly as a human would: paste, then a wire-level
-/// CR. The CR is a distinct write, NOT `\r` appended to the paste -- an embedded
-/// `\r` is paste content, only a separate keystroke is the Enter. Refuses text
-/// carrying a detach sentinel before any write. Extracted so the raw sequence is
+/// Flatten a mail body to ONE typable line (C17: mail is a delivery, never a
+/// paste). Every newline run (`\r\n`, `\n`, `\r`) becomes [`NEWLINE_GLYPH`], a
+/// tab becomes one space, and every other control char -- ESC included -- is
+/// dropped, so nothing the raw-keystroke path would act on survives: no byte
+/// submits line-by-line, no ESC opens an escape sequence. The durable bus copy
+/// keeps the real newlines; only the typed keystrokes are flattened.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push_str(NEWLINE_GLYPH);
+            }
+            '\n' => out.push_str(NEWLINE_GLYPH),
+            '\t' => out.push(' '),
+            other if other.is_control() => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The content-confirm marker for a typed inject: the typed text up to its
+/// first [`NEWLINE_GLYPH`]. That is the same first line `text.lines().next()`
+/// gave when multi-line bodies were bracketed pastes -- the open tag carries
+/// no newline, so flattening never moves it.
+fn typed_marker(text: &str) -> String {
+    let typed = one_line(text);
+    match typed.find(NEWLINE_GLYPH) {
+        Some(idx) => typed[..idx].to_string(),
+        None => typed,
+    }
+}
+
+/// Type the envelope as RAW BYTES on the ATTACHED transport -- flattened to
+/// one line by [`one_line`] (C17: a delivery is typed as ordinary keystrokes
+/// and never wears the operator-clipboard paste label; a paste is only the
+/// user's own) -- settle, then send a separate raw `\r` byte as the Enter.
+/// Post-attach the `control.sock` is a raw keystroke pipe (node x-aaaa): an
+/// `op:'reply'` JSON write here lands its frames -- auth key included -- as
+/// literal text in the recipient input box, unsent. So we type the turn
+/// exactly as a human would: one line, then a wire-level CR. The CR is a
+/// distinct write, NOT `\r` appended to the line. Refuses text carrying a
+/// detach sentinel before any write. Extracted so the raw sequence is
 /// unit-testable against a `Fake` transport (settle=ZERO).
 fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     transport: &mut T,
@@ -549,17 +598,7 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
     }
-    // Guards whenever the payload carries anything the raw-keystroke path
-    // would act on: a newline splits the submit, a lone CR or tab fires
-    // inside the input box, an ESC opens an escape sequence. One control
-    // char anywhere demotes the whole write to paste content, where every
-    // byte is inert. A clean single-line payload stays typed keystrokes, so
-    // it never wears the operator-clipboard paste label.
-    let line = if text.chars().any(char::is_control) {
-        format!("{PASTE_BEGIN}{text}{PASTE_END}")
-    } else {
-        text.to_string()
-    };
+    let line = one_line(text);
     transport
         .send_line(&line)
         .map_err(|e| DriveError::Io(e.to_string()))?;
@@ -569,29 +608,122 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
         .map_err(|e| DriveError::Io(e.to_string()))
 }
 
-/// Poll `confirmed` (a content check on the recipient transcript), re-sending the
-/// raw wire-level CR every `CR_RESUBMIT_EVERY` intervals so a CR the busy recipient
-/// swallowed mid-paste gets re-Entered once it drains. `Ok(())` on a confirmed
-/// landing, `Err("not-confirmed")` on budget exhaustion. Extracted from the
-/// transport + transcript so the retry cadence is unit-testable against a `Fake`
-/// (interval=ZERO). Re-send errors are ignored: it is best-effort, and a dead
-/// transport fails the confirm anyway.
-fn confirm_with_cr_retry<T: crate::claude_attach::ControlTransport>(
+/// The C12 confirm: poll the content confirm for half the budget, send ONE
+/// more wire-level CR (the one the busy recipient swallowed), poll the rest,
+/// and on total silence withdraw the typed line with DEL bytes -- unless the
+/// operator has typed since the inject (a typing row newer than
+/// `typed_since_ms`), because their text is in the composer now and the
+/// withdraw would eat it. `withdraw_on_silence: false` keeps the keeper
+/// `Unconfirmable` arm's shape: it types and never withdraws, because no
+/// landing can be seen there. Replaces the old re-Enter-every-8-polls
+/// cadence: one extra Enter is the measured fix for a swallowed CR, and a
+/// bounded withdraw beats an unconfirmed unknown. Re-send errors are
+/// ignored: it is best-effort, and a dead transport fails the confirm anyway.
+fn confirm_or_withdraw<T: crate::claude_attach::ControlTransport>(
     transport: &mut T,
     attempts: u32,
     interval: Duration,
+    typed_chars: usize,
+    typed_since_ms: i64,
+    journal: &Path,
+    session: &str,
+    withdraw_on_silence: bool,
     mut confirmed: impl FnMut() -> bool,
 ) -> Result<(), &'static str> {
-    for i in 0..attempts.max(1) {
+    let half = (attempts.max(1) / 2).max(1);
+    for _ in 0..half {
         if confirmed() {
             return Ok(());
         }
         std::thread::sleep(interval);
-        if (i + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = transport.send_line("\r");
-        }
     }
+    let _ = transport.send_line("\r");
+    for _ in half..attempts.max(1) {
+        if confirmed() {
+            return Ok(());
+        }
+        std::thread::sleep(interval);
+    }
+    if !withdraw_on_silence {
+        return Err("not-confirmed");
+    }
+    // Withdraw only when the operator has not typed since the inject: a
+    // typing row newer than `typed_since_ms` means their text is in the
+    // composer now, and the DEL write would eat it with our line.
+    let ts = crate::operator_witness::typing_state(journal, session, now_ms());
+    let typed_since_inject = ts.newest_typing_ms.is_some_and(|t| t > typed_since_ms);
+    if ts.recent || typed_since_inject {
+        return Err("not-confirmed");
+    }
+    let _ = transport.send_line(&"\u{7f}".repeat(typed_chars));
     Err("not-confirmed")
+}
+
+/// Epoch milliseconds now, the typing-feed join key.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// The C11/C14 quiet gate: poll the recipient's typing witness and its
+/// effective registry state every `poll` for up to `budget`, so mail never
+/// lands over a live draft or into a session that is asking the operator a
+/// question. Proceeds when the operator is neither typing nor holding an
+/// unfinished draft and the row is not Blocked. On timeout the reason is
+/// whichever blocker held last; Python maps any not-delivered reason to the
+/// durable queue, so the mail waits on the bus. The injectable clock and
+/// sleeper keep the cadence unit-testable.
+fn wait_for_quiet_in(
+    journal: &Path,
+    registry_path: &Path,
+    session: &str,
+    budget: Duration,
+    poll: Duration,
+    now: &mut impl FnMut() -> i64,
+    sleeper: &mut impl FnMut(Duration),
+) -> Result<(), &'static str> {
+    let deadline = now() + budget.as_millis() as i64;
+    loop {
+        let ts = crate::operator_witness::typing_state(journal, session, now());
+        let blocked = registry_row_blocked(registry_path, session);
+        if !ts.recent && !ts.draft && !blocked {
+            return Ok(());
+        }
+        let blocker = if blocked {
+            "session-asking"
+        } else {
+            "user-typing"
+        };
+        if now() >= deadline {
+            return Err(blocker);
+        }
+        sleeper(poll);
+    }
+}
+
+/// True when the registry row `session` addresses is effectively Blocked
+/// (a question picker, a permission wall): the C14 "session-asking" state.
+/// An unreadable registry or no row never blocks.
+fn registry_row_blocked(registry_path: &Path, session: &str) -> bool {
+    let Ok(registry) = crate::state::load_registry(registry_path) else {
+        return false;
+    };
+    let Some(entry) = registry.entries.iter().find(|e| {
+        e.harness_session_id.as_deref() == Some(session)
+            || (session.len() == 8
+                && e.harness_session_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with(session)))
+    }) else {
+        return false;
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::wait::effective_state(entry, now_secs).0 == crate::wait::EffState::Blocked
 }
 
 /// The escaped form of `marker` as it appears inside a transcript JSONL line: the
@@ -663,7 +795,7 @@ fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static 
 }
 
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
-/// recipient on the roster, attach, paste the envelope + wire-level CR submit, and
+/// recipient on the roster, attach, type the flattened envelope + wire-level CR submit, and
 /// confirm by CONTENT that the injected turn landed in the recipient transcript.
 /// `Ok(())` == delivered (the `<fno_mail>` marker appeared after the inject);
 /// `Err(reason)` is a clean not-delivered signal whose value IS the `mail-inject`
@@ -721,10 +853,13 @@ pub fn deliver_via_control_sock_in(
     // so attach side-effects cannot be mistaken for our turn landing (codex peer
     // P2); the content confirm scans only lines appended past this offset.
     let baseline = transcript_len(&transcript);
-    // The injected turn's opening line -- its `<fno_mail>` open tag -- is the
-    // content marker the confirm greps for; it is recorded verbatim once the turn
-    // submits.
-    let marker = text.lines().next().unwrap_or(text);
+    // The withdraw guard's clock: typing the operator does AFTER this instant
+    // is theirs, so the line is never deleted out from under them.
+    let typed_since = now_ms();
+    // The typed turn's opening line -- its `<fno_mail>` open tag, unchanged by
+    // the one-line flattening -- is the content marker the confirm greps for;
+    // it is recorded verbatim once the turn submits.
+    let marker = typed_marker(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
         |e| match e {
             DriveError::UnsafeText => "unsafe-text",
@@ -732,18 +867,24 @@ pub fn deliver_via_control_sock_in(
         },
     )?;
 
-    confirm_with_cr_retry(
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
         &mut transport,
         attempts,
         Duration::from_millis(interval_ms),
-        || confirm_content_after(&transcript, marker, baseline).unwrap_or(false),
+        one_line(text).chars().count(),
+        typed_since,
+        &journal,
+        session,
+        true,
+        || confirm_content_after(&transcript, &marker, baseline).unwrap_or(false),
     )
 }
 
 /// The keeper lane's raw-byte transport: one `Input` frame per write, through
 /// the keeper binary's own frame codec. `send_line` is VERBATIM by the
-/// ControlTransport contract, so `inject_with_submit`'s paste + separate wire
-/// CR sequence rides unchanged - the same keystroke discipline the pane lane
+/// ControlTransport contract, so `inject_with_submit`'s one-line + separate
+/// wire CR sequence rides unchanged - the same keystroke discipline the pane lane
 /// types, just framed for a keeper instead of a mux pane.
 struct KeeperTransport {
     stream: std::os::unix::net::UnixStream,
@@ -810,7 +951,8 @@ fn resolve_keeper_target_in(
 /// harness with no local accepted-turn record types but stays unconfirmed:
 /// composer echo and scrollback repaint are typing progress, never delivery
 ///.
-enum KeeperConfirm {
+#[derive(Debug)]
+enum LaneConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
         path: PathBuf,
@@ -837,64 +979,93 @@ enum KeeperConfirm {
     Refused(&'static str),
 }
 
-fn resolve_keeper_confirm(
-    target: &KeeperTarget,
+fn resolve_confirm(
+    hosted_harness: &str,
     session: &str,
+    cwd: &Path,
     pi_store: Option<&crate::pi::PiStore>,
     grok_root: &Path,
-) -> KeeperConfirm {
-    match target.hosted_harness.as_str() {
+) -> LaneConfirm {
+    match hosted_harness {
         // cursor-agent's chat store is remote (measured: the id appears in no
         // file under its state root after two live turns) and agy keeps its
         // conversations in a sqlite db - neither has a per-turn transcript a
         // confirm could grep, and pty paint is not acceptance evidence.
         // Both type and stay unconfirmed.
-        "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
-        "pi" => {
-            let Some(store) = pi_store else {
-                return KeeperConfirm::Refused("session-store-unreadable");
-            };
-            match crate::pi::lookup_sessions_in(store, &target.cwd, session) {
-                crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+        "cursor-agent" | "agy" => LaneConfirm::Unconfirmable,
+        // Lane A claude: the recipient's own transcript is the confirm
+        // target, exactly the pane lane's claude arm below.
+        "claude" => {
+            match crate::claude_drive::find_transcript_in(
+                &crate::claude_drive::claude_projects_dir(),
+                session,
+            ) {
+                Some(file) => LaneConfirm::Transcript {
                     baseline: transcript_len(&file),
                     path: file,
                 },
-                crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                None => LaneConfirm::PendingStore {
+                    harness: "claude".to_string(),
+                },
+            }
+        }
+        // The codex landing confirm the codex pane never had (C12): a
+        // rollout file is the accepted-turn record the content confirm
+        // greps.
+        "codex" => match crate::codex_store::codex_rollout_path(None, session) {
+            Some(file) => LaneConfirm::Transcript {
+                baseline: transcript_len(&file),
+                path: file,
+            },
+            None => LaneConfirm::PendingStore {
+                harness: "codex".to_string(),
+            },
+        },
+        "pi" => {
+            let Some(store) = pi_store else {
+                return LaneConfirm::Refused("session-store-unreadable");
+            };
+            match crate::pi::lookup_sessions_in(store, cwd, session) {
+                crate::pi::SessionLookup::One { file } => LaneConfirm::Transcript {
+                    baseline: transcript_len(&file),
+                    path: file,
+                },
+                crate::pi::SessionLookup::None => LaneConfirm::PendingStore {
                     harness: "pi".to_string(),
                 },
                 crate::pi::SessionLookup::Duplicate { .. } => {
-                    KeeperConfirm::Refused("duplicate-session-store")
+                    LaneConfirm::Refused("duplicate-session-store")
                 }
                 crate::pi::SessionLookup::Unknown { .. } => {
-                    KeeperConfirm::Refused("session-store-unreadable")
+                    LaneConfirm::Refused("session-store-unreadable")
                 }
             }
         }
         "grok" => match crate::grok_store::lookup_session(grok_root, session) {
-            crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+            crate::pi::SessionLookup::One { file } => LaneConfirm::Transcript {
                 baseline: transcript_len(&file),
                 path: file,
             },
-            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+            crate::pi::SessionLookup::None => LaneConfirm::PendingStore {
                 harness: "grok".to_string(),
             },
             crate::pi::SessionLookup::Duplicate { .. } => {
-                KeeperConfirm::Refused("duplicate-session-store")
+                LaneConfirm::Refused("duplicate-session-store")
             }
             crate::pi::SessionLookup::Unknown { .. } => {
-                KeeperConfirm::Refused("session-store-unreadable")
+                LaneConfirm::Refused("session-store-unreadable")
             }
         },
-        _ => KeeperConfirm::Refused("no-confirm-source"),
+        _ => LaneConfirm::Refused("no-confirm-source"),
     }
 }
 
 /// Deliver `text` to a keeper-hosted lane-B thread: resolve the row,
-/// connect to its keeper socket, paste the envelope inside bracketed-paste
-/// guards as one `Input` frame, settle the hosted harness's own delay, then
+/// connect to its keeper socket, type the envelope as one flattened line in
+/// an `Input` frame, settle the hosted harness's own delay, then
 /// send the wire-level CR - and confirm by CONTENT in the hosted harness's
-/// accepted-turn records, re-Entering on the same cadence as the claude lane
-/// (both loops are the SHARED `inject_with_submit` / `confirm_with_cr_retry`
+/// accepted-turn records, withdrawing on total silence like the claude lane
+/// (both loops are the SHARED `inject_with_submit` / `confirm_or_withdraw`
 /// pair; only the transport and the confirm target differ). A hosted harness
 /// with no local record (cursor-agent, agy) types and stays unconfirmed:
 /// pty paint is typing progress, never delivery.
@@ -950,18 +1121,25 @@ pub fn deliver_via_keeper_socket_in(
             Err(_) => None,
         },
     };
-    let confirm = resolve_keeper_confirm(&target, session, store, grok_root);
-    if let KeeperConfirm::Refused(reason) = confirm {
+    let confirm = resolve_confirm(
+        &target.hosted_harness,
+        session,
+        &target.cwd,
+        store,
+        grok_root,
+    );
+    if let LaneConfirm::Refused(reason) = confirm {
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
     }
     let mut transport = KeeperTransport { stream };
-    // The injected turn's opening line is the content marker the confirm
-    // greps for: recorded verbatim once the turn is accepted, and matched as
-    // the FULL line - never a truncated prefix, which sibling messages can
-    // share.
-    let marker = text.lines().next().unwrap_or(text);
+    let typed_since = now_ms();
+    // The typed turn's opening line (unchanged by the one-line flattening)
+    // is the content marker the confirm greps for: recorded verbatim once
+    // the turn is accepted, and matched as the FULL line - never a truncated
+    // prefix, which sibling messages can share.
+    let marker = typed_marker(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
         |e| match e {
             DriveError::UnsafeText => "unsafe-text",
@@ -978,6 +1156,9 @@ pub fn deliver_via_keeper_socket_in(
     if let Some(cs) = confirm_stream.as_ref() {
         let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
     }
+    // The keeper `Unconfirmable` arm (cursor-agent, agy) keeps today's shape:
+    // it types and never withdraws, because no landing can be seen there.
+    let withdraw_on_silence = !matches!(confirm, LaneConfirm::Unconfirmable);
     let confirmed = move || -> bool {
         if let Some(stream) = confirm_stream.as_ref() {
             let mut sink = [0u8; 8192];
@@ -990,37 +1171,56 @@ pub fn deliver_via_keeper_socket_in(
             }
         }
         match &confirm {
-            KeeperConfirm::Transcript { path, baseline } => {
-                confirm_content_after(path, marker, *baseline).unwrap_or(false)
+            LaneConfirm::Transcript { path, baseline } => {
+                confirm_content_after(path, &marker, *baseline).unwrap_or(false)
             }
-            KeeperConfirm::PendingStore { harness } => {
-                let hit = match harness.as_str() {
-                    "pi" => match store {
-                        Some(s) => crate::pi::lookup_sessions_in(s, &target.cwd, session),
-                        None => return false,
+            LaneConfirm::PendingStore { harness } => match harness.as_str() {
+                "pi" => match store {
+                    Some(s) => match crate::pi::lookup_sessions_in(s, &target.cwd, session) {
+                        crate::pi::SessionLookup::One { file } => {
+                            confirm_content_after(&file, &marker, 0).unwrap_or(false)
+                        }
+                        _ => false,
                     },
-                    _ => crate::grok_store::lookup_session(grok_root, session),
-                };
-                match hit {
+                    None => false,
+                },
+                "claude" => match crate::claude_drive::find_transcript_in(
+                    &crate::claude_drive::claude_projects_dir(),
+                    session,
+                ) {
+                    Some(file) => confirm_content_after(&file, &marker, 0).unwrap_or(false),
+                    None => false,
+                },
+                "codex" => match crate::codex_store::codex_rollout_path(None, session) {
+                    Some(file) => confirm_content_after(&file, &marker, 0).unwrap_or(false),
+                    None => false,
+                },
+                _ => match crate::grok_store::lookup_session(grok_root, session) {
                     crate::pi::SessionLookup::One { file } => {
-                        confirm_content_after(&file, marker, 0).unwrap_or(false)
+                        confirm_content_after(&file, &marker, 0).unwrap_or(false)
                     }
                     _ => false,
-                }
-            }
+                },
+            },
             // No local accepted-turn record exists to grep, so nothing on
             // this lane ever confirms. The budget still runs its
             // full course: the CR resubmits inside it are send retries for a
             // busy recipient, not confirm polls, and the honest outcome is
             // the unconfirmed receipt whose durable recovery Python writes.
-            KeeperConfirm::Unconfirmable => false,
-            KeeperConfirm::Refused(_) => false,
+            LaneConfirm::Unconfirmable => false,
+            LaneConfirm::Refused(_) => false,
         }
     };
-    confirm_with_cr_retry(
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
         &mut transport,
         attempts,
         Duration::from_millis(interval_ms),
+        one_line(text).chars().count(),
+        typed_since,
+        &journal,
+        session,
+        withdraw_on_silence,
         confirmed,
     )
 }
@@ -1172,27 +1372,31 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
     enforce_body_cap(text.len(), warn, refuse)
 }
 
-/// Refuse an unframed payload that is not a single command line. The
-/// invariant this door pins: an unframed payload is ONE line typed verbatim
-/// and it is a command, so it starts with / or $ (law d-f6570dc9, amending
-/// d-5976045c). Authored prose is style-checked and wrapped by `fno agents
-/// mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is framed
-/// and skipped. `Some(exit)` refuses before delivery and before the audit
-/// record; `None` proceeds.
+/// Refuse an unframed SINGLE-line payload that is not a command. The
+/// invariant this door pins: a one-line unframed payload is a command, so it
+/// starts with / or $ (law d-f6570dc9, amending d-5976045c). Authored prose
+/// is style-checked and wrapped by `fno agents mail send`; a `<fno_mail>` /
+/// `<cross-session-message>` envelope is framed and skipped.
+///
+/// A MULTI-line unframed payload is no longer refused here: the whole
+/// refusal reason was that a second line "rides in as a second submitted
+/// turn" -- and C17 deleted that harm, because the typing layer
+/// ([`inject_with_submit`]) flattens every newline run into one submitted
+/// line. The held-mail drain (hold.py `release` -> `_deliver_live` with no
+/// mail context) is the caller this door was stranding: its multi-line
+/// digest was refused with "an unframed payload must be a single line" and
+/// the held messages never reached the session. The digest types now, still
+/// audited as a raw inject.
 fn single_line_decision(text: &str) -> Option<i32> {
     if is_framed_envelope(text) {
         return None;
     }
     let trimmed = text.trim();
-    // A trailing terminator (the newline `echo` appends) is harmless: the paste
-    // submits the command, then an empty turn. Refuse only genuine second-line
-    // content, which rides in as a second submitted turn.
+    // A trailing terminator (the newline `echo` appends) was always harmless;
+    // genuine second-line content is flattened into the one submitted turn by
+    // the typing layer, so multi-line no longer refuses at all.
     if trimmed.contains('\n') || trimmed.contains('\r') {
-        eprintln!(
-            "mail-inject: an unframed payload must be a single line. A second line rides \
-             in as trailing content on the submitted turn."
-        );
-        return Some(1);
+        return None;
     }
     // Raw exists to run a command, not to carry a message: an unwrapped
     // payload lands as user-role text, so a message here impersonates the
@@ -1257,7 +1461,7 @@ fn recipient_capability_row(harness: MailInjectHarness) -> &'static str {
     match harness {
         MailInjectHarness::Codex => "codex",
         MailInjectHarness::Opencode => "opencode",
-        MailInjectHarness::Claude | MailInjectHarness::Keeper => "claude",
+        MailInjectHarness::Claude | MailInjectHarness::Keeper | MailInjectHarness::Pane => "claude",
     }
 }
 /// Retired form, still accepted for queued records.
@@ -1566,6 +1770,168 @@ fn forged_envelope_decision(text: &str) -> Option<i32> {
     forged_envelope_decision_at(text, None)
 }
 
+/// The pane lane's transport: each write rides `fno mux pane send --stdin
+/// --raw`, the same door the writer-claim holder uses, addressed with
+/// `--server` so a foreign session pane is reachable, and `--hold-pass` when
+/// the hold gate passed this text so a DND pane accepts the delivery
+/// (AC17-EDGE) without standing its guard down for anyone else.
+struct PaneTransport {
+    server: String,
+    address: String,
+    fno_id: Option<String>,
+    hold_pass: bool,
+}
+
+impl crate::claude_attach::ControlTransport for PaneTransport {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+        cmd.args([
+            "mux",
+            "pane",
+            "send",
+            &self.address,
+            "--stdin",
+            "--raw",
+            "--server",
+            &self.server,
+        ]);
+        if let Some(id) = &self.fno_id {
+            cmd.args(["--fno-id", id]);
+        }
+        if self.hold_pass {
+            cmd.arg("--hold-pass");
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit());
+        let mut child = cmd.spawn()?;
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(line.as_bytes())?;
+        let status = child.wait()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("pane send refused the write"))
+        }
+    }
+    fn recv_line(&mut self) -> io::Result<Option<String>> {
+        // The confirm loop polls the hosted harness's transcript, never the
+        // subprocess exit stream.
+        Ok(None)
+    }
+}
+
+/// Deliver `text` to a mux pane (C11, C12, C15, C17): the quiet gate, the
+/// one-line flattening and the confirm-or-withdraw cadence of the typed
+/// lanes, with the pane transport underneath and the HOSTED harness's own
+/// accepted-turn record (claude transcript or codex rollout) as the confirm
+/// target -- the landing confirm the codex pane never had.
+fn deliver_via_pane(
+    session: &str,
+    address: &str,
+    hosted_harness: Option<&str>,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    let (server, pane_id) = match address.split_once(':') {
+        Some(pair) => pair,
+        None => return Err(NOT_INJECTABLE),
+    };
+    let row_hosted = hosted_harness
+        .map(str::to_string)
+        .unwrap_or_else(|| resolve_row_harness(session).unwrap_or_else(|| "claude".to_string()));
+    let confirm_cwd = resolve_row_cwd(session);
+    let confirm_target = resolve_confirm(&row_hosted, session, &confirm_cwd, None, &grok_root());
+    if let LaneConfirm::Refused(reason) = confirm_target {
+        return Err(reason);
+    }
+    let mut transport = PaneTransport {
+        server: server.to_string(),
+        address: pane_id.to_string(),
+        fno_id: Some(session.to_string()),
+        // The gate's pass rides the pane write: a `control:` directive or the
+        // pane's own send lands on a held pane (AC17-EDGE); a plain send
+        // carries no pass and the pane's DND refusal stands.
+        hold_pass: crate::mail_hold::gate(session, Some(text), chrono::Utc::now())
+            .pass
+            .is_some(),
+    };
+    let typed_since = now_ms();
+    let marker = typed_marker(text);
+    inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
+        |e| match e {
+            DriveError::UnsafeText => "unsafe-text",
+            _ => "io-error",
+        },
+    )?;
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
+        &mut transport,
+        attempts,
+        Duration::from_millis(interval_ms),
+        one_line(text).chars().count(),
+        typed_since,
+        &journal,
+        session,
+        true,
+        move || match &confirm_target {
+            LaneConfirm::Transcript { path, baseline } => {
+                confirm_content_after(path, &marker, *baseline).unwrap_or(false)
+            }
+            LaneConfirm::PendingStore { harness } => {
+                let file = match harness.as_str() {
+                    "claude" => crate::claude_drive::find_transcript_in(
+                        &crate::claude_drive::claude_projects_dir(),
+                        session,
+                    ),
+                    "codex" => crate::codex_store::codex_rollout_path(None, session),
+                    _ => None,
+                };
+                file.and_then(|f| confirm_content_after(&f, &marker, 0).ok())
+                    .unwrap_or(false)
+            }
+            LaneConfirm::Unconfirmable => false,
+            LaneConfirm::Refused(_) => false,
+        },
+    )
+}
+
+/// The registry row's harness name for `session`, for the pane lane's
+/// confirm-target resolution; None reads claude (the largest confirm set).
+fn resolve_row_harness(session: &str) -> Option<String> {
+    let registry = crate::state::load_registry(&AgentsHome::from_env().registry_json()).ok()?;
+    registry
+        .entries
+        .iter()
+        .find(|e| e.harness_session_id.as_deref() == Some(session))
+        .and_then(|e| e.harness.clone())
+}
+
+/// The registry row's cwd for `session` (pi-scoped confirms); empty when no
+/// row carries it.
+fn resolve_row_cwd(session: &str) -> PathBuf {
+    crate::state::load_registry(&AgentsHome::from_env().registry_json())
+        .ok()
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .find(|e| e.harness_session_id.as_deref() == Some(session))
+                .map(|e| PathBuf::from(&e.cwd))
+        })
+        .unwrap_or_default()
+}
+
+fn grok_root() -> std::path::PathBuf {
+    crate::grok_store::grok_sessions_root()
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -1692,6 +2058,29 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
+    // The quiet gate (C11, C14): no byte is typed while the operator is
+    // typing, holds an unfinished draft, or the recipient is Blocked (a
+    // question picker, a permission wall). The codex and opencode lanes type
+    // into no composer and skip it: their turns do not compose from a prompt
+    // line a delivery could land over. A timeout returns not-delivered and
+    // Python queues the mail durable, so it waits on the bus.
+    match args.harness {
+        MailInjectHarness::Claude | MailInjectHarness::Keeper | MailInjectHarness::Pane => {
+            if let Err(reason) = wait_for_quiet_in(
+                &home.events_jsonl(),
+                &home.registry_json(),
+                &args.session,
+                Duration::from_secs(QUIET_WAIT_S),
+                Duration::from_secs(1),
+                &mut now_ms,
+                &mut |d| std::thread::sleep(d),
+            ) {
+                return emit(false, reason);
+            }
+        }
+        MailInjectHarness::Codex | MailInjectHarness::Opencode => {}
+    }
+
     let result: Result<(), String> = match args.harness {
         MailInjectHarness::Claude => deliver_via_control_sock(
             &args.session,
@@ -1720,6 +2109,21 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             args.enter_delay_ms,
         )
         .map_err(|reason| reason.to_string()),
+        MailInjectHarness::Pane => {
+            let Some(address) = args.pane.clone() else {
+                return emit(false, "pane lane needs --pane <session>:<pane-id>");
+            };
+            deliver_via_pane(
+                &args.session,
+                &address,
+                args.harness_row.as_deref(),
+                &text,
+                args.attempts,
+                args.interval_ms,
+                args.enter_delay_ms,
+            )
+            .map_err(|reason| reason.to_string())
+        }
     };
 
     // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
@@ -1972,64 +2376,79 @@ mod tests {
     }
 
     #[test]
-    fn inject_with_submit_bracketed_pastes_then_separate_cr() {
+    fn inject_with_submit_types_a_multi_line_envelope_as_one_flattened_line() {
         let mut t = Fake { sent: Vec::new() };
         let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">\nhi MARKER\n</fno_mail>";
         inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
-        // The multi-line envelope is ONE bracketed paste, then a SEPARATE wire-level
-        // CR -- not `\r` appended to the paste. Bracketed-paste guards keep the
-        // embedded newlines from submitting the body line-by-line.
+        // The multi-line envelope is ONE write with its newlines typed as the
+        // return glyph, then a SEPARATE wire-level CR -- never a bracketed
+        // paste, and never `\r` appended to the line.
         assert_eq!(
             t.sent,
             vec![
-                format!("{PASTE_BEGIN}{envelope}{PASTE_END}"),
+                "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\"> ⏎ hi MARKER ⏎ </fno_mail>"
+                    .to_string(),
                 "\r".to_string()
             ]
         );
-        // The paste carries the RAW envelope verbatim, NEVER an op:'reply' JSON frame
-        // (the x-aaaa bug): no `op` key, and the control auth key is never typed in.
-        assert!(t.sent[0].contains(envelope), "envelope pasted verbatim");
+        assert!(
+            !t.sent[0].contains('\x1b'),
+            "a delivery must carry no ESC byte: it is typed, not pasted"
+        );
         assert!(
             !t.sent[0].contains("\"op\""),
             "envelope must be raw bytes, not a JSON op"
         );
         assert!(
             !t.sent[0].contains("auth"),
-            "raw paste must never carry the control auth key"
+            "raw typing must never carry the control auth key"
         );
     }
 
     #[test]
-    fn inject_with_submit_single_line_types_keystrokes_without_paste_guards() {
-        // A single-line envelope is ordinary keystrokes -- no
-        // bracketed-paste guards, so it never wears the operator-clipboard
-        // paste label. The separate wire-level CR is unchanged.
+    fn inject_with_submit_single_line_types_keystrokes_verbatim() {
+        // A single-line envelope is ordinary keystrokes, byte-identical to
+        // the sender's body -- no paste label, no flattening. The separate
+        // wire-level CR is unchanged.
         let mut t = Fake { sent: Vec::new() };
         let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">hi MARKER</fno_mail>";
         inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
         assert_eq!(t.sent, vec![envelope.to_string(), "\r".to_string()]);
         assert!(
-            !t.sent[0].contains(PASTE_BEGIN),
+            !t.sent[0].contains('\x1b'),
             "single line must not be paste-labelled"
         );
     }
 
     #[test]
-    fn inject_with_submit_control_byte_payload_still_pastes() {
+    fn inject_with_submit_flattens_tabs_and_drops_escape_bytes() {
         // A lone CR inside a one-line body is the Enter keystroke on this
-        // transport, and the CLI preserves it in bodies by design. A control
-        // byte demotes the whole write to paste content, where every byte is
-        // inert.
+        // transport, and the CLI preserves it in bodies by design, so it is
+        // flattened to the glyph; a tab widens to one space; an ESC byte is
+        // dropped outright. Nothing control-shaped is ever typed.
         let mut t = Fake { sent: Vec::new() };
-        let payload = "one\rline MARKER";
+        let payload = "one\rline\ttwo\x1b[2J MARKER";
         inject_with_submit(&mut t, payload, Duration::ZERO).unwrap();
         assert_eq!(
             t.sent,
-            vec![
-                format!("{PASTE_BEGIN}{payload}{PASTE_END}"),
-                "\r".to_string()
-            ]
+            vec![["one ⏎ line two[2J MARKER"].join(""), "\r".to_string()]
         );
+    }
+
+    #[test]
+    fn typed_marker_is_the_first_line_unchanged_by_flattening() {
+        // The confirm marker comes from the TYPED text up to the first glyph,
+        // so flattening a multi-line body never moves the open tag the
+        // transcript grep matches.
+        let envelope = "<fno_mail from=\"a1b2c3d4\" id=\"msg-1\">\nbody one\nbody two\n</fno_mail>";
+        assert_eq!(
+            typed_marker(envelope),
+            "<fno_mail from=\"a1b2c3d4\" id=\"msg-1\">"
+        );
+        // A single-line payload keeps its whole text as the marker.
+        assert_eq!(typed_marker("plain MARKER"), "plain MARKER");
+        // A \\r\\n run is one newline, not two glyphs.
+        assert_eq!(one_line("a\r\nb\nc"), "a ⏎ b ⏎ c");
     }
 
     #[test]
@@ -2126,12 +2545,15 @@ mod tests {
     }
 
     #[test]
-    fn single_line_refuses_multi_line_unwrapped() {
-        // A second line of CONTENT rides in as a second submitted turn. A trailing
-        // terminator (covered above) does not, since trim() removes it.
-        assert_eq!(single_line_decision("/cmd\nsecond line"), Some(1));
-        assert_eq!(single_line_decision("prose one\nprose two"), Some(1));
-        assert_eq!(single_line_decision("/cmd\n\nsecond"), Some(1));
+    fn multi_line_unwrapped_types_flattened_after_c17() {
+        // The old refusal ("a second line rides in as a second submitted
+        // turn") died with the bracketed paste: the typing layer flattens
+        // every newline run into ONE submitted line, so a multi-line
+        // unframed payload delivers. The held-mail drain's digest is the
+        // caller this door was stranding.
+        assert_eq!(single_line_decision("/cmd\nsecond line"), None);
+        assert_eq!(single_line_decision("prose one\nprose two"), None);
+        assert_eq!(single_line_decision("/cmd\n\nsecond"), None);
     }
 
     #[test]
@@ -2726,36 +3148,309 @@ mod tests {
         assert_eq!(cap_env_int("FNO_TEST_CAP_INT", 5000), 5000);
     }
 
+    fn empty_journal(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mailinj-jrnl-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("events.jsonl")
+    }
+
+    fn write_typing_row(journal: &Path, session: &str) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_typing",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "typed_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
+    }
+
+    fn confirm_fixture() -> (Fake, PathBuf) {
+        (Fake { sent: Vec::new() }, empty_journal("c"))
+    }
+
     #[test]
-    fn busy_recipient_gets_raw_paste_then_retried_crs() {
-        let mut t = Fake { sent: Vec::new() };
-        inject_with_submit(&mut t, "hi MARKER", Duration::ZERO).unwrap();
-        // Confirm never fires -> the loop exhausts its budget, re-Entering a raw CR
-        // once per CR_RESUBMIT_EVERY window.
-        let attempts = 2 * CR_RESUBMIT_EVERY; // two resubmit windows
-        let r = confirm_with_cr_retry(&mut t, attempts, Duration::ZERO, || false);
+    fn no_confirm_for_half_the_budget_sends_exactly_one_extra_cr_then_lands() {
+        let (mut t, journal) = confirm_fixture();
+        let mut calls = 0;
+        // attempts 10 -> half 5. The confirm turns true on the FIRST poll of
+        // the second half, i.e. right after the one extra CR.
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            5,
+            0,
+            &journal,
+            "s1",
+            true,
+            || {
+                calls += 1;
+                calls > 5
+            },
+        );
+        assert_eq!(r, Ok(()), "a turn recorded after the extra CR confirms");
+        assert_eq!(t.sent, vec!["\r".to_string()], "exactly one extra CR");
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn total_silence_sends_one_cr_then_withdraws_with_del_bytes() {
+        let (mut t, journal) = confirm_fixture();
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || false,
+        );
         assert_eq!(r, Err("not-confirmed"));
-        // payload + initial CR (inject_with_submit) + one CR per resubmit window.
-        assert_eq!(t.sent.len() as u32, 2 + attempts / CR_RESUBMIT_EVERY);
-        // Every write after the paste is a bare raw CR -- no JSON, no auth.
-        for line in &t.sent[1..] {
-            assert_eq!(line, "\r");
-        }
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string(), "\u{7f}".repeat(7)],
+            "one extra CR, then one DEL write of the typed length"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn a_typing_row_after_the_inject_sends_no_del() {
+        let (mut t, journal) = confirm_fixture();
+        write_typing_row(&journal, "s1");
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || false,
+        );
+        assert_eq!(r, Err("not-confirmed"));
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string()],
+            "the operator's text is in the composer; nothing more is sent"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn the_keeper_unconfirmable_arm_types_and_never_withdraws() {
+        let (mut t, journal) = confirm_fixture();
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            false,
+            || false,
+        );
+        assert_eq!(r, Err("not-confirmed"));
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string()],
+            "no landing visible, no withdraw: one extra CR only"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_lets_a_typing_row_age_out_then_proceeds() {
+        use std::cell::Cell;
+        let journal = empty_journal("quiet-age");
+        let row_ms = now_ms() - 3_000; // the typing row is 3s old at t0
+        write_typing_row_at(&journal, "s2", row_ms);
+        // A submit AFTER the typing row closes the draft, so once the row
+        // ages past the 15s recent window the gate sees quiet.
+        submit_row_at(&journal, "s2", row_ms + 500);
+        let registry = std::env::temp_dir().join("fno-no-registry-here");
+        // A fake clock advancing 1s per poll (the row ages past the 15s
+        // recent window after ~12 ticks), ZERO poll sleep.
+        let tick = Cell::new(0i64);
+        let now = || row_ms + 3_000 + tick.get() * 1_000;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s2",
+            Duration::from_secs(30),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Ok(()), "the burst ages out and delivery proceeds");
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_times_out_with_user_typing_and_writes_nothing() {
+        use std::cell::Cell;
+        let journal = empty_journal("quiet-draft");
+        let base = now_ms();
+        write_typing_row_at(&journal, "s1", base - 1_000);
+        // A draft: the typing row is later than the (absent) submit row, so
+        // it never ages into quiet inside the budget. The fake clock advances
+        // 10ms per poll so the deadline is always reachable.
+        let registry = std::env::temp_dir().join("fno-no-registry-here");
+        let tick = Cell::new(0i64);
+        let now = || base + tick.get() * 10;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s1",
+            Duration::from_millis(50),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Err("user-typing"));
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_times_out_with_session_asking_on_a_blocked_row() {
+        let journal = empty_journal("quiet-blocked");
+        let dir =
+            std::env::temp_dir().join(format!("mailinj-reg-{}-quietblocked", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = dir.join("registry.json");
+        let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let row = serde_json::json!({
+            "name": "wk", "status": "live", "cwd": "/repo", "harness": "claude",
+            "harness_session_id": "s1",
+            "created_at": "2026-09-26T00:00:00Z",
+            "inside_leg": {
+                "state": "blocked", "seq": 1, "received_at": now_iso, "ttl_ms": 60000
+            },
+        });
+        std::fs::write(
+            &registry,
+            serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string(),
+        )
+        .unwrap();
+        use std::cell::Cell;
+        let base = now_ms();
+        let tick = Cell::new(0i64);
+        let now = || base + tick.get() * 10;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s1",
+            Duration::from_millis(50),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Err("session-asking"));
+        let _ = std::fs::remove_file(&journal);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_typing_row_at(journal: &Path, session: &str, typed_ms: i64) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_typing",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "typed_ms": typed_ms,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
+    }
+
+    fn submit_row_at(journal: &Path, session: &str, submit_ms: i64) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_submit",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "submit_ms": submit_ms,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
     }
 
     #[test]
     fn confirm_stops_on_landing_without_extra_cr() {
-        let mut t = Fake { sent: Vec::new() };
+        let (mut t, journal) = confirm_fixture();
         let mut calls = 0;
-        let r = confirm_with_cr_retry(&mut t, 40, Duration::ZERO, || {
-            calls += 1;
-            calls >= 2
-        });
+        let r = confirm_or_withdraw(
+            &mut t,
+            40,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || {
+                calls += 1;
+                calls >= 2
+            },
+        );
         assert_eq!(r, Ok(()));
         assert!(
             t.sent.is_empty(),
-            "landing before a resubmit window sends no CR"
+            "landing before the half budget sends no CR"
         );
+        let _ = std::fs::remove_file(&journal);
     }
 
     #[test]
@@ -2831,6 +3526,37 @@ mod tests {
         assert!(
             confirm_content_after(&path, marker, baseline).unwrap(),
             "the enqueue record (submit-time, not turn-end) must confirm delivery"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn content_confirm_matches_a_transcript_recording_the_flattened_text() {
+        // C17: the typed keystrokes carry the return glyph, so a hosted
+        // harness records the FLATTENED line, not the multi-line body. The
+        // marker (the open tag) is unchanged by flattening, so the confirm
+        // still matches the recorded turn.
+        let path = tmp_transcript("flattened");
+        let mut f = File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"older"}}}}"#
+        )
+        .unwrap();
+        let baseline = transcript_len(&path);
+        let envelope =
+            "<fno_mail from=\"a1b2c3d4\" id=\"msg-flat1\">\nbody one\nbody two\n</fno_mail>";
+        let marker = typed_marker(envelope);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}}}}"#,
+            escaped_marker(&one_line(envelope))
+        )
+        .unwrap();
+        assert!(
+            confirm_content_after(&path, &marker, baseline).unwrap(),
+            "the flattened recorded turn confirms the unchanged open tag"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -3022,6 +3748,92 @@ mod tests {
             contract_enter_delay_ms(&packaged, MailInjectHarness::Codex),
             800
         );
+    }
+
+    #[test]
+    fn parse_args_accepts_the_pane_lane() {
+        // The pane lane parses as its own harness with the pane address
+        // carried beside it; the address itself is required at run, not at
+        // parse (the lane may be selected before the address is known).
+        let a = parse_args(&argv(&[
+            "--session",
+            "ccccdddd-1111-2222-3333-444455556666",
+            "--harness",
+            "pane",
+            "--pane",
+            "main:3",
+        ]))
+        .unwrap();
+        assert_eq!(a.harness, MailInjectHarness::Pane);
+        assert_eq!(a.pane.as_deref(), Some("main:3"));
+        let lane_only = parse_args(&argv(&["--session", "s1", "--harness", "pane"])).unwrap();
+        assert_eq!(lane_only.harness, MailInjectHarness::Pane);
+        assert!(lane_only.pane.is_none());
+    }
+
+    #[test]
+    fn resolve_confirm_finds_a_codex_rollout_in_a_temp_codex_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session = "0199aabb-ccdd-7e88-9000-aabbccddeeff";
+        let rollout = sessions.join(format!("rollout-2026-09-27T00-00-00-{session}.jsonl"));
+        std::fs::write(&rollout, "{}\n").unwrap();
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", temp.path());
+        let target = resolve_confirm(
+            "codex",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        match target {
+            LaneConfirm::Transcript { path, baseline } => {
+                assert_eq!(path, rollout);
+                assert_eq!(baseline, transcript_len(&rollout));
+            }
+            other => panic!("expected a codex rollout confirm target, got {other:?}"),
+        }
+        match prior {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn resolve_confirm_finds_a_claude_transcript_in_a_temp_projects_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "ccccdddd-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, temp.path());
+        let target = resolve_confirm(
+            "claude",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        match target {
+            LaneConfirm::Transcript { path, .. } => assert_eq!(path, transcript),
+            other => panic!("expected a claude transcript confirm target, got {other:?}"),
+        }
+        match prior {
+            Some(v) => std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, v),
+            None => std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV),
+        }
+        drop(guard);
     }
 
     #[test]
@@ -3530,13 +4342,14 @@ mod tests {
         assert_eq!(outcome, Ok(()), "the envelope lands and confirms");
 
         let frames = handle.join().unwrap();
-        assert_eq!(frames.len(), 2, "one paste frame, one CR frame");
+        assert_eq!(frames.len(), 2, "one typed line, one CR frame");
         assert!(
             matches!(&frames[0], Frame::Input(b)
-                if b.starts_with(PASTE_BEGIN.as_bytes())
-                    && b.ends_with(PASTE_END.as_bytes())
+                if !b.contains(&0x1b)
+                    && std::str::from_utf8(b)
+                        .is_ok_and(|s| s.contains("<fno_mail") && !s.contains('\n'))
                     && b.windows(6).any(|w| w == b"<fno_m")),
-            "the first frame is the bracketed paste of the envelope"
+            "the first frame is the typed one-line envelope, no paste guards"
         );
         assert!(
             matches!(&frames[1], Frame::Input(b) if b.as_slice() == b"\r"),

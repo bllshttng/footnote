@@ -15,6 +15,23 @@ use std::collections::HashMap;
 
 use crate::agents_view::RegistryAgent;
 
+/// True only when the current session/pane join names a LIVE row that
+/// explicitly declared the bus-only delivery policy. DND is presence, never
+/// liveness, but an exited row is skipped (matching the reap gate): a hold
+/// stamped on a reaped agent must not veto the shell or successor that
+/// inherited the pane and can never lift it. Moved here from server.rs so
+/// the DND refusal reads the registry through the same join module every
+/// other pane-to-row reader uses (server.rs is shrink-only).
+pub(super) fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
+    agents.iter().any(|a| {
+        !a.exited
+            && a.dnd
+            && a.mux
+                .as_ref()
+                .is_some_and(|(s, p)| s == session && *p == pane)
+    })
+}
+
 /// Position in `agents` of the row that hosts `pid` in `session_name`.
 pub(crate) fn bind_agent_to_pane(
     agents: &[RegistryAgent],

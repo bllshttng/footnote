@@ -2225,17 +2225,6 @@ def _pick_account_overlay(
         return None
 
 
-def _pick_account_env(
-    *,
-    role: Optional[str] = None,
-    route_env: Optional[Mapping[str, str]] = None,
-) -> Optional[Mapping[str, str]]:
-    """Env-only view of :func:`_pick_account_overlay` for callers that stamp
-    no row (kept so existing seams need not know the overlay type)."""
-    overlay = _pick_account_overlay(role=role, route_env=route_env)
-    return dict(overlay.env) if overlay is not None else None
-
-
 def pick_account_id(
     *,
     role: Optional[str] = None,
@@ -5520,7 +5509,7 @@ def _switchboard_exchange(
 
 # Subprocess budget for the mail-inject verb. It polls the recipient transcript
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
-_MAIL_INJECT_TIMEOUT_S = 20.0
+_MAIL_INJECT_TIMEOUT_S = 60.0
 
 # Liveness-scaled confirm budget (node, change 2). The enqueue record is
 # written at submit time, not at turn end, so a healthy busy recipient confirms
@@ -5681,10 +5670,8 @@ def _mux_pane_send(
     if not session or pane_id is None:
         _record_failure("pre-submit")
         return False
-    # the entry IS the row, so the bus-only gate reads it directly --
-    # a bus-only recipient never gets a pane paste, same as the control.sock
-    # and codex lanes.
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    # A bus-only recipient never gets a pane paste, same as every other lane.
+    if _delivery_policy_refusal(entry, text) == BUS_ONLY_POLICY:
         _record_failure("pre-submit")
         return False
     from fno.agents.harness_map import capabilities_or_undeclared
@@ -5910,6 +5897,9 @@ def _mux_pane_send(
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])
+        if self_send:
+            # The own-send hold gate passed; the pane's DND refusal stands down.
+            send_args.append("--hold-pass")
         if source_label:
             # The floor's audit row joins this dispatch to its bus record by
             # the mail id; declared, never sniffed from the wrapped body.
@@ -5954,6 +5944,37 @@ def _mux_pane_send(
             if proc is None or proc.returncode != 0:
                 return False
         return True
+
+    def _mail_inject_pane_lane() -> bool:
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+        if binary is None:
+            print(
+                f"mux pane {pane} send demoted to durable: the mail-inject binary is missing",
+                file=sys.stderr,
+            )
+            return False
+        recipient_id = (
+            getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+            or session
+        )
+        argv = [
+            str(binary),
+            "mail-inject",
+            "--session",
+            str(recipient_id),
+            "--harness",
+            "pane",
+            "--pane",
+            f"{session}:{pane_id}",
+            "--harness-row",
+            (getattr(entry, "harness", "") or "") or "claude",
+            "--enter-delay-ms",
+            str(int(enter_delay_s * 1000)),
+        ]
+        return _run_mail_inject(argv, text, _MAIL_INJECT_TIMEOUT_S, _record_failure)
 
     def _read_screen() -> Optional[str]:
         proc = _run(["read", pane])
@@ -6123,6 +6144,13 @@ def _mux_pane_send(
             )
             return False
     try:
+        if confirm and not raw and not review:
+            # Wrapped pane mail rides the Rust typed lane (C11/C12/C17);
+            # raw sends, digests and review keep the Python path below.
+            sent = _mail_inject_pane_lane()
+            if not sent:
+                _record_failure("pane-lane-not-confirmed")
+            return sent
         sent = _paste_then_submit()
         outcome = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
@@ -6254,63 +6282,54 @@ def _mux_content_confirm(
     return False
 
 
-def _hold_lapsed_for(entry) -> bool:
-    """True when ``entry``'s ``bus-only`` flag no longer holds mail.
-
-    Busy mode arms the flag with a clock (``fno.mail.hold``). A row with no
-    clock under any of its addresses is not a busy-mode hold at all - it is a
-    policy stamped by ``fno agents register --delivery-policy bus-only``, which
-    has no clock by construction - so it never lapses and the refusal stands
-    exactly as it did before this function existed. Only a timed hold expires.
-
-    The address list comes from ``hold.addresses``, the same rule the writers
-    use, rather than a second copy here. A copy that omitted the canonical
-    handle looked correct on claude, where the handle IS the ``short_id``, and
-    made this check unable to find a codex hold at all: every writer keys by the
-    first-eight, and none of that row's other addresses is the first-eight.
-
-    Pure read. It never mutates the registry, so it cannot deadlock a caller
-    already holding the registry lock; the stale flag is tidied by the release
-    path and by ``fno agents mail notify-self``.
-    """
-    try:
-        from fno.mail import hold as _hold
-
-        if _hold.read_any(entry) is None:
-            return False
-        return _hold.lapsed(entry)
-    except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
-        return False
-
-
-def _delivery_policy_refusal(target) -> Optional[str]:
-    """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
-    belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
-    unreadable registry). The gate every shared injector consults BEFORE any
-    transport call, so the no-paste guarantee holds on every reachable lane
-    rather than on whichever lane remembered to check. Accepts an
-    ``AgentEntry``, or an id/handle token matched against
-    ``harness_session_id``, ``short_id``, and ``name``; an unresolvable read
-    fails open toward live delivery, never toward stranding mail. Never
-    raises."""
-    try:
-        if target is None:
-            return None
-        # The expiry check belongs on BOTH entry and token branches.
-        if hasattr(target, "delivery_policy"):
-            if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
-                return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY
-            return None
-        entries = load_registry()
-    except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
+def _delivery_policy_refusal(
+    target, body: Optional[str] = None, park: bool = False
+) -> Optional[str]:
+    """:data:`BUS_ONLY_POLICY` when the Rust hold gate holds mail to
+    ``target``; ``None`` otherwise. One-call port of the gate body to
+    ``mail_hold.rs`` ``gate``: the gate owns row resolution, the clock sweep,
+    the own-send and ``control:`` passes, and the receipt. A failed or
+    unreadable gate on a stamped row fails closed. With ``park`` (the raw
+    door), a held body is parked and the park receipt comes back instead.
+    Never raises."""
+    if target is None:
         return None
-    for entry in entries:
-        if (
-            getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
-            and target in (entry.harness_session_id, entry.short_id, entry.name)
-        ):
-            return None if _hold_lapsed_for(entry) else BUS_ONLY_POLICY
-    return None
+    if hasattr(target, "delivery_policy"):
+        if getattr(target, "delivery_policy", None) != BUS_ONLY_POLICY:
+            return None
+        token = getattr(target, "harness_session_id", None) or getattr(target, "name") or ""
+    else:
+        token = target
+        try:
+            stamped = any(
+                getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
+                and target in (entry.harness_session_id, entry.short_id, entry.name)
+                for entry in load_registry()
+            )
+        except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
+            return None
+        if not stamped:
+            return None
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return BUS_ONLY_POLICY
+    try:
+        argv = [str(binary), "mail-hold", "--gate"]
+        if park:
+            argv.append("--park-on-hold")
+        argv += ["--session", token]
+        proc = subprocess.run(argv, input=body or "", capture_output=True, text=True, timeout=10)
+        out = json.loads(proc.stdout)
+        verdict = out.get("verdict")
+        if verdict == "deliver":
+            return None
+        if verdict == "parked":
+            return out.get("receipt") or BUS_ONLY_POLICY
+        return BUS_ONLY_POLICY
+    except Exception:  # noqa: BLE001 - fail closed: never lift a hold we could not read
+        return BUS_ONLY_POLICY
 
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
@@ -6370,9 +6389,8 @@ def _mail_inject_keeper(
         if reason_out is not None:
             reason_out.append(reason)
 
-    #, same discipline as lane A: a bus-only recipient gets no prompt-
-    # line paste on any transport, refused before the binary and the socket.
-    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+    # A bus-only recipient gets no prompt-line paste on any transport.
+    if _delivery_policy_refusal(recipient, text) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 
@@ -6397,50 +6415,33 @@ def _mail_inject_claude(
     origin: Optional[str] = None,
     self_send: bool = False,
 ) -> bool:
-    """Inject ``text`` into a live claude session over the daemon ``control.sock``
-    via the ``fno-agents mail-inject`` verb (G1 substrate, node).
-
-    Returns True only when the verb confirms the turn landed in the recipient
-    transcript; any miss (binary absent, recipient not on the roster, not
-    confirmed within the poll budget) returns False so the caller writes the
-    durable fallback.
-
-    ``reason_out`` (node), when a non-empty list, receives the verb's own
-    reason token (not-confirmed / attach-failed / io-error / no-transcript /
-    not-injectable / unsafe-text) so a durable demotion receipt can name WHY the
-    live lane missed instead of a generic live-miss. It is a side-channel rather
-    than a second return value so the many callers and test mocks that read this
-    as a plain bool are unaffected. A missing binary, subprocess failure, or
-    unparseable stdout names that boundary too, so the receipt never silently
-    reverts to a bare live-miss at the Python edge.
-
-    ``liveness_scaled`` (node, change 2): pass the raised confirm budget
-    (``_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS``) when the caller's OWN liveness
-    signal already reports the recipient mid-turn, so a long tool call gets room
-    to yield back to the prompt before the confirm gives up. The unscaled
-    default otherwise (a recipient we cannot independently prove busy stays on
-    the tight budget, converting a wedged send to durable quickly).
-
-    ``sender`` is the invoking session's mail handle, forwarded to the binary's
-    audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
-    its own ``from`` in the transcript, an unwrapped one has nowhere else to
-    record who fired it.
-
-    ``harness``, when the caller already holds the recipient's roster
-    row, is that row's harness and names the settle-delay table row directly.
-    ``None`` resolves it from the roster by session id; a miss (no row, no
-    registry, or a harness the table does not know) falls back to claude, the
-    table's largest delay, so an unresolved read waits longer, never less."""
+    """Inject ``text`` into a live claude session over the daemon
+    ``control.sock`` via the ``fno-agents mail-inject`` verb. Returns True
+    only when the verb confirms the turn landed in the recipient transcript;
+    any miss (binary absent, recipient not on the roster, not confirmed
+    within the poll budget) returns False so the caller writes the durable
+    fallback. ``reason_out``, when a non-empty list, receives the verb's own
+    reason token as a side-channel rather than a second return value, so the
+    many callers and test mocks that read this as a plain bool are
+    unaffected. ``sender`` is the invoking session's mail handle for the
+    binary's audit event; only UNWRAPPED lanes need it, since a wrapped
+    envelope carries its own ``from`` in the transcript.
+    ``liveness_scaled`` passes the raised confirm budget
+    (``_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS``) when the caller's OWN
+    liveness signal already reports the recipient mid-turn, so a long tool
+    call gets room to yield back before the confirm gives up. ``harness``,
+    when the caller holds the recipient's roster row, names the settle-delay
+    table row directly; ``None`` resolves it from the roster by session id,
+    and a miss falls back to claude, the table's largest delay, so an
+    unresolved read waits longer, never less."""
     from fno import rust_binary
 
     def _record(reason: str) -> None:
         if reason_out is not None:
             reason_out.append(reason)
 
-    # a bus-only recipient never gets a prompt-line paste, on any lane
-    # that routes through this injector. Refused BEFORE the binary, the roster,
-    # and the socket: no transport call at all.
-    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+    # A bus-only recipient gets no prompt-line paste on any lane.
+    if _delivery_policy_refusal(recipient, text) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 
@@ -6450,15 +6451,10 @@ def _mail_inject_claude(
         return False
     from fno.agents.harness_map import capabilities, DispatchResolveError
 
-    # the settle delay belongs to the RECIPIENT's harness row, not to a
-    # claude constant. A claude-shaped timing sent to another harness's pane
-    # decides the CR by the wrong table row. The caller's row wins when held
-    # (it is the same lookup without a registry re-read, and it stays correct
-    # for short-id/mcp-channel recipients the session-id lookup cannot see);
-    # otherwise resolve from the roster. A registry error here is an
-    # unresolved read, never a raised mail path (the helper re-raises
-    # RegistryVersionError for callers that classify wake routing; this lane
-    # only wants a hint). The constant keeps the fallback out of the
+    # The settle delay belongs to the RECIPIENT's harness row, not to a claude
+    # constant: the caller's row wins when held (correct for short-id/mcp
+    # recipients too), else the roster. A registry error is an unresolved read,
+    # never a raised mail path. The constant keeps the fallback out of the
     # `capabilities("claude")` literal the shared-contract sentinel greps for.
     _FALLBACK_DELAY_HARNESS = "claude"
     recipient_harness = harness or _FALLBACK_DELAY_HARNESS
@@ -6926,7 +6922,7 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(thread_id, text) == BUS_ONLY_POLICY:
         if reason_out is not None:
             reason_out.append(BUS_ONLY_POLICY)
         return False
@@ -7112,10 +7108,9 @@ def _deliver_live(
         if reason_out is not None:
             reason_out.append(reason)
 
-    # The bus-only policy bounds EVERY live transport below, not only the three
-    # shared injectors: the switchboard and daemon-RPC lanes drive a recipient
-    # turn without routing through any of them.
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    # Bus-only bounds EVERY live transport below, the switchboard and
+    # daemon-RPC lanes included.
+    if _delivery_policy_refusal(entry, wrapped) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
         return False
 

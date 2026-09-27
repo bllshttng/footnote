@@ -175,7 +175,20 @@ node_id=$(printf '%s\n' "$intake_out" | sed -n 's/.*intake \(ab-[0-9a-z]*\).*/\1
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
-    run_fno backlog update "$node_id" --completion-note "smoke alias fixture" > /dev/null 2>&1
+    # The close-evidence guard refuses a bare `done` on a node carrying no
+    # record of why, and the typer surface retired `update --completion-note`
+    # (the leaf the guard's own remedy names). Stamp the note through the
+    # native binary, the same door test_defer.py drives, resolved by the same
+    # finder the store's worker spawn uses.
+    native_fno=$(uv run --project "$REPO_ROOT/cli" python -c "from fno.rust_binary import resolve_binary; b = resolve_binary(); print(b if b else '')")
+    if [[ -z "$native_fno" ]]; then
+        fail "no fno-agents binary: cannot stamp the completion record done requires"
+    fi
+    stamp_rc=0
+    "$native_fno" backlog update "$node_id" --completion-note "smoke alias fixture" > /dev/null 2>&1 || stamp_rc=$?
+    if [[ "$stamp_rc" -ne 0 ]]; then
+        fail "native update could not stamp the completion record (rc=$stamp_rc)"
+    fi
     done_out=$(run_fno backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"

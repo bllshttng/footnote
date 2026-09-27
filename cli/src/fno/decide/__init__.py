@@ -681,57 +681,6 @@ def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
     )
 
 
-def retract_decision(
-    *,
-    decision_id: str,
-    reason: str,
-    authority_source: str | None = None,
-    origin: str | None = None,
-) -> dict[str, Any]:
-    """Append a provenance-checked retraction without changing old bytes."""
-    if not decision_id.strip():
-        raise ValueError("decision id is required")
-    if not reason.strip():
-        raise ValueError("retraction reason is required")
-    target = _decision_row_by_id(decision_id.strip())
-    if target is None:
-        raise KeyError(decision_id)
-
-    origin = enforce_origin_floor(origin)
-    provenance = _resolve_decider(None, authority_source, origin=origin)
-    if _decision_lane(target) == "law" and provenance.authority_source != "operator":
-        raise RefusedAuthorityError(provenance.decided_by, origin)
-
-    from fno.events import append_event, decision_retracted
-    from fno import paths
-    from fno.graph import api as graph_api
-    from fno.outstanding.core import events_path
-
-    event = decision_retracted(
-        target_decision_id=str(target["decision_id"]),
-        subject=str(target.get("subject") or "(unscoped)"),
-        reason=reason.strip(),
-        retracted_by=provenance.decided_by,
-        attested_by=provenance.attested_by,
-        relayed_by=provenance.relayed_by,
-        origin=origin,
-        authority_source=provenance.authority_source,
-    )
-    from fno.carveout.core import resolve_carveout_root
-
-    events_root = resolve_carveout_root()
-    append_event(event, events_path=events_path(events_root))
-    try:
-        append_event(event, events_path=_decisions_index_path())
-    except Exception as exc:  # noqa: BLE001 - the event id names recovery
-        raise IndexWriteError(str(target["decision_id"]), exc) from exc
-    try:
-        graph_api.decision_retract(event, path=paths.graph_json())
-    except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
-        raise IndexWriteError(str(target["decision_id"]), exc) from exc
-    return {"decision_id": str(target["decision_id"]), "event": event}
-
-
 def _project(event: dict[str, Any]) -> tuple[str | None, str]:
     """Write the decision onto the subject node's ``decisions`` list.
 

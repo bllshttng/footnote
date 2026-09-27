@@ -248,7 +248,11 @@ fn accepted_turn_after_painted_draft_confirms_exactly_once() {
     );
     assert_eq!(outcome, Ok(()), "the accepted turn is the delivery proof");
     let frames = handle.join().unwrap();
-    assert_eq!(submit_count(&frames), 2, "paste + CR, no extra submits");
+    assert_eq!(
+        submit_count(&frames),
+        2,
+        "flatten write + CR, no extra submits"
+    );
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -275,7 +279,9 @@ fn painted_draft_without_acceptance_stays_unconfirmed() {
         0,
     );
     assert_eq!(outcome, Err("not-confirmed"));
-    assert_eq!(submit_count(&handle.join().unwrap()), 2);
+    // flatten write + CR + the ONE resubmit CR at half budget; the
+    // unconfirmable arm never withdraws and never re-Enters again.
+    assert_eq!(submit_count(&handle.join().unwrap()), 3);
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -304,7 +310,8 @@ fn fragmented_paint_stays_unconfirmed() {
         0,
     );
     assert_eq!(outcome, Err("not-confirmed"));
-    assert_eq!(submit_count(&handle.join().unwrap()), 2);
+    // The same 3-write shape: flatten write + CR + the one resubmit CR.
+    assert_eq!(submit_count(&handle.join().unwrap()), 3);
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -336,7 +343,8 @@ fn same_prefix_paint_stays_unconfirmed() {
         0,
     );
     assert_eq!(outcome, Err("not-confirmed"));
-    assert_eq!(submit_count(&handle.join().unwrap()), 2);
+    // flatten write + CR + the ONE resubmit CR at half budget.
+    assert_eq!(submit_count(&handle.join().unwrap()), 3);
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -360,7 +368,9 @@ fn stale_accepted_record_before_the_send_stays_unconfirmed() {
         0,
     );
     assert_eq!(outcome, Err("not-confirmed"));
-    assert_eq!(submit_count(&handle.join().unwrap()), 2);
+    // flatten write + CR + the one resubmit CR, then the bounded DEL
+    // withdraw: the rig records no typing, so silence is provable.
+    assert_eq!(submit_count(&handle.join().unwrap()), 4);
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -418,7 +428,9 @@ fn wrong_session_record_stays_unconfirmed() {
         0,
     );
     assert_eq!(outcome, Err("not-confirmed"));
-    assert_eq!(submit_count(&handle.join().unwrap()), 2);
+    // The same 4-write shape as the stale-baseline half: flatten write +
+    // CR, the one resubmit CR, then the DEL withdraw on provable silence.
+    assert_eq!(submit_count(&handle.join().unwrap()), 4);
     std::fs::remove_dir_all(&rig.dir).ok();
 }
 
@@ -478,7 +490,8 @@ fn unconfirmable_lane_keeps_draining_keeper_output() {
     assert_eq!(outcome, Err("not-confirmed"));
     rx.recv_timeout(Duration::from_secs(5))
         .expect("the injector must drain keeper Output while unconfirmable");
-    // paste + CR, plus one resubmit CR per full CR_RESUBMIT_EVERY window.
-    assert_eq!(submit_count(&handle.join().unwrap()), 2 + 30 / 8);
+    // flatten write + CR + exactly ONE resubmit CR at half the budget; the
+    // confirm_or_withdraw cadence no longer re-Enters per window.
+    assert_eq!(submit_count(&handle.join().unwrap()), 3);
     std::fs::remove_dir_all(&rig.dir).ok();
 }

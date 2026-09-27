@@ -343,7 +343,10 @@ fn default_true() -> bool {
 /// transient machine view (`fno mux command`: a screen that is never a
 /// portal) and the named anchor cell (`--from portal N|worker|current`)
 /// a split halves; floor stays 58.
-pub const PROTO_VERSION: u32 = 93;
+/// v94: `ControlVerb::PaneSend.hold_pass` (serde default): a send the Rust
+/// hold gate already passed (`own`, `control:` or parked-mail lane) skips
+/// the pane's DND refusal; floor stays 58.
+pub const PROTO_VERSION: u32 = 94;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -667,6 +670,12 @@ pub enum ControlVerb {
         /// row agree with this value.
         #[serde(default)]
         expected_identity: Option<String>,
+        /// (v94) The caller's send already passed the Rust hold gate, so the
+        /// pane's DND refusal stands down for this write (C15: `control:`
+        /// mail and the pane's own send land while held). Every other guard
+        /// stays.
+        #[serde(default)]
+        hold_pass: bool,
     },
     /// Block until the pane's output settles (`quiet_ms` with no new output),
     /// matches `pattern` (regex over the visible grid), the child exits, or
@@ -4057,7 +4066,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 93);
+        assert_eq!(PROTO_VERSION, 94);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

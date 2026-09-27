@@ -209,6 +209,10 @@ fn main() {
     if args.first().map(String::as_str) == Some("mail-hold") {
         std::process::exit(fno_agents::mail_hold::run_mail_hold(&args[1..]));
     }
+    // `state-root`: the seal-handshake door (agents_config::run_state_root_probe).
+    if args.first().map(String::as_str) == Some("state-root") {
+        std::process::exit(fno_agents::agents_config::run_state_root_probe());
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1502,7 +1506,7 @@ async fn run(args: Vec<String>) -> i32 {
     // this spawn's environment, so a `state_dirs_from_env()` call over there
     // would read the daemon's own env instead of ours.
     if daemon_bound_thread_spawn {
-        attach_codex_thread_state_dirs(&mut params);
+        fno_agents::codex_thread::attach_codex_thread_state_dirs(&mut params);
     }
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
@@ -3492,24 +3496,6 @@ fn default_substrate(params: &Value) -> &'static str {
     match harness {
         "claude" | "codex" | "opencode" => "thread",
         _ => "pane",
-    }
-}
-
-/// Join the typed `--add-dir` ahead of the seam-published state-root grant on
-/// a daemon-bound codex thread spawn. The operator's own grant leads, the same
-/// precedence the argv lanes give it. Extracted from `run` so the ordering
-/// contract stays unit-testable.
-fn attach_codex_thread_state_dirs(params: &mut Value) {
-    let mut roots = fno_agents::claude_ask::state_dirs_from_env();
-    if let Some(add_dir) = params
-        .get("add_dir")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        roots.insert(0, add_dir.to_string());
-    }
-    if !roots.is_empty() {
-        params["state_dirs"] = Value::from(roots);
     }
 }
 
