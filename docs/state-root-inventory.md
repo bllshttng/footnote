@@ -80,7 +80,7 @@ One file per install. These belong at the root.
 
 ## Frozen root rows (2026-09-27 backfill)
 
-The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. The crown verified and deleted the backups whose data a `.db` provably holds, the ephemeral writers below learned to clean up after themselves, and every remaining real entry got its row here. The section is FROZEN: shrink-only, like every root row. When one of these writers moves into a subfolder, delete its row in the same PR.
+The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. The crown verified and deleted the backups whose data a `.db` provably holds. The ephemeral writers below learned to clean up after themselves. Every remaining real entry got its row here. The section is FROZEN: shrink-only, like every root row. When one of these writers moves into a subfolder, delete its row in the same PR.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
