@@ -24,14 +24,21 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|questions|plans-dirs|plan-dir|plan-path>");
         return 2;
     };
     // `plans-dirs` is not a single-path accessor: it answers with one dir per
     // REGISTERED project (see plans_dirs.rs), so it dispatches before the
-    // name-to-path table.
+    // name-to-path table. `plan-dir`/`plan-path` are the plans-chain port
+    // (plans_path.rs): the Python verb and the probe both resolve through it.
     if name == "plans-dirs" {
         return crate::plans_dirs::run(&args[1..]);
+    }
+    if name == "plan-dir" {
+        return crate::plans_path::run_plan_dir(&args[1..]);
+    }
+    if name == "plan-path" {
+        return crate::plans_path::run_plan_path(&args[1..]);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Canonicalize so the slug matches what a caller passing the canonical
@@ -40,7 +47,7 @@ pub fn run(args: &[String]) -> i32 {
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = resolve(name, &cwd) else {
         eprintln!(
-            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, plans-dirs, questions, run-log, scratchpad, status-sinks, target-state, worktree-log)"
+            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plan-dir, plan-path, plans, plans-dirs, questions, run-log, scratchpad, status-sinks, target-state, worktree-log)"
         );
         return 2;
     };
