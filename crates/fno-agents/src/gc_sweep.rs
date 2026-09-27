@@ -1830,7 +1830,7 @@ pub(crate) fn run_with_release(
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() {
+        if e.crown_level.is_some() || crate::loop_reign::row_holds_manifest_live_crown(e) {
             summary.kept_crowned.push(id);
             continue;
         }

@@ -99,6 +99,42 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
         .or_else(|| row.cc_session_id.clone())
 }
 
+/// True when a king manifest in the row's own space names the row's session
+/// as crown holder. The manifest is crown truth that survives registry
+/// damage: a restore or rewrite can strip the row's stamp, so a reaper that
+/// reads only `crown_level` sees an ordinary row where a live king sits.
+/// Absence of a stamp is not absence of a crown. Only
+/// `crown_reap::sweep`'s holder verdict may vacate the manifest, so a manifest
+/// naming a session keeps the row - the fail-safe direction.
+pub(crate) fn row_holds_manifest_live_crown(row: &RegistryEntry) -> bool {
+    let Some(session) = row_session(row).filter(|s| !s.trim().is_empty()) else {
+        return false;
+    };
+    let cwd = std::path::PathBuf::from(row.cwd.trim());
+    if cwd.as_os_str().is_empty() {
+        return false;
+    }
+    let kings = crate::paths::space_dir(&cwd).join("kings");
+    let Ok(files) = fs::read_dir(&kings) else {
+        return false;
+    };
+    for file in files.flatten() {
+        let path = file.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if crate::claude_adopt::manifest_field(&content, "harness_session_id").as_deref()
+            == Some(session.trim())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Python `_find_by_session`, both of its forms. A known harness scopes the
 /// match to rows of that harness and to exact ids only; `None` (the explicit
 /// session form, and any harness Python could not resolve) keeps the original
@@ -2229,5 +2265,40 @@ mod tests {
         // reign-state: with the flag present, the missing-argument refusal
         // names --scope/--session, not the flag.
         assert_eq!(run_reign_state(&["-J".into()]), 2);
+    }
+
+    /// The reaper guard answers on the manifest, not the stamp: a manifest in
+    /// the row's own space naming the row's session is a live crown, and a
+    /// mismatch, an empty cwd, or a missing session is not.
+    #[test]
+    fn manifest_crown_guard_answers_by_session() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
+        let dir = tmp("crown-guard");
+        std::env::set_var("FNO_SPACES_DIR", dir.join("spaces"));
+        let repo = dir.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let space = crate::paths::space_dir(&repo);
+        write_manifest(&space, "x-demo", "s-king9", "pass");
+        let mut held = RegistryEntry::default();
+        held.name = "king-x-demo".into();
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = Some("s-king9".into());
+        assert!(row_holds_manifest_live_crown(&held));
+        held.harness_session_id = Some("s-other".into());
+        assert!(!row_holds_manifest_live_crown(&held));
+        held.harness_session_id = Some("s-king9".into());
+        held.cwd = String::new();
+        assert!(!row_holds_manifest_live_crown(&held));
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = None;
+        assert!(!row_holds_manifest_live_crown(&held));
+        match saved_spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

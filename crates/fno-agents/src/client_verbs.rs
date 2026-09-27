@@ -1450,6 +1450,17 @@ fn upsert_synthesized_row(
                 if merged.node.is_none() {
                     merged.node = old.node.clone();
                 }
+                // The same for the crown stamp: dropping it here is the
+                // registry-restore shape that uncrowned a live fleet.
+                if merged.crown_level.is_none() {
+                    merged.crown_level = old.crown_level;
+                }
+                if merged.crown_scope.is_none() {
+                    merged.crown_scope = old.crown_scope.clone();
+                }
+                if merged.crown_grantor.is_none() {
+                    merged.crown_grantor = old.crown_grantor.clone();
+                }
                 reg.entries[i] = merged;
             }
             None => reg.entries.push(entry),
@@ -4540,6 +4551,39 @@ mod tests {
         assert_eq!(row.pid, Some(4242));
         assert_eq!(row.log_path.as_deref(), Some("/tmp/live.log"));
         assert_eq!(row.created_at, "t1");
+    }
+
+    #[test]
+    fn upsert_synthesized_row_carries_crown_forward() {
+        // The merge keeps identity and runtime state; the crown stamp
+        // is the same class of fact a synthesized adopt observed nothing
+        // about. An upsert over a crowned row must keep the crown, or every
+        // adopt after a restore strips the stamp the vellum named.
+        let dir = cv_tmpdir();
+        let reg = dir.path().join("registry.json");
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-crown".into(),
+            owner_cwd: "/x".into(),
+            ..Default::default()
+        };
+        let mut crowned = mint_synthesized_entry(&id, "t1");
+        crowned.crown_level = Some(2);
+        crowned.crown_scope = Some("x-a,x-b".into());
+        crowned.crown_grantor = Some("vellum".into());
+        upsert_synthesized_row(&reg, crowned).unwrap();
+
+        upsert_synthesized_row(&reg, mint_synthesized_entry(&id, "t2")).unwrap();
+
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        let row = loaded
+            .entries
+            .iter()
+            .find(|r| r.harness_session_id.as_deref() == Some("thread-crown"))
+            .expect("row survives");
+        assert_eq!(row.crown_level, Some(2));
+        assert_eq!(row.crown_scope.as_deref(), Some("x-a,x-b"));
+        assert_eq!(row.crown_grantor.as_deref(), Some("vellum"));
     }
 
     #[test]
