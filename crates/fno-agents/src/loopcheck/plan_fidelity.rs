@@ -118,7 +118,7 @@ pub(super) fn green_conjunct_read(
     pr_number: i64,
     head_oid: &str,
     timeout: std::time::Duration,
-    fno_bin: &str,
+    fno_bin: &std::ffi::OsStr,
     mut on_degraded: impl FnMut(String),
 ) -> GreenRead {
     let ruling = node_id.and_then(super::awaiting_merge::ruling_hold);
@@ -139,7 +139,7 @@ pub(super) fn green_conjunct_read(
         };
     }
     let mut block = None;
-    match evaluate_plan_fidelity(plan_path, std::ffi::OsStr::new(fno_bin), cwd, timeout) {
+    match evaluate_plan_fidelity(plan_path, fno_bin, cwd, timeout) {
         FidelityGate::Refused { reason } => block = Some(reason),
         // Degraded fails OPEN on the stop decision (same as Absent - a hung
         // probe must not wedge the gate that lets a finished session stop),
