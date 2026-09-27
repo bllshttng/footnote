@@ -260,7 +260,16 @@ case "$TOOL" in
         case "$abs" in
             /*) ;;
             \~*) abs="${abs/#\~/${HOME%/}}" ;;
-            *) [[ -n "$CWD" ]] && abs="${CWD%/}/$abs" ;;
+            *)
+                # Same rule as the Bash arm: a relative target with no
+                # payload cwd stays unresolved rather than resolving
+                # against the hook process's unrelated directory.
+                if [[ -n "$CWD" ]]; then
+                    abs="${CWD%/}/$abs"
+                else
+                    abs=""
+                fi
+                ;;
         esac
         abs="$(_physical "$abs")"
         _refuse_for "$abs" || true
