@@ -763,7 +763,10 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                     let row = json!({
                         "id": id,
                         "slug": format!("slug-{id}"),
-                        "title": format!("appended {id}"),
+                        // The title must stay off the leak grammar the
+                        // store gate enforces at write time: the raw id
+                        // (prefix-app-0004) carries a node-id match.
+                        "title": format!("appended {prefix}{i:04}"),
                         "type": "feature",
                         "status": "intake",
                         "priority": "p2",
@@ -911,7 +914,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             let row = json!({
                 "id": id,
                 "slug": format!("slug-{id}"),
-                "title": format!("mid-commit {id}"),
+                // Off the leak grammar: the raw id (m-app-0004) carries a
+                // node-id match the store gate refuses at write time.
+                "title": format!("mid-commit {i:04}"),
                 "type": "feature",
                 "status": "intake",
                 "priority": "p2",
