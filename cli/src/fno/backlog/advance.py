@@ -3242,13 +3242,31 @@ def _events_path(project_root: Optional[Path]) -> Path:
 def _emit(kind: str, data: dict, events_path: Optional[Path]) -> None:
     """Best-effort event emit. Never raises (LD#7: never wedge the host op).
     ``None`` resolves inside the guard: doing it in a caller's argument list
-    puts a raising repo-root read on the post-spawn path."""
-    try:
-        from fno.events import _build, append_event
+    puts a raising repo-root read on the post-spawn path.
 
-        append_event(_build(kind, _EVENT_SOURCE, data), events_path)
+    The row mirrors into the tick's store, guarded separately so a dead
+    primary journal never costs the durable copy: the tick lands in the
+    global state-root store unconditionally, while this journal is
+    writer-relative and dies with a pruned tree."""
+    from fno.control_plane import tick_store_path
+    from fno.events import _build, append_event
+
+    try:
+        event = _build(kind, _EVENT_SOURCE, data)
+        target = events_path if events_path is not None else _events_path(None)
     except Exception as exc:  # noqa: BLE001
         print(f"advance: WARNING: event emit failed ({kind}): {exc}", file=sys.stderr)
+        return
+    try:
+        append_event(event, target)
+    except Exception as exc:  # noqa: BLE001
+        print(f"advance: WARNING: event emit failed ({kind}): {exc}", file=sys.stderr)
+    if (mirror := tick_store_path()) != target:
+        try:
+            append_event(event, mirror)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"advance: WARNING: event mirror emit failed ({kind}): {exc}"
+            print(msg, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
