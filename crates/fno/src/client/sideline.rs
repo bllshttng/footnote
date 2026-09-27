@@ -156,7 +156,7 @@ impl View {
         let chrome_rows = self.bottom_row_is_chrome() as usize;
         let (block_rows, block_lines) = self.court_block_layout(rows);
         let (q_rows, q_lines) = questions::block_rows(self, rows)
-            .map(|(n, lines, _)| (n, lines))
+            .map(|b| (b.n, b.lines))
             .unwrap_or((0, Vec::new()));
         let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
@@ -164,6 +164,12 @@ impl View {
         // answer to the same height, or the render-time scroll lands the
         // selected row under the chrome that paints over it.
         let table_rows_n = list_rows.saturating_sub(chrome_rows);
+        // The sticky menu row (h): when the rows overflow the region, the
+        // menu/add-workspace footer pins directly above the questions block
+        // and the widget area gives up its last row, so the footer is never
+        // covered and the rows scroll to their true end above it.
+        let sticky_footer = table_rows_n > 0 && display.len() > table_rows_n;
+        let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
         // backend) and the blit copies it into the compositor's cells. The
         // court block and the dock own the rows below the list, so the
@@ -176,7 +182,7 @@ impl View {
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
         // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 0, text_w as u16, table_rows_n as u16);
+        let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self.sideline_state.get().with_selected(self.selector);
@@ -216,7 +222,7 @@ impl View {
         // style; its Agent and CardDetail rows use one paired overlay here.
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off;
-            if r >= table_rows_n {
+            if r >= table_h {
                 break;
             }
             let mark_caret = matches!(
@@ -386,7 +392,11 @@ impl View {
         // width - the same rule every sideline row follows.
         // The questions block just above the court block: the row list
         // stopped above both; the open rows render normal, the not-ready and
-        // answered rows DIM.
+        // answered rows DIM. The sticky menu footer rides directly above the
+        // block when the rows overflow (h).
+        if sticky_footer {
+            self.paint_new_squad_footer(cells, list_rows - 1, cols, text_w, panel_w);
+        }
         questions::paint_block(q_lines, cells, list_rows, rows, cols, text_w);
         court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row

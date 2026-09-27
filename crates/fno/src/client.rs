@@ -1012,6 +1012,15 @@ struct View {
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
+    /// The questions block's operator prefs (the toggle, the height, and
+    /// whether answered questions show), each persisted through the view
+    /// store. The block itself reads them at layout time.
+    questions_visible: bool,
+    questions_height: u16,
+    questions_show_done: bool,
+    /// Pending escape bytes in questions-detail mode (the same split-arrow
+    /// safety as [`View::ans_esc`]).
+    question_esc: Vec<u8>,
     /// The questions block's refresh: the last kick and the in-flight flag
     /// (the feed fold's single-flight discipline), every 10 s.
     questions_kick_at: Option<Instant>,
@@ -2151,6 +2160,10 @@ impl View {
             questions_fold: None,
             questions_degraded: false,
             question_detail: None,
+            question_esc: Vec::new(),
+            questions_visible: view_store::load_questions_block(),
+            questions_height: view_store::load_questions_height(),
+            questions_show_done: view_store::load_questions_show_done(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -4273,10 +4286,17 @@ impl View {
             return Some(hit);
         }
         // The questions block pins above the court block: a click on its
-        // rows opens the detail overlay on that question.
+        // rows opens the full questions view on that question; the `+N more`
+        // row opens the list. The header toggles nothing here (the key does).
         if col < panel_w {
-            if let Some(id) = questions::hit_at(self, self.term.0 as usize, row) {
-                return Some(ChromeHit::OpenQuestionDetail(id));
+            match questions::hit_at(self, self.term.0 as usize, row) {
+                Some(questions::QuestionHit::Row(id)) => {
+                    return Some(ChromeHit::OpenQuestionDetail(id));
+                }
+                Some(questions::QuestionHit::More) => {
+                    return Some(ChromeHit::OpenQuestionsList);
+                }
+                None => {}
             }
         }
         // Tab strip (row 0, scoped to the content columns since US1): it
@@ -4642,8 +4662,26 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
+        // The sticky menu footer (h): when the rows overflow, the
+        // menu/add-workspace row pins directly above the questions block, so
+        // a click or hover there is the footer's row even though its display
+        // row has scrolled away. Checked ahead of the offset path: the
+        // covered display row must never win.
+        let region = (self.term.0 as usize)
+            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let pinned = self.painted_rows().len() > self.sideline_visible_rows();
+        if pinned && row as usize >= top && row as usize == top + region.saturating_sub(1) {
+            return self
+                .painted_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::NewSquad));
+        }
         let i = row as usize - top + self.sideline_offset();
-        (i < self.painted_rows().len()).then_some(i)
+        if i < self.painted_rows().len() {
+            return Some(i);
+        }
+        None
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
@@ -5332,9 +5370,15 @@ impl View {
     /// and `reveal_focus_row` inherit the shrunk window without a second
     /// fix.
     fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize)
+        // The questions block and the sticky menu footer both come off the
+        // region before the scroll math runs (h): scrolling to the end lands
+        // the last row above the footer, never under the block.
+        let rows = (self.term.0 as usize)
             .saturating_sub(self.bottom_row_is_chrome() as usize)
             .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let pinned = self.painted_rows().len() > rows;
+        rows.saturating_sub(pinned as usize)
     }
 
     /// The sideline TableState's offset, read and written through the Cell
@@ -7094,6 +7138,8 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
+    /// Open the questions view on the list (the `+N more` row's click).
+    OpenQuestionsList,
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -10665,6 +10711,34 @@ async fn dispatch_event(
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
+        Event::ToggleQuestionsBlock => {
+            view.questions_visible = !view.questions_visible;
+            view_store::save_questions_block(view.questions_visible);
+            view.set_notice(if view.questions_visible {
+                "questions block: shown".into()
+            } else {
+                "questions block: hidden".into()
+            });
+        }
+        Event::ResizeQuestionsBlock(delta) => {
+            let step = u16::from(delta.unsigned_abs());
+            let next = if delta > 0 {
+                view.questions_height.saturating_add(step)
+            } else {
+                view.questions_height.saturating_sub(step)
+            };
+            view.questions_height = next.clamp(2, 60);
+            view_store::save_questions_height(view.questions_height);
+        }
+        Event::ToggleQuestionsDone => {
+            view.questions_show_done = !view.questions_show_done;
+            view_store::save_questions_show_done(view.questions_show_done);
+            view.set_notice(if view.questions_show_done {
+                "questions block: answered shown".into()
+            } else {
+                "questions block: answered hidden".into()
+            });
+        }
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -10965,6 +11039,7 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
+        ChromeHit::OpenQuestionsList => view.open_questions_list(),
     }
     Ok(())
 }

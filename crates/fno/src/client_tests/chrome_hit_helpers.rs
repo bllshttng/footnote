@@ -24,5 +24,6 @@ pub(super) fn chrome_hit_label(hit: &Option<ChromeHit>) -> &'static str {
         Some(ChromeHit::CycleDensity) => "CycleDensity",
         Some(ChromeHit::OpenFeedDetail(_)) => "OpenFeedDetail",
         Some(ChromeHit::OpenQuestionDetail(_)) => "OpenQuestionDetail",
+        Some(ChromeHit::OpenQuestionsList) => "OpenQuestionsList",
     }
 }
