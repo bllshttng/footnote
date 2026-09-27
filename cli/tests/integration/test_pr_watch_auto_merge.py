@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fno.pr_watch._dispatch import run_execute_queue
 from fno.pr_watch._discover import PrCandidate
 from fno.pr_watch._state import WatermarkStore
@@ -32,6 +34,15 @@ PR = 7
 SLUG = "owner/repo"
 GRANT = {"source": "config", "recorded_by": "spawner-session",
          "recorded_at": "2026-08-24T10:00:00Z"}
+
+
+@pytest.fixture(autouse=True)
+def _free_gh_budget(monkeypatch):
+    """The drain's fleet-budget read must never answer from the real ledger
+    inside a test."""
+    import fno.pr_watch._dispatch as _dispatch_mod
+
+    monkeypatch.setattr(_dispatch_mod, "_gh_budget_backoff_left", lambda: 0.0)
 
 
 def _grant_verdict():
