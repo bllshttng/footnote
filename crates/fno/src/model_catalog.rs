@@ -331,6 +331,11 @@ pub fn needs_refresh(mtime: Option<SystemTime>, now: SystemTime) -> bool {
 /// spawns this in the background; it never blocks the picker.
 pub async fn refresh(state: &Path) -> Result<(), String> {
     let dir = state.join("cache");
+    // A fresh install has no cache/ dir; curl would fail on the tmp path on
+    // every open and the catalog would never populate.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Err(format!("cache dir unwritable: {e}"));
+    }
     let tmp = dir.join(format!("models-dev.json.tmp.{}", std::process::id()));
     let fetched = fetch_to(&tmp).await;
     let committed = fetched.and_then(|()| install_from(&tmp, &cache_path(state)));
@@ -637,8 +642,9 @@ fn facts_for<'a>(
     ))
 }
 
-/// The `provider -> model ids` the config names: tier_models values,
-/// haiku_model, and the account records' routes for this harness.
+/// The `provider -> model ids` the config names: each provider record's
+/// tier_models and haiku_model (both live under model_routing.providers.<id>),
+/// plus the account records' routes for this harness.
 fn config_named_models(
     cfg: &serde_json::Value,
     records: &HashMap<String, Vec<ModelChoice>>,
@@ -654,16 +660,25 @@ fn config_named_models(
             list.push(model.to_string());
         }
     };
-    if let Some(tm) = cfg.get("tier_models").and_then(|v| v.as_object()) {
-        for (_, val) in tm {
-            if let Some((p, m)) = val.as_str().and_then(|s| s.split_once('/')) {
-                push(p, m);
+    if let Some(providers) = cfg.get("providers").and_then(|v| v.as_object()) {
+        for (id, record) in providers {
+            if let Some(tm) = record.get("tier_models").and_then(|v| v.as_object()) {
+                for (_, val) in tm {
+                    let model = val.as_str().unwrap_or_default();
+                    // A bare id names the record's own provider; a
+                    // provider/model value attributes itself.
+                    match model.split_once('/') {
+                        Some((p, m)) => push(p, m),
+                        None => push(id, model),
+                    }
+                }
             }
-        }
-    }
-    if let Some(hm) = cfg.get("haiku_model").and_then(|v| v.as_str()) {
-        if let Some((p, m)) = hm.split_once('/') {
-            push(p, m);
+            if let Some(hm) = record.get("haiku_model").and_then(|v| v.as_str()) {
+                match hm.split_once('/') {
+                    Some((p, m)) => push(p, m),
+                    None => push(id, hm),
+                }
+            }
         }
     }
     if let Some(choices) = records.get(harness) {
@@ -1211,5 +1226,45 @@ mod tests {
         for row in zai {
             assert!(matches!(row.state, ModelState::Ready), "{row:?}");
         }
+    }
+    #[test]
+    fn provider_declared_tier_and_haiku_models_become_rows() {
+        // tier_models and haiku_model live under model_routing.providers.<id>,
+        // not at the root: a custom provider with no catalog link and no
+        // account record still lists the models it declares.
+        let (reach, _cfg, _records) = reach_fixture();
+        let cfg: serde_json::Value = serde_json::json!({
+            "value": {
+                "providers": {
+                    "myproxy": {
+                        "protocol": "anthropic",
+                        "base_url": "https://myproxy.local/anthropic",
+                        "api_key_env": "FNO_TEST_PROXY_KEY",
+                        "tier_models": {"opus": "proxy-big", "sonnet": "proxy-mid"},
+                        "haiku_model": "proxy-small"
+                    }
+                }
+            }
+        });
+        let key_present = |env: &str, _file: Option<&str>| env == "FNO_TEST_PROXY_KEY";
+        let (ready, more) = reach_rows(
+            "claude",
+            &reach,
+            &cfg,
+            &std::collections::HashMap::new(),
+            None,
+            &key_present,
+        );
+        let mut names: Vec<&str> = ready
+            .iter()
+            .filter(|r| r.provider.as_deref() == Some("myproxy"))
+            .map(|r| r.model.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["proxy-big", "proxy-mid", "proxy-small"],
+            "declared models listed; more was {more:?}"
+        );
     }
 }
