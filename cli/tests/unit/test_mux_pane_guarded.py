@@ -221,15 +221,9 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch):
     this test pins the routing and the honor: the delivered verdict is the True,
     and no pane burst is typed behind it."""
     calls: list[list[str]] = []
-    real_run = dispatch.subprocess.run
 
-    def _run(argv, **kwargs):
+    def _run(argv, **_kwargs):
         calls.append(list(argv))
-        # The envelope render (`fno-agents mail-envelope`) is a foreign call
-        # whose stdout IS the payload: it runs for real so the lane envelopes
-        # today's bytes, not yesterday's.
-        if "mail-envelope" in argv:
-            return real_run(argv, **kwargs)
         if "mail-inject" in argv:
             return SimpleNamespace(
                 returncode=0,
@@ -238,6 +232,12 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    # The envelope render is a foreign binary call; the wrap itself is what the
+    # lane pastes, so a stubbed wrap keeps the test off the developer's PATH.
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prepare",
+        lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
+    )
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
@@ -256,11 +256,8 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     the confirm lives in the Rust lane, so the pane lane's contract is that a
     not-delivered verdict reports False and names the reason twice - the
     binary's word and the demotion."""
-    real_run = dispatch.subprocess.run
 
-    def _run(argv, **kwargs):
-        if "mail-envelope" in argv:
-            return real_run(argv, **kwargs)
+    def _run(argv, **_kwargs):
         if "mail-inject" in argv:
             return SimpleNamespace(
                 returncode=0,
@@ -269,6 +266,10 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prepare",
+        lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
+    )
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
 
     failure: list[str] = []
