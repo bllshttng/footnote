@@ -55,6 +55,15 @@ pub enum Role {
     BodySel,
     /// A `PopupRow::Header` cell inside the body.
     BodyHead,
+    /// A plain-body popup's emphasis text (the key column, a section
+    /// heading): the theme's accent, bold, on the plain ground - never a
+    /// band. `accent` survives the `terminal` inherit branch (the field
+    /// doc), so the emphasis reads under every theme.
+    BodyAccent,
+    /// The cursor row of a plain-body popup: a filled band on the plain
+    /// ground. Under `terminal` INVERSE is the band; under a named theme
+    /// the `sel` surface, as [`Role::BodySel`].
+    BodyCursor,
     /// A disabled (greyed) body entry: present but inert to arrow, Enter, and
     /// click. DIM under `terminal`, the theme's `dim` color under a named theme.
     BodyDim,
@@ -147,22 +156,28 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         // branch is what keeps pre-theme renders byte-identical.
         return match role {
             Role::BodySel => (Color::Default, Color::Default, 0),
+            // A plain-body popup's cursor row: the one filled band on the
+            // plain ground (the inverse block's old job, now per-row).
+            Role::BodyCursor => (Color::Default, Color::Default, cell_flags::INVERSE),
             Role::BodyHead | Role::Title | Role::Chip | Role::Tab(true) | Role::ScrollThumb => (
                 Color::Default,
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::BOLD,
             ),
-            Role::BodyDim
-            | Role::Subtitle
-            | Role::Tab(false)
-            | Role::Footer
-            | Role::ScrollTrack => (
+            // Tab(false) left the inverse arms: a whole strip of filled
+            // chips read as one selected row. Only the ACTIVE tab is
+            // filled; an inactive one is plain dim text.
+            Role::Tab(false) => (Color::Default, Color::Default, cell_flags::DIM),
+            Role::BodyDim | Role::Subtitle | Role::Footer | Role::ScrollTrack => (
                 Color::Default,
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
             ),
             // Amber under `terminal` too: `accent` survives the inherit branch
             // (see the field doc), so the brand mark keeps its two-tone read.
+            // BodyAccent shares the property: the key column and section
+            // headings carry the accent under every theme.
+            Role::BodyAccent => (t.accent, Color::Default, cell_flags::BOLD),
             Role::Wordmark => (t.accent, Color::Default, cell_flags::DIM),
             // The backlog panel's slots resolved above the theme split.
             // Body, Border: plain inverse.
@@ -179,12 +194,14 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         // terminal. An explicit light fg stays readable regardless of the
         // emulator's default pair, the property INVERSE gives the Body row.
         Role::BodySel => (t.title, t.sel, cell_flags::BOLD),
+        // A plain-body popup's cursor band: the `sel` surface, as BodySel.
+        Role::BodyCursor => (t.title, t.sel, cell_flags::BOLD),
+        Role::BodyAccent => (t.accent, Color::Default, cell_flags::BOLD),
         Role::BodyHead => (
             Color::Default,
             Color::Default,
             cell_flags::INVERSE | cell_flags::BOLD,
         ),
-        // A disabled body entry: the theme's dim color on the plain
         // background. The inverse block it used to sit on turned the light
         // `dim` into the BACKGROUND, so the row rendered light-on-light and
         // near invisible under every named theme (the screenshot review).
@@ -342,6 +359,7 @@ mod tests {
             Role::Footer,
             Role::Body,
             Role::BodySel,
+            Role::BodyCursor,
             Role::BodyHead,
             Role::BodyDim,
             Role::ScrollTrack,

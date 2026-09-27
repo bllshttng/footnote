@@ -4,11 +4,11 @@
 //! ESC carry to the overlay on top.
 
 use super::backlog_board;
+use super::keys_modal::keys_modal_keys;
 use super::{
     answer_keys, attach_place_keys, confirm_keys, connections_keys, create_keys, is_sideline_verb,
-    keys_modal_keys, move_pick_keys, move_to_keys, nav_keys, peek_keys, portal_pick_keys,
-    recruit_keys, rename_keys, row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow,
-    View,
+    move_pick_keys, move_to_keys, nav_keys, peek_keys, portal_pick_keys, recruit_keys, rename_keys,
+    row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow, View,
 };
 use super::{aux_keys, questions, sideline};
 

@@ -4,7 +4,7 @@ use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 mod chrome_hit_helpers;
 use crate::client::{
     input_folds::MAX_ESC_CARRY,
-    keys_modal::{build_keys_modal, keys_modal_mouse},
+    keys_modal::{build_keys_modal, keys_modal_keys, keys_modal_mouse},
 };
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
@@ -6550,12 +6550,14 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // do not. The in-app help must name all three triggers and the caveat,
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
-    // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections): the global section spent five rows,
-    // the V chord one more, and the questions block four (q, {, }, X), so
-    // the pin moved from 64.
-    view.term = (77, 100);
+    // Tall enough that the centered modal shows its tail. The modal scrolls
+    // in a 60%-of-terminal viewport now, so the note lines are reached by
+    // scrolling to the bottom - that reachability is the contract.
+    view.term = (73, 100);
     view.open_keys_modal();
+    if let Some(m) = view.keys_modal.as_mut() {
+        m.popup.scroll_by(10_000);
+    }
     let text = frame_text(&view.compose());
     let modal_tail: String = text
         .lines()
@@ -15663,26 +15665,19 @@ fn a_clipped_notice_reads_as_clipped() {
 
 #[test]
 fn the_key_modal_shows_exact_action_ids_on_a_narrow_terminal() {
-    // The modal advertises the id an operator types into `config.mux.keys`,
-    // so a clipped one is worse than none: `grab-…` still looks like an id.
-    // The generic row renderer clipped the whole line from the RIGHT, which
-    // is exactly where the id sits, so this only showed at the narrow end -
-    // the wide case the id was added for looked fine.
-    let modal = build_keys_modal();
-    // Tall enough that the popup does not scroll: the subject here is
-    // WIDTH, and a scrolled-off row would read as a clipped id.
-    for cols in [40u16, 60, 100] {
-        let out = modal.popup.render((80, cols));
-        let screen: Vec<String> = out.lines.iter().map(|l| l.text.clone()).collect();
-        for kb in crate::keys::key_bindings() {
-            assert!(
-                screen.iter().any(|l| l.contains(kb.action)),
-                "at {cols} cols the modal must show `{}` in full, not clipped; \
-                     rendered:\n{}",
-                kb.action,
-                screen.join("\n")
-            );
-        }
+    // The action id is no longer a rendered column (the 2026-09-26 plain-body
+    // rebuild dropped it for the reference look), but the id an operator
+    // types into `config.mux.keys` still resolves: filtering by the id keeps
+    // exactly that binding's row.
+    for kb in crate::keys::key_bindings() {
+        let m = keys_modal::keys_modal_with_filter(Some(kb.action));
+        assert!(
+            m.popup.rows.iter().any(
+                |r| matches!(r, PopupRow::Entry { label, enabled: true, .. } if label == kb.label)
+            ),
+            "filtering by the action id `{}` keeps the binding's row",
+            kb.action
+        );
     }
 }
 
