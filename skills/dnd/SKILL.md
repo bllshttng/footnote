@@ -26,7 +26,7 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 
 "Until I go idle" arms the idle clock, not the wall clock. Say in the report that this clock restarts on every prompt and ends at twice the window. Every other route arms the wall clock: a fixed deadline that never moves.
 
-The conversation hold needs no command: it starts by itself when the user sends a real message in a session (not a slash command, a `!` line, or a raw send), lasts while the session answers plus a 2-minute grace, and restarts with each message; `off` or `cancel` ends it now. A DND you set with a duration keeps its full length; the conversation rules never shorten or replace it.
+A real message (not a slash command, a `!` line, or a raw send) starts the conversation hold by itself. It lasts while the session answers plus a 2-minute grace and restarts with each message. `Off` or `cancel` ends it now. A DND you set with a duration keeps its full length. The conversation rules never shorten or replace it.
 
 ## Report the real receipt
 
