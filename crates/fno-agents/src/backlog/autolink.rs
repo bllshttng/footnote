@@ -4,9 +4,8 @@
 //! is never refused. The caller applies a linked result inside the locked
 //! write; this module only scores and decides.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
 
 use super::node_ref::{find_node, would_create_cycle, would_exceed_epic_depth};
 use super::relatedness::epic_candidates;

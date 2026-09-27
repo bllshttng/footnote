@@ -263,7 +263,10 @@ pub fn filing_candidates(entries: &[Value], sidecar: &Path) -> (Vec<Value>, Stri
     let live: Vec<Value> = entries
         .iter()
         .filter(|e| {
-            e.get("completed_at").is_none()
+            // apply_defaults materializes completed_at as null; a Python
+            // `.get() is None` passes both missing and null, so the Rust
+            // check must treat null as absent too.
+            !e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false)
                 && !matches!(
                     e.get("status").and_then(Value::as_str),
                     Some("done") | Some("superseded") | Some("deferred")

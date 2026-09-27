@@ -26,7 +26,7 @@ const SOURCE_KINDS: [&str; 5] = [
 ];
 const VALID_NODE_TYPES: [&str; 4] = ["bug", "epic", "feature", "roadmap"];
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AddArgs {
     pub title: String,
     pub domain: String,
@@ -887,7 +887,7 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
     // node is linked without a receipt. Strictly non-fatal: any failure
     // degrades to the orphan line.
     let mut working = rows.clone();
-    let mut rollup_lines: Vec<String> = Vec::new();
+    let rollup_lines: Vec<String>;
     {
         let mut entries = working.clone();
         entries.push(node.clone());
@@ -921,6 +921,10 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
         let _ = crate::graph_keeper::set_related(&mut working, &minted, &tokens);
     }
 
+    // The shared write pipeline recomputes statuses across the graph on
+    // every commit (a plan-less filing's stored status lands as idea), the
+    // same recompute commit_rows_via_store ran.
+    crate::graph_store::recompute_statuses_with_plan_rungs(&mut working, None);
     crate::graph_store::locked_mutate(
         &graph,
         crate::graph_store::MutateInput {
@@ -1023,7 +1027,7 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
 /// The single-entry status ladder the Python model derives on every read:
 /// terminal fields, then PR, blockers, lock, then the plan rung (no plan ->
 /// idea; unreadable plan or a plan-side terminal -> ready; design -> design).
-fn derive_status(entry: &serde_json::Map<String, Value>, graph: &Path) -> String {
+fn derive_status(entry: &serde_json::Map<String, Value>, _graph: &Path) -> String {
     if entry.get("completed_at").is_some_and(|v| !v.is_null()) {
         return "done".into();
     }
@@ -1043,13 +1047,17 @@ fn derive_status(entry: &serde_json::Map<String, Value>, graph: &Path) -> String
     {
         return "blocked".into();
     }
-    if ["locked_by", "session_id"]
-        .iter()
-        .any(|k| entry.get(*k).is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty())))
-    {
+    if ["locked_by", "session_id"].iter().any(|k| {
+        entry
+            .get(*k)
+            .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+    }) {
         return "in_progress".into();
     }
-    let Some(plan_path) = entry.get("plan_path").and_then(Value::as_str).filter(|p| !p.is_empty())
+    let Some(plan_path) = entry
+        .get("plan_path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
     else {
         return "idea".into();
     };
@@ -1185,7 +1193,10 @@ mod tests {
 
     #[test]
     fn missing_title_refuses_like_typer() {
-        let tail: Vec<String> = ["--difficulty", "low"].iter().map(|s| s.to_string()).collect();
+        let tail: Vec<String> = ["--difficulty", "low"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         match parse(&tail) {
             ParsedAdd::Refusal { exit, .. } => assert_eq!(exit, 2),
             _ => panic!("refuses"),
@@ -1200,7 +1211,10 @@ mod tests {
         locked.insert("locked_by".into(), Value::String("w".into()));
         assert_eq!(derive_status(&locked, Path::new("/x")), "in_progress");
         let mut blocked = serde_json::Map::new();
-        blocked.insert("blocked_by".into(), Value::Array(vec![Value::String("x-1".into())]));
+        blocked.insert(
+            "blocked_by".into(),
+            Value::Array(vec![Value::String("x-1".into())]),
+        );
         assert_eq!(derive_status(&blocked, Path::new("/x")), "blocked");
         let mut done = serde_json::Map::new();
         done.insert("completed_at".into(), Value::String("t".into()));
@@ -1219,4 +1233,923 @@ fn parse_blocker_list(value: Option<&str>) -> Vec<String> {
         }
     }
     out
+}
+
+/// The holder of a live/suspect `node:<id>` claim, else None. A suspect
+/// claim (TTL unexpired, pid dead) still belongs to its session, so it
+/// counts as a worker here too.
+pub(crate) fn live_worker(node_id: &str) -> Option<String> {
+    let key = format!("node:{node_id}");
+    let Ok(path) = crate::claims::claim_path(&key, None) else {
+        return None;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    let Ok(rec) = serde_json::from_str::<crate::claims::ClaimRecord>(&text) else {
+        return None;
+    };
+    match crate::claims::classify(&rec, None) {
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect => Some(rec.holder),
+        _ => None,
+    }
+}
+
+/// The idea-only flag tail on top of add's surface: wave filing, the fold
+/// gate's escape, and the JSON receipt.
+#[derive(Debug, Default)]
+pub struct IdeaArgs {
+    pub add: AddArgs,
+    pub wave_of: Option<String>,
+    pub separate: bool,
+    pub json_out: bool,
+    pub details_file: Option<String>,
+}
+
+pub enum ParsedIdea {
+    Args(IdeaArgs),
+    Refusal { message: String, exit: i32 },
+    Help,
+}
+
+pub fn parse_idea(tail: &[String]) -> ParsedIdea {
+    let mut idea = IdeaArgs::default();
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < tail.len() {
+        let arg = tail[i].as_str();
+        match arg {
+            "--wave-of" => {
+                let Some(v) = tail.get(i + 1) else {
+                    return ParsedIdea::Refusal {
+                        message: "Error: Option '--wave-of' requires an argument".into(),
+                        exit: 2,
+                    };
+                };
+                idea.wave_of = Some(v.clone());
+                i += 2;
+            }
+            "--separate" => {
+                idea.separate = true;
+                i += 1;
+            }
+            "--json" | "-J" => {
+                idea.json_out = true;
+                i += 1;
+            }
+            "--details-file" => {
+                let Some(v) = tail.get(i + 1) else {
+                    return ParsedIdea::Refusal {
+                        message: "Error: Option '--details-file' requires an argument".into(),
+                        exit: 2,
+                    };
+                };
+                idea.details_file = Some(v.clone());
+                i += 2;
+            }
+            _ => {
+                rest.push(tail[i].clone());
+                i += 1;
+            }
+        }
+    }
+    match parse(&rest) {
+        ParsedAdd::Help => ParsedIdea::Help,
+        ParsedAdd::Refusal { message, exit } => ParsedIdea::Refusal { message, exit },
+        ParsedAdd::Args(add) => {
+            idea.add = add;
+            ParsedIdea::Args(idea)
+        }
+    }
+}
+
+/// Read --details from a file ("-" = stdin) when --details-file names one.
+fn read_text_arg(
+    details: &Option<String>,
+    details_file: &Option<String>,
+) -> Result<Option<String>, Refusal> {
+    if details_file.is_none() {
+        return Ok(details.clone());
+    }
+    if details.is_some() {
+        return Err(refused(
+            "Error: pass --details or --details-file, not both",
+            1,
+        ));
+    }
+    let path = details_file.clone().expect("checked");
+    let body = if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| refused(format!("Error: could not read stdin: {e}"), 1))?;
+        buf
+    } else {
+        std::fs::read_to_string(&path)
+            .map_err(|e| refused(format!("Error: could not read {path}: {e}"), 1))?
+    };
+    Ok(Some(body))
+}
+
+/// shlex.quote: wrap in single quotes when the token is not shell-safe.
+fn shlex_quote(token: &str) -> String {
+    if !token.is_empty()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_%+=:,@./-".contains(&b))
+    {
+        return token.to_string();
+    }
+    format!("'{}'", token.replace('\'', "'\\''"))
+}
+
+/// Append the wave note to the target's progress_notes under one locked
+/// write, with the keeper's same terminal and missing-target refusals.
+fn file_wave(
+    json_out: bool,
+    target_id: &str,
+    title: &str,
+    body: Option<&str>,
+    difficulty: &str,
+    source_node: Option<&str>,
+) -> Result<(), Refusal> {
+    let text = body.unwrap_or(title).to_string();
+    let mut source = source_node
+        .map(str::to_string)
+        .or_else(|| std::env::var("FNO_NODE").ok())
+        .unwrap_or_else(|| "fno backlog idea".to_string());
+    if source.trim().is_empty() {
+        source = "fno backlog idea".to_string();
+    }
+    let note = json!({
+        "ts": crate::graph_store::now_isoformat(),
+        "kind": "wave",
+        "title": title,
+        "details": body,
+        "difficulty": difficulty,
+        "source": source,
+        "text": text,
+    });
+    let graph = super::settings::graph_path();
+    let run = || -> Result<(), String> {
+        let base_version = crate::graph_store::base_version(&graph).map_err(|e| e.to_string())?;
+        let mut entries = crate::graph_store::read_rows(&graph).map_err(|e| e.to_string())?;
+        let Some(idx) = entries
+            .iter()
+            .position(|r| r.get("id").and_then(Value::as_str) == Some(target_id))
+        else {
+            return Err(format!("no node resolves to '{target_id}'"));
+        };
+        {
+            let obj = entries[idx].as_object_mut().expect("row is an object");
+            let stored_done = matches!(
+                obj.get("status").and_then(Value::as_str),
+                Some("done") | Some("superseded")
+            );
+            let completed = obj
+                .get("completed_at")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+            if stored_done || completed {
+                return Err(format!("wave target '{target_id}' is terminal"));
+            }
+            let notes = obj
+                .entry("progress_notes".to_string())
+                .or_insert_with(|| Value::Array(vec![]));
+            if !notes.is_array() {
+                *notes = Value::Array(vec![]);
+            }
+            notes
+                .as_array_mut()
+                .expect("just made an array")
+                .push(note.clone());
+        }
+        // The same plan-rung map _run_op rides: locked_mutate's ladder write
+        // is skipped when no map is supplied, and the wave append must land
+        // the derived status (a live wave node reads back status: idea). The
+        // map rides MutateInput, so locked_mutate recomputes and takes the
+        // curation pre-image from the derived status (no touched_at stamp).
+        let mut plan_rungs = std::collections::BTreeMap::new();
+        for e in entries.iter() {
+            let Some(id) = e.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(plan_path) = e.get("plan_path").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Ok(text) = std::fs::read_to_string(plan_path) {
+                if let Some(status) = plan_frontmatter_status(&text) {
+                    plan_rungs.insert(id.to_string(), status);
+                }
+            }
+        }
+        crate::graph_store::locked_mutate(
+            &graph,
+            crate::graph_store::MutateInput {
+                entries,
+                canonical_path: None,
+                base_version,
+                plan_rungs: Some(plan_rungs),
+            },
+            crate::graph_store::DEFAULT_LOCK_TIMEOUT,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    };
+    let char_count = text.chars().count();
+    run().map_err(|e| {
+        if e.starts_with("wave target") {
+            refused(format!("Error: {e}"), 2)
+        } else {
+            refused(format!("Error: {e}"), 2)
+        }
+    })?;
+    if json_out {
+        println!(
+            "{}",
+            super::render::py_json_pretty(&json!({
+                "outcome": "wave",
+                "node_id": target_id,
+                "note": note,
+                "minted_id": Value::Null,
+            }))
+        );
+    } else {
+        println!("wave note appended to {target_id} progress_notes ({char_count} chars); no node minted. Read it: fno backlog get {target_id}");
+    }
+    Ok(())
+}
+
+// -- idea: the pre-mint fold gate (A8) and wave filing (A9) --
+
+fn stdin_is_interactive() -> bool {
+    // SAFETY: isatty only reads the descriptor's mode, like law_match.rs.
+    unsafe { libc::isatty(0) == 1 }
+}
+
+/// discovery._PATH_RE: a slash-bearing path token not preceded by an
+/// identifier character. The regex crate has no lookbehind, so the scan is
+/// hand-rolled over the same ASCII classes, leftmost-longest, non-overlapping.
+fn path_spans(text: &str) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let is_class = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-';
+    let mut out = Vec::new();
+    let n = b.len();
+    let mut start = 0;
+    while start < n {
+        if !is_class(b[start])
+            || (start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_'))
+        {
+            start += 1;
+            continue;
+        }
+        let mut pos = start;
+        let mut segments = 0usize;
+        loop {
+            let seg_start = pos;
+            while pos < n && is_class(b[pos]) {
+                pos += 1;
+            }
+            if pos == seg_start || pos >= n || b[pos] != b'/' {
+                pos = seg_start;
+                break;
+            }
+            pos += 1;
+            segments += 1;
+        }
+        if segments == 0 {
+            start += 1;
+            continue;
+        }
+        let tail_start = pos;
+        while pos < n && is_class(b[pos]) {
+            pos += 1;
+        }
+        if pos == tail_start {
+            start += 1;
+            continue;
+        }
+        out.push((start, pos));
+        start = pos;
+    }
+    out
+}
+
+/// Drop fenced code blocks and quoted spans (a quoted path is something the
+/// filer read, not a surface they touch), then lift the path tokens.
+pub(crate) fn filing_paths(text: &str) -> Vec<String> {
+    let mut cleaned = text.to_string();
+    // ```.*?``` (dotall): collapse each fence pair.
+    while let Some(open) = cleaned.find("```") {
+        let Some(close_rel) = cleaned[open + 3..].find("```") else {
+            cleaned.replace_range(open.., " ");
+            break;
+        };
+        let close = open + 3 + close_rel + 3;
+        cleaned.replace_range(open..close, " ");
+    }
+    // (?<![A-Za-z0-9])(['\"])[^'\"\n]*\1(?![A-Za-z0-9]): one span at a
+    // time, same quote both ends, no quote or newline inside.
+    loop {
+        let bytes = cleaned.as_bytes();
+        let mut hit: Option<(usize, usize)> = None;
+        for q in 0..bytes.len() {
+            let quote = bytes[q];
+            if quote != b'\'' && quote != b'"' {
+                continue;
+            }
+            if q > 0 && (bytes[q - 1].is_ascii_alphanumeric()) {
+                continue;
+            }
+            let Some(rel) = bytes[q + 1..]
+                .iter()
+                .position(|&c| c == quote || c == b'\n')
+            else {
+                continue;
+            };
+            if rel == 0 {
+                continue; // empty span: * matches at least one char
+            }
+            let end_quote = q + 1 + rel;
+            if bytes[end_quote] != quote {
+                continue; // hit a newline first
+            }
+            match bytes.get(end_quote + 1) {
+                Some(c) if c.is_ascii_alphanumeric() => continue,
+                _ => {}
+            }
+            hit = Some((q, end_quote + 1));
+            break;
+        }
+        let Some((s, e)) = hit else { break };
+        cleaned.replace_range(s..e, " ");
+    }
+    path_spans(&cleaned)
+        .into_iter()
+        .map(|(s, e)| cleaned[s..e].to_string())
+        .collect()
+}
+
+fn strip_path_cell(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    // Trailing parenthetical annotation: `path (template)` -> `path`.
+    if let Some(open) = s.rfind('(') {
+        if s.ends_with(')') && !s[open + 1..s.len() - 1].contains('(') {
+            let head = s[..open].trim_end().to_string();
+            s = head;
+        }
+    }
+    s = s.replace('`', "").trim().to_string();
+    // Trailing line suffix: `path.py:42` or `path.py:42-90` -> `path.py`.
+    let byte_len = s.len();
+    let mut cut = byte_len;
+    let b = s.as_bytes();
+    // scan back over digits, then an optional -digits, then the colon
+    let mut i = b.len();
+    while i > 0 && b[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i < b.len() && i > 0 && b[i - 1] == b'-' {
+        let mut j = i - 1;
+        while j > 0 && b[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        if j < i - 1 && j > 0 && b[j - 1] == b':' {
+            cut = j - 1;
+        }
+    } else if i < b.len() && i > 0 && b[i - 1] == b':' {
+        cut = i - 1;
+    }
+    if cut < byte_len {
+        s.truncate(cut);
+    }
+    s
+}
+
+fn is_separator_row(line: &str) -> bool {
+    // ^\|[\s:|-]+\|[\s:|-]*$
+    let b = line.as_bytes();
+    if b.first() != Some(&b'|') {
+        return false;
+    }
+    let mut i = 1;
+    let mut seen = 0;
+    while i < b.len() && b[i] != b'|' {
+        if !(b[i].is_ascii_whitespace() || b[i] == b':' || b[i] == b'|' || b[i] == b'-') {
+            return false;
+        }
+        seen += 1;
+        i += 1;
+    }
+    if seen == 0 || i >= b.len() {
+        return false;
+    }
+    i += 1; // the second '|'
+    while i < b.len() {
+        if !(b[i].is_ascii_whitespace() || b[i] == b':' || b[i] == b'|' || b[i] == b'-') {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn looks_like_separator_prefix(line: &str) -> bool {
+    // ^\|[\s:|-]+\|
+    let b = line.as_bytes();
+    if b.first() != Some(&b'|') {
+        return false;
+    }
+    let mut i = 1;
+    let mut seen = 0;
+    while i < b.len() && b[i] != b'|' {
+        if !(b[i].is_ascii_whitespace() || b[i] == b':' || b[i] == b'|' || b[i] == b'-') {
+            return false;
+        }
+        seen += 1;
+        i += 1;
+    }
+    seen > 0 && i < b.len() && b[i] == b'|'
+}
+
+const FILE_HEADINGS: [&str; 5] = [
+    "files to modify",
+    "files to change",
+    "files touched",
+    "file ownership map",
+    "files",
+];
+
+fn extract_files_from_section(lines: &[&str], heading_index: usize) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    let mut saw_header = false;
+    let mut saw_separator = false;
+    for line in lines.iter().skip(heading_index + 1) {
+        let stripped = line.trim();
+        if stripped.starts_with("##") {
+            break;
+        }
+        if !stripped.starts_with('|') || is_separator_row(stripped) {
+            if saw_header && saw_separator && stripped.is_empty() {
+                saw_header = false;
+                saw_separator = false;
+            }
+            continue;
+        }
+        if !saw_header {
+            saw_header = true;
+            continue;
+        }
+        if !saw_separator {
+            if looks_like_separator_prefix(stripped) {
+                saw_separator = true;
+                continue;
+            }
+            saw_separator = true; // tolerate a missing separator; fall through
+        }
+        let body = stripped.trim_matches('|');
+        let Some(cell) = body.split('|').next() else {
+            continue;
+        };
+        let cell = strip_path_cell(cell);
+        if !cell.is_empty() && !files.contains(&cell) {
+            files.push(cell);
+        }
+    }
+    files
+}
+
+fn scan_one_plan(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("Warning: collision parser cannot read {path:?}");
+        return Vec::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found: Vec<String> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let stripped = line.trim();
+        if !stripped.starts_with("##") {
+            continue;
+        }
+        let heading = stripped.trim_start_matches('#').trim().to_lowercase();
+        if FILE_HEADINGS.iter().any(|h| heading.starts_with(h)) {
+            for f in extract_files_from_section(&lines, idx) {
+                if !found.contains(&f) {
+                    found.push(f);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// collision.parse_files_to_modify: the plan's declared file surface. A
+/// folder plan spreads its tables across 00-INDEX.md and the phase files.
+fn parse_files_to_modify(plan_path: &Path) -> Vec<String> {
+    if plan_path.is_dir() {
+        let mut found: Vec<String> = Vec::new();
+        let mut children: Vec<PathBuf> = std::fs::read_dir(plan_path)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        children.sort();
+        for child in children {
+            for f in scan_one_plan(&child) {
+                if !found.contains(&f) {
+                    found.push(f);
+                }
+            }
+        }
+        return found;
+    }
+    if !plan_path.exists() {
+        return Vec::new();
+    }
+    scan_one_plan(plan_path)
+}
+
+/// discovery.candidates over the filing pool: union the FTS lane with
+/// relatedness recall, ranked by relatedness score. `limit=5` here, matching
+/// the Python fold gate.
+fn discovery_candidates(
+    title: &str,
+    details: &str,
+    pool: &[Value],
+    graph: &Path,
+    limit: usize,
+) -> (Vec<(String, f64, String, Vec<String>)>, Option<String>) {
+    let mut by_id: std::collections::BTreeMap<String, &Value> = std::collections::BTreeMap::new();
+    for e in pool {
+        if let Some(id) = e.get("id").and_then(Value::as_str) {
+            by_id.insert(id.to_string(), e);
+        }
+    }
+    let query = [title, details]
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut fts_ids: Vec<String> = Vec::new();
+    let mut warning: Option<String> = None;
+    if query.is_empty() {
+        warning = Some(
+            "graph entries were injected without the graph file; \
+             the fts lane is unavailable"
+                .to_string(),
+        );
+    } else {
+        match super::search::search(&super::api::Store::new(graph), &query, None) {
+            Ok(ids) => {
+                for id in ids {
+                    if by_id.contains_key(&id) && !fts_ids.contains(&id) {
+                        fts_ids.push(id);
+                    }
+                }
+            }
+            // Golden captures ran with the FTS cache present, so the exact
+            // degraded wording is unpinned; the shape mirrors Python's str(exc).
+            Err(err) => warning = Some(err.0),
+        }
+    }
+    let mut incoming = Map::new();
+    incoming.insert("id".into(), json!("__incoming__"));
+    incoming.insert("title".into(), json!(title));
+    incoming.insert("details".into(), json!(details));
+    incoming.insert("domain".into(), json!("code"));
+    let incoming = Value::Object(incoming);
+    let related_rows = relatedness::similar_nodes(&incoming, pool, usize::MAX, None);
+    let mut all: Vec<(String, f64, String, Vec<String>)> = Vec::new();
+    for (id, score, reason) in related_rows {
+        if !by_id.contains_key(&id) {
+            continue;
+        }
+        all.push((id, score, reason, vec!["relatedness".into()]));
+    }
+    for id in &fts_ids {
+        if let Some(entry) = by_id.get(id) {
+            if all.iter().any(|(eid, _, _, _)| eid == id) {
+                let slot = all
+                    .iter_mut()
+                    .find(|(eid, _, _, _)| eid == id)
+                    .expect("checked above");
+                slot.3.push("fts".into());
+            } else {
+                let (score, reason) = relatedness::score_pair(&incoming, entry, false);
+                all.push((id.clone(), score, reason, vec!["fts".into()]));
+            }
+        }
+    }
+    all.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    all.truncate(limit);
+    (all, warning)
+}
+
+/// The fold gate's candidate list: live filing siblings, then any live plan
+/// surface naming the same files. Raw stored statuses; the write pipeline
+/// keeps them in step.
+fn fold_candidates(title: &str, details: Option<&str>, entries: &[Value]) -> (Vec<Value>, String) {
+    let sidecar = super::settings::graph_path()
+        .parent()
+        .map(|p| p.join("relatedness.json"))
+        .unwrap_or_else(|| PathBuf::from("relatedness.json"));
+    let (candidates, source) = relatedness::filing_candidates(entries, &sidecar);
+    let details_owned = details.unwrap_or("").to_string();
+    let graph = super::settings::graph_path();
+    let (ranked, warning) = discovery_candidates(title, &details_owned, &candidates, &graph, 5);
+    let mut out: Vec<Value> = Vec::new();
+    for (node_id, score, reason, lanes) in &ranked {
+        let Some(node) = candidates
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(node_id.as_str()))
+        else {
+            continue;
+        };
+        let mut reason = reason.clone();
+        if lanes.len() == 1 && lanes[0] == "fts" {
+            reason = format!(
+                "fts-only: {}",
+                if reason.is_empty() {
+                    "full-text match"
+                } else {
+                    reason.as_str()
+                }
+            );
+        }
+        // Python serializes the lane set sorted.
+        let mut lanes = lanes.clone();
+        lanes.sort();
+        out.push(json!({
+            "id": node_id,
+            "title": node.get("title").cloned().unwrap_or(Value::Null),
+            "status": node.get("status").cloned().unwrap_or(Value::Null),
+            "holder": live_worker(node_id),
+            "score": score,
+            "evidence": reason,
+            "lanes": lanes,
+        }));
+    }
+    let mut source = source;
+    if let (true, Some(warning)) = (!out.is_empty() || !ranked.is_empty(), warning.as_ref()) {
+        if !ranked.is_empty() {
+            source = format!("{source}; degraded: {warning}");
+        }
+    }
+    // A live plan surface is an independent fold signal when the filing
+    // names one of the same files.
+    let incoming: std::collections::BTreeSet<String> =
+        filing_paths(&details_owned).into_iter().collect();
+    if !incoming.is_empty() {
+        let known: std::collections::BTreeSet<String> = out
+            .iter()
+            .filter_map(|c| c.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        for node in entries {
+            let Some(surface_node_id) = node.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if known.contains(surface_node_id)
+                || node.get("status").and_then(Value::as_str) != Some("in_progress")
+            {
+                continue;
+            }
+            let Some(plan_path) = node.get("plan_path").and_then(Value::as_str) else {
+                continue;
+            };
+            let declared: std::collections::BTreeSet<String> =
+                parse_files_to_modify(Path::new(plan_path))
+                    .into_iter()
+                    .collect();
+            let overlap: Vec<String> = incoming.intersection(&declared).cloned().collect();
+            if !overlap.is_empty() {
+                out.push(json!({
+                    "id": surface_node_id,
+                    "title": node.get("title").cloned().unwrap_or(Value::Null),
+                    "status": node.get("status").cloned().unwrap_or(Value::Null),
+                    "holder": live_worker(surface_node_id),
+                    "score": 1.0,
+                    "evidence": format!("file overlap: {}", overlap.join(", ")),
+                }));
+            }
+        }
+    }
+    (out, source)
+}
+
+/// typer.confirm's y/N read, reduced: prints the prompt with typer's default
+/// marker, reads one line, yes when it starts y/Y. EOF answers no.
+fn confirm(prompt: &str) -> bool {
+    eprint!("{prompt} [y/N] ");
+    use std::io::BufRead;
+    let line = std::io::stdin().lock().lines().next();
+    matches!(line, Some(Ok(text)) if {
+        let t = text.trim();
+        t.starts_with('y') || t.starts_with('Y')
+    })
+}
+
+/// `fno backlog idea` — the plan-less capture verb with the pre-mint fold
+/// gate and wave filing. Share add's create path once the gate passes.
+pub fn run_idea(tail: &[String]) -> i32 {
+    let idea = match parse_idea(tail) {
+        ParsedIdea::Help => {
+            print!("{}", include_str!("idea_help.txt"));
+            return 0;
+        }
+        ParsedIdea::Refusal { message, exit } => {
+            eprintln!("{message}");
+            return exit;
+        }
+        ParsedIdea::Args(a) => a,
+    };
+    match idea_create(&idea) {
+        Ok(()) => 0,
+        Err(r) => {
+            eprintln!("{}", r.message);
+            r.exit
+        }
+    }
+}
+
+fn wave_normalize_difficulty(raw: &str) -> Result<String, Refusal> {
+    let band = raw.trim().to_lowercase();
+    if !["low", "medium", "high"].contains(&band.as_str()) {
+        // The wave path carries no DIFFICULTY_HELP suffix; the golden pins it.
+        return Err(refused(
+            format!("Error: invalid difficulty '{raw}'; must be one of: low, medium, high"),
+            2,
+        ));
+    }
+    Ok(band)
+}
+
+fn idea_create(idea: &IdeaArgs) -> Result<(), Refusal> {
+    refuse_tracker_owned("idea")?;
+    let add = &idea.add;
+    let details = read_text_arg(&add.details, &idea.details_file)?;
+    let wave_body: Option<String> = details.clone().or_else(|| add.description.clone());
+
+    if let Some(wave_of) = &idea.wave_of {
+        if add.evidence.is_some() {
+            return Err(refused("Error: --wave-of cannot record a creation vote", 2));
+        }
+        if idea.separate {
+            return Err(refused(
+                "Error: --wave-of and --separate are mutually exclusive",
+                2,
+            ));
+        }
+        let mut topology_flags: Vec<String> = Vec::new();
+        let mut push_flag = |given: bool, name: &str| {
+            if given {
+                topology_flags.push(name.to_string());
+            }
+        };
+        push_flag(add.blocked_by.is_some(), "--blocked-by");
+        push_flag(add.parent.is_some(), "--parent");
+        push_flag(add.roadmap_id.is_some(), "--roadmap-id");
+        push_flag(add.vision_path.is_some(), "--vision-path");
+        push_flag(add.project.is_some(), "--project");
+        push_flag(add.cwd.is_some(), "--cwd");
+        push_flag(add.size.is_some(), "--size");
+        push_flag(add.batch.is_some(), "--batch");
+        push_flag(!add.related.is_empty(), "--related");
+        push_flag(add.type_ != "feature", "--type");
+        push_flag(add.priority != "p2", "--priority");
+        if !topology_flags.is_empty() {
+            return Err(refused(
+                format!(
+                    "Error: wave filing cannot use node-only topology flags: {}",
+                    topology_flags.join(", ")
+                ),
+                2,
+            ));
+        }
+        let difficulty = match &add.difficulty {
+            None => {
+                if !stdin_is_interactive() {
+                    return Err(refused(
+                        "Error: non-interactive wave filing requires --difficulty (low, medium, high)",
+                        2,
+                    ));
+                }
+                let mut value;
+                loop {
+                    eprint!("Difficulty (low|medium|high): ");
+                    use std::io::BufRead;
+                    let line = std::io::stdin()
+                        .lock()
+                        .lines()
+                        .next()
+                        .unwrap_or_else(|| Ok(String::new()))
+                        .unwrap_or_default();
+                    value = line.trim().to_lowercase();
+                    if ["low", "medium", "high"].contains(&value.as_str()) {
+                        break;
+                    }
+                }
+                value
+            }
+            Some(d) => wave_normalize_difficulty(d)?,
+        };
+        let graph = super::settings::graph_path();
+        let entries =
+            crate::graph_store::read_rows(&graph).map_err(|e| refused(format!("{e}"), 2))?;
+        let target_id = node_ref::resolve_asserted_id(wave_of, &entries, "--wave-of", None)
+            .map_err(|(message, exit)| refused(message, exit))?;
+        file_wave(
+            idea.json_out,
+            &target_id,
+            &add.title,
+            wave_body.as_deref(),
+            &difficulty,
+            add.source_node.as_deref(),
+        )?;
+        return Ok(());
+    }
+
+    if add.difficulty.is_some() && !idea.separate {
+        if let Ok(normalized) =
+            wave_normalize_difficulty(add.difficulty.as_deref().expect("checked"))
+        {
+            let graph = super::settings::graph_path();
+            let entries =
+                crate::graph_store::read_rows(&graph).map_err(|e| refused(format!("{e}"), 2))?;
+            let (candidates, candidate_source) =
+                fold_candidates(&add.title, wave_body.as_deref(), &entries);
+            if !candidates.is_empty() {
+                if add.evidence.is_some() {
+                    return Err(refused(
+                        "Error: --evidence cannot be used when an idea fold is offered; \
+                         rerun with --separate to mint a node and record the creation vote.",
+                        2,
+                    ));
+                }
+                let top = &candidates[0];
+                let top_id = top.get("id").and_then(Value::as_str).unwrap_or("");
+                let wave_command = format!(
+                    "fno backlog idea {} --wave-of {} --difficulty {normalized}",
+                    shlex_quote(&add.title),
+                    top_id,
+                );
+                let marker = format!(
+                    "fold offered: {} status={} holder={} evidence={}",
+                    top.get("title").and_then(Value::as_str).unwrap_or(""),
+                    top.get("status").and_then(Value::as_str).unwrap_or(""),
+                    top.get("holder").and_then(Value::as_str).unwrap_or("none"),
+                    top.get("evidence").and_then(Value::as_str).unwrap_or(""),
+                );
+                let separate_command = format!(
+                    "fno backlog idea {} --separate --difficulty {normalized}",
+                    shlex_quote(&add.title),
+                );
+                if !stdin_is_interactive() {
+                    if idea.json_out {
+                        println!(
+                            "{}",
+                            super::render::py_json_pretty(&json!({
+                                "outcome": "choice_required",
+                                "marker": marker,
+                                "candidate_source": candidate_source,
+                                "candidates": candidates,
+                                "wave_command": wave_command,
+                                "separate_command": separate_command,
+                                "minted_id": Value::Null,
+                            }))
+                        );
+                    } else {
+                        println!("{marker}");
+                        println!("wave: {wave_command}");
+                        println!("separate: {separate_command}");
+                    }
+                    return Ok(());
+                }
+                if confirm(&format!("{marker}. Fold into {top_id}?")) {
+                    file_wave(
+                        idea.json_out,
+                        top_id,
+                        &add.title,
+                        wave_body.as_deref(),
+                        &normalized,
+                        add.source_node.as_deref(),
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let mut mint = add.clone();
+    mint.details = details;
+    create(&mint)
 }

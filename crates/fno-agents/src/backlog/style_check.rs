@@ -23,7 +23,6 @@ pub struct Violation {
 const LIST_ITEM_CAP: usize = 20;
 const PARAGRAPH_CAP: usize = 25;
 const MESSAGE_WORD_CAP: usize = 80;
-const EXCERPT_CAP: usize = 12;
 const PLACEHOLDER: &str = "x";
 
 /// Rule 3 modals. Matched lowercase whole-word; "may" is lowercase-only so
