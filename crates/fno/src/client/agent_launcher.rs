@@ -91,11 +91,25 @@ pub(crate) struct RecentModelChoice {
 /// The catalog read's outcome (the update-probe shape): the dock opens
 /// instantly on whatever is in hand and refreshes when the probe lands. The
 /// second field of `Ok` carries the account-record read's failure when model
-/// lists could not be fetched; harness rows still stand.
+/// lists could not be fetched; harness rows still stand. The third carries
+/// one [`ProjectFacts`] row per probed project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogOutcome {
-    Ok(Vec<HarnessChoice>, Option<String>),
+    Ok(Vec<HarnessChoice>, Option<String>, Vec<ProjectFacts>),
     Degraded(String),
+}
+
+/// One project's launch facts, read during the catalog probe: the checkout's
+/// current branch, its local branches (committer-date freshest first), and
+/// the resolved worktree policy word. A non-git cwd carries no branch facts;
+/// a failed policy read lands the named reason in `policy` so the launch
+/// stays honest (`worktree ?`) instead of guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectFacts {
+    pub cwd: String,
+    pub current: Option<String>,
+    pub branches: Vec<String>,
+    pub policy: Result<String, String>,
 }
 
 /// Which control owns the keyboard. The chips carry the axes; a chip's
@@ -159,7 +173,7 @@ impl Focus {
 /// effort surface at all (`None` = no axis).
 pub(crate) fn effort_offered(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> bool {
     let harness = launcher.draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return false;
     };
     rows.iter()
@@ -525,11 +539,22 @@ pub(crate) fn open(view: &mut View) {
     // A missing OR degraded catalog re-probes: one transient failure must
     // not stick for the session while a healthy one stays last-outcome-wins.
     // A partial model read re-probes too: defaults still launch, but the next
-    // open retries any failed routing or harness-specific model list.
-    if !matches!(
-        &view.launcher_catalog,
-        Some(CatalogOutcome::Ok(rows, None)) if rows.iter().all(|row| row.models_error.is_none())
-    ) {
+    // open retries any failed routing or harness-specific model list. A draft
+    // project with no facts row re-probes as well, so a project that joins
+    // the list after the last probe gets its facts on the next read.
+    let facts_missing = view.launcher.as_ref().is_some_and(|l| {
+        let cwd = l.draft.cwd();
+        match &view.launcher_catalog {
+            Some(CatalogOutcome::Ok(_, _, facts)) => !facts.iter().any(|f| f.cwd == cwd),
+            _ => false,
+        }
+    });
+    if facts_missing
+        || !matches!(
+            &view.launcher_catalog,
+            Some(CatalogOutcome::Ok(rows, None, _)) if rows.iter().all(|row| row.models_error.is_none())
+        )
+    {
         view.catalog_want = true;
     }
 }
@@ -538,7 +563,7 @@ pub(crate) fn open(view: &mut View) {
 /// AT SUBMIT with its own reason (visible inline), never by disappearing.
 pub(crate) fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutcome>) {
     if l.draft.harnesses.is_empty() {
-        if let Some(CatalogOutcome::Ok(rows, _)) = catalog {
+        if let Some(CatalogOutcome::Ok(rows, _, _)) = catalog {
             l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
             if l.draft.harness_idx >= rows.len() {
                 l.draft.harness_idx = 0;
@@ -600,9 +625,9 @@ pub(crate) fn open_with(
     Ok(())
 }
 
-fn fresh_draft(view: &View) -> LaunchDraft {
-    // Project candidates: the active workspace's squads, cwd-most-recent is
-    // the session's own launch cwd. The exact cwd sent is the one shown.
+/// The project candidates a fresh draft offers: the session's own launch cwd
+/// first, then the workspace squads' cwds, deduped, most-recent first.
+fn candidate_projects(view: &View) -> Vec<String> {
     let mut projects: Vec<String> = Vec::new();
     let own = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -615,6 +640,22 @@ fn fresh_draft(view: &View) -> LaunchDraft {
             projects.push(s.canonical_cwd.clone());
         }
     }
+    projects
+}
+
+/// The project list the catalog probe reads facts for: the open draft's
+/// candidates, or the fresh-draft list when the dock is closed.
+pub(crate) fn probe_projects(view: &View) -> Vec<String> {
+    view.launcher
+        .as_ref()
+        .map(|l| l.draft.projects.clone())
+        .unwrap_or_else(|| candidate_projects(view))
+}
+
+fn fresh_draft(view: &View) -> LaunchDraft {
+    // Project candidates: the active workspace's squads, cwd-most-recent is
+    // the session's own launch cwd. The exact cwd sent is the one shown.
+    let projects = candidate_projects(view);
     LaunchDraft {
         harnesses: Vec::new(),
         harness_idx: 0,
@@ -755,7 +796,7 @@ async fn submit(
     // reason, draft intact.
     let selected = l.draft.harness();
     let availability = match &view.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows, _)) => match rows.iter().find(|r| r.name == selected) {
+        Some(CatalogOutcome::Ok(rows, _, _)) => match rows.iter().find(|r| r.name == selected) {
             Some(r) if !r.selectable() => Err(r.reason()),
             Some(_) => Ok(()),
             None => Err(format!("harness {selected:?} is not in the catalog")),
@@ -1362,7 +1403,7 @@ pub(crate) async fn launcher_keys(
 /// harness with no effort list keeps its pin untouched.
 fn cycle_effort(l: &mut Launcher, delta: i32, catalog: &Option<CatalogOutcome>) {
     let harness = l.draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return;
     };
     let Some(row) = rows.iter().find(|r| r.name == harness) else {
@@ -1385,7 +1426,7 @@ fn cycle_effort(l: &mut Launcher, delta: i32, catalog: &Option<CatalogOutcome>) 
 /// After the harness changes, any pin the new harness does not offer clears.
 fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome>) {
     let harness = draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return;
     };
     let Some(row) = rows.iter().find(|r| r.name == harness) else {
@@ -1460,10 +1501,12 @@ fn next_free_portal(view: &View) -> u8 {
 
 /// The catalog read: a compiled-in table (each harness's model floor
 /// included) plus PATH stats, then bounded reads for configured routing
-/// rows, codex's own model cache, and OpenCode's installed model list.
-/// Delivered through the probe channel so the dock has one "not yet read"
-/// and "read" shape; async because the subprocess reads are.
-pub(crate) async fn load_catalog() -> CatalogOutcome {
+/// rows, codex's own model cache, and OpenCode's installed model list, and
+/// one facts row per project in `projects` (git branch facts + the resolved
+/// worktree policy word). Delivered through the probe channel so the dock
+/// has one "not yet read" and "read" shape; async because the subprocess
+/// reads are.
+pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
     let Ok(parsed) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
         return CatalogOutcome::Degraded("harness catalog: capability table unparseable".into());
     };
@@ -1661,7 +1704,85 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
         row.more = more;
         row.catalog_error = catalog_error.clone();
     }
-    CatalogOutcome::Ok(rows, models_err)
+    let facts = probe_project_facts(projects, timeout, deadline).await;
+    CatalogOutcome::Ok(rows, models_err, facts)
+}
+
+/// One project's facts read: current branch, local branches, and the
+/// worktree policy word - three bounded subprocess reads run in parallel
+/// under the probe's shared deadline. A non-git cwd yields no branch facts;
+/// the policy verb's failure lands in `policy` as the named reason.
+async fn probe_project_facts(
+    projects: Vec<String>,
+    timeout: std::time::Duration,
+    deadline: tokio::time::Instant,
+) -> Vec<ProjectFacts> {
+    let fno = crate::server::fno_bin().to_string_lossy().into_owned();
+    let mut facts = Vec::with_capacity(projects.len());
+    for cwd in projects {
+        let git_current = ["git", "-C", cwd.as_str(), "branch", "--show-current"];
+        let git_branches = [
+            "git",
+            "-C",
+            cwd.as_str(),
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ];
+        let policy_argv = [
+            fno.as_str(),
+            "agents",
+            "workspace",
+            "worktree",
+            "policy",
+            "--repo",
+            cwd.as_str(),
+        ];
+        let (current, branches, policy) = tokio::join!(
+            crate::dispatch_launch::run_fno_captured(&git_current, timeout, deadline),
+            crate::dispatch_launch::run_fno_captured(&git_branches, timeout, deadline),
+            crate::dispatch_launch::run_fno_captured(&policy_argv, timeout, deadline),
+        );
+        let current = current.filter(|(ok, _, _)| *ok).and_then(|(_, out, _)| {
+            out.lines()
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+        let branches: Vec<String> = branches
+            .filter(|(ok, _, _)| *ok)
+            .map(|(_, out, _)| {
+                out.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let policy = match policy {
+            Some((true, out, _)) => out
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| "policy verb printed nothing".to_string()),
+            Some((false, _, stderr)) => Err(stderr
+                .lines()
+                .next()
+                .unwrap_or("policy verb failed")
+                .trim()
+                .to_string()),
+            None => Err("policy read timed out".to_string()),
+        };
+        facts.push(ProjectFacts {
+            cwd,
+            current,
+            branches,
+            policy,
+        });
+    }
+    facts
 }
 
 // -- picker ------------------------------------------------------------------
@@ -1887,7 +2008,7 @@ pub(crate) fn picker_rows(
     };
     match field {
         Focus::Harness => match catalog {
-            Some(CatalogOutcome::Ok(rows_found, _)) => {
+            Some(CatalogOutcome::Ok(rows_found, _, _)) => {
                 for h in rows_found.iter().filter(|h| h.selectable()) {
                     push_entry(
                         &mut rows,
@@ -1935,7 +2056,7 @@ pub(crate) fn picker_rows(
             ),
         },
         Focus::Model => match catalog {
-            Some(CatalogOutcome::Ok(rows_found, models_err)) => {
+            Some(CatalogOutcome::Ok(rows_found, models_err, _)) => {
                 let models = rows_found
                     .iter()
                     .find(|row| row.name == harness)
@@ -2132,7 +2253,7 @@ pub(crate) fn picker_rows(
                 true,
                 Some(PickerAction::Clear),
             );
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(modes) = &row.permission_modes {
                         if modes.is_empty() {
@@ -2235,7 +2356,7 @@ pub(crate) fn picker_rows(
                 true,
                 Some(PickerAction::Clear),
             );
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(efforts) = &row.efforts {
                         for e in efforts {

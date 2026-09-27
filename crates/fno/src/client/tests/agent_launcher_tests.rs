@@ -64,6 +64,7 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
             })
             .collect(),
         None,
+        Vec::new(),
     ))
 }
 
@@ -71,7 +72,7 @@ fn sync_catalog(v: &mut View) {
     // Mirror the run loop's rx arm: land the catalog and sync the draft's
     // harness names.
     let names: Vec<String> = match &v.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows, _)) => rows.iter().map(|r| r.name.clone()).collect(),
+        Some(CatalogOutcome::Ok(rows, _, _)) => rows.iter().map(|r| r.name.clone()).collect(),
         _ => vec![],
     };
     if let Some(l) = v.launcher.as_mut() {
@@ -217,7 +218,7 @@ fn tab_walks_the_chip_row_and_wraps() {
 fn the_effort_chip_drops_when_the_harness_has_no_effort_surface() {
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
         choices[0].efforts = None;
     }
     v.launcher_catalog = Some(rows);
@@ -748,7 +749,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     // together.
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
         choices[0].models = vec![
             super::agent_launcher::ModelChoice {
                 name: "claude-opus-5".into(),
@@ -822,7 +823,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
 fn provider_and_model_choices_come_from_configured_rows() {
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("opencode", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
         choices[0].models = super::agent_launcher::parse_opencode_models(
             "openrouter/qwen/qwen3-coder\nlocal/llama-3.3\n",
         );
@@ -892,7 +893,7 @@ fn account_rows_supply_model_and_provider_options() {
 
     let mut v = view_with_launcher();
     let mut catalog = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, _) = &mut catalog {
+    if let CatalogOutcome::Ok(rows, _, _) = &mut catalog {
         rows[0].models = claude.clone();
     }
     v.launcher_catalog = Some(catalog);
@@ -1023,7 +1024,7 @@ fn model_picker_label_survives_a_long_error_hint() {
     // stays whole in the picker rows; the hint truncates instead.
     let mut v = view_with_launcher();
     let mut choices = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(rows, models_err) = &mut choices {
+    if let CatalogOutcome::Ok(rows, models_err, _) = &mut choices {
         *models_err =
             Some("account records unavailable: Usage: fno-py config get [OPTIONS] {key}".into());
         let _ = rows;
@@ -1057,6 +1058,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
             permission_modes: Some(Vec::new()),
         }],
         Some("routing inventory unavailable".into()),
+        Vec::new(),
     ));
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
@@ -1589,6 +1591,7 @@ fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
             permission_modes: Some(Vec::new()),
         }],
         None,
+        Vec::new(),
     ));
     let action = super::agent_launcher::PickerAction::PickRow {
         harness: "claude".into(),
@@ -1610,6 +1613,32 @@ fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
 }
 
 #[test]
+fn probe_projects_prefers_the_open_draft_and_falls_back_to_candidates() {
+    // The probe reads facts for the projects the dock actually shows; with
+    // the dock closed it still probes the fresh-draft list so the first
+    // open lands facts together with the catalog.
+    let mut v = plain_view();
+    let own = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    assert!(
+        super::agent_launcher::probe_projects(&v)
+            .iter()
+            .any(|p| *p == own),
+        "a closed dock probes the candidate list: {:?}",
+        super::agent_launcher::probe_projects(&v)
+    );
+    open(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.projects = vec!["/tmp/proj-a".into(), "/tmp/proj-b".into()];
+    }
+    assert_eq!(
+        super::agent_launcher::probe_projects(&v),
+        vec!["/tmp/proj-a".to_string(), "/tmp/proj-b".to_string()]
+    );
+}
+
+#[test]
 fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
     // AC4-ERR: no cache and a failing fetch leaves the floor standing; the
     // catalog failure lands in catalog_error, never on the harness rows.
@@ -1619,9 +1648,9 @@ fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
     let dir = fresh_state_dir();
     std::env::set_var("FNO_STATE_DIR", &dir);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let outcome = rt.block_on(super::agent_launcher::load_catalog());
+    let outcome = rt.block_on(super::agent_launcher::load_catalog(Vec::new()));
     let rows = match outcome {
-        CatalogOutcome::Ok(rows, _) => rows,
+        CatalogOutcome::Ok(rows, _, _) => rows,
         CatalogOutcome::Degraded(reason) => panic!("harness rows must not degrade: {reason}"),
     };
     let claude = rows
