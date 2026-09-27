@@ -27,7 +27,7 @@ pub fn normalize_difficulty(value: &str) -> Result<String, String> {
 /// band, attribute via history. `history_on`: "change" (update - a
 /// same-band revision is a history no-op) or "always" (claim -
 /// confirmations count too). The claim lane's twin stays Python-owned until
-/// x-fcb4.
+/// the claim-side port deletes it.
 pub fn write_canonical_difficulty(
     obj: &mut Map<String, Value>,
     band: Option<&str>,

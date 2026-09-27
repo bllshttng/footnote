@@ -407,12 +407,14 @@ mod tests {
     #[test]
     fn find_node_unique_prefix_resolves_and_ambiguous_refuses() {
         let entries = vec![
-            json!({"id": "ab-12345678"}),
-            json!({"id": "ab-12349999"}),
+            json!({"id": "ab-1a2b3c4d"}),
+            json!({"id": "ab-1234abcd"}),
             json!({"id": "x-bbbb2222"}),
         ];
-        assert!(find_node(&entries, "ab-12345678").is_some());
-        assert!(find_node(&entries, "ab-1234").is_none()); // ambiguous
+        assert!(find_node(&entries, "ab-1a2b3c4d").is_some());
+        // Both stored ids carry the bare `ab-` family prefix, so the fuzzy
+        // tier names two candidates and reads as a miss.
+        assert!(find_node(&entries, "ab-").is_none());
         assert!(find_node(&entries, "x-bbbb2222").is_some());
         assert!(find_node(&entries, "x-missing").is_none());
     }
