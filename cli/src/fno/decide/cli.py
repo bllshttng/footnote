@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -36,31 +35,6 @@ _DEPRECATION_NOTICE = (
     "`fno inbox decisions`, `fno decide reindex` -> `fno backlog "
     "decide-reindex`). This spelling is removed next release."
 )
-
-
-def _subject_node_id(subject: str, entries: Optional[list] = None) -> Optional[str]:
-    """The graph node a query subject names, when it names one.
-
-    The empty-answer text uses it to point at the one authority surface that
-    is not a decision record: a ruling written on the node itself. An
-    unreadable graph means an absent hint, never a failed read; the empty
-    answer below still states what it does not cover.
-    """
-    from fno.decide import _graph_entries, _resolved_node
-
-    try:
-        # The same resolution dance, in the same order, as _subject_matcher
-        # in fno/decide/__init__.py: strip, then resolve the spelling and its
-        # case-fold. A private copy that skips a tier here drifts from the
-        # matcher's answer for the same subject.
-        subject = subject.strip()
-        if entries is None:
-            entries = _graph_entries() or None
-        return _resolved_node(subject, entries or []) or _resolved_node(
-            subject.strip().casefold(), entries or []
-        )
-    except Exception:  # noqa: BLE001 - an advisory hint is never the answer
-        return None
 
 
 def _render_claim_receipt(node_id: str, event: dict) -> None:
@@ -487,44 +461,6 @@ def backlog_decide_retract(
     os.execv(str(binary), argv)
 
 
-@shim_app.command("list")
-def list_cmd(
-    subject: Optional[str] = typer.Option(
-        None,
-        "--subject",
-        help="What the decision governs. Omit it for recent decisions.",
-    ),
-    limit: int = typer.Option(
-        20, "--limit", help="Most recent N. 0 or less means no cap."
-    ),
-    lane: Optional[str] = typer.Option(
-        None,
-        "--lane",
-        metavar="law|coord|grant|unattributed",
-        help="Show only one authority lane.",
-    ),
-    state: Optional[str] = typer.Option(
-        None,
-        "--state",
-        metavar="live|retired|expired|superseded|retracted|unscoped|all",
-        help="Filter by the derived lifecycle state.",
-    ),
-    review_list: bool = typer.Option(
-        False,
-        "--review-list",
-        help="Report subjects with multiple unrelated live rulings without changing data.",
-    ),
-    output: Optional[str] = typer.Option(None, "--output", help="Write the full report to PATH."),
-    output_format: Optional[str] = typer.Option(
-        None, "--format", help="Export format: markdown or json."
-    ),
-    as_json: bool = typer.Option(
-        False, "--json", "-J", help="Emit one JSON object instead of the human block."
-    ),
-) -> None:
-    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
-
-
 def backlog_decisions(
     subject: Optional[str] = typer.Argument(
         None,
@@ -561,15 +497,64 @@ def backlog_decisions(
         None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
     ),
 ) -> None:
-    from fno._flag_aliases import merge_deprecated_alias
+    """Compatibility forward to the native listing (fno-agents).
 
-    subject = merge_deprecated_alias(
-        subject,
-        subject_legacy,
-        canonical_flag="<subject>",
-        legacy_flag="--subject",
-    )
-    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
+    The listing logic is native; this leaf exists so the old spellings keep
+    resolving and the pinned surface sets do not shift. Reads never mutate
+    the stores.
+    """
+    if subject_legacy is not None:
+        if subject is not None:
+            typer.echo(
+                "backlog decisions: pass either <subject> or --subject "
+                "(deprecated), not both",
+                err=True,
+            )
+            raise typer.Exit(2)
+        subject = subject_legacy
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "backlog decisions: refused: the fno-agents binary is "
+            "unavailable (set FNO_AGENTS_BIN, or install fno-agents beside "
+            "fno).",
+            err=True,
+        )
+        raise typer.Exit(3)
+    # A binary older than the native arm forwards right back here; break the
+    # cycle with the one line that names the fix instead of exec-spinning.
+    # The sentinel value is one this leaf mints, never a bare truthy flag.
+    import os
+
+    if os.environ.get("FNO_BACKLOG_FORWARD") == "backlog-decisions":
+        typer.echo(
+            "backlog decisions: the resolved fno-agents binary predates the "
+            "native decisions arm. Run `fno doctor update --rust` or rebuild "
+            "fno-agents, then retry.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    argv = [str(binary), "backlog", "decisions"]
+    if subject is not None:
+        argv.append(subject)
+    if limit != 20:
+        argv += ["--limit", str(limit)]
+    if lane is not None:
+        argv += ["--lane", lane]
+    if state is not None:
+        argv += ["--state", state]
+    if review_list:
+        argv.append("--review-list")
+    if output is not None:
+        argv += ["--output", output]
+    if output_format is not None:
+        argv += ["--format", output_format]
+    if as_json:
+        argv.append("--json")
+    os.environ["FNO_BACKLOG_FORWARD"] = "backlog-decisions"
+    os.execv(str(binary), argv)
 
 
 @shim_app.command("decide-reindex", hidden=True)
@@ -609,450 +594,3 @@ def reindex_compat_cmd() -> None:
     typer.echo(str(counts.get("total", 0)))
     if counts.get("invalid"):
         raise typer.Exit(1)
-
-
-def _resolve_output_format(path: str, requested: Optional[str]) -> str:
-    allowed = {"json", "markdown"}
-    fmt = (requested or "").strip().lower() or None
-    if fmt == "md":
-        fmt = "markdown"
-    if fmt is not None and fmt not in allowed:
-        raise ValueError("--format must be markdown or json")
-    suffix = Path(path).suffix.lower()
-    inferred = {".json": "json", ".md": "markdown", ".markdown": "markdown"}.get(suffix)
-    if fmt and inferred and fmt != inferred:
-        raise ValueError(f"--format {fmt} conflicts with output suffix {suffix}")
-    if fmt:
-        return fmt
-    if inferred:
-        return inferred
-    raise ValueError("--output needs a .json, .md, or .markdown suffix, or --format")
-
-
-_INVALID_AUTHORITY_SHOWN = 5
-
-
-def _invalid_authority_detail(quality: dict) -> str:
-    """Spell out the offending authority values, or say nothing.
-
-    The count alone never named `crown-l1`, `crown-l2-<node>` or `banana`, so
-    the tally that was supposed to catch a minted spelling could not report
-    one. Returns a leading-space suffix so callers append it unconditionally.
-    """
-    values = quality.get("invalid_authority_values") or []
-    if not values:
-        return ""
-    # Capped because the motivating value is `crown-l2-<node>`, one distinct
-    # spelling per node, over a machine-wide index. Uncapped, a large journal
-    # turns this summary into a single line of tens of kilobytes. The producer
-    # ranks by count descending, so the cap keeps the worst offenders.
-    shown = values[:_INVALID_AUTHORITY_SHOWN]
-    listed = ", ".join(f"{row['value']} x{row['count']}" for row in shown)
-    remaining = len(values) - len(shown)
-    if remaining > 0:
-        listed += f", +{remaining} more (see --json)"
-    return f" ({listed})"
-
-
-def _render_markdown(report: dict) -> str:
-    lines = ["# Decision report", ""]
-    if "groups" in report:
-        for group in report["groups"]:
-            lines.extend([f"## {group['subject']}", ""])
-            for row in group["decisions"]:
-                lines.append(
-                    f"- `{row['decision_id']}` ({row.get('lane', '')}, {row.get('ts', '')}): "
-                    f"{row.get('decision', '')}"
-                )
-            lines.append("")
-        quality = report.get("data_quality", {})
-        lines.append(
-            f"Data quality: {quality.get('subjectless', 0)} subjectless, "
-            f"{quality.get('invalid_authority', 0)} invalid authority value(s)"
-            f"{_invalid_authority_detail(quality)}."
-        )
-    else:
-        lines.append(
-            f"Subject: {report.get('subject', '(all)')}  "
-            f"Total: {report.get('total', 0)}"
-        )
-        lines.append("")
-        for row in report.get("decisions", []):
-            lines.append(
-                f"- `{row.get('decision_id', '')}` **{row.get('lifecycle', '')}** "
-                f"({row.get('lane', '')}, {row.get('ts', '')}, {row.get('scope') or 'project:fno'}): {row.get('decision', '')}"
-            )
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _write_report(report: dict, output: str, output_format: Optional[str]) -> None:
-    from fno.handoff.output import write_output_file
-
-    try:
-        fmt = _resolve_output_format(output, output_format)
-        content = (
-            json.dumps(report, indent=2, sort_keys=True) + "\n"
-            if fmt == "json"
-            else _render_markdown(report)
-        )
-        receipt = write_output_file(Path(output), content)
-    except (OSError, ValueError) as exc:
-        typer.echo(f"backlog decisions: cannot export report: {exc}", err=True)
-        raise typer.Exit(2 if isinstance(exc, ValueError) else 1)
-    typer.echo(json.dumps(receipt, separators=(",", ":")))
-
-
-def _list_decisions(
-    subject: Optional[str],
-    limit: int,
-    lane: Optional[str],
-    state: Optional[str],
-    review_list_mode: bool,
-    output: Optional[str],
-    output_format: Optional[str],
-    as_json: bool,
-) -> None:
-    """Recover the decision history for a subject, newest first."""
-    from fno.decide import (
-        current_law,
-        list_decisions,
-        looks_like_decision_id,
-        near_miss_subjects,
-        review_list,
-    )
-    from fno.tracker.metadata import ExternalMetadataUnavailable
-
-    if review_list_mode:
-        report = review_list()
-        if output:
-            _write_report(report, output, output_format)
-        elif as_json:
-            typer.echo(json.dumps(report, separators=(",", ":")))
-        else:
-            for group in report["groups"]:
-                typer.echo(f"REVIEW  {group['subject']}")
-                for row in group["decisions"]:
-                    typer.echo(
-                        f"  {row['decision_id']}  {row.get('lane', '')}  "
-                        f"{row.get('ts', '')}  {row.get('decision', '')}"
-                    )
-            quality = report["data_quality"]
-            typer.echo(
-                f"review list: {len(report['groups'])} group(s), "
-                f"{quality['subjectless']} subjectless, "
-                f"{quality['invalid_authority']} invalid authority value(s)"
-                f"{_invalid_authority_detail(quality)}",
-                err=True,
-            )
-        return
-
-    if lane not in {None, "law", "coord", "grant", "unattributed"}:
-        typer.echo(
-            "backlog decisions: --lane must be law, coord, grant, or unattributed",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    try:
-        # No cap on the read; the total is known here, so a truncated answer
-        # can say so. One soft graph read per subject query, passed down to
-        # every resolver that used to re-read it.
-        entries = None
-        if subject:
-            from fno.decide import _graph_entries
-
-            entries = _graph_entries() or None  # strict lifecycle retry for an empty read
-        label, found, damaged = list_decisions(
-            subject,
-            limit=None,
-            lane=lane,
-            state=state if state is not None else "all",
-            entries=entries,
-        )
-        standing_law = (
-            current_law(subject)
-            if subject is not None and lane == "law" and state == "live"
-            else None
-        )
-    except (OSError, ValueError) as exc:
-        # ValueError covers UnicodeDecodeError, which a torn multi-byte append
-        # raises and which is NOT an OSError.
-        typer.echo(f"backlog decisions: cannot read the decision index: {exc}", err=True)
-        raise typer.Exit(1)
-    except ExternalMetadataUnavailable as exc:
-        typer.echo(f"backlog decisions: {exc}", err=True)
-        raise typer.Exit(1)
-
-    if unknown := [row for row in found if row.get("lifecycle") == "unknown"]:
-        typer.echo(
-            f"backlog decisions: {unknown[0].get('lifecycle_reason')}, "
-            f"so {len(unknown)} coord ruling(s) read UNKNOWN, not unscoped.",
-            err=True,
-        )
-    decisions = found[:limit] if limit > 0 else found
-    truncated = len(decisions) < len(found)
-    # Computed for EVERY subject read, not only an empty one. The specimen this
-    # exists for returns one row: `--subject ` matched a wave plan and hid
-    # four rulings filed under ` scope`. A near-miss scan that only runs
-    # when the answer is empty would have stayed silent on exactly that case,
-    # and a partial answer reads as a whole one.
-    near = near_miss_subjects(subject, entries=entries or []) if subject else []
-
-    # Plan rulings: sibling plans whose consolidation.rejected names this
-    # node. The index cannot hold them, so this scan is the one surface the
-    # ruled-out node's readers consult. Prints before the index answer, on
-    # the empty answer too.
-    plan_rulings_result = None
-    if subject:
-        from fno.graph._constants import is_wellformed_node_id
-        from fno.paths import plans_content_dir
-        from fno.plan.rulings import plan_rulings
-
-        stripped = subject.strip()
-        node_id = stripped if is_wellformed_node_id(stripped) else None
-        if node_id is None:
-            node_id = _subject_node_id(subject, entries=entries)
-        if node_id:
-            plan_rulings_result = plan_rulings(node_id, plans_content_dir())
-            if plan_rulings_result["status"] == "unavailable":
-                # A degraded read names itself in every mode, JSON included.
-                typer.echo(
-                    f"backlog decisions: plan rulings not read "
-                    f"({plan_rulings_result['dir']}: {plan_rulings_result['detail']})",
-                    err=True,
-                )
-
-    # matched_by tells a machine reader WHICH key answered, so an id lookup is
-    # never mistaken for a subject hit. A LIST is a union: `--subject d-XXXX`
-    # returns that decision and any ruling filed about it.
-    matched: "list[str]" = []
-    if subject:
-        want = subject.strip().casefold()
-        if any(str(d.get("decision_id") or "").casefold() == want for d in found):
-            matched.append("decision_id")
-        if any(str(d.get("decision_id") or "").casefold() != want for d in found):
-            matched.append("subject")
-    payload = {
-        "subject": label,
-        "decisions": decisions,
-        "total": len(found),
-        "truncated": truncated,
-        "damaged": damaged,
-        "matched_by": matched if subject else None,
-        "near_misses": [{"subject": s, "count": n} for s, n in near],
-    }
-    if plan_rulings_result is not None:
-        payload["plan_rulings"] = {
-            "status": plan_rulings_result["status"],
-            "dir": plan_rulings_result["dir"],
-            "rulings": plan_rulings_result["rulings"],
-            "skipped": plan_rulings_result["skipped"],
-        }
-    if standing_law is not None:
-        payload.update(standing_law)
-    if output:
-        payload["decisions"] = found
-        payload["truncated"] = False
-        _write_report(payload, output, output_format)
-        return
-    if as_json:
-        typer.echo(json.dumps(payload, separators=(",", ":")))
-        return
-
-    if standing_law is not None:
-        canonical = standing_law["canonical_subject"]
-        verdict = standing_law["current_law"]
-        if verdict["status"] == "single":
-            typer.echo(f"CURRENT LAW  {canonical}  {verdict['decision_id']}")
-        elif verdict["status"] == "conflict":
-            typer.echo(
-                f"LAW CONFLICT  {canonical}  {','.join(verdict['decision_ids'])}"
-            )
-        else:
-            # Scoped because this line is the one a reader quotes. `NO CURRENT
-            # LAW` alone reads as "no rule exists", and a worker acted on that
-            # reading: the verdict covers the law lane only, and the
-            # ruling that governs can sit in another lane or on the node
-            # itself, outside every decision record.
-            typer.echo(
-                f"NO CURRENT LAW  {canonical}  (law lane only; a ruling can "
-                "sit in another lane or on the node itself)"
-            )
-
-    if plan_rulings_result is not None:
-        from fno.plan.rulings import ruling_lines
-
-        for line in ruling_lines(plan_rulings_result, "", "", style="recall"):
-            typer.echo(line)
-
-    if not decisions:
-        # Exit 0: a read that answered "none" is a successful read. Only a read
-        # that could not run is a failure.
-        #
-        # A lane or lifecycle filter can empty the answer while the store
-        # itself holds decisions; the empty answer then says what it filtered
-        # away rather than implying nothing is recorded. The store cannot be
-        # a missing file any more, so the only source of an empty answer here
-        # is the filter itself.
-        if lane is not None or state is not None:
-            # A lane or lifecycle filter emptied the answer, not the store.
-            # Saying nothing is indexed under this subject would be false, and
-            # the reader acts on it.
-            #
-            # ONE branch for every lane. `law` used to have its own, naming
-            # only the pre-cutover rows, so a subject with 2 unattributed and 3
-            # coord rulings heard about the 2 and never the 3: the more
-            # specific branch gave the less complete answer.
-            _, unfiltered, _ = list_decisions(
-                subject, limit=None, state="all", entries=entries
-            )
-            if unfiltered:
-                noun = "decision" if len(unfiltered) == 1 else "decisions"
-                verb = "sits" if len(unfiltered) == 1 else "sit"
-                counts: "dict[str, int]" = {}
-                for d in unfiltered:
-                    key = str(d.get("lane") or "unattributed")
-                    counts[key] = counts.get(key, 0) + 1
-                lanes = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
-                filters = [value for value in (lane, state) if value is not None]
-                filter_label = " ".join(filters)
-                hint = ""
-                if lane == "law" and counts.get("unattributed"):
-                    hint = (
-                        " The unattributed ones are pre-cutover, recorded "
-                        "before authority was an earned value."
-                    )
-                recovery_command = "fno backlog decisions"
-                if subject is not None:
-                    recovery_command += f" '{subject}'"
-                if lane is not None and counts.get(lane):
-                    recovery_command += f" --lane {lane}"
-                recovery_command += " --state all"
-                typer.echo(
-                    f"backlog decisions: 0 {filter_label} decisions for '{label}', but "
-                    f"{len(unfiltered)} {noun} {verb} under it: {lanes}."
-                    f"{hint} Read all lifecycle states with: {recovery_command}.",
-                    err=True,
-                )
-                return
-
-        from fno import paths
-        from fno.events.store_client import store_db_path
-
-        index_path = Path(paths.decisions_jsonl())
-        hint = (
-            ""
-            if index_path.exists() or store_db_path(index_path).exists()
-            else " (no index yet on this machine - run `fno backlog "
-            "decide-reindex` to backfill what is already on disk)"
-        )
-        # NEVER "no decisions recorded". That is a claim about the world, and
-        # only a claim about the QUERY is true here. Say what is not indexed,
-        # then name what is searchable.
-        if near:
-            listed = "; ".join(f"'{s}' ({n})" for s, n in near)
-            typer.echo(
-                f"backlog decisions: nothing is indexed under the exact subject "
-                f"'{label}'{hint}. Nearly matching subjects: {listed}. Read one "
-                f"with: fno backlog decisions '{near[0][0]}'",
-                err=True,
-            )
-        elif subject and looks_like_decision_id(subject):
-            typer.echo(
-                f"backlog decisions: '{label}' is shaped like a decision id, and no "
-                f"decision on this machine carries it{hint}. It is not indexed "
-                "as a subject either. Browse the store with: fno backlog decisions",
-                err=True,
-            )
-        else:
-            # A subject that names a graph node carries authority this store
-            # structurally cannot hold: a king's ruling or an operator note on
-            # the node itself (third condition). Naming that surface
-            # is the difference between an honest empty and "no rule exists".
-            node_surface = ""
-            if subject:
-                node_id = _subject_node_id(subject, entries=entries)
-                if node_id:
-                    node_surface = (
-                        " That is not a finding that no rule exists: a king's "
-                        "ruling or an operator note on the node itself is "
-                        "authority no decision record carries. Read it with: "
-                        f"fno backlog get {node_id}."
-                    )
-            typer.echo(
-                f"backlog decisions: no decision is indexed under the subject "
-                f"'{label}'{hint}.{node_surface} Rulings on other subjects are "
-                "unaffected; browse them with: fno backlog decisions",
-                err=True,
-            )
-        return
-
-    for d in decisions:
-        superseded = str(d.get("superseded_by") or "")
-        marker = f"  [superseded by {superseded}]" if superseded else ""
-        # Across subjects the subject IS the column that tells the rows apart;
-        # scoped to one it is the same word on every line.
-        scope = "" if subject else f"{d.get('subject') or '(none)'}  "
-        lane_marker = "LAW" if d.get("lane") == "law" else d.get("lane", "")
-        lifecycle = str(d.get("lifecycle") or "live").upper()
-        # Provenance travels ON the row. A citation is quoted without the lane
-        # column far more often than it is read here, so the authority and the
-        # attestation have to be part of what a reader copies.
-        attested = "  [attested]" if d.get("attested_by") else ""
-        # Parenthesised only when there IS one. Law is no longer defaulted, so
-        # most rows claim no authority, and `operator ()` on every line is
-        # noise on the one line added to carry provenance. `or ""` rather than
-        # a .get default: an explicit JSON null would otherwise print "None".
-        authority = str(d.get("authority_source") or "")
-        authority = f" ({authority})" if authority else ""
-        typer.echo(
-            f"{lifecycle}  {lane_marker}  {d.get('decision_id')}  {d.get('ts') or ''}  {scope}"
-            f"{d.get('decided_by') or ''}{authority}"
-            f"{attested}  {d.get('decision') or ''}{marker}"
-        )
-        if d.get("relayed_by"):
-            typer.echo(
-                f"    relayed: {d['relayed_by']} (a name this caller supplied, "
-                "not a stamped one)"
-            )
-        if d.get("rationale"):
-            typer.echo(f"    rationale: {d['rationale']}")
-        for read_row in d.get("reads") or []:
-            head = str(read_row.get("out_head") or "")
-            first = head.splitlines()[0] if head else "(no output)"
-            typer.echo(
-                f"    read: {read_row.get('cmd')} -> exit {read_row.get('exit')} | {first}"
-            )
-        if d.get("question"):
-            typer.echo(f"    question: {d['question']}")
-        if d.get("options"):
-            typer.echo(f"    options: {', '.join(str(o) for o in d['options'])}")
-        if d.get("supersedes"):
-            typer.echo(f"    supersedes: {d['supersedes']}")
-        if d.get("lifecycle_reason"):
-            typer.echo(f"    lifecycle reason: {d['lifecycle_reason']}")
-        if d.get("lifecycle_evidence"):
-            typer.echo(f"    lifecycle evidence: {d['lifecycle_evidence']}")
-
-    if truncated:
-        typer.echo(
-            f"backlog decisions: showing {len(decisions)} of {len(found)}; "
-            f"--limit 0 for all.",
-            err=True,
-        )
-
-    if near:
-        # An answer that arrived is not an answer that is whole. `--subject
-        # ` returned one wave plan while four rulings sat under
-        # ` scope`, and nothing said so.
-        #
-        # It states the near misses and nothing else. `len(found)` is already
-        # lane-filtered, so calling it the count for this subject under-reports
-        # the record - a wrong number inside the message that exists to stop a
-        # reader trusting a short answer.
-        listed = "; ".join(f"'{s}' ({n})" for s, n in near)
-        typer.echo(
-            f"backlog decisions: decisions also sit under subjects that nearly match "
-            f"'{label}': {listed}",
-            err=True,
-        )
