@@ -732,7 +732,7 @@ def test_derived_deadline_stays_below_the_interval(monkeypatch):
     def cfg(interval):
         return SimpleNamespace(tick_timeout_seconds=None, interval_seconds=interval)
 
-    assert _resolve_tick_deadline(cfg(600)) == 480
+    assert _resolve_tick_deadline(cfg(600)) == 510
     assert _resolve_tick_deadline(cfg(60)) == 55
     assert _resolve_tick_deadline(cfg(30)) == 25
     # An explicit config value is clamped too: 3600 over a 600s interval
@@ -1072,7 +1072,10 @@ def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events)
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows, "a cut sweep must mint its arm row"
-    assert rows[0]["skip_reason"] == "timeout"
+    # A slice cut is starvation of the phase's budget, not an arm failure:
+    # "timeout" rides FAILURE_SKIPS and would render a healthy loop as FAIL
+    # (notify_watch read FAIL for 43 minutes while only its slice was short).
+    assert rows[0]["skip_reason"] == "starved"
     # The sweep cap is below the remaining wall, so the slice wording fires;
     # the load-bearing half is the handed-back scan counter.
     assert "phase slice" in rows[0]["detail"]
