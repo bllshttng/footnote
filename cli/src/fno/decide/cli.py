@@ -468,7 +468,9 @@ def backlog_decide_retract(
         raise typer.Exit(3)
     # A binary older than the native arm forwards right back here; break the
     # cycle with the one line that names the fix instead of exec-spinning.
-    if os.environ.get("FNO_BACKLOG_FORWARD") == "1":
+    # The sentinel value is one this leaf mints, never a bare truthy flag, so
+    # an unrelated export of the variable cannot trip the guard.
+    if os.environ.get("FNO_BACKLOG_FORWARD") == "backlog-decide-retract":
         typer.echo(
             "backlog decide-retract: the resolved fno-agents binary predates "
             "the native decide-retract arm. Run `fno doctor update --rust` or "
@@ -481,7 +483,7 @@ def backlog_decide_retract(
         argv += ["--reason", reason]
     if authority:
         argv += ["--authority", authority]
-    os.environ["FNO_BACKLOG_FORWARD"] = "1"
+    os.environ["FNO_BACKLOG_FORWARD"] = "backlog-decide-retract"
     os.execv(str(binary), argv)
 
 

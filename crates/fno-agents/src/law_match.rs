@@ -2083,11 +2083,13 @@ fn parse_retract_door(
                     .ok_or_else(|| format!("--reason needs a value\n{usage}"))?
                     .clone();
             }
-            ("-R", true) => {
+            // One arm takes both spellings, so the value error and the
+            // stored field cannot diverge between --reason and -R.
+            ("--reason", _) | ("-R", true) => {
                 i += 1;
                 door.reason = args
                     .get(i)
-                    .ok_or_else(|| format!("-R needs a value\n{usage}"))?
+                    .ok_or_else(|| format!("--reason needs a value\n{usage}"))?
                     .clone();
             }
             ("--authority", true) => {
