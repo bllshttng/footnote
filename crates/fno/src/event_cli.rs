@@ -597,8 +597,7 @@ fn run_find(args: &[OsString]) -> i32 {
     let aggregate = serde_json::json!({
         "status": if complete { "complete" } else { worst },
         "complete_since": complete_since,
-        "requested_since": coverages.first()
-            .and_then(|c| c["requested_since"].as_str()),
+        "requested_since": since_ms.map(rfc3339),
         "observed_first": observed_first,
         "observed_last": observed_last,
         "reason": reason,
