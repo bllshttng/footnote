@@ -175,12 +175,16 @@ _refuse_for() {
 name_cls='[^[:space:];|&<>)]+'   # the FULL bound path, slashes included:
                                 # top-level-ness is decided on the resolved
                                 # path in _refuse_for, not here
+# _re_quote TEXT -> every ERE metacharacter escaped, so a runtime path value
+# (HOME, CLAUDE_CONFIG_DIR) reads as a literal inside the arms.
+_re_quote() {
+    printf '%s' "$1" | sed -e 's/[][\.*^$()+?{|}]/\\&/g'
+}
 arms=('\$CLAUDE_CONFIG_DIR' '\$HOME/\.claude' '~/\.claude')
-home_esc="${HOME//./\\.}"
+home_esc="$(_re_quote "${HOME%/}")"
 arms+=("${home_esc}/\.claude")
 if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-    cfg_esc="${CLAUDE_CONFIG_DIR//./\\.}"
-    arms+=("${cfg_esc}")
+    arms+=("$(_re_quote "${CLAUDE_CONFIG_DIR%/}")")
 fi
 path_arm=""
 for arm in "${arms[@]}"; do
