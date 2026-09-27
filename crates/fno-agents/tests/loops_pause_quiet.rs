@@ -326,7 +326,7 @@ fn ac6_resume_all_lifts_the_mail_leg() {
                 .unwrap();
         assert_eq!(breaker["state"], "clear");
         assert_eq!(breaker["origin"], "pause-all");
-        assert_eq!(breaker["mail"], "armed");
+        assert_eq!(breaker["mail"], "lifted");
         assert_eq!(breaker["mail_session_id"], TEST_SESSION_ID);
         assert_eq!(
             fs::read_to_string(calls).unwrap().trim(),
