@@ -5946,12 +5946,6 @@ def _mux_pane_send(
         return True
 
     def _mail_inject_pane_lane(binary) -> bool:
-        if binary is None:
-            print(
-                f"mux pane {pane} send demoted to durable: the mail-inject binary is missing",
-                file=sys.stderr,
-            )
-            return False
         recipient_id = (
             getattr(entry, "harness_session_id", None)
             or getattr(entry, "session_id", None)
@@ -6142,9 +6136,8 @@ def _mux_pane_send(
             return False
     try:
         if confirm and not raw and not review:
-            # Wrapped pane mail rides the Rust typed lane (C11/C12/C17); raw
-            # sends, digests and review keep the Python path below. No binary:
-            # the Python lane below carries the same confirm contract.
+            # Rust typed lane when a binary resolves; no binary: the Python
+            # lane below carries the same confirm contract.
             from fno import rust_binary as _rb
             binary = _rb.resolve_installed_binary()
             if binary is not None:
@@ -6316,7 +6309,6 @@ def _delivery_policy_refusal(
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         from fno.mail import hold as hold_mod
-
         return hold_mod.gate_answer_in_process(token)
     try:
         argv = [str(binary), "mail-hold", "--gate"]
