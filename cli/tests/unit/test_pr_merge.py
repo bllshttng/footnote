@@ -2364,9 +2364,9 @@ def _global_events_at(monkeypatch, root):
     """Point the global events journal at a tmp dir and return it.
 
     Patches the resolver the code actually calls rather than an env var:
-    ``FNO_STATE_DIR`` is not a knob anything here reads, so setting it leaves
-    these tests pointed at the developer's real ``~/.fno`` - where the absence
-    of any matching event makes a negative assertion pass for the wrong reason.
+    an env pin moves only the readers that honor it (``FNO_STATE_DIR`` moves
+    ``state_dir``/``locks_dir``, not every journal path), so patching the
+    resolver is the strict way to keep a negative assertion honest.
     """
     from fno import paths
 

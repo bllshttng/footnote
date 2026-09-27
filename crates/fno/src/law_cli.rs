@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 /// The verbs the native surface serves. The Python `fno inbox law` group
 /// forwards here instead of holding its own write path.
-pub const NATIVE_LAW_SUBCOMMANDS: &[&str] = &["set", "stage", "match"];
+pub const NATIVE_LAW_SUBCOMMANDS: &[&str] = &["set", "stage", "match", "retract", "history"];
 
 /// Classify `fno inbox law <sub> ...` for the front door: `Some(rest)` runs
 /// natively, `None` forwards to the Python CLI.
@@ -43,7 +43,7 @@ pub fn run(args: &[OsString]) -> i32 {
         .any(|a| a.to_str() == Some("-h") || a.to_str() == Some("--help"))
     {
         println!(
-            "usage: fno inbox law set <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]... | fno inbox law stage | fno inbox law match (one JSON request on stdin)"
+            "usage: fno inbox law set <subject> [decision] [--global] [--paths g1,g2] [--rationale s] [--option s]... [--supersedes d-x] [--graduation k] [--graduation-ref r] [--decision-file f|-] [--read cmd]... | fno inbox law stage | fno inbox law match (one JSON request on stdin) | fno inbox law retract <subject-or-id> --reason <why> | fno inbox law history <subject-or-id>"
         );
         return 0;
     }
@@ -54,14 +54,15 @@ pub fn run(args: &[OsString]) -> i32 {
                 .iter()
                 .filter_map(|a| a.to_str().map(str::to_owned))
                 .collect();
-            // A piped stdin rides the request for `--decision-file -`; a tty
-            // reads nothing, so an interactive call never blocks.
-            let stdin_text = if stdin_is_tty() {
-                String::new()
-            } else {
+            // A piped stdin rides the request ONLY for `--decision-file -`:
+            // every other call never touches stdin, so a daemon whose stdin
+            // is an open pipe cannot block the verb.
+            let stdin_text = if stdin_requested(&argv) {
                 let mut buf = String::new();
                 let _ = std::io::stdin().read_to_string(&mut buf);
                 buf
+            } else {
+                String::new()
             };
             let request = serde_json::json!({
                 "mode": "record",
@@ -69,7 +70,7 @@ pub fn run(args: &[OsString]) -> i32 {
                 "stdin": stdin_text,
             })
             .to_string();
-            law_exec(&request)
+            law_exec(&request, Attended::No)
         }
         "stage" | "match" => {
             // The caller shapes the request (the hook wraps its payload as a
@@ -80,28 +81,89 @@ pub fn run(args: &[OsString]) -> i32 {
                 eprintln!("fno inbox law {sub}: could not read the request from stdin");
                 return 2;
             }
-            law_exec(&buf)
+            law_exec(&buf, Attended::No)
+        }
+        "retract" => {
+            let argv: Vec<String> = rest
+                .iter()
+                .filter_map(|a| a.to_str().map(str::to_owned))
+                .collect();
+            let request = serde_json::json!({
+                "mode": "retract",
+                "argv": argv,
+            })
+            .to_string();
+            // Attended: the request rides argv and the worker inherits this
+            // terminal as stdin, so the door's operator proof is the real
+            // tty - the one credential a piped lane can never carry.
+            law_exec(&request, Attended::Yes)
+        }
+        "history" => {
+            let argv: Vec<String> = rest
+                .iter()
+                .filter_map(|a| a.to_str().map(str::to_owned))
+                .collect();
+            let request = serde_json::json!({
+                "mode": "history",
+                "argv": argv,
+            })
+            .to_string();
+            law_exec(&request, Attended::No)
         }
         _ => {
-            eprintln!("error: expected a subcommand (set | stage | match)");
+            eprintln!("error: expected a subcommand (set | stage | match | retract | history)");
             2
         }
     }
 }
 
-/// One request through the worker's `--law-exec` one-shot lane. The child
-/// owns stdout and the exit code; the request rides stdin. A missing worker
-/// is the door's refused exit (3), never an empty answer.
-fn law_exec(request: &str) -> i32 {
+/// Stdin is read only when the argv asks for it: `--decision-file` whose
+/// value is `-`. A tty check cannot tell an attended call from a daemon,
+/// but the argv can.
+fn stdin_requested(argv: &[String]) -> bool {
+    // Both spellings the record door parses: two arguments, and the inline
+    // `--decision-file=-` form its flag=value splitter accepts.
+    argv.iter().any(|arg| {
+        arg.split_once('=')
+            .is_some_and(|(f, v)| f == "--decision-file" && v == "-")
+    }) || argv
+        .iter()
+        .zip(argv.iter().skip(1))
+        .any(|(flag, value)| flag == "--decision-file" && value == "-")
+}
+
+/// Whether the child inherits this process's stdin. `Yes` is the attended
+/// shape: the request rides argv and the worker's fd 0 is the caller's real
+/// terminal, which is the operator proof the retract door reads.
+enum Attended {
+    Yes,
+    No,
+}
+
+/// One request through the worker's one-shot law lane. The child owns stdout
+/// and the exit code; unattended, the request rides a piped stdin. A missing
+/// worker is the door's refused exit (3), never an empty answer.
+fn law_exec(request: &str, attended: Attended) -> i32 {
     let Some(binary) = crate::store_client::worker_binary() else {
         eprintln!(
             "fno inbox law: refused: the fno-agents-worker binary is unavailable (set FNO_AGENTS_WORKER, or install the worker beside fno)."
         );
         return 3;
     };
-    let mut child = match Command::new(&binary)
-        .arg("--law-exec")
-        .stdin(Stdio::piped())
+    let mut cmd = Command::new(&binary);
+    let piped = match attended {
+        Attended::Yes => {
+            cmd.arg("--law-exec-arg").arg(request);
+            cmd.stdin(Stdio::inherit());
+            None
+        }
+        Attended::No => {
+            cmd.arg("--law-exec");
+            cmd.stdin(Stdio::piped());
+            Some(request)
+        }
+    };
+    let mut child = match cmd
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -112,18 +174,20 @@ fn law_exec(request: &str) -> i32 {
             return 3;
         }
     };
-    let sent = child
-        .stdin
-        .take()
-        .ok_or(())
-        .and_then(|mut stdin| stdin.write_all(request.as_bytes()).map_err(|_| ()));
-    if sent.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        eprintln!("fno inbox law: refused: could not send the law request");
-        return 3;
+    if let Some(request) = piped {
+        let sent = match child.stdin.as_mut() {
+            Some(stdin) => stdin.write_all(request.as_bytes()).map_err(|_| ()),
+            None => Err(()),
+        };
+        if sent.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("fno inbox law: refused: could not send the law request");
+            return 3;
+        }
+        drop(child.stdin.take());
+        // stdin dropped here: the child sees EOF and answers.
     }
-    // stdin dropped here: the child sees EOF and answers.
     match child.wait() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
@@ -133,6 +197,52 @@ fn law_exec(request: &str) -> i32 {
     }
 }
 
-fn stdin_is_tty() -> bool {
-    unsafe { libc::isatty(0) == 1 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_only_for_decision_file_dash() {
+        // A daemon whose stdin is an open pipe must never block the
+        // verb. Only `--decision-file -` (either spelling) asks for stdin.
+        assert!(stdin_requested(&[
+            "subject".to_string(),
+            "--decision-file".to_string(),
+            "-".to_string(),
+        ]));
+        assert!(stdin_requested(&[
+            "topic".to_string(),
+            "--decision-file=-".to_string()
+        ]));
+        assert!(!stdin_requested(&[
+            "subject".to_string(),
+            "text".to_string()
+        ]));
+        assert!(!stdin_requested(&[
+            "subject".to_string(),
+            "--decision-file".to_string(),
+            "plan.md".to_string(),
+        ]));
+        assert!(!stdin_requested(&[
+            "topic".to_string(),
+            "--decision-file=plan.md".to_string()
+        ]));
+        assert!(!stdin_requested(&[]));
+    }
+
+    #[test]
+    fn classify_routes_new_subcommands() {
+        let mk = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            classify_inbox_law(&mk(&["inbox", "law", "retract"])).map(|r| r.len()),
+            Some(1)
+        );
+        assert_eq!(
+            classify_inbox_law(&mk(&["inbox", "law", "history"])).map(|r| r.len()),
+            Some(1)
+        );
+        // Unknown subcommands still fall through to the Python group.
+        assert!(classify_inbox_law(&mk(&["inbox", "law", "nope"])).is_none());
+        assert!(classify_inbox_law(&mk(&["inbox", "law"])).is_none());
+    }
 }

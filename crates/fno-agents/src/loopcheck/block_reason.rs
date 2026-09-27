@@ -235,7 +235,7 @@ pub(super) fn build_block_reason(
             // diff-sized level. None keeps the placeholder form (fail-open,
             // same as every other hint consumer).
             let sized = sized_self_review_hint(
-                &std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".into()),
+                &super::loopcheck_fno_bin(),
                 &std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
                 author_harness.as_deref(),
             );

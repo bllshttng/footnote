@@ -149,7 +149,7 @@ pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> 
     } else {
         cwd.join(plan_path)
     };
-    let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".into());
+    let fno_bin = crate::loopcheck::loopcheck_fno_bin();
     evaluate(&fno_bin, cwd, &plan_path, events)
 }
 

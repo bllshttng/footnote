@@ -254,9 +254,13 @@ use watch_lease::{harness_can_idle, watch_target, watch_window_ms, CONTINUE_WORK
 /// The fno binary every loop-check surface shells, resolved through the same
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
 /// default `fno`). One resolver so a stubbed test and a live gate cannot
-/// disagree about which binary answered.
+/// disagree about which binary answered. Under `cfg!(test)` an unset var
+/// answers a path that cannot exec (`scrape::declared_fno`): a lib unit
+/// test gets only the porcelain it declared.
 pub(crate) fn loopcheck_fno_bin() -> String {
-    std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+    crate::scrape::declared_fno(
+        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").map(|v| v.to_string_lossy().into_owned()),
+    )
 }
 
 /// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
@@ -277,10 +281,8 @@ fn best_effort_notify(title: &str, body: &str) {
     if std::env::var("FNO_LOOPCHECK_NO_NOTIFY").as_deref() == Ok("1") {
         return;
     }
-    // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
-    // hands the raw OsString straight to the spawn (gemini review).
-    let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-    crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
+    let fno_bin = loopcheck_fno_bin();
+    crate::operator_notice::notify_operator_with(std::ffi::OsStr::new(&fno_bin), title, body, None);
 }
 
 // ── main decision function ────────────────────────────────────────────────────
@@ -1372,8 +1374,7 @@ pub(crate) fn decide_with_payload(
                 // fail-open on a stale/missing fno (the merge gate is the backstop).
                 let mut fidelity_block: Option<String> = None;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
-                    let fno_bin =
-                        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
+                    let fno_bin = std::ffi::OsString::from(loopcheck_fno_bin());
                     match evaluate_plan_fidelity(
                         manifest.plan_path.as_deref(),
                         &fno_bin,

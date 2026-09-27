@@ -104,50 +104,7 @@ pub fn derive_rows(rows: Vec<Value>, damaged: usize) -> Index {
             Some("operator_decision")
         )
     };
-    let rank = |row: &Value, tie: &str| {
-        (
-            row.get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            row.get(tie)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-        )
-    };
-    let mut retired: std::collections::BTreeMap<String, (String, String)> = Default::default();
-    for row in rows
-        .iter()
-        .filter(|r| r.get("_event_type").and_then(Value::as_str) == Some("decision_retracted"))
-    {
-        let target = row
-            .get("target_decision_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if target.is_empty() {
-            continue;
-        }
-        let r = rank(row, "reason");
-        if retired.get(&target).map_or(true, |prev| *prev < r) {
-            retired.insert(target, r);
-        }
-    }
-    for row in rows.iter().filter(|r| is_decision(r)) {
-        let target = row
-            .get("supersedes")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if target.is_empty() {
-            continue;
-        }
-        let r = rank(row, "decision_id");
-        if retired.get(&target).map_or(true, |prev| *prev < r) {
-            retired.insert(target, r);
-        }
-    }
+    let retired = retirement_map(&rows);
     let rows = rows
         .into_iter()
         .filter(is_decision)
@@ -161,6 +118,65 @@ pub fn derive_rows(rows: Vec<Value>, damaged: usize) -> Index {
         })
         .collect();
     Index { rows, damaged }
+}
+
+/// The retirement map behind `derive_rows`, exposed for readers that render
+/// the retired rows instead of dropping them: casefolded target id ->
+/// ((ts, tie) rank of the newest retirement, kind "retracted" | "superseded").
+pub fn retirement_map(
+    rows: &[Value],
+) -> std::collections::BTreeMap<String, ((String, String), &'static str)> {
+    let rank = |row: &Value, tie: &str| {
+        (
+            row.get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get(tie)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        )
+    };
+    let mut retired: std::collections::BTreeMap<String, ((String, String), &'static str)> =
+        Default::default();
+    for row in rows
+        .iter()
+        .filter(|r| r.get("_event_type").and_then(Value::as_str) == Some("decision_retracted"))
+    {
+        let target = row
+            .get("target_decision_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        if target.is_empty() {
+            continue;
+        }
+        let r = rank(row, "reason");
+        if retired.get(&target).map_or(true, |prev| prev.0 < r) {
+            retired.insert(target, (r, "retracted"));
+        }
+    }
+    for row in rows.iter().filter(|r| {
+        matches!(
+            r.get("_event_type").and_then(Value::as_str),
+            Some("operator_decision")
+        )
+    }) {
+        let target = row
+            .get("supersedes")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        if target.is_empty() {
+            continue;
+        }
+        let r = rank(row, "decision_id");
+        if retired.get(&target).map_or(true, |prev| prev.0 < r) {
+            retired.insert(target, (r, "superseded"));
+        }
+    }
+    retired
 }
 
 /// `derive_live` composed of its two halves, kept as the seam the JSONL-file

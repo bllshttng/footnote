@@ -135,10 +135,16 @@ pub fn project_root(project: &str) -> Option<String> {
     None
 }
 
-/// The state directory the porcelain reads serve from: `FNO_CONFIG`'s
-/// `state_dir` when the env names a file, else the first candidate carrying
-/// a `state_dir`, else `~/.fno`. `FNO_HOME` does not move the backlog.
+/// The state directory the porcelain reads serve from: `FNO_STATE_DIR` when
+/// the env names a root (the carrier `fno.paths.state_dir` resolves and
+/// `seal_state_root` pins, so a sealed read serves the store its parent
+/// wrote), else `FNO_CONFIG`'s `state_dir` when the env names a file, else
+/// the first candidate carrying a `state_dir`, else `~/.fno`. `FNO_HOME`
+/// does not move the backlog.
 pub fn state_dir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("FNO_STATE_DIR").filter(|v| !v.is_empty()) {
+        return Some(expand_home(&v.to_string_lossy()));
+    }
     if let Some(cfg) = std::env::var_os("FNO_CONFIG").filter(|v| !v.is_empty()) {
         let cfg = PathBuf::from(cfg);
         if let Some(sd) = read_flat(&cfg).get("state_dir").and_then(Value::as_str) {
@@ -165,6 +171,20 @@ pub fn graph_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_dir_carrier_outranks_config_and_home() {
+        let _guard = crate::claims::test_env_lock();
+        let prior = std::env::var_os("FNO_STATE_DIR");
+        std::env::set_var("FNO_STATE_DIR", "/pinned-state");
+
+        assert_eq!(state_dir(), Some(PathBuf::from("/pinned-state")));
+
+        match prior {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+    }
 
     #[test]
     fn a_legacy_yaml_work_map_resolves_the_project_path() {

@@ -110,14 +110,14 @@ SECRET_ROUTE_VARS = (
 # home, where nothing looks. The worker still starts, so the strand is silent.
 STATE_ROOT_ENV_KEYS = frozenset({"HOME"})
 
-# The roots that a pin can hold still. Both are read env-first by the runtime
+# The roots that a pin can hold still. All are read env-first by the runtime
 # that owns them, so setting them alongside a HOME override keeps footnote's
 # state where it was while the harness credential follows the override.
-_STATE_ROOT_PINS = ("FNO_AGENTS_HOME", "FNO_CLAIMS_ROOT")
+_STATE_ROOT_PINS = ("FNO_AGENTS_HOME", "FNO_CLAIMS_ROOT", "FNO_STATE_DIR")
 
 
 def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
-    """Pin the two state roots that have an env carrier, around a moved HOME.
+    """Pin the state roots that have an env carrier, around a moved HOME.
 
     For the seam that has no argv carrier and MUST forward a HOME override,
     because the env is the only channel to the launched harness. Prefer
@@ -126,20 +126,15 @@ def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
     exec'd, so no footnote process ever sees the override at all.
 
     A no-op unless the mapping actually moves HOME. When it does, pin
-    ``FNO_AGENTS_HOME`` and ``FNO_CLAIMS_ROOT`` to the roots THIS process
-    resolves, so the child's registry row and its claim stay findable. A value
-    already in the mapping wins, so an inherited pin propagates unchanged and a
+    ``FNO_AGENTS_HOME``, ``FNO_CLAIMS_ROOT`` and ``FNO_STATE_DIR`` to the roots
+    THIS process resolves, so the child's registry row, its claim, its locks
+    and its graph all stay findable. A value already in the mapping wins, so a
     caller that meant to redirect a root is not second-guessed.
 
-    **This is a partial seal, and the remainder is the honest part.** Only those
-    two roots read an env var. ``fno.paths.locks_dir`` is deliberately
-    ``$HOME``-only, and ``state_dir`` (graph.json, the ledger, the briefs) has
-    no override at all, so both still follow the moved HOME. Measured under a
-    sealed env: ``agents_home_dir`` resolves the real root while ``locks_dir``
-    and ``graph_json`` resolve under the account's home. A worker that runs
-    ``fno backlog done`` under a forwarded HOME therefore still writes its graph
-    where nothing looks. Closing that needs a state_dir env carrier, which does
-    not exist yet - prefer the argv carrier over this seal wherever there is one.
+    The remaining honest limit: the ``FNO_HOME``-anchored sidecars and any
+    root without a carrier still follow the moved HOME; the three pins cover
+    the registry, the claims tree, the locks and the config state root.
+    Prefer the argv carrier over this seal wherever a launch has one.
 
     Never mutates the input.
     """
@@ -154,6 +149,7 @@ def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
 
     current: dict[str, str] = {
         "FNO_AGENTS_HOME": str(paths.agents_home_dir()),
+        "FNO_STATE_DIR": str(paths.state_dir()),
     }
     claims_root = os.environ.get("FNO_CLAIMS_ROOT") or os.environ.get("HOME")
     if claims_root:

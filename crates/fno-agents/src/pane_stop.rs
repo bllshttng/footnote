@@ -593,7 +593,7 @@ pub(crate) struct FnoRun {
 /// stderr, because several callers treat "the verb refused" as data rather
 /// than as a failure of their own.
 pub(crate) fn run_fno(args: &[&str]) -> Result<FnoRun, String> {
-    let output = std::process::Command::new("fno")
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -684,7 +684,7 @@ fn mux_session_names() -> Vec<String> {
 /// not on the pane.
 pub(crate) fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
     let pane_id = pane_id.to_string();
-    let mut child = std::process::Command::new("fno")
+    let mut child = std::process::Command::new(crate::scrape::fno_bin())
         .args(["mux", "pane", "kill", "--server", session, &pane_id])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

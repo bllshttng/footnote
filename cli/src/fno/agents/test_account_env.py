@@ -278,17 +278,20 @@ def test_mesh_env_wrapper_sets_block_cap(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_seal_pins_our_roots_when_home_moves(monkeypatch) -> None:
+def test_seal_pins_our_roots_when_home_moves(monkeypatch, tmp_path) -> None:
     """The harness credential follows the override; footnote's roots do not."""
     monkeypatch.setenv("HOME", "/real/home")
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    # The parent's state root, pinned inside the hermetic sandbox (x-fc25).
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
 
     sealed = seal_state_root({"HOME": "/accounts/zai-1/home"})
 
     assert sealed["HOME"] == "/accounts/zai-1/home"
     assert sealed["FNO_AGENTS_HOME"] == "/real/home/.fno/agents"
     assert sealed["FNO_CLAIMS_ROOT"] == "/real/home"
+    assert sealed["FNO_STATE_DIR"] == str(tmp_path / "state")
 
 
 def test_seal_is_a_noop_without_a_home_move(monkeypatch) -> None:
@@ -304,17 +307,19 @@ def test_seal_is_a_noop_when_home_is_unchanged(monkeypatch) -> None:
     assert sealed == {"HOME": "/real/home", "X": "1"}
 
 
-def test_seal_never_overrides_an_explicit_pin(monkeypatch) -> None:
+def test_seal_never_overrides_an_explicit_pin(monkeypatch, tmp_path) -> None:
     """A caller who meant to redirect a root is not second-guessed."""
     monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
     sealed = seal_state_root(
         {"HOME": "/accounts/zai-1/home", "FNO_CLAIMS_ROOT": "/sandbox"}
     )
     assert sealed["FNO_CLAIMS_ROOT"] == "/sandbox"
 
 
-def test_seal_does_not_mutate_its_input(monkeypatch) -> None:
+def test_seal_does_not_mutate_its_input(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
     src = {"HOME": "/accounts/zai-1/home"}
     seal_state_root(src)
     assert src == {"HOME": "/accounts/zai-1/home"}
