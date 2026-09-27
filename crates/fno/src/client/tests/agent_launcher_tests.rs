@@ -2131,8 +2131,8 @@ fn picking_a_non_current_branch_checks_the_box() {
         .collect();
     assert_eq!(
         labels,
-        vec!["main", "main", "feature/x"],
-        "main leads, then the facts' local branches"
+        vec!["main", "feature/x"],
+        "main leads once (the fresh default), then the facts' other branches"
     );
     let branch_action = actions
         .iter()

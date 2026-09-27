@@ -2022,6 +2022,11 @@ fn filtered_popup(
         .full_chrome()
         .full_width_selection()
         .label_first();
+    // The Branch and Model lists can run hundreds of rows; the popover never
+    // takes the whole screen - the composer sheet stays readable behind it.
+    if matches!(field, Focus::Branch | Focus::Model) {
+        popup = popup.body_cap_pct(50);
+    }
     if !filter.is_empty() {
         popup = popup.title(format!(
             "{title} \u{b7} filter: {filter}",
@@ -2472,6 +2477,12 @@ pub(crate) fn picker_rows(
             );
             if let Some(facts) = facts {
                 for b in &facts.branches {
+                    // The leading row already speaks for main (ensure's
+                    // fresh-branch default); the checkout's own main entry
+                    // would read as a second main.
+                    if b == "main" {
+                        continue;
+                    }
                     push_entry(
                         &mut rows,
                         &mut actions,
@@ -3119,8 +3130,11 @@ impl Launcher {
         // `never` policy and paints no caret: there is nothing to drop.
         for (f, r) in &sl.chips {
             let never = *f == Focus::Worktree && self.draft.policy_never(&view.launcher_catalog);
+            // The grey reads through the FOREGROUND role: a dim modifier
+            // alone is too subtle a tell for the one control whose whole
+            // state is "off, and why".
             let style = if never {
-                role_style(Role::BodyDim, &view.theme)
+                role_style(Role::PanelMeta, &view.theme)
             } else if *f == self.focus {
                 role_style(Role::BodySel, &view.theme)
             } else {
