@@ -87,7 +87,8 @@ fn strip_ansi(s: &str) -> String {
 /// The `(installed, latest)` pair from `uv tool list --outdated`, whose fno
 /// line reads `fno v0.3.1 [latest: 0.3.2]`.
 pub(crate) fn parse_uv_outdated(stdout: &str) -> Result<Option<(String, String)>, String> {
-    for line in strip_ansi(stdout).lines().map(str::trim) {
+    let cleaned = strip_ansi(stdout);
+    for line in cleaned.lines().map(str::trim) {
         if line.split_whitespace().next() != Some("fno") {
             continue;
         }
@@ -334,7 +335,7 @@ mod tests {
         })
         .await;
         assert!(
-            matches!(outcome, ReleaseOutcome::Degraded(reason) if reason.contains("uv tool list --outdated")),
+            matches!(&outcome, ReleaseOutcome::Degraded(reason) if reason.contains("uv tool list --outdated")),
             "{outcome:?}"
         );
     }
