@@ -3,7 +3,7 @@
 
 use super::*;
 use super::{
-    done_node, no_agents, open_do_row, quiet_transcript, spawn_row, stage_graph, staged_ages,
+    done_node, no_agents, open_do_row, quiet_transcript, spawn_row, stage_graph, staged_ages_at,
     staged_graph_home,
 };
 use crate::gc_sweep::{self, GcSummary};
@@ -64,7 +64,7 @@ fn settle_staged_then_run(
         7,
         &gc_sweep::read_graph_entries,
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -434,7 +434,7 @@ fn dry_run_with(
         0,
         &read_graph,
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
