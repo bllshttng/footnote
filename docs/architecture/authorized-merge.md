@@ -46,7 +46,7 @@ After a main merge, only PRs with overlapping changed files become stale. While 
 
 1. **One guarded fetch.** `fno do pr info` gives the number, the head, the state, the body, and whether GitHub's queue owns the PR. The armed flag rides that same payload. A second `gh pr view` probe describes a different head.
 2. **Terminal state.** A merged or closed PR holds before every other guard. The guards below protect a merge that has not happened yet. An "unreviewed" answer about a landed merge sends a caller hunting a defect that blocks nothing.
-3. **Authority.** A per-run refusal (`auto_merge_approved: false`) outranks every grant. An explicit per-run env grant (`auto_merge_source: env-target-auto-merge`) satisfies the standing arm on its own. Otherwise the LIVE config decides. A manifest snapshot never outlives an operator who flips the switch off mid-flight. Then the automerge posture floor.
+3. **Authority.** A per-run refusal (`auto_merge_approved: false`) outranks every grant, except the head-scoped operator grant below. An explicit per-run env grant (`auto_merge_source: env-target-auto-merge`) satisfies the standing arm on its own. Otherwise the LIVE config decides. A manifest snapshot never outlives an operator who flips the switch off mid-flight. Then the automerge posture floor.
 4. **Node binding.** The graph must see the PR. Three keys decide, in order. A node id the branch names. A node whose own back-pointer carries the PR. A closure line in the body (`Fixes <id> [<id>...]`. The retired `Backlog-Closure:` spelling still reads). The same predicate answers the king board's untracked warning, so the board and the gate cannot disagree. When all three miss, the merge refuses. The remedy is to bind it: pick or file the node, write the closure trailer onto the body, retry. A revert or a hotfix binds the same way. There is no bypass flag. The team merges, and not only the operator. A bypass flag is one the agents pass to themselves. The gate stays silent where the repo keeps no backlog. A graph with no node under the canonical root has nothing to bind to. A graph or a body that cannot be read is `Unknown`, never a verdict.
 5. **The dispatch hold** (`fno do pr hold-check`), fail-closed.
 6. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
@@ -54,6 +54,26 @@ After a main merge, only PRs with overlapping changed files become stale. While 
 8. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
 9. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. The same merge tree also runs the repo's preamble budget from its own copy. Two PRs that each pass their own base can no longer merge into a main over the byte ceiling. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
 10. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
+
+## The head-scoped operator merge grant
+
+The per-run no-merge refusal used to name only out-of-band escapes: merge by hand, or re-dispatch. That door is closed. The one sanctioned remedy is a law row at a subject that names the exact head:
+
+```
+merge-grant:<owner/repo>#<pr>@<40-hex head>
+```
+
+An operator records it in their own terminal, attended:
+
+```
+fno backlog decide 'merge-grant:owner/repo#2131@abc...' 'merge authorized for this head' --authority operator
+```
+
+The reader lives in `merge_grant.rs` (`head_grant_status`) and shares the waiver's trust shape. Only rows whose `authority_source` is `operator` count. A harness session cannot mint one, because `fno backlog decide` refuses `--authority operator` from any agent session. The decision must equal `merge authorized for this head` exactly: row existence carries no polarity, identical duplicates read granted once, and disagreeing rows read conflicting. A `chat_attested` row at the subject is invisible to the reader.
+
+Head invalidation is structural. A push changes the head, the subject no longer matches, and the new subject has no rows: the refusal stands until the operator grants again. No manifest is rewritten.
+
+The grant supersedes only the per-run layer. Live config, the posture floor, the holds, the pin, and every later guard still run. A merge that passes them carries `"merge_grant": "operator head grant <short head>"` in its receipt.
 
 ## The effect
 
