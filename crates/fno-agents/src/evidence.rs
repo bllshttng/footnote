@@ -93,9 +93,9 @@ pub fn find_code_claims(text: &str) -> Vec<String> {
     claims
 }
 
-/// The bounded-walk ceiling for a non-repo root. A hermetic test tmp dir
-/// holds a handful of files; a state root like ~/.fno holds worktrees and
-/// build dirs no citation can name.
+/// The bounded-walk ceiling on entries (files or directories) visited in a
+/// non-repo root. A hermetic test tmp dir holds a handful of files; a state
+/// root like ~/.fno holds worktrees and build dirs no citation can name.
 const WALK_CAP: usize = 1_000;
 
 /// Why the bounded walk stopped. `Full` is the caller-visible bound; `Io`
@@ -127,14 +127,15 @@ fn tracked_files(root: &Path) -> Result<Vec<String>, String> {
     }
     // Not a repo (a hermetic test tmp dir): a bounded walk stands in for
     // ls-files. Nested checkouts and target dirs are skipped, and past
-    // WALK_CAP files the root refuses the citation check - a state root is
-    // not a citation target, and walking it is the 120s decide timeout.
+    // WALK_CAP entries the root refuses the citation check - a state root
+    // is not a citation target, and walking it is the 120s decide timeout.
     let mut files: Vec<String> = Vec::new();
-    match walk_files(root, root, &mut files) {
+    let mut budget = WALK_CAP;
+    match walk_files(root, root, &mut files, &mut budget) {
         Err(WalkStop::Full) => {
             return Err(format!(
                 "the root {} is not a usable git repository (the walk stopped at \
-                 {WALK_CAP} files); run from the repo so citations resolve against \
+                 {WALK_CAP} entries); run from the repo so citations resolve against \
                  tracked files",
                 root.display()
             ));
@@ -145,21 +146,27 @@ fn tracked_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), WalkStop> {
+fn walk_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    budget: &mut usize,
+) -> Result<(), WalkStop> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
+        if *budget == 0 {
+            return Err(WalkStop::Full);
+        }
+        *budget -= 1;
         if p.is_dir() {
             let name = p.file_name().and_then(|n| n.to_str());
             let nested_checkout = p.join(".git").exists();
             if name != Some(".git") && name != Some("target") && !nested_checkout {
-                walk_files(root, &p, out)?;
+                walk_files(root, &p, out, budget)?;
             }
         } else if let Ok(rel) = p.strip_prefix(root) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
-            if out.len() >= WALK_CAP {
-                return Err(WalkStop::Full);
-            }
         }
     }
     Ok(())
@@ -979,6 +986,31 @@ mod tests {
             "{}",
             failures[0]
         );
+        assert!(failures[0].contains("run from the repo"), "{}", failures[0]);
+    }
+
+    // A root holding exactly the cap is not oversized: the refusal fires
+    // only on the entry past it.
+    #[test]
+    fn root_at_the_exact_cap_is_returned_whole() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").expect("write");
+        }
+        let tracked = tracked_files(dir.path()).expect("tracked");
+        assert_eq!(tracked.len(), WALK_CAP);
+    }
+
+    // Directory entries spend the same budget as files, so a wide tree of
+    // empty dirs is bounded too.
+    #[test]
+    fn dir_entries_spend_the_walk_budget() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP + 1 {
+            std::fs::create_dir_all(dir.path().join(format!("d{i}"))).expect("mkdir");
+        }
+        let failures = check_citations("see a.py:1", dir.path());
+        assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("run from the repo"), "{}", failures[0]);
     }
 
