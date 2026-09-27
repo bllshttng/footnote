@@ -238,6 +238,11 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch):
         "fno.mail.pane_transport.prepare",
         lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
     )
+    # The lane refuses before any subprocess when no binary resolves, which is
+    # every smoke runner's shape; pin the routing, not the developer's install.
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: "/usr/bin/true"
+    )
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
@@ -269,6 +274,9 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     monkeypatch.setattr(
         "fno.mail.pane_transport.prepare",
         lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: "/usr/bin/true"
     )
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
 
