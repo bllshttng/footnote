@@ -142,8 +142,7 @@ pub struct GcSummary {
     /// hold has a clock like every other keep.
     pub kept_open_pr: Vec<(String, String)>,
     /// `(id, claim detail)`: a live or suspect work-claim names the row's
-    /// session as its holder. The holder process answered the pid
-    /// probe, so the session is mid-work whatever the transcript claims.
+    /// session as its holder; the holder process answered the pid probe.
     pub kept_live_claim: Vec<(String, String)>,
     /// `(id, node)` for the rows the open-PR keep named, and the nudge
     /// ladder's DRY-RUN plan: `would nudge <id> (<action>)`, no effect and
@@ -1660,14 +1659,10 @@ pub(crate) fn run_with_release(
     }
     let graph = read_graph(home);
     let now = crate::daemon::now_epoch_secs();
-    // One claims read per sweep, over the global root plus every distinct
-    // row cwd's local store. A live or suspect record names its holder
-    // session; any row carrying that session never retires as unattended,
-    // because the claim's holder process answered the pid probe. Keyed by
-    // lowercase session id, joined through the record's `session_id` stamp
-    // (the holder string is a credential, never parsed for identity). An
-    // unreadable claims root reads as no facts - the transcript gates
-    // still stand - never as evidence of anything.
+    // One claims read per sweep: the global root plus every distinct row
+    // cwd's local store. A live or suspect record names its holder
+    // session, keyed through the record's `session_id` stamp (never the
+    // holder string, a credential). An unreadable root reads as no facts.
     let mut claims_dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(global) = crate::claims_root::global_claims_dir() {
         claims_dirs.push(global);
@@ -1675,9 +1670,11 @@ pub(crate) fn run_with_release(
     let mut row_cwds: Vec<&String> = registry.entries.iter().map(|e| &e.cwd).collect();
     row_cwds.sort();
     row_cwds.dedup();
-    for cwd in row_cwds {
-        claims_dirs.push(std::path::Path::new(cwd.as_str()).join(crate::claims::CLAIMS_DIRNAME));
-    }
+    claims_dirs.extend(
+        row_cwds
+            .iter()
+            .map(|c| std::path::Path::new(c.as_str()).join(crate::claims::CLAIMS_DIRNAME)),
+    );
     let claims_by_session: std::collections::HashMap<String, String> =
         crate::claims::list_in(&claims_dirs, None, false)
             .unwrap_or_default()
@@ -2165,8 +2162,7 @@ pub(crate) fn run_with_release(
             session_terminal,
             superseded_by_live_peer,
             node_merged,
-            // The claim fact rides the row, so the grace gate -
-            // the one gate every retire-eligible arm passes - rules on it.
+            // The claim fact rides the row: the grace gate rules on it.
             live_claim: claims_by_session
                 .get(sid.to_ascii_lowercase().as_str())
                 .cloned(),
@@ -2300,9 +2296,7 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::LiveClaim { detail }) => {
                     summary.kept_live_claim.push((id.clone(), detail.clone()));
-                    // The hold rides the projection like every other keep,
-                    // so the hold has a clock and the release verb can
-                    // answer it.
+                    // The hold rides the projection like every other keep.
                     summary.holds.push(Hold {
                         id,
                         reason: KeepReason::LiveClaim {
