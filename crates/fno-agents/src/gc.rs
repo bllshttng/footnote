@@ -149,9 +149,9 @@ pub struct GcRow {
     /// from `agents.reap.open_work_retire_s`, defaulting well above the
     /// ordinary grace.
     pub open_work_retire_s: i64,
-    /// A live or suspect work-claim names this session as its holder
-    /// (x-3bf4): the claim's holder process answered the pid probe. The
-    /// row is never reaped as unattended while it holds one. `None` when
+    /// A live or suspect work-claim names this session as its holder: the
+    /// claim's holder process answered the pid probe. The row is never
+    /// reaped as unattended while it holds one. `None` when
     /// the pass read no such claim (or the claims root read empty).
     pub live_claim: Option<String>,
 }
@@ -238,10 +238,11 @@ pub enum KeepReason {
     /// stale node pinning it, so an operator can act on the node.
     OpenWorkStale { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
-    /// live in the only sense the law allows (x-3bf4). A terminal roster
-    /// state and a dead pid no longer revoke recency - the 2026-09-25
-    /// sweeps retired thread workers seconds after their transcripts moved
-    /// on exactly this override, and one lost its claim mid-node.
+    /// live in the only sense the law allows. Since the 2026-09-25
+    /// unattended reaps nothing revokes recency - not a terminal roster
+    /// state, not a dead pid. The sweeps retired thread workers seconds
+    /// after their transcripts moved on the old override, and one worker
+    /// lost its claim mid-node.
     Active { age_s: i64 },
     /// The transcript could not be resolved. Absence is not quiet.
     TranscriptUnresolved,
@@ -263,9 +264,9 @@ pub enum KeepReason {
     /// can run `fno agents resume` on it.
     DeadOpenWork { node: String },
     /// A live or suspect work-claim names this session as its holder
-    /// (x-3bf4): the claim's holder process answered the pid probe, the
-    /// strongest liveness fact the machine holds. The row is never reaped
-    /// as unattended while it holds one.
+    /// the claim's holder process answered the pid probe, the strongest
+    /// liveness fact the machine holds. The row is never reaped as
+    /// unattended while it holds one.
     LiveClaim { detail: String },
 }
 
@@ -499,9 +500,9 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 /// The transcript gates shared by every retire-eligible arm: an unresolved
 /// transcript and a transcript inside the grace window both keep the row.
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
-    // x-3bf4: a live work-claim outranks every transcript reading. The
-    // holder process answered the pid probe, so the session is mid-work
-    // whatever the transcript or the roster claims.
+    // A live work-claim outranks every transcript reading: the holder
+    // process answered the pid probe, so the session is mid-work whatever
+    // the transcript or the roster claims.
     if let Some(detail) = &row.live_claim {
         return (
             GcAction::Keep,
@@ -515,12 +516,12 @@ fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
         // other path reads absence as unresolved, never as quiet.
         None if row.release_quiet => (GcAction::Retire, None),
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-        // x-3bf4: recency outranks every death reading now - a terminal
-        // roster state and an ESRCH pid included. The 2026-09-25 sweeps
-        // retired t-x-d83b-glm and t-x-e65e-glm inside the grace window on
-        // exactly this override, and one lost its claim mid-node. A fresh
-        // timestamped entry has a writer seconds behind it; the row
-        // retires when the writing stops, never while it moves.
+        // Recency outranks every death reading now - a terminal roster
+        // state and an ESRCH pid included. The 2026-09-25 sweeps retired
+        // two thread workers inside the grace window on exactly this
+        // override, and one lost its claim mid-node. A fresh timestamped
+        // entry has a writer seconds behind it; the row retires when the
+        // writing stops, never while it moves.
         Some(age) if age <= grace_secs => (GcAction::Keep, Some(KeepReason::Active { age_s: age })),
         Some(_) => (GcAction::Retire, None),
     }
@@ -3432,9 +3433,9 @@ mod tests {
         }
     }
 
-    /// Change 1, amended by x-3bf4: the harness publishing a terminal state
-    /// releases the open-work keep only past the grace window. Inside it the
-    /// transcript outranks the state: a between-turns session reads
+    /// Change 1, amended: the harness publishing a terminal state
+    /// releases the open-work keep only past the grace window. Inside it
+    /// the transcript outranks the state: a between-turns session reads
     /// working/idle, never done, and the 2026-09-25 reaps prove the state
     /// itself can lie.
     #[test]
@@ -3455,10 +3456,10 @@ mod tests {
         // level by x2774_terminal_harness_state_releases_an_open_work_row.
     }
 
-    /// x-3bf4, amending change 1: recency outranks a terminal harness
-    /// state inside the grace window. Past it, the terminal state still
-    /// retires the row - a `done` reading with a quiet transcript is a
-    /// finish line. An unreadable transcript is never quiet either way.
+    /// Amended change 1: recency outranks a terminal harness state inside
+    /// the grace window. Past it, the terminal state still retires the row
+    /// - a `done` reading with a quiet transcript is a finish line. An
+    /// unreadable transcript is never quiet either way.
     #[test]
     fn a_terminal_harness_state_yields_to_recency() {
         let mut retiring_row = retiring();
@@ -3490,12 +3491,12 @@ mod tests {
         );
     }
 
-    /// x-3bf4: recency is never reaped as unattended. The 2026-09-25 daemon
-    /// sweeps retired t-x-d83b-glm and t-x-e65e-glm INSIDE the grace window:
-    /// a terminal roster reading overrode a transcript that had moved
-    /// seconds earlier, and one worker lost its claim mid-node. A fresh
-    /// timestamped entry has a writer seconds behind it; the row retires
-    /// when the writing stops, never while it moves.
+    /// Recency is never reaped as unattended. The 2026-09-25 daemon sweeps
+    /// retired two thread workers INSIDE the grace window: a terminal
+    /// roster reading overrode a transcript that had moved seconds
+    /// earlier, and one worker lost its claim mid-node. A fresh timestamped
+    /// entry has a writer seconds behind it; the row retires when the
+    /// writing stops, never while it moves.
     #[test]
     fn a_recent_transcript_is_never_reaped_as_unattended() {
         let mut row = open_row("in_progress");
@@ -3517,20 +3518,20 @@ mod tests {
         );
     }
 
-    /// x-3bf4: a live work-claim names this session as its holder and the
+    /// A live work-claim names this session as its holder and the
     /// claim's holder process answered the pid probe. That is the strongest
     /// liveness fact the machine holds, so the row keeps past quiet
     /// whatever the work verdict says.
     #[test]
     fn a_live_claim_holds_the_row_past_quiet() {
         let mut row = retiring();
-        row.live_claim = Some("node:x-3bf4 (holder spawn-handover:t-x-3bf4-glm)".into());
+        row.live_claim = Some("node:x-dddd (holder spawn-handover:t-x-dddd-glm)".into());
         assert_eq!(
             gc_decide(&row, GRACE),
             (
                 GcAction::Keep,
                 Some(KeepReason::LiveClaim {
-                    detail: "node:x-3bf4 (holder spawn-handover:t-x-3bf4-glm)".into()
+                    detail: "node:x-dddd (holder spawn-handover:t-x-dddd-glm)".into()
                 })
             ),
         );
@@ -3637,7 +3638,7 @@ mod tests {
         );
     }
 
-    /// Change 8 is retired by x-3bf4: recency outranks every death
+    /// Change 8 is retired: recency outranks every death
     /// reading inside the grace window, so a pid answer no longer rides
     /// the row. What survives is the unresolved half: absence is not
     /// quiet, whatever any process probe says.

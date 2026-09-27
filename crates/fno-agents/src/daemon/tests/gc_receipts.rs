@@ -4876,13 +4876,12 @@ fn a_sweep_receipt_names_its_writer_and_trigger() {
     );
 }
 
-// ── x-3bf4: the live-claim keep ──────────────────────────────────────
+// ── the live-claim keep ──────────────────────────────────────
 
-/// x-3bf4: a live claim naming the session keeps a quiet, done-node row
-/// the sweep would otherwise retire. The 2026-09-25 registry sweeps
-/// retired thread workers (t-x-d83b-glm, t-x-e65e-glm) whose claims were
-/// live; the claim fact now rides the row and the grace gate keeps it
-/// past quiet.
+/// A live claim naming the session keeps a quiet, done-node row the sweep
+/// would otherwise retire. The 2026-09-25 registry sweeps retired thread
+/// workers whose claims were live; the claim fact now rides the row and
+/// the grace gate keeps it past quiet.
 #[test]
 fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
     let _env = crate::claims::test_env_lock()
@@ -4912,8 +4911,8 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
     std::fs::create_dir_all(&claims_root).unwrap();
     let rec = crate::claims::ClaimRecord {
         schema_version: crate::claims::SCHEMA_VERSION,
-        key: "node:x-3bf4".into(),
-        holder: "spawn-handover:t-x-3bf4-glm".into(),
+        key: "node:x-dddd".into(),
+        holder: "spawn-handover:t-x-dddd-glm".into(),
         acquired_at: crate::claims::now_ms(),
         pid: Some(std::process::id() as i32),
         host: crate::claims::hostname(),
@@ -4927,7 +4926,7 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
         metadata: Default::default(),
     };
     std::fs::write(
-        claims_root.join("node:x-3bf4.lock"),
+        claims_root.join("node:x-dddd.lock"),
         crate::claims::serialize_claim(&rec).unwrap(),
     )
     .unwrap();
@@ -4960,7 +4959,7 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
         summary.kept_live_claim,
         vec![(
             "t-claim".to_string(),
-            "node:x-3bf4 (holder spawn-handover:t-x-3bf4-glm)".to_string()
+            "node:x-dddd (holder spawn-handover:t-x-dddd-glm)".to_string()
         )],
         "{summary:?}"
     );

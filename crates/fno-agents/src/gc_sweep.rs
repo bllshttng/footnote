@@ -142,7 +142,7 @@ pub struct GcSummary {
     /// hold has a clock like every other keep.
     pub kept_open_pr: Vec<(String, String)>,
     /// `(id, claim detail)`: a live or suspect work-claim names the row's
-    /// session as its holder (x-3bf4). The holder process answered the pid
+    /// session as its holder. The holder process answered the pid
     /// probe, so the session is mid-work whatever the transcript claims.
     pub kept_live_claim: Vec<(String, String)>,
     /// `(id, node)` for the rows the open-PR keep named, and the nudge
@@ -1660,7 +1660,7 @@ pub(crate) fn run_with_release(
     }
     let graph = read_graph(home);
     let now = crate::daemon::now_epoch_secs();
-    // x-3bf4: one claims read per sweep. A live or suspect record names its
+    // One claims read per sweep. A live or suspect record names its
     // holder session; any row carrying that session never retires as
     // unattended, because the claim's holder process answered the pid
     // probe. Keyed by lowercase session id, joined through the record's
@@ -2154,7 +2154,7 @@ pub(crate) fn run_with_release(
             session_terminal,
             superseded_by_live_peer,
             node_merged,
-            // x-3bf4: the claim fact rides the row, so the grace gate -
+            // The claim fact rides the row, so the grace gate -
             // the one gate every retire-eligible arm passes - rules on it.
             live_claim: claims_by_session
                 .get(sid.to_ascii_lowercase().as_str())

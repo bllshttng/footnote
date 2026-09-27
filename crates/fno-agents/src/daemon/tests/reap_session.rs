@@ -442,8 +442,8 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         dry_unverified,
         vec!["t-term"],
         "positive stop evidence advances to the unevaluated active-surface \
-         gate; t-donefresh keeps under active since x-3bf4 - recency inside \
-         the grace outranks the terminal state, so it never reaches a gate"
+         gate; t-donefresh keeps under active because recency inside the \
+         grace outranks the terminal state, so it never reaches a gate"
     );
     assert!(
         dry.dry_run_unverified
@@ -470,7 +470,7 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         acting_ids,
         vec!["t-done", "t-nostop", "t-term"],
         "apply records the effect outcome: every row whose gates confirmed \
-         retired; t-donefresh keeps under active since x-3bf4"
+         retired; t-donefresh keeps under active because recency outranks the terminal state inside the grace"
     );
     assert!(
         acting.retired.iter().all(|(id, _)| id != "t-donefresh"),
@@ -493,7 +493,7 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// x-b7f8 change 3, amended by x-3bf4: a terminal row whose transcript is
+/// x-b7f8 change 3, amended: a terminal row whose transcript is
 /// inside the grace keeps AT CLASSIFICATION - the terminal state no longer
 /// overrides recency, so the apply-window re-check never sees the row. The
 /// decreasing age seam still answers, and the row keeps with the
