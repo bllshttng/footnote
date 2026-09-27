@@ -1006,9 +1006,10 @@ jobs:
     # everything except the fno-agents integration leg at about six minutes.
     # No python or uv steps here: flock_interop.rs, the cross-language test,
     # lives in fno-agents, and no fno crate test spawns the cli venv.
-    # The 2026-09-24 cut to 15, off a widest passing run of 11.1m, did not
-    # hold: the load grew to a 14.7m median over the three passing runs before
-    # a 15.27m cap kill on 2026-09-27. Back to 20 for headroom.
+    # The 2026-09-24 cut to 15, off a widest passing run of about 11 minutes
+    # 6 seconds, did not hold: the load grew, the three passing runs before
+    # the 2026-09-27 kill read a median of about 14 minutes 42 seconds, and
+    # the kill landed 15 minutes 16 seconds in. Back to 20 for headroom.
     timeout-minutes: 20
 
     steps:
