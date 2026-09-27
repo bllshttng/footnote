@@ -512,9 +512,19 @@ fn page_lines(d: &Detail, w: usize, now: u64) -> Vec<backlog_style::BLine> {
     super::node_detail::backlog_md::md_lines(&question_page(d.item(), d, now), w, usize::MAX)
 }
 
-/// The detail pane's body width at a terminal width.
-fn detail_w(cols: usize, list_w: usize) -> usize {
-    cols.saturating_sub(list_w).saturating_sub(2).max(10)
+/// The detail pane's body width at a terminal size, shared by the draw and
+/// the scroll clamp so the window never follows past a line the pane hides:
+/// side-by-side splits at 45%, stacked spans the terminal.
+fn page_width(rows: usize, cols: usize) -> usize {
+    let hint_h = if rows >= 8 { 2 } else { 0 };
+    let panes_h = rows.saturating_sub(hint_h);
+    let side_by_side = cols >= 100 && panes_h >= 10;
+    let pane_w = if side_by_side {
+        cols.saturating_sub(cols * 45 / 100)
+    } else {
+        cols
+    };
+    pane_w.saturating_sub(2).max(10)
 }
 
 /// Draw the full questions view over the content viewport: the framed list
@@ -602,8 +612,9 @@ pub(super) fn draw_detail(
         cursor_line,
         &view.theme,
     );
-    // The detail pane: the cursor question's page.
-    let page = page_lines(d, detail_w(cols, list_rect.3), now);
+    // The detail pane: the cursor question's page, wrapped to the pane the
+    // layout actually gave it (the full width when the panes stack).
+    let page = page_lines(d, page_width(rows, cols), now);
     let page_follow = Some(d.scroll.min(page.len().saturating_sub(1)));
     let detail_chrome = chrome::Chrome::new(
         format!("question \u{b7} {}", d.item().id),
@@ -636,7 +647,11 @@ pub(super) fn draw_detail(
             "notes \u{b7} Enter saves \u{b7} Esc cancels"
         }
     } else if d.focus {
-        "1-9 option \u{b7} 0 none of these \u{b7} Enter sends \u{b7} n notes \u{b7} j/k scroll \u{b7} Tab list \u{b7} Esc close"
+        if d.item().options.is_empty() {
+            "Enter answer \u{b7} j/k scroll \u{b7} n notes \u{b7} Tab list \u{b7} Esc close"
+        } else {
+            "1-9 option \u{b7} 0 none \u{b7} j/k select \u{b7} Enter sends \u{b7} n notes \u{b7} ^d/^u scroll \u{b7} Tab list \u{b7} Esc close"
+        }
     } else {
         "j/k move \u{b7} Enter opens \u{b7} Tab page \u{b7} n notes \u{b7} 0 none of these \u{b7} Esc close"
     };
@@ -674,7 +689,9 @@ fn draw_notes_box(
     theme: &Theme,
     d: &Detail,
 ) {
-    let w = 64.min(cols.saturating_sub(4)).max(24);
+    // Never wider than the terminal can hold: a tiny column keeps the box
+    // inside its four-column margin instead of a forced minimum floor.
+    let w = 64.min(cols.saturating_sub(4).max(1));
     let inner_w = w.saturating_sub(2);
     let text_w = inner_w.saturating_sub(2);
     let mut wrapped: Vec<String> = Vec::new();
@@ -692,8 +709,6 @@ fn draw_notes_box(
         .collect();
     let framed = chrome::frame(&body, &chrome, inner_w, None);
     chrome::blit(cells, rows, cols, (top, left), &framed, theme);
-    let dw = detail_w(cols, cols * 45 / 100);
-    let _ = dw;
     let hint = if d.item().options.is_empty() && d.item().kind != "pin" {
         "Enter sends \u{b7} Esc cancels"
     } else {
@@ -714,6 +729,9 @@ fn draw_notes_box(
     }
     for (k, line) in wrapped.iter().take(body_lines).enumerate() {
         let y = top + 1 + k;
+        if y >= rows {
+            break;
+        }
         let mut col = left + 1;
         let paint = if k == 0 {
             format!("\u{276f} {line}")
@@ -722,7 +740,7 @@ fn draw_notes_box(
         };
         for ch in paint.chars() {
             let gw = glyph_cols(ch);
-            if col + gw > left + 1 + inner_w {
+            if col + gw > left + 1 + inner_w || col + gw > cols {
                 break;
             }
             let flags = if ch == '\u{276f}' || ch == '\u{258f}' {
@@ -822,25 +840,47 @@ pub(super) async fn detail_keys(
         }
         match k {
             b'j' => {
-                if d.focus {
-                    let cols = view.term.1 as usize;
+                if !d.focus {
+                    d.advance(1);
+                } else if d.item().options.is_empty() {
+                    // No options to select: the fold's arrow twin scrolls.
+                    let (rows, cols) = view.term;
                     let lines = page_lines(
                         d,
-                        detail_w(cols, cols * 45 / 100),
+                        page_width(rows as usize, cols as usize),
                         crate::digest_overlay::now_secs(),
                     )
                     .len();
                     d.scroll = (d.scroll + 1).min(lines.saturating_sub(1));
                 } else {
-                    d.advance(1);
+                    select_neighbor(d, 1);
                 }
             }
             b'k' => {
-                if d.focus {
+                if !d.focus {
+                    d.advance(-1);
+                } else if d.item().options.is_empty() {
                     d.scroll = d.scroll.saturating_sub(1);
                 } else {
-                    d.advance(-1);
+                    select_neighbor(d, -1);
                 }
+            }
+            // Ctrl+d / Ctrl+u: half a page down/up. The scroll gesture for
+            // option questions, where j/k are the selection.
+            0x04 | 0x15 => {
+                let (rows, cols) = view.term;
+                let lines = page_lines(
+                    d,
+                    page_width(rows as usize, cols as usize),
+                    crate::digest_overlay::now_secs(),
+                )
+                .len();
+                let step = 12;
+                d.scroll = if k == 0x04 {
+                    (d.scroll + step).min(lines.saturating_sub(1))
+                } else {
+                    d.scroll.saturating_sub(step)
+                };
             }
             b'\t' => d.focus = !d.focus,
             b'0'..=b'9' => {
@@ -881,6 +921,23 @@ pub(super) async fn detail_keys(
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// Move the highlighted option one step through the option list with none
+/// of these last (spec f: the arrow gesture): `dir` 1 steps down, -1 up,
+/// wrapping, and an unset pick starts at the first option (down) or at
+/// none of these (up).
+fn select_neighbor(d: &mut Detail, dir: isize) {
+    let mut ns: Vec<u32> = d.item().options.iter().map(|o| o.n).collect();
+    ns.sort_unstable();
+    ns.dedup();
+    ns.push(0);
+    let pos = ns
+        .iter()
+        .position(|&n| Some(n) == d.sel)
+        .unwrap_or(if dir > 0 { usize::MAX } else { 0 });
+    let next = (pos as isize + dir).rem_euclid(ns.len() as isize) as usize;
+    d.sel = Some(ns[next]);
 }
 
 /// What submitting the cursor question decided: an answer to queue, a
@@ -1315,6 +1372,83 @@ mod tests {
                 crate::needs_overlay::AnswerPick::Words("none of these".into())
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn j_and_k_walk_the_options_with_none_of_these_last() {
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
+        v.open_detail_on("q-1");
+        // Unset + down lands on the first option, then walks into none of
+        // these and wraps back around.
+        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(1));
+        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(2));
+        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(0));
+        detail_keys(&mut v, b"j", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(1), "wrap");
+        // Up from the first option reaches none of these from the other side.
+        detail_keys(&mut v, b"k", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(0));
+        detail_keys(&mut v, b"k", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().sel, Some(2));
+        // Enter submits the arrow-highlighted option.
+        detail_keys(&mut v, b"\r", &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some(("q-1".into(), crate::needs_overlay::AnswerPick::Option(2)))
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_d_and_ctrl_u_scroll_the_page_when_options_exist() {
+        let mut q = item("q-long", true);
+        q.body = Some("word ".repeat(300));
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![q]));
+        v.open_detail_on("q-long");
+        detail_keys(&mut v, b"\x04", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().scroll, 12, "half page");
+        detail_keys(&mut v, b"\x15", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.question_detail.as_ref().unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn page_width_follows_the_layout_the_draw_uses() {
+        // Stacked: the page wraps at the full terminal width.
+        assert_eq!(page_width(40, 80), 78);
+        // Side-by-side: the detail pane's own inner width.
+        assert_eq!(page_width(40, 100), 100 - 45 - 2);
+        // Tiny terminal: the width floors at ten.
+        assert_eq!(page_width(6, 8), 10);
+    }
+
+    #[tokio::test]
+    async fn notes_box_on_a_tiny_terminal_stays_in_bounds() {
+        let mut v = view_with_agents(vec![]);
+        v.questions_fold = Some(fold_with(vec![item("q-1", true)]));
+        v.open_detail_on("q-1");
+        detail_keys(&mut v, b"n", &mut Vec::new()).await.unwrap();
+        detail_keys(
+            &mut v,
+            "a long note that must wrap and stay inside the box".as_bytes(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        // A 20x6 terminal: the box clamps to the terminal, no panic.
+        v.term = (6, 20);
+        let (rows, cols) = (6usize, 20usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        assert!(draw_detail(
+            &v,
+            &mut cells,
+            (rows, cols),
+            (0, 0),
+            (rows, cols)
+        ));
     }
 
     #[tokio::test]
