@@ -155,6 +155,27 @@ expect "Bash: ex -s blocks" block \
 expect "Bash: trailing 2>/dev/null does not hide the cp target" block \
     "$(bashp "cp docs/gen.src docs/gen.md 2>/dev/null")" "docs/gen.src"
 
+expect "Bash: quoted cp destination blocks" block \
+    "$(bashp "cp docs/gen.src \"docs/gen.md\"")" "docs/gen.src"
+
+expect "Bash: quoted redirect target blocks" block \
+    "$(bashp "echo x > \"docs/gen.md\"")" "docs/gen.src"
+
+expect "Bash: second write in a compound command blocks" block \
+    "$(bashp "echo x > README.tmp; echo y > docs/gen.md")" "docs/gen.src"
+
+expect "Bash: second cp in a compound command blocks" block \
+    "$(bashp "cp a README.tmp; cp docs/gen.src docs/gen.md")" "docs/gen.src"
+
+expect "Bash: force-clobber >| blocks" block \
+    "$(bashp "echo x >| docs/gen.md")" "docs/gen.src"
+
+expect "Bash: noclobber >| with flags blocks" block \
+    "$(bashp "set -o noclobber; echo x >| docs/gen.md")" "docs/gen.src"
+
+expect "Bash: fd dup 2>&1 is not a write target" approve \
+    "$(bashp "make gen 2>&1")"
+
 expect "Bash: cp over the installed plugin copy blocks" block \
     "$(jq -nc --arg cwd "$TMP" --arg cmd "cp $REPO/docs/gen.md $TMP/stage/plugin-stage/fno/hooks/a.sh" '{tool_name:"Bash",cwd:$cwd,tool_input:{command:$cmd}}')" \
     "installed plugin copy" "fno doctor update"
