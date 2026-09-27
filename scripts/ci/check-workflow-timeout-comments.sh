@@ -17,8 +17,10 @@
 #   not an overshoot.
 # - A job's header comment (contiguous comment lines whose next significant
 #   line is the job key) belongs to that job, not to the previous one.
-# - Compact "19m" is matched; "16m35s" is not (no word boundary after m), so
-#   write second-precision history in plain seconds and this guard stays quiet.
+# - Compact "19m" is matched, decimals included: "15.27m" reads as 15.27, not
+#   the 27 after the dot. "16m35s" is not matched (no word boundary after m),
+#   so write second-precision history in plain seconds and this guard stays
+#   quiet.
 # - A job whose cap is an expression (sized at runtime) is skipped: there is no
 #   static number to contradict.
 set -uo pipefail
@@ -49,6 +51,22 @@ jobs:          # file-header numbers like 'costs 4 minutes' name no job
     steps:
       # puts the shard back near 12 minutes
       - run: true
+  decimal-job:
+    timeout-minutes: 20
+    steps:
+      # a 15.27m cap kill on 2026-09-27 reads 15.27, under this cap
+      - run: true
+      # a decimal above the cap still refuses: 25.5m
+      - run: true
+      # spelled out the same way: 15.27 minutes reads 15.27, not 27
+      - run: true
+  frac-job:
+    timeout-minutes: 2.5
+    steps:
+      # a fractional cap reads: 3.5m must refuse
+      - run: true
+      # 2m sits under it and passes
+      - run: true
   dynamic-job:
     timeout-minutes: ${{ fromJSON(needs.sizer.outputs.timeout_minutes) }}
     steps:
@@ -56,10 +74,10 @@ jobs:          # file-header numbers like 'costs 4 minutes' name no job
       - run: true
 """
 
-MINUTES = re.compile(r"\b(\d{1,4})\s*(?:minutes?|mins?)\b", re.IGNORECASE)
-COMPACT = re.compile(r"\b(\d{1,3})m\b")
+MINUTES = re.compile(r"(?<![\d.])(\d{1,4}(?:\.\d+)?)\s*(?:minutes?|mins?)\b", re.IGNORECASE)
+COMPACT = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d+)?)m\b")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
-CAP = re.compile(r"^    timeout-minutes:\s*(\d+)\s*$")
+CAP = re.compile(r"^    timeout-minutes:\s*(\d+(?:\.\d+)?)\s*$")
 
 
 def scan(text: str, source: str) -> list[str]:
@@ -80,7 +98,7 @@ def scan(text: str, source: str) -> list[str]:
             continue
         cm = CAP.match(line)
         if cm and current and current not in job_cap:
-            job_cap[current] = int(cm.group(1))
+            job_cap[current] = float(cm.group(1))
 
     # A comment belongs to the job whose key line follows it when that key is
     # the next line that is neither blank nor a comment (a job's header block
@@ -120,24 +138,28 @@ def scan(text: str, source: str) -> list[str]:
         name, cap = own
         for pattern in (MINUTES, COMPACT):
             for dm in pattern.finditer(comment):
-                minutes = int(dm.group(1))
+                minutes = float(dm.group(1))
                 if minutes > cap:
                     fails.append(
-                        f"{source}: job {name}: comment names {minutes} minutes "
-                        f"above its {cap}-minute cap: {line.strip()}")
+                        f"{source}: job {name}: comment names {minutes:g} minutes "
+                        f"above its {cap:g}-minute cap: {line.strip()}")
     return fails
 
 
 def selftest() -> int:
     fails = scan(FIXTURE, "fixture")
-    expected = 2  # over-job's header comment and its step comment; nothing else
-    if len(fails) != expected or sum("over-job" in f for f in fails) != expected:
-        print(f"FAIL: selftest expected exactly {expected} over-job refusals, got:",
+    expected = 4  # over-job x2 (int minutes), decimal-job x1 (25.5m), frac-job x1 (3.5m)
+    counts = {"over-job": 2, "decimal-job": 1, "frac-job": 1}
+    if (
+        len(fails) != expected
+        or any(sum(job in f for f in fails) != n for job, n in counts.items())
+    ):
+        print(f"FAIL: selftest expected {counts} (= {expected}), got:",
               file=sys.stderr)
         for f in fails:
             print(f"  {f}", file=sys.stderr)
         return 1
-    print(f"  ok: the selftest fixture yields exactly the {expected} over-job refusals")
+    print("  ok: the selftest fixture yields over-job x2, decimal-job x1, frac-job x1")
     print("check-workflow-timeout-comments selftest: ALL PASS")
     return 0
 
