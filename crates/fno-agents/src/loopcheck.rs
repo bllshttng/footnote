@@ -321,6 +321,43 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     decide_with_payload(&parsed, hook_input.as_deref())
 }
 
+fn pause_subject(parsed: &LoopCheckArgs) -> crate::fleet_incident::Subject<'_> {
+    let manifest = std::fs::read_to_string(&parsed.state_path).unwrap_or_default();
+    let mut session_ids = Vec::new();
+    for field in [
+        "fno_id",
+        "session_id",
+        "harness_session_id",
+        "claude_session_id",
+        "claude_transcript_id",
+        "codex_thread_id",
+        "gemini_session_id",
+        "opencode_session_id",
+    ] {
+        if let Some(id) = scan_manifest_field(&manifest, field) {
+            if !id.eq_ignore_ascii_case("null") && !session_ids.contains(&id) {
+                session_ids.push(id);
+            }
+        }
+    }
+    if let Some(id) = parsed.harness_session.as_deref() {
+        if !session_ids.contains(&id.to_string()) {
+            session_ids.push(id.to_string());
+        }
+    }
+    let node = scan_manifest_field(&manifest, "graph_node_id").or_else(|| {
+        scan_manifest_field(&manifest, "target_claim_key")
+            .and_then(|key| key.strip_prefix("node:").map(str::to_string))
+    });
+    crate::fleet_incident::Subject {
+        session_ids,
+        node,
+        territory: scan_manifest_field(&manifest, "territory")
+            .or_else(|| scan_manifest_field(&manifest, "scope")),
+        cwd: &parsed.cwd,
+    }
+}
+
 /// The decision core with the Stop payload as a parameter :
 /// the native `hook stop` handler calls this in process with the payload it
 /// already read, and tests replay recorded payloads, so the stdin handoff is
@@ -338,7 +375,8 @@ pub(crate) fn decide_with_payload(
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         0,
     );
-    if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
+    let subject = pause_subject(parsed);
+    if let Some(message) = crate::loops_pause::pause_message(&subject) {
         return (0, paused_output(&parsed.driver, &message));
     }
     // The king uses a separate manifest and decision path.
