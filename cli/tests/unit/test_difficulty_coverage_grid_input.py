@@ -50,7 +50,9 @@ def test_backlog_builder_accepts_explicit_none():
 
 
 def test_backlog_add_requires_difficulty_noninteractive(tmp_graph):
-    result = run_native_create(tmp_graph, "add", "missing difficulty")
+    result = run_native_create(
+        tmp_graph, "add", "missing difficulty", auto_difficulty=False
+    )
 
     assert result.exit_code == 2
     assert "non-interactive filing requires --difficulty" in (result.output + result.stderr)
