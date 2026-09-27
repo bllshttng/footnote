@@ -18,6 +18,7 @@ pub mod findings;
 pub mod get_cli;
 pub mod idea_cap;
 pub mod model;
+pub mod node_ref;
 pub mod node_state;
 pub mod nodes;
 pub mod note_cli;
@@ -35,6 +36,7 @@ pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod update_cli;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};
