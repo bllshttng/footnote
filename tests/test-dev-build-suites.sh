@@ -22,9 +22,10 @@ if [ -z "${FNO_BIN:-}" ] && [ ! -x "../crates/fno/target/debug/fno" ] \
   exit 1
 fi
 
-# Select by the fixture name, so a new file that takes it joins with no edit.
+# Select by the fixture name or the dev_build marker, so a new file that
+# takes either joins with no edit.
 # grep exits 1 on no candidate and pytest exits 5 on an empty -m selection;
 # both fail this harness.
-files=$(grep -rl --include='test_*.py' native_backlog_door tests)
+files=$(grep -rl --include='test_*.py' -e native_backlog_door -e 'mark\.dev_build' tests)
 # shellcheck disable=SC2086  # repo test paths carry no spaces
 uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup -m dev_build $files

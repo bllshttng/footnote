@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.rust_binary import find_dev_binary as _find_dev_binary
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -402,10 +401,7 @@ def test_ac5_hp_a_never_routed_row_restores_nothing(tmp_path, monkeypatch) -> No
     assert restore_route_for_relaunch(row) is None
 
 
-requires_rust = pytest.mark.skipif(
-    _find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 @requires_rust

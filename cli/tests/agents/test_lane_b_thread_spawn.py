@@ -39,6 +39,11 @@ from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
 from tests._afunix import short_bind_root
 
+# The autouse _rust_posture_door reaches every test here, so the
+# whole module runs with the dev build; the conftest hook applies
+# the skip where this checkout has none.
+pytestmark = pytest.mark.dev_build
+
 
 @pytest.fixture(autouse=True)
 def _rust_posture_door(monkeypatch):

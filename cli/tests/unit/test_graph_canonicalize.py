@@ -27,10 +27,7 @@ from fno.graph.store import (
 # the compiled runtime and skips whole where the smoke harness deleted the
 # worker binary (the parity-test convention). The skip keeps the import-time
 # canonical_field_order() read below from ever running without a worker.
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 

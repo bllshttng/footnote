@@ -7,13 +7,9 @@ from pathlib import Path
 import pytest
 
 from fno.graph import api
-from fno.rust_binary import find_dev_binary
 
 
-pytestmark = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present",
-)
+pytestmark = pytest.mark.dev_build
 
 
 def _graph(tmp_path: Path, decisions: list[dict] | None = None) -> Path:

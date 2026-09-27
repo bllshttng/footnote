@@ -16,16 +16,12 @@ from typing import Generator
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
 from fno.graph.store import commit_rows_via_store, render_canonical_views
 
 # Since the store port every mutation here rides the keeper, so the module
 # needs the compiled runtime and skips whole where the smoke harness deleted
 # the worker binary (the parity-test convention).
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 

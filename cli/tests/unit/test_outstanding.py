@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths import project_log
-from fno.rust_binary import VerbUnavailable, find_dev_binary
+from fno.rust_binary import VerbUnavailable
 from typer.testing import CliRunner
 
 from fno.harness_identity import OwnedHarnessIdentity
@@ -37,10 +37,7 @@ pytestmark = [pytest.mark.xdist_group("done-audit-serial")]
 
 runner = CliRunner()
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 def _write_carveouts(root: Path, rows: list[dict]) -> Path:

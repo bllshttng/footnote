@@ -68,13 +68,12 @@ def _history_row(cohort: str, repeat: int, bank_rev: str) -> str:
     return json.dumps(payload)
 
 
+@pytest.mark.dev_build
 def test_live_native_fold_answers_the_declared_manifest(tmp_path: Path) -> None:
     """The real dev binary folds the real manifest end to end."""
     from fno.rust_binary import find_dev_binary
 
     binary = find_dev_binary()
-    if binary is None:
-        pytest.skip("no dev fno-agents binary; the fold is covered in Rust")
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     rev = manifest["release"]["bank_rev"]
     history = tmp_path / "history.jsonl"
