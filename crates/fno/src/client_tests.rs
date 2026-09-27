@@ -2625,21 +2625,20 @@ fn majority_default_recomputes_as_agents_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC2-HP (x-c5ee): the two pull-sections default Collapsed - the top of the
-// panel is the operator's own agents, the pull-sections one click away.
+// Pin the Expanded elsewhere default: every spawn appears in the sideline.
 #[test]
-fn pull_sections_default_collapsed() {
+fn pull_sections_default_expanded() {
     let dir = isolate_view_store("pull");
     let view = two_pane_view();
     assert_eq!(
         view.section_view(&SectionKey::Elsewhere),
-        SectionView::Collapsed
+        SectionView::Expanded
     );
     crate::view_store::clear_test_path();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC1-FR (x-c5ee): an explicit persisted choice outranks the new Collapsed
+// AC1-FR (x-c5ee): an explicit persisted choice outranks the computed
 // pull-section default. Inserted straight into the map to mirror a value
 // loaded from disk, without touching the real store.
 #[test]

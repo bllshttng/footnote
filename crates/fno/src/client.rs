@@ -1441,6 +1441,10 @@ mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
+// The per-section view defaults (Expanded/LiveOnly/Collapsed), moved out of
+// this file (file budget); the elsewhere section now takes the Expanded-tier
+// default with the active squad.
+mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
 mod pane_paint;
@@ -4891,81 +4895,6 @@ impl View {
         // pending, the layout that just added the tab opens rename on it. Last
         // so `open_rename` clearing the selector/nav is never re-clobbered.
         self.maybe_prompt_new_tab_name();
-    }
-
-    /// A section's effective view, resolved live every frame. The one
-    /// authority behind both the caret glyph and the row filter, so they can
-    /// never disagree. Order:
-    ///   1. An explicit persisted operator choice wins verbatim - it survives a
-    ///      restart and outranks every computed default below (Locked 2, AC1-FR).
-    ///   2. Else a computed default, recomputed from the layout in hand:
-    ///      - the active squad opens `Expanded`, downgrading to
-    ///        `LiveOnly` when the section is majority-exited so the dead rows
-    ///        fold behind the header's `✗N` while the live agents stay up;
-    ///      - an inactive squad stays `Collapsed` - surfacing live rows across
-    ///        every idle workspace is the opposite of attention-focus;
-    ///      - the pull-section `~ elsewhere` defaults
-    ///        `Collapsed`, one click from their own header + rollup.
-    /// The active-squad default lives HERE, not in a map-seed: a seed is
-    /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
-    /// mid-session, and it pollutes the map that should hold only choices.
-    fn section_view(&self, key: &SectionKey) -> SectionView {
-        if let Some(chosen) = self.section_view.get(key).copied() {
-            return chosen;
-        }
-        match key {
-            SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
-            SectionKey::Squad(_) | SectionKey::Elsewhere => SectionView::Collapsed,
-        }
-    }
-
-    /// The Expanded-tier computed default: `Expanded`, or `LiveOnly` when the
-    /// section is majority-exited (its dead rows then fold behind the header's
-    /// `✗N` while the live rows stay). Only ever downgrades an Expanded default;
-    /// never upgrades a Collapsed inactive squad (Locked 3).
-    fn expanded_or_live_only(&self, key: &SectionKey) -> SectionView {
-        if self.majority_exited(key) {
-            SectionView::LiveOnly
-        } else {
-            SectionView::Expanded
-        }
-    }
-
-    /// Whether `key` names the currently active squad. Compared through
-    /// `squad_matches` (allocation-free) rather than minting a `SectionKey` for
-    /// the active id on every call - `section_view` is per-section-per-frame hot.
-    fn is_active_squad(&self, key: &SectionKey) -> bool {
-        self.layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .is_some_and(|s| squad_matches(s, key))
-    }
-
-    /// Strict-majority-exited over the section's own rows (`exited * 2 > total`).
-    /// Zero rows is never a majority (an empty section keeps Expanded) and a
-    /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
-    /// Walks the same membership `section_dead_rows` does, live off the layout
-    /// and never cached, so it tracks agents exiting mid-session. Only the
-    /// Expanded-tier key (the active squad) reaches it; every other key has
-    /// no squad match and reads as "not a majority".
-    fn majority_exited(&self, key: &SectionKey) -> bool {
-        let Some(id) = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| squad_matches(s, key))
-            .map(|s| s.id)
-        else {
-            return false;
-        };
-        let mut total = 0usize;
-        let mut exited = 0usize;
-        for a in self.layout.agents.iter().filter(|a| a.squad == Some(id)) {
-            total += 1;
-            exited += a.exited as usize;
-        }
-        exited * 2 > total
     }
 
     /// Advance a section one step through the view cycle: pure client
