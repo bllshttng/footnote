@@ -324,7 +324,21 @@ class WatermarkStore:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2)
                 fh.write("\n")
-            os.replace(tmp_path, self._path)
+            try:
+                os.replace(tmp_path, self._path)
+            except FileNotFoundError:
+                # A concurrent sweeper removed the tmp between write and
+                # replace (seen live mid-merge-queue). Rewrite once
+                # instead of aborting the caller's queue walk.
+                fd2, tmp_str2 = tempfile.mkstemp(
+                    dir=self._path.parent,
+                    prefix=".pr-watcher-state.tmp.",
+                )
+                tmp_path = Path(tmp_str2)
+                with os.fdopen(fd2, "w", encoding="utf-8") as fh:
+                    json.dump(self._data, fh, indent=2)
+                    fh.write("\n")
+                os.replace(tmp_path, self._path)
         except Exception:
             if tmp_path and tmp_path.exists():
                 try:
