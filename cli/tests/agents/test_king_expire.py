@@ -434,16 +434,19 @@ def test_an_orphaned_scope_writes_the_manifest_clear_event(court, monkeypatch) -
 
 def _stub_graph(monkeypatch, projects: dict[str, str]) -> None:
     """Feed find_presiding_crown the epic -> project read the real graph
-    gives it; the tmp court has no tracker entries of its own."""
-    import fno.tracker.metadata as metadata
+    gives it, at the seam the CLI reads (court's ``_graph_index``). Stubbing
+    the tracker module two layers down made the stub read whatever state a
+    sibling test left ``fno.tracker.metadata`` in, and the presiding path
+    answered "graph unreadable" for every crown in the room."""
+    import fno.agents.court as court_mod
 
     monkeypatch.setattr(
-        metadata,
-        "read_entries",
-        lambda kind: [
-            {"id": epic, "type": "epic", "project": proj}
+        court_mod,
+        "_graph_index",
+        lambda: {
+            epic: {"id": epic, "type": "epic", "project": proj}
             for epic, proj in projects.items()
-        ],
+        },
     )
 
 
