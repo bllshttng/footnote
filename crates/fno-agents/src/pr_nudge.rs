@@ -78,8 +78,8 @@ pub enum NudgeAction {
     /// Nothing is due: the transcript is fresh, the last nudge is young, or
     /// the ladder already escalated and is waiting for activity.
     Wait,
-    /// A live merge order holds the session: no nudge, the pause names
-    /// itself in the event log at most once per hour.
+    /// A merge order or fleet loop halt holds the session: no nudge, and the
+    /// pause names itself in the event log at most once per hour.
     Pause,
     /// The attempt budget is spent: file one operator question and wait for
     /// activity.
@@ -153,8 +153,8 @@ pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
     if !due(&input) {
         return (NudgeAction::Wait, state);
     }
-    // 3. Pause: a live merge order is the only allowed hold. The row stays
-    // and the pause names itself, at most once per hour.
+    // 3. Pause: a merge order or fleet loop halt holds the row. The pause
+    // names itself at most once per hour.
     if input.merge_order_hold {
         return (NudgeAction::Pause, state);
     }
@@ -189,8 +189,7 @@ pub struct NudgeInput {
     pub transcript_age_s: Option<i64>,
     /// Unix seconds of the transcript's last write, when the age answered.
     pub last_activity_at: Option<i64>,
-    /// A live `merge-order:<node>:after:<lead>` decision names this node
-    /// and the lead is not done.
+    /// A live merge order or loop-scoped fleet halt holds this session.
     pub merge_order_hold: bool,
     pub grace_secs: i64,
     pub now: i64,
@@ -263,11 +262,8 @@ fn ladder_run(argv: &[String], cwd: &str) -> (i32, String, String) {
 /// then drop the state files of sessions that no longer carry one.
 pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow], grace_secs: i64) {
     let now = crate::daemon::now_epoch_secs();
-    let holds: Vec<bool> = rows
-        .iter()
-        .map(|row| merge_order_hold(home, &row.node))
-        .collect();
-    for (row, held) in rows.iter().zip(holds) {
+    for row in rows {
+        let held = merge_order_hold(home, &row.node);
         let state = load_state(home, &row.session_id);
         apply(
             home,
@@ -283,6 +279,51 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
     cleanup_state_files(home, rows);
 }
 
+fn nudge_pause_hold(home: &AgentsHome, row: &OpenPrRow) -> bool {
+    if merge_order_hold(home, &row.node) {
+        return true;
+    }
+    loop_pause_hold(home, row)
+}
+
+fn loop_pause_hold(home: &AgentsHome, row: &OpenPrRow) -> bool {
+    let subject = crate::fleet_incident::Subject {
+        session_ids: vec![row.session_id.clone()],
+        node: Some(row.node.clone()),
+        territory: None,
+        cwd: std::path::Path::new(&row.cwd),
+    };
+    crate::resume_gate::loop_pause_hold(home, &subject)
+}
+
+fn record_pause(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    row: &OpenPrRow,
+    mut state: LadderState,
+    state_param: &LadderState,
+    now: i64,
+) {
+    if &state != state_param {
+        save_state(home, &row.session_id, &state);
+    }
+    let pause_due = state
+        .last_pause_emit_at
+        .is_none_or(|then| now.saturating_sub(then) >= PAUSE_EMIT_FLOOR_S);
+    if pause_due {
+        let _ = emitter.emit(
+            "pr_nudge_paused",
+            &serde_json::json!({
+                "session_id": row.session_id,
+                "node": row.node,
+                "pr": row.pr,
+            }),
+        );
+        state.last_pause_emit_at = Some(now);
+        save_state(home, &row.session_id, &state);
+    }
+}
+
 /// One row through the decision and its effects. Public so tests can stage
 /// the runner instead of the world.
 #[allow(clippy::too_many_arguments)]
@@ -296,10 +337,12 @@ pub fn apply(
     now: i64,
     runner: Runner,
 ) {
+    let loop_pause = loop_pause_hold(home, row);
     let (action, mut state, status) = decide_with_read(
         row,
         state_param,
         merge_order_hold,
+        loop_pause,
         grace_secs,
         now,
         &mut *runner,
@@ -328,24 +371,7 @@ pub fn apply(
         NudgeAction::Pause => {
             // A stamped red head must survive the hold, or the wake after
             // the lift would count as a second one.
-            if &state != state_param {
-                save_state(home, &row.session_id, &state);
-            }
-            let pause_due = state
-                .last_pause_emit_at
-                .is_none_or(|t| now.saturating_sub(t) >= PAUSE_EMIT_FLOOR_S);
-            if pause_due {
-                let _ = emitter.emit(
-                    "pr_nudge_paused",
-                    &serde_json::json!({
-                        "session_id": row.session_id,
-                        "node": row.node,
-                        "pr": row.pr,
-                    }),
-                );
-                state.last_pause_emit_at = Some(now);
-                save_state(home, &row.session_id, &state);
-            }
+            record_pause(home, emitter, row, state, state_param, now);
         }
         NudgeAction::Escalate => {
             let key = task_key(row);
@@ -375,6 +401,10 @@ pub fn apply(
             );
         }
         NudgeAction::Mail | NudgeAction::Resume => {
+            if nudge_pause_hold(home, row) {
+                record_pause(home, emitter, row, state, state_param, now);
+                return;
+            }
             // Mail and resume are only reachable past `due`, which is where
             // the one status read happened - for a PR row. A dead-worker
             // row carries no PR, so there is no status to read and no
@@ -459,6 +489,10 @@ pub fn apply(
                 resume_stderr = rstderr;
                 (code, stdout, code == 0, false)
             };
+            if resumed_exit == Some(crate::resume_gate::RESUME_PAUSED_EXIT) {
+                record_pause(home, emitter, row, state, state_param, now);
+                return;
+            }
             state.attempts += 1;
             if resumed_exit == Some(crate::resume_gate::RESUME_REASSIGNED_EXIT) {
                 // The resume refused for a new holder: nudging on would put
@@ -881,6 +915,7 @@ fn decide_with_read(
     row: &OpenPrRow,
     state_param: &LadderState,
     merge_order_hold: bool,
+    loop_pause_hold: bool,
     grace_secs: i64,
     now: i64,
     runner: Runner,
@@ -889,7 +924,7 @@ fn decide_with_read(
         state: state_param.clone(),
         transcript_age_s: row.transcript_age_s,
         last_activity_at: row.transcript_age_s.map(|age| now.saturating_sub(age)),
-        merge_order_hold,
+        merge_order_hold: merge_order_hold || loop_pause_hold,
         grace_secs,
         now,
         live: row.live,
@@ -901,7 +936,7 @@ fn decide_with_read(
     // escalated row is due every pass. Read escalated rows once per grace if the
     // gh budget runs hot. A dead-worker row carries no PR: no read, no red
     // head - the node's open work is the whole reason for the nudge.
-    if due(&input) && row.pr.is_some() {
+    if !loop_pause_hold && due(&input) && row.pr.is_some() {
         let s = read_status(row, runner);
         input.red_head = s.as_ref().ok().and_then(settled_red_head);
         status = Some(s);
@@ -924,8 +959,18 @@ pub fn plan_with(
     rows.iter()
         .map(|row| {
             let state = load_state(home, &row.session_id);
-            let held = merge_order_hold(home, &row.node);
-            let (action, _, _) = decide_with_read(row, &state, held, grace_secs, now, &mut *runner);
+            let merge_order = merge_order_hold(home, &row.node);
+            let loop_paused = loop_pause_hold(home, row);
+            let action = decide_with_read(
+                row,
+                &state,
+                merge_order,
+                loop_paused,
+                grace_secs,
+                now,
+                &mut *runner,
+            )
+            .0;
             (row.id.clone(), action.as_str().to_string())
         })
         .collect()
@@ -974,6 +1019,90 @@ mod tests {
             busy: false,
             red_head: None,
         }
+    }
+
+    #[test]
+    fn targeted_loop_pause_holds_a_due_nudge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(tmp.path());
+        let row = row(false);
+        let dir = home.root().join("fleet-stop.d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("session-{}.json", row.session_id)),
+            serde_json::json!({
+                "version": 1,
+                "state": "stopped",
+                "generation": 1,
+                "changed_at": "2026-06-05T00:00:00Z",
+                "changed_by": "operator",
+                "reason": "targeted nudge hold",
+                "holds": ["loops"],
+                "target": format!("session:{}", row.session_id),
+                "expires_at": "2099-12-31T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let hold = nudge_pause_hold(&home, &row);
+        assert!(hold, "the targeted loop record must hold this PR nudge");
+        let mut input = input(LadderState::default(), false);
+        input.merge_order_hold = hold;
+        assert_eq!(decide(&input).0, NudgeAction::Pause);
+        let mut status_read = false;
+        let planned = plan_with(&home, &[row], 900, &mut |_, _| {
+            status_read = true;
+            (0, "{}".into(), String::new())
+        });
+        assert_eq!(planned[0].1, "paused");
+        assert!(!status_read, "a held nudge skips the PR-status read");
+    }
+
+    #[test]
+    fn pause_after_a_durable_nudge_preserves_its_delivery_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(tmp.path());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let row = row(true);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"do".to_string()) {
+                (
+                    0,
+                    status_payload("green", true, "0123456789abcdef"),
+                    String::new(),
+                )
+            } else if argv.contains(&"send".to_string()) {
+                (
+                    0,
+                    "msg-1 queued (durable) [live-miss]".into(),
+                    String::new(),
+                )
+            } else if argv.contains(&"resume".to_string()) {
+                (
+                    crate::resume_gate::RESUME_PAUSED_EXIT,
+                    String::new(),
+                    "loop halt active".into(),
+                )
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
+
+        apply(
+            &home,
+            &emitter,
+            &row,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+
+        let saved = load_state(&home, &row.session_id);
+        assert!(saved.mail_durable);
+        assert_eq!(saved.attempts, 0, "a paused resume is not a nudge attempt");
     }
 
     /// The status payload the real verb writes to stdout whatever the exit

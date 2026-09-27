@@ -2442,6 +2442,10 @@ pub fn locked_mutate_with_hook(
     // through here, so every writer obeys the combined details+current_state
     // budget, and a migrated row's progress_notes can never grow again.
     enforce_node_state_policy(&raw, &entries)?;
+    // The write-time title leak gate: a NEW or CHANGED title the
+    // render gate would refuse never publishes; a stored leaky title passes
+    // an unrelated update.
+    crate::backlog::title_gate::enforce_title_gate(&raw, &entries)?;
     // The epic child cap holds at this seam too: every whole-graph writer
     // (update --parent, idea --parent, contain, decompose, the rollup
     // auto-link) meets the same refusal. The single-row seam answers for
@@ -2782,6 +2786,70 @@ mod tests {
         );
         assert_eq!(read_rows(&graph).unwrap(), before);
     }
+
+    #[test]
+    fn a_leaky_title_is_refused_at_the_publication_seam() {
+        // The render gate fires at PUBLISH time, so a leaking title
+        // killed the live push instead of the write. The seam refuses a NEW
+        // leaky title and leaves the store untouched; a stored leaky title
+        // passes an unrelated update untouched by this gate.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        let original = json!({
+            "id": "ab-titl0001", "title": "a clean title", "slug": "a-clean-title",
+            "type": "feature", "status": "idea", "priority": "p2",
+        });
+        seed_rows(&graph, &[original]).unwrap();
+        let before = read_rows(&graph).unwrap();
+
+        let input = MutateInput {
+            entries: vec![
+                json!({
+                    "id": "ab-titl0001", "title": "a clean title", "slug": "a-clean-title",
+                    "type": "feature", "status": "ready", "priority": "p2",
+                }),
+                json!({
+                    "id": "ab-titl0002", "title": "fix the bug in x-aaaa", "slug": "fix-the-bug",
+                    "type": "feature", "status": "idea", "priority": "p2",
+                }),
+            ],
+            canonical_path: None,
+            base_version: crate::backlog::version(&graph).unwrap(),
+            plan_rungs: None,
+        };
+        let err = locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .err()
+            .expect("a leaky title must refuse at write time");
+        assert!(
+            matches!(&err, StoreError::Invalid(text)
+                if text.contains("ab-titl0002") && text.contains("node-id") && text.contains("--details")),
+            "expected a refusal naming the id, class and rule, got {err:?}"
+        );
+        assert_eq!(read_rows(&graph).unwrap(), before);
+
+        // A stored leaky title passes an unrelated update: the gate refuses
+        // only titles this write introduces.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        let legacy = json!({
+            "id": "ab-titl0003", "title": "legacy title about x-aaaa PR #12",
+            "slug": "legacy-title", "type": "feature", "status": "idea", "priority": "p2",
+        });
+        seed_rows(&graph, &[legacy]).unwrap();
+        let input = MutateInput {
+            entries: vec![json!({
+                "id": "ab-titl0003", "title": "legacy title about x-aaaa PR #12",
+                "slug": "legacy-title", "type": "feature", "status": "in_progress",
+                "priority": "p2",
+            })],
+            canonical_path: None,
+            base_version: crate::backlog::version(&graph).unwrap(),
+            plan_rungs: None,
+        };
+        locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .expect("an unrelated update on a stored leaky title must pass");
+    }
+
     fn count_prefixed(dir: &Path, prefix: &str) -> usize {
         std::fs::read_dir(dir)
             .unwrap()

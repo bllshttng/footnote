@@ -343,10 +343,12 @@ fn slot_refusal_line_names_the_release_remedy() {
         age_s: Some(120),
         state: "suspect",
         provider: Some("__uncapped__".into()),
+        redeemable: true,
     };
     let live = SlotReservation {
         state: "live",
         pid: Some(std::process::id() as i32),
+        redeemable: false,
         ..suspect.clone()
     };
 
