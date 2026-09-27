@@ -322,7 +322,10 @@ fn a_state_write_keeps_a_row_another_writer_landed() {
                         rows.push(json!({
                             "id": id,
                             "slug": format!("slug-{id}"),
-                            "title": format!("appended {id}"),
+                            // Off the leak grammar: the raw id (c-app-0004)
+                            // carries a node-id match the store gate
+                            // refuses at write time.
+                            "title": format!("appended {i:04}"),
                             "type": "feature",
                             "status": "intake",
                             "priority": "p2",
