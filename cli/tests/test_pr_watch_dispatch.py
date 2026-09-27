@@ -2383,7 +2383,7 @@ class TestTickRecordsAndDeadline:
             lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
             raising=True,
         )
-        def _notify_row(_roots=None, timeout_s=None) -> None:
+        def _notify_row(_roots=None, timeout_s=None, **_kw) -> None:
             prcli._emit_tick_row("notify_watch", interval_s=300,
                                  skip_reason="notify_off")
 
@@ -2431,7 +2431,7 @@ class TestTickRecordsAndDeadline:
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                            lambda _roots=None, timeout_s=None: None,
+                            lambda _roots=None, timeout_s=None, **_kw: None,
                             raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path],
@@ -2555,7 +2555,7 @@ class TestTickRecordsAndDeadline:
             "fno.pr_watch._king_wake.run_king_wake", _stall_in_step, raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                            lambda _roots=None, timeout_s=None: None, raising=True)
+                            lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
@@ -3436,7 +3436,7 @@ class TestFleetLegRunsAfterACutPRLeg:
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                            lambda _roots=None, timeout_s=None: None, raising=True)
+                            lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
