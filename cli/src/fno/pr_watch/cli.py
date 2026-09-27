@@ -240,6 +240,15 @@ def _run_notify_watch_phase(
                        acted=int(payload.get("acted") or 0),
                        skip_reason=payload.get("skip_reason"),
                        detail=(payload.get("detail") or "")[:200])
+    except subprocess.TimeoutExpired as exc:
+        # The bound is the phase slice minus its reserve, so an overrun is
+        # starvation of the arm's budget, not a broken arm: "starved" keeps
+        # the row out of FAILURE_SKIPS, where "notify_failed" would render a
+        # healthy loop as FAIL for as long as the budget stays short.
+        log.warning("pr-watch: notify_watch arm exceeded its %.1fs bound", exc.timeout or 0)
+        _emit_tick_row("notify_watch", interval_s=300,
+                       skip_reason="starved",
+                       detail=f"arm pass exceeded its {exc.timeout:.0f}s bound"[:200])
     except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
         log.warning("pr-watch: notify_watch phase failed: %s", exc)
         _emit_tick_row("notify_watch", interval_s=300,
@@ -417,11 +426,13 @@ _STRANDED_FLOOR_S = 10.0
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
 #: Each phase has a measured cap, bounded by tick time. Merge runs last uncapped. The fit test proves _MERGE_FLOOR_S.
+#: notify_watch 30: a real pass measured 23.1s over 12 roots on 2026-09-27 (per root one gh api pair,
+#: 1.3-9.5s each); at the old 10s cap the slice was spent mid-arm on 5 of 15 passes and the arm read FAIL.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
     "king_wake": 45,
-    "notify_watch": 10,
+    "notify_watch": 30,
     "heal": 10,
     "evals": 10,
 }
@@ -449,13 +460,16 @@ def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signat
 
 
 def _resolve_tick_deadline(cfg) -> int:
-    """Env seam first, then config, then 0.8x the interval (min 60s).
+    """Env seam first, then config, then 0.85x the interval (min 60s).
 
     Config and derived values are clamped BELOW interval_seconds: launchd
     never runs a StartInterval job concurrently, so a deadline at or above
     the interval would let an overrun suppress the successor tick - the exact
     failure mode this ceiling exists to prevent. The env seam stays
     unclamped; it is an operator escape hatch, not a durable setting.
+    0.85: at 0.8 the caps plus the merge floor no longer fit
+    (480 - 345 = 135 < 150), which starved the notify_watch arm into false
+    FAILs; 0.85 leaves 90s of launchd slack at a 600s interval.
     """
     env = (os.environ.get(_ENV_TICK_TIMEOUT) or "").strip()
     if env.isdigit() and int(env) > 0:
@@ -463,7 +477,7 @@ def _resolve_tick_deadline(cfg) -> int:
     ceiling = max(1, int(cfg.interval_seconds) - 5)
     if cfg.tick_timeout_seconds:
         return min(int(cfg.tick_timeout_seconds), ceiling)
-    derived = max(60, int(cfg.interval_seconds * 0.8))
+    derived = max(60, int(cfg.interval_seconds * 0.85))
     return min(derived, ceiling)
 
 
@@ -623,8 +637,11 @@ def tick() -> None:
                 cut.append(name)
                 phase_s[name] = 0.0
                 if arm is not None:
+                    # A phase the wall reached before its body ran was
+                    # starved, not broken: "timeout" is a FAILURE_SKIPS
+                    # token and would render a healthy arm as FAIL.
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"deadline exceeded before phase {name}")
                 return False
             if ceiling_box["v"] is None:
@@ -659,6 +676,10 @@ def tick() -> None:
                     # back what the phase did before the cut - the body's
                     # progress note or the sweep's scan counter - so the row
                     # says "scanned 21 of 39", never a bare timeout.
+                    # skip_reason is "starved", not "timeout": the slice was
+                    # the binding budget, so the arm reads starved in the
+                    # readout, never a FAIL that pages kings about a healthy
+                    # loop (43 minutes of false FAIL in the field).
                     step = current_tick_phase()
                     at = f" at {step}" if step.startswith(name + ":") else ""
                     base = (f"deadline exceeded in phase {name} at "
@@ -666,7 +687,7 @@ def tick() -> None:
                             f"phase slice {int(slice_s)}s spent") + at
                     note = progress.get(name) or sweep_progress.get(name) or ""
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"{base} {note}" if note else base)
             finally:
                 if alarm_ok:

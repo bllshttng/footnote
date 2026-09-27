@@ -1312,7 +1312,7 @@ def liveness_report(
         )
     if cuts := [
         a for a, r in (arm_rows or {}).items()
-        if isinstance(r, dict) and r.get("skip_reason") == "timeout"
+        if isinstance(r, dict) and r.get("skip_reason") in ("timeout", "starved")
         and 0 <= now - (_parse_ts(r.get("ts")) or now + 1) <= 2 * max(interval_seconds, 1)]:
         named = "; ".join(
             f"{a} cut: {(arm_rows or {}).get(a, {}).get('detail') or 'none'}" for a in cuts)

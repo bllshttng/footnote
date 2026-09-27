@@ -586,13 +586,14 @@ fn heal_tick_as_arm_row(value: Value) -> Value {
 }
 
 /// Mark rows whose arm is armed, ticking, and producing nothing: every
-/// observed tick inside `threshold_s` carried `acted=0` with no skip reason
-/// while the newest stayed fresh. A skip token that explains the idleness
-/// (`calm`, `off_cadence`, a configured-off switch) is the arm stating its
-/// own state, not starvation; and a stale or failing row keeps its louder
-/// verdict. A heuristic with a ceiling - it reads a run of silent zeroes
-/// over time, not the arm's input, so it tunes via the threshold knob,
-/// never via an input probe.
+/// observed tick inside `threshold_s` carried `acted=0` with no explaining
+/// skip reason while the newest stayed fresh. A skip token that explains the
+/// idleness (`calm`, `off_cadence`, a configured-off switch) is the arm
+/// stating its own state, not starvation; a `starved` skip is the producer
+/// naming a budget cut and counts toward starvation; and a stale or failing
+/// row keeps its louder verdict. A heuristic with a ceiling - it reads a run
+/// of silent zeroes over time, not the arm's input, so it tunes via the
+/// threshold knob, never via an input probe.
 pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
     let mut history: HashMap<String, Vec<(u64, u64, bool)>> = HashMap::new();
     collect_tick_history(journal_rows(journals, ARM_ROW_TYPES), &mut history);
@@ -670,10 +671,15 @@ fn collect_tick_history(rows: Vec<Value>, history: &mut HashMap<String, Vec<(u64
         else {
             continue;
         };
-        let skip_explains = data
-            .get("skip_reason")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
+        // A "starved" skip is the producer saying its budget cut the pass:
+        // it explains nothing about the arm's input, so it counts toward
+        // starvation like a silent no-op would (a cut
+        // every tick must read starved, never ok-quiet).
+        let skip = data.get("skip_reason").and_then(Value::as_str);
+        let skip_explains = match skip {
+            None | Some("starved") => false,
+            Some(_) => true,
+        };
         history.entry(arm.to_string()).or_default().push((
             ts_unix,
             data.get("acted").and_then(Value::as_u64).unwrap_or(0),
@@ -1742,6 +1748,58 @@ mod tests {
             render_row(heal)
         );
         assert!(!needs_attention(heal));
+    }
+
+    // A pass the tick's budget cut every time emits skip="starved",
+    // acted=0. That run of starved rows is starvation - the arm's input was
+    // never empty - so it must reach the starved verdict, not sit as an
+    // explained-skip ok row nobody reads.
+    #[test]
+    fn starved_skips_in_the_window_read_starved_not_ok() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-14T11:00:00Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("starved"),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T11:59:00Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("starved"),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let notify = rows
+            .iter()
+            .find(|r| r.arm == "notify_watch")
+            .expect("notify row");
+        assert!(notify.starved, "{notify:?}");
+        assert!(!notify.failing, "a starved row is not a failing row");
+        let line = render_row(notify);
+        assert!(line.contains(" starved "), "{line}");
+        assert!(!line.contains("FAIL"), "{line}");
     }
 
     #[test]

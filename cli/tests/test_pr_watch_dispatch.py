@@ -2569,7 +2569,9 @@ class TestTickRecordsAndDeadline:
         assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
-        assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
+        # A slice cut reads starved: "timeout" is a failure token and would
+        # render a budget-cut phase as a broken arm.
+        assert king_rows and king_rows[-1].get("skip_reason") == "starved"
         assert "at king_wake:truth:epic-x" in king_rows[-1].get("detail", ""), (
             f"the cut must name its sub-step: {king_rows[-1].get('detail')!r}"
         )
