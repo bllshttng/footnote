@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - reconcile session start
 # SessionStart hook: surface the PRIOR `fno backlog reconcile` sweep as a
 # system reminder, then kick off a fresh throttled reconcile in the background.
 #

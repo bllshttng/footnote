@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: pre-push - pre push
 # pre-push protected-branch gate, destination-only.
 #
 # Git feeds this hook one stdin line per ref being written:

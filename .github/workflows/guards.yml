@@ -421,6 +421,13 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-identity-stamp-sites.sh
 
+      - name: hook source identity
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash scripts/ci/check-hook-identity.sh --self-test
+          bash scripts/ci/check-hook-identity.sh
+
       # A skipped test reads green while a failing one blocks the merge, so the
       # cheapest way past a red test is to skip it. This ratchet refuses any
       # pytest skip site the checked-in baseline does not name, until the PR

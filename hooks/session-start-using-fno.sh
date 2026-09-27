@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - session start using fno
 # SessionStart hook: inject the using-fno SKILL.md as additionalContext.
 #
 # It ensures every Claude session opened in a footnote-enabled project

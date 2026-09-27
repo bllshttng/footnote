@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: UserPromptSubmit - born with why offer inject
 # hooks/born-with-why-offer-inject.sh -- surface a pending born-with-why offer.
 #
 # UserPromptSubmit hook. The attended born-with-why path (spawn_think.py) emits a
