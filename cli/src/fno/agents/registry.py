@@ -1327,7 +1327,7 @@ def _validate_resolvable_handle(entry: AgentEntry) -> None:
 
 
 class RegistryWriteRefused(RuntimeError):
-    """x-48ae write guard, the Python mirror of ``registry_guard::check`` in fno-agents."""
+    """The shared-registry write guard, Python's mirror of ``registry_guard::check``."""
 
 
 def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:

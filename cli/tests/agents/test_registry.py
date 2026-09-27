@@ -3050,7 +3050,7 @@ def test_session_report_fields_round_trip(monkeypatch, tmp_path) -> None:
     assert reloaded.start_source == "resume"
 
 
-def test_x48ae_guard_refuses_probe_and_mass_drop_on_shared_root(
+def test_guard_refuses_probe_and_mass_drop_on_shared_root(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A probe (a process under a test marker) writing the real shared

@@ -1,6 +1,6 @@
-//! The shared-registry write guard (x-48ae): the two refusals every Rust
-//! registry write routes through at [`crate::state::update_registry`], and
-//! Python's `write_registry` mirrors in `cli/src/fno/agents/registry.py`.
+//! The shared-registry write guard: the two refusals every Rust registry
+//! write routes through at [`crate::state::update_registry`], and Python's
+//! `write_registry` mirrors in `cli/src/fno/agents/registry.py`.
 //!
 //! 2026-09-27 a worker's probe called Python's `write_registry` with no
 //! pinned state dir and replaced the live `~/.fno/agents/registry.json` with
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn a_sandboxed_home_stands_down() {
-        let home = std::env::temp_dir().join("x48ae-sandbox-home");
+        let home = std::env::temp_dir().join("guard-sandbox-home");
         let target = home.join(".fno").join("agents").join("registry.json");
         assert!(check(GuardInputs {
             cfg_test: true,

@@ -263,11 +263,12 @@ pub enum StateError {
         current: u32,
         source_root: String,
     },
-    /// The x-48ae write guard refused at the choke point (`registry_guard`):
-    /// a test/probe process aimed at the real shared registry, or a closure
-    /// about to drop most live rows without the override. Its own variant
-    /// rather than `InvariantViolation` so the remedy-bearing message stays
-    /// grep-able as the guard, not as a row-shape bug.
+    /// The shared-registry write guard refused at the choke point
+    /// (`registry_guard`): a test/probe process aimed at the real shared
+    /// registry, or a closure about to drop most live rows without the
+    /// override. Its own variant rather than `InvariantViolation` so the
+    /// remedy-bearing message stays grep-able as the guard, not as a
+    /// row-shape bug.
     #[error("registry write guard: {0}")]
     WriteGuard(String),
     /// The blocking-pool task reading the registry was cancelled by daemon
@@ -2379,7 +2380,7 @@ where
             entry.exited_at = None;
         }
     }
-    // x-48ae: the shared-registry write guard. Fires only on the real shared
+    // The shared-registry write guard. Fires only on the real shared
     // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -
     // so the refusal names exactly the two shapes that cost the fleet its
     // rows on 2026-09-27: a test or probe process writing fleet state, and a
