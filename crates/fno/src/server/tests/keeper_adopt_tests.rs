@@ -294,6 +294,7 @@ fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         id

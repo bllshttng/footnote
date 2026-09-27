@@ -27,6 +27,7 @@ pub mod note_stale;
 pub mod orphan_plans;
 pub mod patch;
 pub mod pull_requests;
+pub mod rank_cli;
 pub mod receipt;
 pub mod relations;
 pub mod render;
@@ -34,6 +35,7 @@ pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod title_gate;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -846,24 +848,10 @@ fn mutate_single_row_once(
         return Ok(false);
     }
     // The publish-seam invariants the whole-graph path ran on every publish
-    // hold here too: no empty presence field, a slug on every row, and a
-    // touched_at stamp when a row's curation fields moved.
-    for row in working.iter() {
-        let Some(obj) = row.as_object() else {
-            continue;
-        };
-        let id = crate::graph_store::entry_id(row).unwrap_or("<no id>");
-        for field in crate::graph_store::PRESENCE_TEXT_FIELDS {
-            if let Some(serde_json::Value::String(text)) = obj.get(*field) {
-                if text.trim().is_empty() {
-                    return Err(format!(
-                        "refusing to persist an empty '{field}' on entry '{id}': \
-                         pass real content, or remove the key to clear it"
-                    ));
-                }
-            }
-        }
-    }
+    // hold here too: an empty presence field only when the write introduces
+    // it, a slug on every row, and a touched_at stamp when a row's curation
+    // fields moved.
+    crate::graph_store::refuse_new_empty_presence(&rows, &working)?;
     crate::graph_store::ensure_slugs(&mut working);
     // The close-evidence rule at the single-row seam: judged over the
     // transaction's pre rows and the mutation's output, before anything is
@@ -1844,6 +1832,63 @@ mod tests {
         let journal = crate::paths::events_path(&std::env::current_dir().unwrap());
         let text = crate::events::committed_journal_text(&journal);
         assert!(text.contains("graph_write_gate") && text.contains("comment_create"));
+    }
+
+    #[test]
+    fn single_row_write_passes_a_legacy_empty_field_on_another_row() {
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (_dir, graph) = seeded_sqlite_fixture();
+        // Seed the trap the store itself can produce: a closed row holding
+        // an empty details (stored as the description column). The write
+        // routes through the table's owning module (the table-ownership
+        // gate), like every write.
+        {
+            let connection = open(&graph).unwrap();
+            let mut one = crate::backlog::nodes::load(&connection, "ab-one")
+                .unwrap()
+                .unwrap();
+            one.status = crate::backlog::model::Status::parse("done").unwrap();
+            one.description = Some(String::new());
+            crate::backlog::nodes::save(&connection, &one).unwrap();
+        }
+        // A write touching only the OTHER row succeeds.
+        let ok = mutate_single_row(&graph, "comment_create", |rows| {
+            for row in rows.iter_mut() {
+                if entry_id_from(row) == Some("ab-two") {
+                    row.as_object_mut()
+                        .unwrap()
+                        .insert("progress_notes".into(), serde_json::json!([{"body": "hi"}]));
+                }
+            }
+            Ok(true)
+        })
+        .unwrap();
+        assert!(ok);
+        // An empty value the write introduces still refuses, naming that row.
+        let err = mutate_single_row(&graph, "node_update", |rows| {
+            for row in rows.iter_mut() {
+                if entry_id_from(row) == Some("ab-two") {
+                    row.as_object_mut()
+                        .unwrap()
+                        .insert("title".into(), serde_json::json!(""));
+                }
+            }
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(err.contains("ab-two"), "{err}");
+        // The legacy row still reads details "".
+        let rows = export_rows(&open(&graph).unwrap()).unwrap();
+        let one = rows
+            .iter()
+            .find(|r| entry_id_from(r) == Some("ab-one"))
+            .unwrap();
+        assert_eq!(
+            one.get("details"),
+            Some(&serde_json::Value::String(String::new()))
+        );
     }
 
     #[test]

@@ -914,52 +914,90 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
-/// One verdict token for the check-in line, from the shared reader's rows:
-/// every check-run page, legacy statuses, and runs that failed before
-/// minting a job. GitHub's combined status is gone from the reduce: it reads
-/// `pending` for a commit with zero legacy statuses, which no green on this
-/// repo survives.
-fn main_ci_token(rows: Vec<Value>) -> Result<Value, String> {
-    let (conclusion, _, _) = crate::loopcheck::classify_checks_payload(&Value::Array(rows))?;
-    let token = match conclusion {
-        crate::loopcheck::CiConclusion::Failure(_) => "red",
-        crate::loopcheck::CiConclusion::Success => "green",
-        _ => "pending",
-    };
-    Ok(Value::String(token.into()))
+/// One verdict token for the check-in line, from the workflow-run history on
+/// main, not the tip's check runs: a tip that fires no run of a workflow must
+/// not read green while that workflow's newest completed main run failed.
+/// Per workflow the newest COMPLETED run decides - red on fail or cancel,
+/// naming the workflow and the sha it ran on; a workflow whose newest run is
+/// still in flight reads pending; empty history reads pending, never green.
+fn main_ci_token_from_runs(runs: &[Value]) -> Value {
+    // GitHub answers newest-first, so each workflow's first sighting is its
+    // newest run and its first completed sighting its newest result.
+    let mut order: Vec<(&str, &Value)> = Vec::new();
+    let mut newest: Vec<(&str, &Value)> = Vec::new();
+    for run in runs {
+        let name = run.get("name").and_then(Value::as_str).unwrap_or("");
+        if name.is_empty() || newest.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        newest.push((name, run));
+    }
+    for (name, _) in &newest {
+        if let Some(completed) = runs.iter().find(|run| {
+            run.get("name").and_then(Value::as_str) == Some(name)
+                && run.get("status").and_then(Value::as_str) == Some("completed")
+        }) {
+            order.push((name, completed));
+        }
+    }
+    if let Some((_, run)) = order
+        .iter()
+        .find(|(_, run)| matches!(crate::pr_push::rest_bucket(run), "fail" | "cancel"))
+    {
+        let field = |k: &str| run.get(k).and_then(Value::as_str).unwrap_or("unknown");
+        return json!({
+            "verdict": "red",
+            "workflow": field("name"),
+            "sha": field("head_sha"),
+        });
+    }
+    let inflight = newest
+        .iter()
+        .any(|(_, run)| run.get("status").and_then(Value::as_str) != Some("completed"));
+    Value::String(if runs.is_empty() || inflight {
+        "pending".into()
+    } else {
+        "green".into()
+    })
+}
+
+/// The `main ci:` line body: a red verdict names the workflow and sha, the
+/// string tokens pass through untouched.
+fn main_ci_render(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::Object(o)) => {
+            let field = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("unknown");
+            format!(
+                "{} ({} at {})",
+                field("verdict"),
+                field("workflow"),
+                field("sha")
+            )
+        }
+        other => dash(other),
+    }
 }
 
 fn r_main_ci() -> Result<Value, String> {
-    let sha = {
-        // The REMOTE tip, not the local ref: origin/main is stale until the
-        // caller fetches, and the check-in must not grade yesterday's main.
-        let argv: Vec<std::ffi::OsString> = vec![
-            "git".into(),
-            "ls-remote".into(),
-            "origin".into(),
-            "refs/heads/main".into(),
-        ];
-        let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
-        if code != 0 {
-            return Err(format!("git ls-remote failed: {}", stderr_cause(&err)));
-        }
-        // `git ls-remote origin refs/heads/main` answers "<sha>\trefs/heads/main".
-        let sha = out
-            .trim()
-            .split('\t')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if sha.is_empty() {
-            return Err("git ls-remote named no main tip".to_string());
-        }
-        sha
-    };
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)
-        .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
-    main_ci_token(rows)
+    // One un-paginated page: the listing grows with the repo's age, and a
+    // paginated read would walk its whole history on every check-in beat.
+    // A workflow absent from the 100 newest main runs has nothing newer
+    // than what this page already carries.
+    let raw = crate::pr_push::gh_api(
+        "gh",
+        &cwd,
+        "repos/{owner}/{repo}/actions/runs?branch=main&per_page=100",
+        &[],
+    )
+    .map_err(|error| format!("gh api failed: {}", gh_error_cause(&error)))?;
+    let mut runs: Vec<Value> = Vec::new();
+    if let Ok(page) = serde_json::from_str::<Value>(&raw) {
+        if let Some(list) = page.get("workflow_runs").and_then(Value::as_array) {
+            runs = list.clone();
+        }
+    }
+    Ok(main_ci_token_from_runs(&runs))
 }
 
 /// The control plane's own verdict: every arm failing past the notify
@@ -1861,7 +1899,7 @@ fn render_lines(
     }
     match failed("main_ci") {
         Some(r) => lines.push(format!("READER FAILED main_ci: {}", r.error)),
-        None => lines.push(format!("main ci: {}", dash(data.get("main_ci")))),
+        None => lines.push(format!("main ci: {}", main_ci_render(data.get("main_ci")))),
     }
     match failed("control_plane") {
         Some(r) => lines.push(format!("READER FAILED control_plane: {}", r.error)),
@@ -2899,53 +2937,132 @@ mod tests {
         assert!(!is_user_placeholder(""));
     }
 
-    #[test]
-    fn main_ci_token_reads_green_on_pass_and_skip_rows_only() {
-        // The 9da9a1de2a shape: every check passed and the combined status
-        // read pending (0 legacy statuses). The shared reduce reads green.
-        let rows = vec![
-            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
-            serde_json::json!({"name": "guards", "bucket": "skipping"}),
-        ];
-        assert_eq!(main_ci_token(rows).unwrap(), Value::String("green".into()));
+    /// The workflow-run rows a `/actions/runs?branch=main` page carries,
+    /// newest first, in the fields the reducer reads.
+    fn wf_run(name: &str, sha: &str, status: &str, conclusion: &str, created: &str) -> Value {
+        serde_json::json!({
+            "name": name, "head_sha": sha, "status": status,
+            "conclusion": conclusion, "created_at": created,
+        })
     }
 
     #[test]
-    fn main_ci_token_reads_red_on_a_zero_job_fail_row() {
-        let rows = vec![
-            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
-            serde_json::json!({"name": ".github/workflows/cli-ci.yml", "bucket": "fail"}),
-        ];
-        assert_eq!(main_ci_token(rows).unwrap(), Value::String("red".into()));
-    }
-
-    #[test]
-    fn main_ci_token_reads_red_on_a_failed_status_row() {
-        let rows = vec![
-            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
-            serde_json::json!({"name": "external-ci", "bucket": "fail"}),
-        ];
-        assert_eq!(main_ci_token(rows).unwrap(), Value::String("red".into()));
-    }
-
-    #[test]
-    fn main_ci_token_reads_pending_on_a_pending_row() {
-        let rows = vec![
-            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
-            serde_json::json!({"name": "guards", "bucket": "pending"}),
+    fn main_ci_reads_green_when_every_workflows_newest_completed_run_passed() {
+        let runs = vec![
+            wf_run(
+                "guards",
+                "b1",
+                "completed",
+                "success",
+                "2026-09-26T03:00:00Z",
+            ),
+            wf_run(
+                "cli-ci",
+                "b1",
+                "completed",
+                "success",
+                "2025-09-26T02:50:00Z",
+            ),
         ];
         assert_eq!(
-            main_ci_token(rows).unwrap(),
+            main_ci_token_from_runs(&runs),
+            Value::String("green".into())
+        );
+    }
+
+    /// The filed bug's shape: the newest completed cli-ci main run failed,
+    /// and the later tip fires no cli-ci at all. The tip-only reader read
+    /// green here; the history reader names the failed workflow and sha.
+    #[test]
+    fn main_ci_reads_red_from_a_newer_failed_cli_ci_when_the_tip_fires_none() {
+        let runs = vec![
+            wf_run(
+                "guards",
+                "b2",
+                "completed",
+                "success",
+                "2026-09-26T04:00:00Z",
+            ),
+            wf_run(
+                "rust-ci",
+                "b2",
+                "completed",
+                "success",
+                "2026-09-26T04:00:00Z",
+            ),
+            wf_run(
+                "cli-ci",
+                "a1",
+                "completed",
+                "failure",
+                "2026-09-26T03:35:00Z",
+            ),
+        ];
+        assert_eq!(
+            main_ci_token_from_runs(&runs),
+            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
+        );
+    }
+
+    /// A workflow whose newest run is still in flight reads pending even when
+    /// its newest completed run passed.
+    #[test]
+    fn main_ci_reads_pending_when_a_workflows_newest_run_is_in_flight() {
+        let runs = vec![
+            wf_run(
+                "guards",
+                "b2",
+                "completed",
+                "success",
+                "2026-09-26T04:00:00Z",
+            ),
+            wf_run("cli-ci", "b2", "in_progress", "", "2026-09-12T04:00:00Z"),
+        ];
+        assert_eq!(
+            main_ci_token_from_runs(&runs),
             Value::String("pending".into())
         );
     }
 
+    /// Red outranks an in-flight run of the same workflow: the newest
+    /// completed result is the failure until a newer run completes green.
     #[test]
-    fn main_ci_token_reads_pending_on_no_rows() {
+    fn main_ci_reads_red_even_while_a_newer_run_of_the_same_workflow_is_in_flight() {
+        let runs = vec![
+            wf_run("cli-ci", "b3", "in_progress", "", "2026-09-26T04:10:00Z"),
+            wf_run(
+                "cli-ci",
+                "a1",
+                "completed",
+                "failure",
+                "2026-09-26T03:35:00Z",
+            ),
+        ];
         assert_eq!(
-            main_ci_token(Vec::new()).unwrap(),
+            main_ci_token_from_runs(&runs),
+            serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"})
+        );
+    }
+
+    #[test]
+    fn main_ci_reads_pending_on_no_runs() {
+        assert_eq!(
+            main_ci_token_from_runs(&[]),
             Value::String("pending".into())
         );
+    }
+
+    /// The rendered line names the workflow and sha; the string tokens pass
+    /// through untouched.
+    #[test]
+    fn main_ci_render_names_the_failed_workflow_and_sha() {
+        let red = serde_json::json!({"verdict": "red", "workflow": "cli-ci", "sha": "a1"});
+        assert_eq!(main_ci_render(Some(&red)), "red (cli-ci at a1)".to_string());
+        assert_eq!(
+            main_ci_render(Some(&Value::String("green".into()))),
+            "green".to_string()
+        );
+        assert_eq!(main_ci_render(None), "-".to_string());
     }
 
     fn board_payload() -> Value {
@@ -4366,7 +4483,11 @@ mod tests {
             "line: {}",
             out[0]
         );
-        assert!(out[0].contains("merges proceed"), "line: {}", out[0]);
+        assert!(
+            out[0].contains("merges and loops proceed"),
+            "line: {}",
+            out[0]
+        );
         assert!(
             out.iter()
                 .all(|l| !l.contains("merges and dispatch are held")),

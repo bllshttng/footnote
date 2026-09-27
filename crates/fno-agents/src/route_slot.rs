@@ -2843,7 +2843,7 @@ fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Va
 /// the CWD's project root, so the fingerprint and policy must be read from
 /// the AUDITED project, not from whatever checkout invoked the audit.
 fn inventory_command(project: &str) -> std::process::Command {
-    let mut cmd = std::process::Command::new("fno");
+    let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
     cmd.args(["config", "route", "inventory", "--json"]);
     if !project.trim().is_empty() {
         cmd.current_dir(project);

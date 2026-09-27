@@ -2627,6 +2627,41 @@ event_types:
         seq:
           type: integer
 
+  - name: session_report_stored
+    description: "A harness hook's raw SessionStart report was stamped onto the matching registry row (id additive, transcript path and start source recorded)."
+    sources: [daemon]
+    data:
+      required: [harness, session_id, related_filled]
+      properties:
+        name:
+          type: [string, "null"]
+        harness:
+          type: string
+        session_id:
+          type: string
+        related_filled:
+          type: boolean
+        source:
+          type: [string, "null"]
+
+  - name: session_report_dropped
+    description: "A SessionStart report was dropped without storing it (unknown session, or a third distinct id hit the row's cap)."
+    sources: [daemon]
+    data:
+      required: [harness, session_id, reason]
+      properties:
+        harness:
+          type: string
+        session_id:
+          type: string
+        reason:
+          type: string
+          enum: [unknown_session, id_cap]
+        recorded:
+          type: array
+          items:
+            type: string
+
   - name: codex_thread_inside_leg
     description: "Driver-sourced thread-row status : the codex thread actor's turn phases landed on the row's inside_leg through the shared seq gate; one event per accepted write."
     sources: [daemon]
@@ -3965,6 +4000,36 @@ event_types:
         decision_id:
           type: string
           description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
+    consumers: [operator, fno-agents needs]
+
+  - name: attention_delivery
+    retention: durable
+    description: "One delivery outcome for an answered attention item: the daemon arm's reply ladder records which rung delivered the answer (the clear's mail leg, a resume of an idle asker, or a wrapped mail to the crown over the asker's node) and how it ended. One row per item's ladder, written by the attention arm beside the answer row it delivers. The panel shows the rung on the answered row for 15 minutes."
+    sources: [daemon, test]
+    data:
+      required: [item_id, rung, outcome]
+      properties:
+        item_id:
+          type: string
+          description: "The answered item this ladder carried."
+        rung:
+          type: string
+          description: "The rung that ended the ladder: `mail` (the clear's mail leg landed), `resume` (a resume confirmed by content in the asker's transcript), `crown` (a wrapped mail to the crown over the asker's node), or `none` (undelivered, the evidence names why)."
+        outcome:
+          type: string
+          description: "landed | confirmed | sent | failed."
+        evidence:
+          type: string
+          description: "Optional. The posture line, the resume reason, or the no-crown reason, cut to a one-line read."
+        session_id:
+          type: string
+          description: "Optional. The asker session the ladder resumed or mailed."
+        holder:
+          type: string
+          description: "Optional. The crown holder the escalation mailed."
+        at:
+          type: string
+          description: "Optional. When the ladder ended."
     consumers: [operator, fno-agents needs]
 
   - name: user_ask_answered

@@ -677,7 +677,7 @@ fn parse_truth_payload(value: &serde_json::Value) -> Option<TruthProbe> {
 /// the whole answer. A handle the batch could not resolve is present with
 /// `state: "unknown"` and its own `reason`.
 fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
-    let mut command = std::process::Command::new("fno");
+    let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
         .args(["agents", "truth", "--handles", &handles.join(","), "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");

@@ -52,6 +52,11 @@
           },
           {
             "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/bin-install-guard.sh",
+            "statusMessage": "checking for a copy onto the deployed fno-agents"
+          },
+          {
+            "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/bg-process-guard.py",
             "statusMessage": "checking for unbounded background processes"
           },

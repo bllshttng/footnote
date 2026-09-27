@@ -208,6 +208,58 @@ def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
 
 
 @requires_rust
+def test_advance_row_mirrors_into_the_tick_store(iso, tmp_path, monkeypatch):
+    """The decision row's journal is writer-relative and dies with a pruned
+    tree, while the tick's store survives every run - 14 rows vanished in 7d
+    while all 425 sibling ticks landed. The row mirrors into the tick's
+    store, so one store always answers why an arm skipped."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    tick_store = tmp_path / "tick-store" / "events.jsonl"
+    tick_store.parent.mkdir()
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tick_store))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    row_store_types = [event["type"] for event in event_rows(iso)]
+    assert row_store_types.count("advance_skipped") == 1
+    tick_store_types = [event["type"] for event in event_rows(tick_store)]
+    assert tick_store_types == ["advance_skipped", "control_plane_tick"]
+    assert tick_store_types.count("advance_skipped") == 1
+
+
+@requires_rust
+def test_mirror_survives_a_dead_primary_journal(iso, tmp_path, monkeypatch):
+    """The mirror is guarded separately: a failed write to the row's own
+    journal must not cost the durable copy too - that primary-fails case is
+    the very loss class the mirror exists to close."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    tick_store = tmp_path / "tick-store" / "events.jsonl"
+    tick_store.parent.mkdir()
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tick_store))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    from fno.events import append_event as real_impl
+
+    calls = {"n": 0}
+
+    def flaky_append(event, events_path, **kwargs):
+        if calls["n"] == 0:
+            calls["n"] += 1
+            raise RuntimeError("primary journal unavailable")
+        return real_impl(event, events_path, **kwargs)
+
+    monkeypatch.setattr("fno.events.append_event", flaky_append)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    tick_store_types = [event["type"] for event in event_rows(tick_store)]
+    assert tick_store_types.count("advance_skipped") == 1
+
+
+@requires_rust
 def test_skip_tick_carries_detail(iso, monkeypatch):
     """A skip whose reason carries a detail lands it in the tick row,
     truncated the way failed() truncates - a claim-error tick is diagnosable."""
@@ -3680,7 +3732,7 @@ def test_filed_specimen_names_remain_byte_for_byte():
 # ---------------------------------------------------------------------------
 
 
-def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
+def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch, tmp_path):
     """A quota cutover names its destination RECORD on argv.
 
     The credential never touches this wrapper's environment. A non-claude
@@ -3699,7 +3751,8 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setenv("HOME", "/real/home")
+    fake_home = tmp_path / "real-home"
+    monkeypatch.setenv("HOME", str(fake_home))
     adv._spawn_worker(
         "ab-2222aaaa",
         "/w",
@@ -3711,7 +3764,7 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
     cmd = captured["cmd"]
     assert cmd[cmd.index("--dispatch-account") + 1] == "zai-cutover-1"
     # The positive marker: the wrapper's HOME is the REAL one, not the account's.
-    assert captured["env"]["HOME"] == "/real/home"
+    assert captured["env"]["HOME"] == str(fake_home)
 
 
 def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):

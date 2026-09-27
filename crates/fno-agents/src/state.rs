@@ -826,6 +826,19 @@ pub struct RegistryEntry {
     /// `AgentEntry.related_session_id`; same X3 passthrough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_session_id: Option<String>,
+    /// The transcript file the harness itself reported at SessionStart
+    /// (v37), stamped by the session-report ingest. None when no hook
+    /// reported: absence means unknown, never missing. Mirrors Python's
+    /// `AgentEntry.transcript_path`; same X3 passthrough duty as every
+    /// daemon-stamped field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    /// WHY this session started (v37): the harness's own SessionStart
+    /// flavor - claude: startup|resume|clear|compact. None when no hook
+    /// reported. Mirrors Python's `AgentEntry.start_source`; same X3
+    /// passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_source: Option<String>,
     /// The backlog node this row WORKS (v21), mirroring Python's
     /// `AgentEntry.node`: stamped once at birth by the Python spawn seams from
     /// the spawn's resolved provenance and by the client-side ask lanes from

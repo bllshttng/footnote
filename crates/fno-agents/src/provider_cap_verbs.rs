@@ -299,7 +299,7 @@ pub(crate) fn run_fno_output(
 ) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let fno = crate::scrape::fno_bin();
     let mut cmd = Command::new(&fno);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -353,8 +353,7 @@ fn real_deps() -> crate::provider_cap::LeaveDeps {
         }),
         spawn: Box::new(|member, flags, handoff_path| {
             use std::process::{Command, Stdio};
-            let fno =
-                std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+            let fno = crate::scrape::fno_bin();
             let cwd = member
                 .cwd
                 .clone()

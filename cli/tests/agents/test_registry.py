@@ -895,7 +895,7 @@ def test_us2_schema_version_is_three() -> None:
     # attempt id and validated birth record).
     # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2388,7 +2388,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2454,7 +2454,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",
@@ -3009,3 +3009,42 @@ def test_v32_lineage_kind_round_trip(tmp_path: Path, monkeypatch) -> None:
     write_registry(loaded, path=registry_path)
     reloaded = load_registry(path=registry_path)
     assert reloaded[0].lineage_kind == "peer"
+
+
+# ---------------------------------------------------------------------------
+# v37: session-report stamps (transcript_path / start_source) round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_session_report_fields_round_trip(monkeypatch, tmp_path) -> None:
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="w1",
+                harness="claude",
+                cwd="/repo",
+                log_path="",
+                harness_session_id="uuid-1",
+                transcript_path="/t/w1.jsonl",
+                start_source="resume",
+            )
+        ],
+        path=registry_path,
+    )
+    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert raw["agents"][0]["transcript_path"] == "/t/w1.jsonl"
+    assert raw["agents"][0]["start_source"] == "resume"
+    row = load_registry(path=registry_path)[0]
+    assert row.transcript_path == "/t/w1.jsonl"
+    assert row.start_source == "resume"
+
+    write_registry([row], path=registry_path)
+    reloaded = load_registry(path=registry_path)[0]
+    assert reloaded.transcript_path == "/t/w1.jsonl"
+    assert reloaded.start_source == "resume"

@@ -118,6 +118,9 @@ edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_pat
 # $1 file, $2 transcript_path, $3 agent_id - the subagent-borne shape carries
 # the parent session id plus the harness's per-call subagent marker.
 edit_payload_ag() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","agent_id":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$3" "$TMP/repo" "$1"; }
+# $1 file, $2 cwd - the foreign-shell shape: the session's shell sits
+# outside the repo, so the payload cwd names no checkout.
+edit_payload_at() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$1"; }
 
 # Escalations resolve through the vault pin (project name = the git repo's
 # basename). Seed the repo as git so resolve_project_name answers "repo".
@@ -199,6 +202,37 @@ OUT="$(run_guard "$(edit_payload "$TMP/repo/docs/guide.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == *'"block"'* ]] \
   && pass "AC2b: docs edit denies again with the root cleared" \
   || fail "AC2b: docs deny after clear rc=$RC out=$OUT"
+
+# ── AC2c-EDGE: the payload cwd is not the key. A crowned court whose shell
+# sits outside the repo still denies a write into the crown row's repo:
+# the deny region comes from the row's cwd (the writer's key), never from the
+# payload cwd. Absolute targets are judged against the crown's repo.
+registry_fixture "$CROWNED"
+manifest_fixture court
+mkdir -p "$TMP/outside"
+OUT="$(run_guard "$(edit_payload_at "$SRC_FILE" "$TMP/outside")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "foreign shell: Edit inside the crown's repo still denied" \
+  || fail "foreign shell deny rc=$RC out=${OUT:0:300}"
+
+OUT="$(run_guard "$(edit_payload_at "$TMP/outside/notes.md" "$TMP/outside")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "foreign shell: Edit outside the crown's repo allows" \
+  || fail "foreign shell allow rc=$RC out=${OUT:0:300}"
+
+# The manifest half: with the space NOT pinned, the court manifest lives in
+# the repo row cwd's own space (the writer arms it there). Discover that space
+# through the binary's own resolver, never a hand-computed slug.
+REPO_EVENTS="$( cd "$TMP/repo" && unset FNO_EVENTS_PATH && "$BIN" state path events 2>/dev/null )"
+REPO_SPACE="${REPO_EVENTS%/*}"
+mkdir -p "$REPO_SPACE/kings"
+printf -- '---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: court\nharness_session_id: %s\n---\n' "$SID" \
+  > "$REPO_SPACE/kings/fno.md"
+OUT="$( unset FNO_EVENTS_PATH; run_guard "$(edit_payload_at "$SRC_FILE" "$TMP/outside")" )"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "foreign shell: unpinned court manifest read through the crown row's space" \
+  || fail "foreign shell unpinned manifest rc=$RC out=${OUT:0:300} err=$(cat "$TMP/stderr.txt")"
+rm -f "$REPO_SPACE/kings/fno.md"
 
 # ── AC3-EDGE: pass shape, uncrowned row, no row, unreadable registry ─────────
 registry_fixture "$CROWNED"

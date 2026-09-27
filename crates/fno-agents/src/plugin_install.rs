@@ -1817,13 +1817,71 @@ fn run_agy_hooks(
 /// `untrusted` (naming the path with the fix command), `absent`, or
 /// `unknown` (grok missing, inspect failed, or unparseable output).
 fn grok_status_receipt() -> String {
-    match grok_reachability() {
+    grok_receipt_for(grok_reachability())
+}
+
+/// The receipt line for an already-classified reading, so the status arm and
+/// the loop probe classify once and print without a second `grok inspect` run.
+fn grok_receipt_for(reachability: GrokReachability) -> String {
+    match reachability {
         GrokReachability::Reachable { path } => format!("reachable: {path}"),
         GrokReachability::Untrusted { path } => format!(
             "untrusted: {path} (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)"
         ),
         GrokReachability::Absent => "absent: no enabled fno plugin with hooks".to_string(),
         GrokReachability::Unknown { reason } => format!("unknown: {reason}"),
+    }
+}
+
+/// Whether footnote's loop artifacts reach `harness` on THIS machine: the
+/// machine fact behind the capability row. `None` names a harness with no
+/// fno-installed loop gate (a native row whose loop closes through the
+/// harness's own hook surface); `Some(Ok)` admits; `Some(Err(detail))`
+/// carries the receipt line the dispatch refusal embeds.
+pub(crate) fn loop_install_probe(
+    harness: &str,
+    extension_src: Option<&Path>,
+) -> Option<Result<(), String>> {
+    match harness {
+        "opencode" => {
+            let status = crate::opencode_install::installed_status()["status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            Some(if status == "installed" {
+                Ok(())
+            } else {
+                Err(format!("opencode install status reads {status}"))
+            })
+        }
+        "pi" => {
+            let dest = crate::pi::pi_agent_dir()
+                .join("extensions")
+                .join("footnote.ts");
+            let mut installed = dest.is_file();
+            if installed {
+                if let Some(src) = extension_src {
+                    installed = files_byte_equal(Path::new(src), &dest).unwrap_or(false);
+                }
+            }
+            Some(if installed {
+                Ok(())
+            } else {
+                Err(format!(
+                    "pi extension {} is absent or stale",
+                    dest.display()
+                ))
+            })
+        }
+        "grok" => {
+            let receipt = grok_receipt_for(grok_reachability());
+            Some(if receipt.starts_with("reachable") {
+                Ok(())
+            } else {
+                Err(receipt)
+            })
+        }
+        _ => None,
     }
 }
 

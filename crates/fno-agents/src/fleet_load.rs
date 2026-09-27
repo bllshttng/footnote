@@ -168,7 +168,7 @@ fn read_events(home: &AgentsHome) -> EventPass {
     let mut pass = EventPass::default();
     let mut seen: HashSet<String> = HashSet::new();
     for journal in [home.events_jsonl(), crate::daemon::global_events_path(home)] {
-        let text = crate::events_store::journal_text(&journal, EVENT_TYPES);
+        let text = crate::event_store::journal_text(&journal, EVENT_TYPES);
         for line in text.lines() {
             if !seen.insert(line.to_string()) {
                 continue;

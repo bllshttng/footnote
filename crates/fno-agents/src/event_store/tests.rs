@@ -809,5 +809,5 @@ fn journal_text_checked_window_does_not_readd_filtered_live_rows() {
     );
 }
 
-mod drift;
+mod coverage;
 mod observation;

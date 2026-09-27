@@ -285,9 +285,10 @@ def test_auto_merge_grant_rust_leg_matches_the_inventory() -> None:
     guard pinned that deletion. x-7aaf regrew it with a real caller: the
     Rust durable-grant verdict reads the live grant leaf. The guard now pins
     the inventory instead - `agents_config.rs` is the reader,
-    `merge_grant.rs` its one caller, and `pr_status_facts.rs` reads the
-    grant's dispatch list to key the status cache - so a leg with no caller
-    of its own still cannot regrow silently.
+    `merge_grant.rs` its one caller, `pr_status_facts.rs` reads the
+    grant's dispatch list to key the status cache, and `seams.rs` reads the
+    same dispatches for the merge-authority receipt axes - so a leg with no
+    caller of its own still cannot regrow silently.
     """
     root = _repo_root()
     rust_hits = [
@@ -299,7 +300,7 @@ def test_auto_merge_grant_rust_leg_matches_the_inventory() -> None:
         if "target" not in p.relative_to(root).parts
         and "auto_merge_grant" in p.read_text(encoding="utf-8")
     ]
-    expected = {"agents_config.rs", "merge_grant.rs", "pr_status_facts.rs"}
+    expected = {"agents_config.rs", "merge_grant.rs", "pr_status_facts.rs", "seams.rs"}
     found = {p.name for p in rust_hits}
     assert found == expected, (
         f"Rust auto_merge_grant legs drifted from the inventory: expected "

@@ -2802,16 +2802,6 @@ def cmd_spawn(
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
 
-    pane_view = (
-        defaulted and substrate == "bg" and spawn_succeeded
-        and result.kind == "created" and os.environ.get("FNO_PANE")
-    )
-    if pane_view:
-        # Post-receipt, best effort: a placement failure never recolors the verdict.
-        from fno.agents.spawn_defaults import place_default_view
-
-        place_default_view(result.name)
-
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:
 #: Click already spends 2 on usage errors including "no such command", so a
@@ -3628,11 +3618,15 @@ def cmd_register(
     # lets the DND column on `fno agents list` say "held" for this row instead
     # of leaving the operator to guess from a blank cell.
     if delivery_policy is not None:
+        from fno.harness_identity import session_identity_key
         from fno.mail import hold as _hold
 
+        # Clock key is the collision-free identity key; the name-keyed clear removes a pre-migration clock.
+        clock_key = session_identity_key(session_id)
         if delivery_policy == "bus-only":
-            _hold.arm_permanent(entry.name)
+            _hold.arm_permanent(clock_key)
         else:
+            _hold.clear(clock_key)
             _hold.clear(entry.name)
 
     events.emit(
@@ -4929,8 +4923,7 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
-    No --hold holds all three scopes; status prints each scope as holds or admits.
+    stop --reason T [--by X] | clear --reason T [--by X] | status [--json] | check [--scope S].
     """
     import subprocess
 

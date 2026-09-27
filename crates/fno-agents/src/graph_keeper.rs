@@ -545,6 +545,11 @@ fn run_render_pass() -> Result<(), (i32, String)> {
     let bin = match std::env::var_os("FNO_BIN") {
         Some(v) => PathBuf::from(v),
         None => {
+            // A lib unit test declared no fno: refuse before the PATH walk,
+            // the same declared-only rule scrape::fno_bin applies.
+            if cfg!(test) {
+                return Err((-1, "no fno declared under a unit test".into()));
+            }
             let path = match std::env::var_os("PATH") {
                 Some(p) => p,
                 None => return Err((-1, "PATH is unset; the view pass cannot run".into())),
@@ -998,7 +1003,7 @@ fn cached_entries_gated(
 /// The owned-graph entries without the digest, for readers that do not run a
 /// transaction: the gate is taken here so every caller shares the same
 /// window discipline.
-fn cached_entries(
+pub(crate) fn cached_entries(
     state: &StoreState,
     keep_malformed: bool,
     strict: bool,
@@ -1238,6 +1243,9 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // external-tracker backend's joined candidates); without, it reads
         // the graph this keeper owns.
         "ready" => handle_ready(state, &params),
+        // The plan-doc writer (codec + projection + stamp), served so the
+        // Python callers are clients and no second writer leg exists.
+        "plan_docs" => crate::plan_doc::keeper::handle_plan_docs(state, &params),
         // The read-time readiness overlay (statuses.compute_readiness), for
         // the client's pre-render pass: the write path's recompute does not
         // derive `blocked` -- it is a read overlay -- so a mutation that

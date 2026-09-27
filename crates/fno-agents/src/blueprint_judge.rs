@@ -164,7 +164,10 @@ fn load_lenses(dir: Option<&Path>) -> Lenses {
 /// lenses or any fault.
 fn gather_context(dimension: &str, plan_text: &str, cwd: &Path) -> String {
     if dimension == "surface_fit" {
-        return match Command::new("fno").args(["help", "--all"]).output() {
+        return match Command::new(crate::scrape::fno_bin())
+            .args(["help", "--all"])
+            .output()
+        {
             Ok(o) if o.status.success() => {
                 truncate_chars(&String::from_utf8_lossy(&o.stdout), 4000)
             }
@@ -280,7 +283,7 @@ fn default_spawn(
     timeout_secs: u64,
     model: &str,
 ) -> Result<(i32, String, String), String> {
-    let out = Command::new("fno")
+    let out = Command::new(crate::scrape::fno_bin())
         .args(reader_argv(name, prompt, cwd, timeout_secs, model))
         .output()
         .map_err(|e| e.to_string())?;

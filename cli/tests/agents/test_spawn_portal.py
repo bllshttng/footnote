@@ -139,50 +139,20 @@ def _stub_default_spawn_env(monkeypatch, tmp_path):
     monkeypatch.setattr("fno.agents.harness_map.thread_seatable", lambda h: True)
 
 
-def test_bare_default_thread_spawn_opens_portal_zero_inside_a_mux(
+def test_bare_default_thread_spawn_places_nothing_inside_a_mux(
     tmp_path, monkeypatch
 ) -> None:
-    # The node's own acceptance shape: a BARE spawn inside a mux seats a
-    # thread AND opens its default view. The view rides the same two-call
-    # seam a user names by hand; the parser still declares no --portal.
+    # The TV law: a DEFAULT never creates. A bare spawn inside a mux seats
+    # a thread and opens no portal, no pane and no tab; an explicit
+    # placement flag is the only thing that does.
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    from fno.agents import spawn_defaults
 
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_PANE", "%7")
     _stub_default_spawn_env(monkeypatch, tmp_path)
     _stub_bg_dispatch(monkeypatch)
-
-    placed: list[tuple[str, int]] = []
-
-    def fake_place(worker, portal=0):
-        placed.append((worker, portal))
-        return True
-
-    monkeypatch.setattr(spawn_defaults, "place_default_view", fake_place)
-
-    res = CliRunner().invoke(agents_cli.agents_app, ["spawn", "--name", "w1", "hi"])
-    assert res.exit_code == 0, res.output
-    assert placed == [("w1", 0)], placed
-
-
-def test_bare_default_thread_spawn_survives_a_failed_view_placement(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    # A placement failure is a partial result: the worker keeps its live
-    # receipt and exit 0; the stderr note names the manual reach.
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-    from fno.agents import spawn_defaults
-
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    monkeypatch.setenv("FNO_PANE", "%7")
-    _stub_default_spawn_env(monkeypatch, tmp_path)
-    _stub_bg_dispatch(monkeypatch)
-    monkeypatch.setattr(spawn_defaults, "place_default_view", lambda worker: False)
 
     res = CliRunner().invoke(agents_cli.agents_app, ["spawn", "--name", "w1", "hi"])
     assert res.exit_code == 0, res.output
@@ -190,69 +160,19 @@ def test_bare_default_thread_spawn_survives_a_failed_view_placement(
 
 
 def test_explicit_thread_substrate_names_its_own_view(tmp_path, monkeypatch) -> None:
-    # An explicit --substrate thread is a named-lane spawn: the built-in
-    # default's auto view does not fire (the caller names a portal, or runs
-    # paneless and reaches for `fno mux thread` themselves).
+    # An explicit --substrate thread is a named-lane spawn: the caller names
+    # a portal, or runs paneless and reaches for `fno mux thread` themselves.
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    from fno.agents import spawn_defaults
 
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_PANE", "%7")
     _stub_default_spawn_env(monkeypatch, tmp_path)
     _stub_bg_dispatch(monkeypatch)
 
-    placed: list[str] = []
-
-    def fake_place(worker):
-        placed.append(worker)
-        return True
-
-    monkeypatch.setattr(spawn_defaults, "place_default_view", fake_place)
-
     res = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "--name", "w1", "--substrate", "thread", "hi"],
     )
     assert res.exit_code == 0, res.output
-    assert placed == []
-
-
-def test_place_default_view_runs_the_documented_two_call_seam(monkeypatch) -> None:
-    # The helper's argv IS the documented reach: fno mux thread <name> --portal 0.
-    import subprocess as subprocess_mod
-
-    from fno.agents.spawn_defaults import place_default_view
-
-    seen: list[list[str]] = []
-
-    class Ok:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def fake_run(argv, **kw):
-        seen.append(list(argv))
-        return Ok()
-
-    monkeypatch.setattr(subprocess_mod, "run", fake_run)
-    assert place_default_view("w1") is True
-    assert seen == [["fno", "mux", "thread", "w1", "--portal", "0"]]
-
-
-def test_place_default_view_failure_names_the_reach(
-    monkeypatch, capsys
-) -> None:
-    import subprocess as subprocess_mod
-
-    from fno.agents.spawn_defaults import place_default_view
-
-    class Boom:
-        returncode = 1
-        stdout = ""
-        stderr = "no live mux server\n"
-
-    monkeypatch.setattr(subprocess_mod, "run", lambda argv, **kw: Boom())
-    assert place_default_view("w1") is False
-    assert "fno mux thread w1 --portal 0" in capsys.readouterr().err

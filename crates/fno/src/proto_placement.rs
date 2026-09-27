@@ -146,6 +146,22 @@ pub struct PanePlacement {
     /// Additive and `#[serde(default)]`, so the floor does not move.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fit: bool,
+    /// (v93) A TRANSIENT machine view: open the row's viewer in a pane
+    /// that is never a portal - no `portals` entry, no persisted slot, and
+    /// the restore prune reaps the pane instead of tabbing it. The screen
+    /// a side effect (`fno mux command`) needs when a row hosts no pane of
+    /// its own. Additive and `#[serde(default)]`, so the floor does not
+    /// move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub view: bool,
+    /// (v93) The split's anchor by NAME, not pane id: `portal N` (the
+    /// portal index's screen), a worker's registry name (the pane the row
+    /// hosts or the portal showing it), or `current` (the calling pane,
+    /// resolved by the caller when one exists). Resolved to `at` before
+    /// any geometry runs; `at` wins when both name a pane. Additive and
+    /// `#[serde(default)]`, so the floor does not move.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 impl PanePlacement {

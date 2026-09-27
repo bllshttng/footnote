@@ -104,7 +104,7 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
 
     // The PR's dispatch-hold word, through the same probe the merge path
     // reads: exit 0 clear, 3 held, anything else unreadable.
-    let hold_word = Command::new("fno")
+    let hold_word = Command::new(crate::scrape::fno_bin())
         .args(["do", "pr", "hold-check", &pr.to_string()])
         .current_dir(&cwd)
         .output()
@@ -130,7 +130,7 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
     // Review-evidence lines at this head (attestations, coverage rows,
     // findings): a fresh verdict on an unchanged head must rekey.
     let journal = crate::paths::events_path(&cwd);
-    let text = crate::events_store::review_text(&journal);
+    let text = crate::event_store::review_text(&journal);
     if !head.is_empty() {
         let mut count = 0usize;
         let mut last = String::new();

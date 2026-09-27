@@ -35,7 +35,7 @@ def _node(node_id: str, **overrides) -> dict:
     status = overrides.get("status", "ready")
     base = {
         "id": node_id,
-        "title": f"node {node_id}",
+        "title": "sample node",
         "project": "fno",
         "type": "feature",
         "parent": None,

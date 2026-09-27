@@ -104,7 +104,7 @@ fn token_helper_output(
     scope_cwd: Option<&Path>,
 ) -> std::io::Result<std::process::Output> {
     let registry_path = helper_registry_path(registry_path)?;
-    let mut command = std::process::Command::new("fno");
+    let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
         .args(token_helper_args(token, &registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
@@ -436,7 +436,11 @@ mod tests {
         let caller_cwd = std::env::current_dir().unwrap();
         let relative_registry = Path::new("relative/registry.json");
         let expected_registry = caller_cwd.join(relative_registry);
+        let prev_bin = std::env::var_os("FNO_BIN");
         std::env::set_var("PATH", path_with(dir.path()));
+        // The helper execs through scrape::fno_bin, which under cfg!(test)
+        // answers only a declared FNO_BIN: pin the same stub PATH pins.
+        std::env::set_var("FNO_BIN", dir.path().join("fno"));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =
@@ -444,6 +448,10 @@ mod tests {
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
         }
         std::env::remove_var("FNO_TEST_HELPER_CWD");
         std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
@@ -479,13 +487,21 @@ mod tests {
 
         let old_path = std::env::var_os("PATH");
         let registry = dir.path().canonicalize().unwrap().join("registry.json");
+        let prev_bin = std::env::var_os("FNO_BIN");
         std::env::set_var("PATH", path_with(dir.path()));
+        // The helper execs through scrape::fno_bin, which under cfg!(test)
+        // answers only a declared FNO_BIN: pin the same stub PATH pins.
+        std::env::set_var("FNO_BIN", dir.path().join("fno"));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output = token_helper_output("deadbeef", &registry, false, None).unwrap();
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
         }
         std::env::remove_var("FNO_TEST_HELPER_CWD");
         std::env::remove_var("FNO_TEST_HELPER_REGISTRY");

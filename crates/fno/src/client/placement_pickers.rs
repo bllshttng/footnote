@@ -425,6 +425,8 @@ pub(crate) async fn attach_place_keys(
                 id: picker.id,
                 placement: PanePlacement {
                     portal_new: false,
+                    view: false,
+                    from: None,
                     target: match dst.filter(|_| !here) {
                         Some(sid) => PaneTarget::SquadId(sid),
                         None => PaneTarget::CurrentRoute,

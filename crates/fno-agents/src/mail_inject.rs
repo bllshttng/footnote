@@ -374,21 +374,20 @@ pub fn outcome_json(delivered: bool, reason: &str) -> String {
     serde_json::json!({ "delivered": delivered, "reason": reason }).to_string()
 }
 
-/// The portal route for an idle claude thread row. A not-confirmed
-/// raw inject there cannot prove landing: the content confirm greps the
-/// transcript for the payload's first line, a dialog command writes no turn,
-/// and the paste measurably fails to land on an idle thread at all. The
-/// outcome names the route that reaches an idle thread instead.
+/// The route for an idle claude thread row. A not-confirmed raw inject
+/// there cannot prove landing: the content confirm greps the transcript
+/// for the payload's first line, a dialog command writes no turn, and the
+/// paste measurably fails to land on an idle thread at all. The outcome
+/// names the route that reaches an idle thread instead.
 fn thread_route_hint(substrate: Option<&str>, name: &str) -> Option<String> {
     if substrate != Some("thread") {
         return None;
     }
     Some(format!(
         "idle thread row: this control.sock paste cannot prove landing. The measured route:\n  \
-         fno mux thread {name} --portal new          # opens the portal pane\n  \
-         fno mux pane ls                                   # read the portal pane's <session>:<pane-id>\n  \
-         fno mux pane send <session>:<pane-id> --text <payload> --submit --raw\n  \
-         fno mux pane send <session>:<pane-id> --raw --submit   # bare Enter (Continue a dialog)"
+         fno mux command {name} --text <payload> --proof screen \\\n  \
+           --expect '<regex the finished turn matches>' --empty-composer '<idle regex>'\n  \
+         (a dialog answer rides a bare Enter after: fno mux pane send <session>:<pane-id> --raw --submit)"
     ))
 }
 
@@ -613,7 +612,11 @@ fn escaped_marker(marker: &str) -> String {
 /// nothing, and a busy recipient's unrelated growth never carries our marker -- so
 /// this rejects the growth-only false positive (node x-aaaa). `since_byte` is a
 /// prior full-file length, hence a clean line boundary.
-fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Result<bool> {
+pub(crate) fn confirm_content_after(
+    path: &Path,
+    marker: &str,
+    since_byte: u64,
+) -> io::Result<bool> {
     let escaped = escaped_marker(marker);
     if escaped.is_empty() {
         return Ok(false);
@@ -3099,8 +3102,11 @@ mod tests {
     #[test]
     fn thread_route_hint_names_the_portal_route() {
         let h = thread_route_hint(Some("thread"), "king-fno-g6").expect("thread row hints");
-        assert!(h.contains("fno mux thread king-fno-g6 --portal new"));
-        assert!(h.contains("--submit --raw"));
+        assert!(h.contains("fno mux command king-fno-g6 --text <payload> --proof screen"));
+        assert!(h.contains("--expect"));
+        assert!(h.contains("--empty-composer"));
+        assert!(!h.contains("--portal new"));
+        assert!(h.contains("--raw --submit"));
         assert!(h.contains("bare Enter"));
         assert!(
             thread_route_hint(Some("pane"), "w").is_none(),
