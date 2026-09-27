@@ -1854,7 +1854,8 @@ def test_a_working_holder_seeds_a_first_observation_and_pays_no_read(tmp_path):
 def test_the_pass_stops_under_its_floor_and_names_what_it_evaluated(tmp_path):
     # AC2: under 15s left, stop BEFORE the next truth read, so the alarm
     # never cuts a pass mid-crown and discards the crowns it already woke.
-    budget = [100.0, 100.0, 14.0]
+    # The bounded court read consumes the first clock reading.
+    budget = [100.0, 100.0, 100.0, 14.0]
 
     def seconds():
         return budget.pop(0) if budget else 0.0
@@ -1877,7 +1878,8 @@ def test_a_stopped_pass_rotates_its_starting_crown_per_debounce_window(tmp_path)
     # debounce window, so a fleet that always overruns still wakes everyone
     # in turn.
     def seconds():
-        budget = [100.0, 14.0]
+        # The bounded court read consumes the first clock reading.
+        budget = [100.0, 100.0, 14.0]
         return lambda: budget.pop(0) if budget else 0.0
 
     _rec1, s1, _p1 = _run_crowns(
@@ -2212,7 +2214,6 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
 ):
     # The stop note used to clobber the graph-timeout note, so the tick row
     # read as an unexplained budget stop. The stop now appends.
-    import itertools
     import threading
 
     from fno.pr_watch import _king_wake as wake_mod
@@ -2234,7 +2235,10 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
         blocked.wait(timeout=60)
         return []
 
-    seconds = itertools.cycle([44.0, 14.0])
+    # Clock cadence: the bounded court read, the quiet crown's pre-graph
+    # check, then the loud crown's pre-truth check stops the pass.
+    seconds_values = iter([44.0, 44.0, 14.0])
+    seconds = lambda: next(seconds_values, 14.0)  # noqa: E731
     try:
         summary = run_king_wake(
             _settings(),
@@ -2246,7 +2250,7 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
             unread_fn=lambda address: [object()] if address in loud_addresses else [],
             entries_fn=slow_graph,
             answered_fn=lambda: [],
-            seconds_left_fn=lambda: next(seconds),
+            seconds_left_fn=seconds,
             dispatch_fn=rec.dispatch,
             ask_fn=lambda *a: None,
         )
@@ -2256,3 +2260,49 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
     assert summary["budget_spent"] is True
     assert "graph read timed out" in summary["note"]
     assert "budget spent after 1 of 2 crowns" in summary["note"]
+
+
+def test_a_blocked_court_read_ends_the_pass_with_its_note(tmp_path, monkeypatch):
+    # The court read used to run unbounded: under machine thrash it ate the
+    # phase slice and the alarm cut the tick mid-phase. The read now runs
+    # under the slice's discipline and the pass ends with a note.
+    import threading
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        _king_manifest(root),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    blocked = threading.Event()
+    rec = _Recorder()
+
+    def slow_court(_rows):
+        blocked.wait(timeout=60)
+        return {"crowns": None, "conflicts": []}
+
+    try:
+        summary = run_king_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            court_fn=slow_court,
+            rows_fn=lambda: [],
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [],
+            entries_fn=lambda: [],
+            answered_fn=lambda: [],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["crowns"] == 0
+    assert "court read did not complete" in summary["note"]
+    assert rec.dispatches == []

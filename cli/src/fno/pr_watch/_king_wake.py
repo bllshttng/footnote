@@ -517,6 +517,35 @@ def run_king_wake(
     if not getattr(cfg, "wake_enabled", False):
         return {"armed": False}
     now = now or datetime.now(timezone.utc)
+
+    _step = on_step or (lambda _s: None)
+
+    def _wait_cap(left):
+        cap = _KING_TRUTH_WAIT_S
+        return cap if left is None else min(cap, max(0.0, left - _KING_STEP_FLOOR_S))
+
+    def _bounded(fn, *args, wait_s: float):
+        # Returns (value, timed_out); the reader runs on past a timeout: a join would spend the bound.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(fn, *args)
+            return future.result(timeout=wait_s), False
+        except TimeoutError:  # the reads never raise it themselves
+            return None, True
+        finally:
+            pool.shutdown(wait=False)
+
+    def _setup_bounded(step, fn, *args):
+        # One setup read under the slice's discipline: floor check then wait
+        # bound, so a thrashing machine degrades the lane instead of eating
+        # the phase the alarm would otherwise cut mid-read.
+        left = seconds_left_fn() if seconds_left_fn is not None else None
+        if left is not None and left < _KING_STEP_FLOOR_S:
+            return None, True
+        if step:
+            _step(step)
+        return _bounded(fn, *args, wait_s=_wait_cap(left))
+
     if court_fn is None:
         from fno.agents.court import gather_court
 
@@ -531,7 +560,13 @@ def run_king_wake(
         from fno.bus.log import iter_messages
 
         # One bus read per pass, not one per address: a crown has up to nine.
-        unread_fn = partial(scan_unread, messages=list(iter_messages()))
+        scanned, bus_cut = _setup_bounded(
+            None, lambda: list(iter_messages())
+        )
+        if bus_cut or scanned is None:
+            unread_fn = lambda address: []  # noqa: E731 - degraded: no mail signal
+        else:
+            unread_fn = partial(scan_unread, messages=scanned)
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
@@ -555,23 +590,6 @@ def run_king_wake(
     debounce_s = _cfg_int("wake_debounce_seconds", 900)
     backstop_s = _cfg_int("wake_backstop_seconds", 1800)
 
-    _step = on_step or (lambda _s: None)
-
-    def _wait_cap(left):
-        cap = _KING_TRUTH_WAIT_S
-        return cap if left is None else min(cap, max(0.0, left - _KING_STEP_FLOOR_S))
-
-    def _bounded(fn, *args, wait_s: float):
-        # Returns (value, timed_out); the reader runs on past a timeout: a join would spend the bound.
-        pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(fn, *args)
-            return future.result(timeout=wait_s), False
-        except TimeoutError:  # the reads never raise it themselves
-            return None, True
-        finally:
-            pool.shutdown(wait=False)
-
     def _note(msg: str) -> None:
         prior = str(summary.get("note") or "")
         summary["note"] = f"{prior}; {msg}" if prior else msg
@@ -583,8 +601,18 @@ def run_king_wake(
         summary["budget_spent"] = True
         return summary
 
-    _step("court")
-    targets, note = _crowned(court_fn, rows_fn)
+    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
+    if court_cut or outcome is None:
+        return {
+            "armed": True,
+            "crowns": 0,
+            "woke": [],
+            "refused": [],
+            "truth_reads": 0,
+            "evaluated": 0,
+            "note": "court read did not complete in its slice bound; crowns wait for the next tick",
+        }
+    targets, note = outcome
     summary: dict[str, Any] = {
         "armed": True,
         "crowns": len(targets),
