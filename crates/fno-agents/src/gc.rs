@@ -263,7 +263,7 @@ pub enum KeepReason {
     /// stranded). The keep holds the row so the nudge ladder's Resume rung
     /// can run `fno agents resume` on it.
     DeadOpenWork { node: String },
-    /// A live or suspect work-claim names this session as its holder
+    /// A live or suspect work-claim names this session as its holder:
     /// the claim's holder process answered the pid probe, the strongest
     /// liveness fact the machine holds. The row is never reaped as
     /// unattended while it holds one.

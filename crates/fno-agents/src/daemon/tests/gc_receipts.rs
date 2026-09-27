@@ -4889,8 +4889,17 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
         .unwrap_or_else(|e| e.into_inner());
     let (dir, home) = staged_graph_home();
     // Force-pin: the sweep's claims read must see THIS test's root, not a
-    // root an earlier test's set-if-unset pin left behind.
+    // root an earlier test's set-if-unset pin left behind. The guard
+    // unsets the pin on scope exit, panic included, so an assert failure
+    // never leaks it into a concurrently running test.
+    struct ClaimsRootGuard;
+    impl Drop for ClaimsRootGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_CLAIMS_ROOT");
+        }
+    }
     std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
+    let _claims_root_guard = ClaimsRootGuard;
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let transcripts = tempfile::tempdir().unwrap();
     let quiet = quiet_transcript(transcripts.path(), "q.jsonl", 2 * 3600);
@@ -4963,7 +4972,6 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
         )],
         "{summary:?}"
     );
-    std::env::remove_var("FNO_CLAIMS_ROOT");
     std::fs::remove_dir_all(home.root()).ok();
 }
 

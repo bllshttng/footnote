@@ -1660,15 +1660,26 @@ pub(crate) fn run_with_release(
     }
     let graph = read_graph(home);
     let now = crate::daemon::now_epoch_secs();
-    // One claims read per sweep. A live or suspect record names its
-    // holder session; any row carrying that session never retires as
-    // unattended, because the claim's holder process answered the pid
-    // probe. Keyed by lowercase session id, joined through the record's
-    // `session_id` stamp (the holder string is a credential, never parsed
-    // for identity). An unreadable claims root reads as no facts - the
-    // transcript gates still stand - never as evidence of anything.
+    // One claims read per sweep, over the global root plus every distinct
+    // row cwd's local store. A live or suspect record names its holder
+    // session; any row carrying that session never retires as unattended,
+    // because the claim's holder process answered the pid probe. Keyed by
+    // lowercase session id, joined through the record's `session_id` stamp
+    // (the holder string is a credential, never parsed for identity). An
+    // unreadable claims root reads as no facts - the transcript gates
+    // still stand - never as evidence of anything.
+    let mut claims_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(global) = crate::claims_root::global_claims_dir() {
+        claims_dirs.push(global);
+    }
+    let mut row_cwds: Vec<&String> = registry.entries.iter().map(|e| &e.cwd).collect();
+    row_cwds.sort();
+    row_cwds.dedup();
+    for cwd in row_cwds {
+        claims_dirs.push(std::path::Path::new(cwd.as_str()).join(crate::claims::CLAIMS_DIRNAME));
+    }
     let claims_by_session: std::collections::HashMap<String, String> =
-        crate::claims::list(None, None, false)
+        crate::claims::list_in(&claims_dirs, None, false)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|rec| {

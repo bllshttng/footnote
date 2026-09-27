@@ -388,7 +388,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         ));
     }
     for (id, detail) in &summary.kept_live_claim {
-        out.push_str(&format!("  kept {id} (live claim held: {detail})\n"));
+        out.push_str(&format!(
+            "  kept {id} (live claim held: {detail}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, detail) in &summary.kept_probe_unread {
         out.push_str(&format!(
