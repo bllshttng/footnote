@@ -33,8 +33,12 @@ pub(super) fn quiet_transcript(
 
 /// The test age seam (x-54cf): the sweep reads ages through the injected
 /// batch seam, and the fixtures answer from the SAME staged transcript files
-/// the old stat read - the seam is what changed, not the fixture ages.
-pub(super) fn staged_ages(
+/// the old stat read - the seam is what changed, not the fixture ages. `now`
+/// is injected so a dry pass and its acting pass judge one clock and their
+/// ages agree byte for byte; wall-clock call sites pass
+/// `crate::daemon::now_epoch_secs()`.
+pub(super) fn staged_ages_at(
+    now: i64,
     transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
 ) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> + '_ {
     move |entries| {
@@ -51,13 +55,7 @@ pub(super) fn staged_ages(
                 });
                 (
                     crate::gc::row_handle(e),
-                    age.map(|newest| {
-                        (std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64)
-                            .saturating_sub(newest)
-                    }),
+                    age.map(|newest| now.saturating_sub(newest)),
                 )
             })
             .collect()
@@ -140,7 +138,7 @@ fn retire_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -168,7 +166,7 @@ fn staged_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -3522,7 +3520,7 @@ fn settle_then_run(
                 gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &[]))
             },
             transcripts,
-            &staged_ages(transcripts),
+            &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -3548,7 +3546,7 @@ fn settle_then_run(
             7,
             &gc_sweep::read_graph_entries,
             transcripts,
-            &staged_ages(transcripts),
+            &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -4440,7 +4438,7 @@ pub(super) fn evidence_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         stop,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -4623,7 +4621,7 @@ fn dry_run_promises_only_provable_rows() {
         7,
         &gc_sweep::read_graph_entries,
         &picks,
-        &staged_ages(&picks),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &picks),
         &move |_| {
             stops_seam.set(stops_seam.get() + 1);
             true
@@ -4952,10 +4950,13 @@ fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
             Some("s-done") => Some(vec![quiet.clone()]),
             _ => None,
         },
-        &staged_ages(&|e| match e.harness_session_id.as_deref() {
-            Some("s-done") => Some(vec![quiet.clone()]),
-            _ => None,
-        }),
+        &staged_ages_at(
+            crate::daemon::now_epoch_secs(),
+            &|e| match e.harness_session_id.as_deref() {
+                Some("s-done") => Some(vec![quiet.clone()]),
+                _ => None,
+            },
+        ),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
