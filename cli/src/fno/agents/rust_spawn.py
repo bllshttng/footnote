@@ -127,7 +127,7 @@ def _codex_thread_spawn(
     ``account_env``/``route_env`` overlay the client subprocess environment.
     They reach the app-server child only when this client also lazy-starts the
     daemon (the child inherits the daemon's env); a warm daemon keeps its own.
-    The two state roots that have an env carrier are pinned around the overlay
+    The state roots that have an env carrier are pinned around the overlay
     by ``seal_state_root``; that docstring names what still follows HOME.
     """
     from fno.agents.account_env import seal_state_root

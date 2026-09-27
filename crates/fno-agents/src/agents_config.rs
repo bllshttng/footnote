@@ -220,8 +220,13 @@ fn resolve_state_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Configured Python state root, including its `~/.fno` default.
+/// Configured Python state root, including its `~/.fno` default. `FNO_STATE_DIR`
+/// first: the carrier `fno.paths.state_dir` resolves and `seal_state_root` pins,
+/// so a sealed read serves the root its parent wrote.
 pub fn state_dir(cwd: &Path) -> Option<PathBuf> {
+    if let Some(root) = non_empty_env("FNO_STATE_DIR") {
+        return resolve_state_path(&root.to_string_lossy(), cwd);
+    }
     if let Some(raw) =
         config_lookup(cwd, &["state_dir"]).and_then(|value| value.as_str().map(str::to_string))
     {
@@ -232,6 +237,9 @@ pub fn state_dir(cwd: &Path) -> Option<PathBuf> {
 
 /// Config-independent plan/quota lock directory used by Python's `locks_dir`.
 pub fn machine_locks_dir() -> Option<PathBuf> {
+    if let Some(root) = non_empty_env("FNO_STATE_DIR") {
+        return Some(PathBuf::from(root).join("locks"));
+    }
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno/locks"))
 }
 
@@ -1396,6 +1404,30 @@ pub(crate) fn read_roster_scope(content: &str) -> Option<RosterScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_dir_carrier_outranks_config_for_state_and_machine_locks() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_STATE_DIR");
+        std::env::set_var("FNO_STATE_DIR", "/pinned-state");
+        let cwd = write_project_settings("carrier-state-root", "schema_version = 1\n");
+
+        assert_eq!(
+            state_dir(&cwd),
+            Some(PathBuf::from("/pinned-state")),
+            "the carrier must win over config and the home default"
+        );
+        assert_eq!(
+            machine_locks_dir(),
+            Some(PathBuf::from("/pinned-state/locks"))
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+        clear_config_env();
+    }
 
     #[test]
     fn state_reap_config_defaults() {

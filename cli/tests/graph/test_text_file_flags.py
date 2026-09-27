@@ -36,7 +36,7 @@ def _seed_node(g, node_id="x-eeee"):
         entries.append(
             {
                 "id": node_id,
-                "title": f"node {node_id}",
+                "title": "sample node",
                 "project": "fno",
                 "type": "feature",
                 "priority": "p2",
