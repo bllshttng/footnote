@@ -104,6 +104,7 @@ impl View {
                 (rows, actions) = crate::lane_colors_panel::build_lane_color_rows(
                     crate::sideline_color::palette(),
                     &self.lane,
+                    &self.theme,
                 );
             }
         }
@@ -138,7 +139,8 @@ impl View {
                 ("colors".to_string(), tab == SettingsTab::Colors),
             ])
             .footer("tab switches section · esc close")
-            .min_width(widest);
+            .min_width(widest)
+            .plain_body();
         AuxPopup { popup, actions }
     }
 
@@ -241,4 +243,58 @@ pub(super) async fn run_toggle(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // x-b5b8: the settings modal sits on the theme ground (plain body).
+    // The inverse body block under a named theme read as a white slab -
+    // the keys-modal fix on a path it missed. Every tab paints, including
+    // the Colors drill with its Rule rows.
+    #[test]
+    fn settings_modal_body_paints_no_inverse_under_a_named_theme() {
+        let mut view = View::new(
+            (30, 100),
+            "main".into(),
+            LayoutView {
+                squads: vec![],
+                active_squad: 0,
+                panes: vec![],
+                focus: 0,
+                area: (29, 72),
+                agents: vec![],
+                focus_node: None,
+            },
+        );
+        view.theme = crate::theme::Theme::from_name("footnote-superscript").0;
+        for tab in [
+            SettingsTab::General,
+            SettingsTab::Theme,
+            SettingsTab::Keys,
+            SettingsTab::Colors,
+        ] {
+            view.settings_tab = tab;
+            // The Colors drill's Rule rows ride the picker and key-list views.
+            if tab == SettingsTab::Colors {
+                view.lane.axis = Some("route".into());
+            }
+            view.aux = Some(view.build_settings_modal());
+            let aux = view.aux.as_ref().expect("modal open");
+            let rendered = aux.popup.render(view.term);
+            let rows_n = view.term.0 as usize;
+            let cols = view.term.1 as usize;
+            let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+            crate::popup::draw(&mut cells, rows_n, cols, &rendered, &view.theme);
+            let inverse = cells
+                .iter()
+                .filter(|c| c.flags & crate::proto::cell_flags::INVERSE != 0)
+                .count();
+            assert_eq!(
+                inverse, 0,
+                "tab {tab:?}: no INVERSE on the plain-body settings modal"
+            );
+        }
+    }
 }

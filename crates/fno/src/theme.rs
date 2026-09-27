@@ -43,10 +43,6 @@ pub struct Theme {
     /// the background and the terminal's own fg carries the letters. Off-white
     /// on a dark theme, ink on a light one.
     pub stamp: Color,
-    /// Text on a chosen highlight band. Dark themes band on a light accent, so
-    /// dark text reads; a light theme bands on a dark accent and needs light
-    /// text. The contrast tests hold the floor per theme.
-    pub band_text: Color,
 }
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
@@ -108,6 +104,10 @@ pub enum Role {
     PanelPill,
     /// A thin rule under a heading or lane name: the index-8 dim slot.
     PanelRule,
+    /// A literal-color span (the colors tab's swatches). The color IS the
+    /// content, so it resolves above the theme split and never shifts with
+    /// the theme.
+    Swatch(Color),
 }
 
 impl Theme {
@@ -160,6 +160,11 @@ impl Theme {
 /// becomes concrete style, so a new chrome element adds a variant here and is
 /// colored consistently by both overlay families.
 pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
+    // A literal swatch is content, not chrome: it resolves above the theme
+    // split so the painted color never shifts with the theme.
+    if let Role::Swatch(c) = role {
+        return (c, Color::Default, 0);
+    }
     // The backlog panel's slots sit above the theme split and stay
     // palette-following under EVERY theme: attributes plus emulator-palette
     // indexes, never a fixed color. A named theme's `title` is a fixed Rgb -
@@ -254,18 +259,15 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     }
 }
 
-/// `(fg, bg, flags)` for a sideline highlight band. `chosen` is the focused
-/// agent's brand band: the theme's band text on the brand surface. Selection
-/// and hover share the cursor band - a subtle surface under brand text - and
-/// the chosen color wins where they collide. Both legs are explicit colors that
-/// answer each other's contrast, so the band reads identically on a dark and
-/// a light terminal: INVERSE would make the terminal's own background the
-/// text color and DIM washes the text toward the band. Neither belongs in a
-/// band.
-pub fn band_style(chosen: bool, t: &Theme) -> (Color, Color, u8) {
-    if chosen {
-        return (t.band_text, t.brand, 0);
-    }
+/// `(fg, bg, flags)` for a sideline highlight band: accent text on the
+/// surface band. Selection, hover, and the focused row share one pair - the
+/// focused row's distinction rides its glyph marks, never a louder fill
+/// (the operator's color ruling: selection is the surface0 band, never a
+/// full brand fill). Both legs are explicit colors that answer each other's
+/// contrast, so the band reads identically on a dark and a light terminal:
+/// INVERSE would make the terminal's own background the text color and DIM
+/// washes the text toward the band. Neither belongs in a band.
+pub fn band_style(t: &Theme) -> (Color, Color, u8) {
     if t.inherit {
         // The palette's own surface pair: accent text on the deep index, so
         // both legs follow the emulator's scheme instead of painting a pale
@@ -293,7 +295,6 @@ fn theme_terminal() -> Theme {
         dim: Color::Default,
         chip: Color::Default,
         stamp: Color::Default,
-        band_text: rgb(0, 0, 0),
     }
 }
 
@@ -311,7 +312,6 @@ fn theme_footnote_superscript() -> Theme {
         dim: rgb(0xb4, 0xb4, 0xb4),       // subtext0
         chip: rgb(0xe1, 0xa6, 0xa3),      // red accent
         stamp: rgb(0xe8, 0xe8, 0xe8),     // off-white stamp label
-        band_text: rgb(0x14, 0x14, 0x14), // base
     }
 }
 
@@ -329,7 +329,6 @@ fn theme_footnote_paper() -> Theme {
         dim: rgb(0x50, 0x50, 0x50),       // subtext0
         chip: rgb(0x96, 0x53, 0x51),      // red accent
         stamp: rgb(0x29, 0x29, 0x29),     // ink stamp label
-        band_text: rgb(0xf7, 0xf7, 0xf7), // base
     }
 }
 
@@ -345,7 +344,6 @@ fn theme_catppuccin() -> Theme {
         dim: rgb(0xa6, 0xad, 0xc8),       // subtext0
         chip: rgb(0xf3, 0x8b, 0xa8),      // red
         stamp: rgb(0xcd, 0xd6, 0xf4),     // text
-        band_text: rgb(0, 0, 0),
     }
 }
 
@@ -361,7 +359,6 @@ fn theme_tokyo_night() -> Theme {
         dim: rgb(0x96, 0x9d, 0xc4),       // fg_gutter
         chip: rgb(0xf7, 0x76, 0x8e),      // red
         stamp: rgb(0xa9, 0xb1, 0xd6),     // fg
-        band_text: rgb(0, 0, 0),
     }
 }
 
@@ -377,12 +374,69 @@ fn theme_gruvbox() -> Theme {
         dim: rgb(0xa8, 0x99, 0x84),       // fg4
         chip: rgb(0xfb, 0x49, 0x34),      // red
         stamp: rgb(0xeb, 0xdb, 0xb2),     // fg1
-        band_text: rgb(0, 0, 0),
     }
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
+}
+
+/// The Terminal 16 palette of the two footnote themes (the token tables in
+/// internal/fno/design/brand-telemetry-palette.md): the color a colors-tab
+/// swatch paints for ANSI slot `slot` under the active theme. `None` = the
+/// theme defines no terminal palette of its own; the swatch then rides
+/// `Indexed(slot)` (the emulator resolves it) and shows no hex.
+pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
+    const DARK: [Color; 16] = [
+        rgb(0x40, 0x40, 0x40), // black
+        rgb(0xe1, 0xa6, 0xa3), // red
+        rgb(0x9c, 0xc4, 0x9c), // green
+        rgb(0xc5, 0xb7, 0x84), // yellow
+        rgb(0x9f, 0xb8, 0xe5), // blue
+        rgb(0xd7, 0xa6, 0xc6), // magenta
+        rgb(0x83, 0xc6, 0xbd), // cyan
+        rgb(0xce, 0xce, 0xce), // white
+        rgb(0x55, 0x55, 0x55), // bright black (gray)
+        rgb(0xdc, 0x92, 0x8d), // bright red (light_red)
+        rgb(0x82, 0xb8, 0x88), // bright green (light_green)
+        rgb(0xb8, 0xa9, 0x65), // bright yellow (light_yellow)
+        rgb(0x8c, 0xa8, 0xe2), // bright blue (light_blue)
+        rgb(0xd0, 0x92, 0xb9), // bright magenta (light_magenta)
+        rgb(0x5e, 0xbb, 0xb2), // bright cyan (light_cyan)
+        rgb(0xe8, 0xe8, 0xe8), // bright white (light_white)
+    ];
+    const LIGHT: [Color; 16] = [
+        rgb(0xbf, 0xbf, 0xbf), // black
+        rgb(0x96, 0x53, 0x51), // red
+        rgb(0x46, 0x77, 0x48), // green
+        rgb(0x79, 0x68, 0x23), // yellow
+        rgb(0x4c, 0x68, 0x9d), // blue
+        rgb(0x8b, 0x53, 0x79), // magenta
+        rgb(0x08, 0x79, 0x70), // cyan
+        rgb(0x3c, 0x3c, 0x3c), // white
+        rgb(0xa8, 0xa8, 0xa8), // bright black (gray)
+        rgb(0xae, 0x5a, 0x56), // bright red (light_red)
+        rgb(0x46, 0x88, 0x4f), // bright green (light_green)
+        rgb(0x89, 0x76, 0x15), // bright yellow (light_yellow)
+        rgb(0x55, 0x74, 0xb7), // bright blue (light_blue)
+        rgb(0xa2, 0x5b, 0x89), // bright magenta (light_magenta)
+        rgb(0x06, 0x89, 0x80), // bright cyan (light_cyan)
+        rgb(0x29, 0x29, 0x29), // bright white (light_white)
+    ];
+    match theme.name {
+        "footnote-superscript" => Some(DARK[(slot % 16) as usize]),
+        "footnote-paper" => Some(LIGHT[(slot % 16) as usize]),
+        _ => None,
+    }
+}
+
+/// The `#rrggbb` string of an RGB color, for the hex a swatch shows beside
+/// the name; non-RGB colors resolve through the emulator and name no hex.
+pub fn color_hex(c: Color) -> Option<String> {
+    let Color::Rgb(r, g, b) = c else {
+        return None;
+    };
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
 }
 
 /// The shipped theme names, in display order. Adding a palette later is a

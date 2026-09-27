@@ -607,10 +607,15 @@ fn sideline_lane_color_and_deviation_token_render_on_the_row() {
         let fg = frame.cells[start + name_x].fg;
         (text, fg)
     };
-    // Row 1: the codex row - lane color from the built-in table (blue),
-    // no account prefix.
+    // Row 1: the codex row - the lane color now rides the status cell only
+    // (the operator's color ruling), so the NAME cell reads default. No
+    // account prefix.
     let (text, fg) = line(1);
-    assert_eq!(fg, Color::Indexed(4), "builtin codex lane color");
+    assert_eq!(
+        fg,
+        Color::Default,
+        "the name cell carries no lane color anymore"
+    );
     assert!(
         !text.contains('@'),
         "the @account prefix is retired: `{text}`"
@@ -647,20 +652,22 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
     assert_eq!(caret.fg, LATTICE_ACCENT, "active squad caret is accented");
 
     // Display row 1 -> outer row 1: the focused agent row is a full-width
-    // accent band, and the `▎` gutter glyph is gone.
+    // surface band (accent text on the deep index, never a full accent
+    // fill), and the `▎` gutter glyph is gone.
     let lead = frame.cells[cols]; // outer row 1, col 0
     assert_ne!(
         lead.c, '▎',
         "the ▎ gutter is retired; the band is the signal"
     );
     assert_eq!(
-        lead.bg, LATTICE_ACCENT,
-        "the focused row carries the standing accent band"
+        lead.bg,
+        Color::Indexed(0),
+        "the focused row carries the standing surface band"
     );
     // The band fills the panel width (a right-edge text cell is still banded).
     assert_eq!(
         frame.cells[cols + panel_w - 2].bg,
-        LATTICE_ACCENT,
+        Color::Indexed(0),
         "the focus band fills the panel width"
     );
 }
@@ -7063,7 +7070,7 @@ fn menu_labels(menu: &RowMenu) -> Vec<String> {
         .iter()
         .map(|(ri, ci)| match &menu.popup.rows[*ri] {
             PopupRow::Grid(cells) => cells[*ci].label.clone(),
-            PopupRow::Entry { label, .. } => label.clone(),
+            PopupRow::Entry { label, .. } | PopupRow::SwatchEntry { label, .. } => label.clone(),
             PopupRow::FullWidth(l) => l.clone(),
             PopupRow::Header(_) | PopupRow::Rule => unreachable!("not a target"),
         })
@@ -8328,14 +8335,21 @@ fn headers_demoted_and_focused_row_wears_the_band() {
     );
     assert_eq!(cells[0].flags & cell_flags::BOLD, cell_flags::BOLD);
     // Row 1 = the agent row owning the focused pane: the sole standing band.
+    // x-b5b8: the band is the surface pair (accent text on the deep index),
+    // never a full accent fill.
     assert_eq!(
-        cells[cols].bg, LATTICE_ACCENT,
-        "the focused row wears the full-width accent band"
+        cells[cols].bg,
+        Color::Indexed(0),
+        "the focused row wears the surface band"
+    );
+    assert_eq!(
+        cells[cols].fg, LATTICE_ACCENT,
+        "the band's text is the accent"
     );
     // The band spans the full width (a right-edge text cell is still banded).
     assert_eq!(
         cells[cols + panel_w - 2].bg,
-        LATTICE_ACCENT,
+        Color::Indexed(0),
         "band fills the panel width"
     );
     // Row 2 = the Blank spacer between squads (inert, no INVERSE). Row 3 =

@@ -3907,7 +3907,7 @@ impl View {
             }
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
-            | DisplayRow::CardDetail(_)
+            | DisplayRow::CardDetail(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4413,7 +4413,7 @@ impl View {
             // A card's lower half acts on the card: the exact hit of the
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
-            DisplayRow::CardDetail(_) => self.row_action(i.checked_sub(1)?),
+            DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action.
             DisplayRow::Sub(_)
@@ -6631,8 +6631,10 @@ enum DisplayRow<'a> {
     /// "card"`): harness, king, message and age in a DIM legacy row. Inert
     /// like `Sub` - every painted line stays one display row (the
     /// single-enumeration invariant) - and a click on it acts on the `Agent`
-    /// row above it via [`View::row_action`]'s index shift.
-    CardDetail(&'a AgentRow),
+    /// row above it via [`View::row_action`]'s index shift. A foreign-cwd
+    /// card folds the subline's cwd in here, so the card stays two painted
+    /// rows.
+    CardDetail(&'a AgentRow, Option<String>),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6758,7 +6760,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
-            | DisplayRow::CardDetail(_)
+            | DisplayRow::CardDetail(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )

@@ -35,7 +35,7 @@ fn card_rows_for(view: &View, name: &str) -> (usize, usize) {
         .expect("agent card exists");
     let detail = rows
         .iter()
-        .position(|row| matches!(row, DisplayRow::CardDetail(a) if a.name == name))
+        .position(|row| matches!(row, DisplayRow::CardDetail(a, _) if a.name == name))
         .expect("card detail exists");
     (agent, detail)
 }
@@ -106,7 +106,7 @@ fn card_mode_expands_each_agent_into_a_two_line_padded_card() {
             DisplayRow::Sel(s) if s.tab.is_none() => "band",
             DisplayRow::Blank => "blank",
             DisplayRow::Agent(_) => "agent",
-            DisplayRow::CardDetail(_) => "detail",
+            DisplayRow::CardDetail(..) => "detail",
             _ => "other",
         })
         .map(String::from)
@@ -173,11 +173,11 @@ fn card_age_sort_orders_workers_inside_a_king_group() {
         let w_old = rows
             .iter()
             .find_map(|r| match r {
-                DisplayRow::CardDetail(a) if a.name == "w-old" => Some(a),
+                DisplayRow::CardDetail(a, _) if a.name == "w-old" => Some(a),
                 _ => None,
             })
             .expect("w-old card detail exists");
-        let detail = v.card_detail_text(w_old, now, 80);
+        let detail = v.card_detail_text(w_old, None, now, 80);
         assert!(
             detail.ends_with("12m"),
             "painted age must read the sorted-on field: {detail:?}"
@@ -213,7 +213,7 @@ fn card_detail_click_routes_to_the_agent_above() {
     let rows = v.painted_rows();
     let detail_i = rows
         .iter()
-        .position(|r| matches!(r, DisplayRow::CardDetail(_)))
+        .position(|r| matches!(r, DisplayRow::CardDetail(..)))
         .expect("a card detail row exists");
     let agent_action = v.row_action(detail_i - 1);
     let detail_action = v.row_action(detail_i);
@@ -292,38 +292,110 @@ fn hover_and_selection_share_the_same_card_cell_snapshot() {
 fn hovered_card_paints_one_background_across_both_lines_including_gaps() {
     // Per-cell background, not text: every cell of both lines carries the
     // same band, the column gaps included. The pair is the theme's explicit
-    // hover pair - never INVERSE.
+    // hover pair - never INVERSE. The status and word columns of line 1
+    // keep the row's lane accent on the band (the operator's color ruling).
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     v.hover_row = Some(agent_i);
     let frame = v.compose();
-    for cell in card_pair_cells(&v, &frame, agent_i, detail_i) {
-        assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
-        assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
-        assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+    let cols = frame.cols as usize;
+    let text_w = v.sideline_paint_w().saturating_sub(1);
+    let offset = v.sideline_offset();
+    let rects = sideline_column_rects(text_w as u16);
+    let in_col =
+        |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
+    for display_i in [agent_i, detail_i] {
+        let row = display_i - offset;
+        for (j, cell) in frame.cells[row * cols..row * cols + text_w]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(cell.bg, Color::Indexed(0), "one background everywhere");
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
+                assert_eq!(cell.fg, Color::Indexed(3), "accent band text");
+            }
+            assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
+        }
     }
 }
 
 #[test]
+fn a_foreign_cwd_folds_into_the_detail_line_and_never_adds_a_third_row() {
+    // x-b5b8 scope add: a foreign-cwd agent's card stays two painted rows -
+    // the subline's cwd folds into line 2 (`harness · … · cwd`), the Sub
+    // row is gone.
+    let mut agents = king_and_worker();
+    agents[1].cwd_base = Some("elsewhere".into());
+    let mut v = card_view(agents);
+    v.term = (30, 140);
+    v.sideline_width = 80;
+    let rows = v.display_rows();
+    let kinds: Vec<&str> = rows
+        .iter()
+        .map(|r| match r {
+            DisplayRow::Blank => "blank",
+            DisplayRow::Agent(_) => "agent",
+            DisplayRow::CardDetail(..) => "detail",
+            DisplayRow::Sub(_) => "sub",
+            _ => "other",
+        })
+        .collect();
+    assert!(
+        !kinds.contains(&"sub"),
+        "no sub row survives in card mode: {kinds:?}"
+    );
+    let detail = rows.iter().find_map(|r| match r {
+        DisplayRow::CardDetail(a, cwd) if a.name == "w1" => Some(cwd),
+        _ => None,
+    });
+    assert_eq!(
+        detail,
+        Some(&Some("elsewhere".to_string())),
+        "the cwd rides the detail line"
+    );
+    let text = v.card_detail_text(detail_agent(&rows, "w1"), Some("elsewhere"), 0, 80);
+    assert!(text.contains("elsewhere"), "line 2 names the cwd: {text:?}");
+}
+
+fn detail_agent<'a>(rows: &'a [DisplayRow<'_>], name: &str) -> &'a AgentRow {
+    rows.iter()
+        .find_map(|r| match r {
+            DisplayRow::CardDetail(a, _) if a.name == name => Some(*a),
+            _ => None,
+        })
+        .expect("the card's detail row")
+}
+
+#[test]
 fn chosen_card_paints_accent_across_both_lines() {
+    // x-b5b8: the focused card wears the same surface band as selection -
+    // accent text on the sel surface, never a full brand fill. The lane
+    // accent survives on the status and word columns of line 1.
     let mut v = card_view(king_and_worker());
     v.term = (30, 140);
     v.sideline_width = 80;
     v.layout.focus = 5;
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let accent = v.theme.brand;
-    let band_text = v.theme.band_text;
+    let (band_fg, band_bg, _) = crate::theme::band_style(&v.theme);
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
+    let rects = sideline_column_rects(text_w as u16);
+    let in_col =
+        |j: usize, c: usize| j >= rects[c].x as usize && j < (rects[c].x + rects[c].width) as usize;
     for display_i in [agent_i, detail_i] {
         let row = display_i - offset;
-        for cell in &frame.cells[row * cols..row * cols + text_w] {
-            assert_eq!(cell.bg, accent, "the chosen color fills the card line");
-            assert_eq!(cell.fg, band_text, "the theme's band text on the band");
+        for (j, cell) in frame.cells[row * cols..row * cols + text_w]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(cell.bg, band_bg, "the surface band fills the card line");
+            if !(display_i == agent_i && (in_col(j, 0) || in_col(j, 2))) {
+                assert_eq!(cell.fg, band_fg, "the band's accent text everywhere");
+            }
             assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
         }
     }
@@ -338,14 +410,14 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     v.hover_row = Some(detail_i);
     let frame = v.compose();
-    let accent = v.theme.brand;
+    let (_, band_bg, _) = crate::theme::band_style(&v.theme);
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
     for display_i in [agent_i, detail_i] {
         let row = display_i - offset;
         for cell in &frame.cells[row * cols..row * cols + text_w] {
-            assert_eq!(cell.bg, accent, "the chosen color wins on hover");
+            assert_eq!(cell.bg, band_bg, "the band wins on hover");
         }
     }
 }
@@ -460,11 +532,11 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     v.sideline_width = 80;
     let frame = v.compose();
 
-    // Re-frozen when the padded active-tab label (`[ 2 ]`, x-8c5a item 6)
-    // changed the tab-strip cells the frame snapshot covers.
+    // Re-frozen when the band change (x-b5b8) moved the lane color off the
+    // name row: the status column alone carries it now.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0x462e2dae835ef3c6,
+        0xd8948ddbcb4651ac,
         "List frame-cell snapshot"
     );
 }
@@ -526,26 +598,23 @@ fn shipped_mux_themes() -> Vec<crate::theme::Theme> {
 #[test]
 fn band_pairs_hold_luminance_contrast_on_dark_and_light() {
     // x-cd1c D1: every band is an explicit fg+bg pair with no INVERSE and no
-    // DIM. The CHOSEN band clears the 4.5:1 body-text floor (dark text on a
-    // light accent); the hover band clears the 3:1 bar (transient affordance,
-    // same text the row carries unhovered). `terminal` resolves its Indexed
-    // legs against each lens theme's real palette; named themes paint fixed
-    // RGB pairs, which the named-theme lens themes judge directly.
+    // DIM. The one band (selection, hover, and focus share it) clears the 3:1
+    // transient-affordance floor. `terminal` resolves its Indexed legs
+    // against each lens theme's real palette; named themes paint fixed RGB
+    // pairs, which the named-theme lens themes judge directly.
     for t in shipped_mux_themes() {
-        for (chosen, floor) in [(true, 4.5), (false, 3.0)] {
-            let (fg, bg, flags) = crate::theme::band_style(chosen, &t);
-            assert_eq!(flags, 0, "no INVERSE and no DIM inside the band");
-            assert!(fg != Color::Default, "band fg must be explicit");
-            assert!(bg != Color::Default, "band bg must be explicit");
-            for lens in crate::frame_html::THEMES {
-                let ratio = lens_contrast(fg, bg, lens);
-                assert!(
-                    ratio >= floor,
-                    "{} chosen={chosen} on {}: {ratio:.2}:1 (floor {floor})",
-                    t.name,
-                    lens.name
-                );
-            }
+        let (fg, bg, flags) = crate::theme::band_style(&t);
+        assert_eq!(flags, 0, "no INVERSE and no DIM inside the band");
+        assert!(fg != Color::Default, "band fg must be explicit");
+        assert!(bg != Color::Default, "band bg must be explicit");
+        for lens in crate::frame_html::THEMES {
+            let ratio = lens_contrast(fg, bg, lens);
+            assert!(
+                ratio >= 3.0,
+                "{} band on {}: {ratio:.2}:1 (floor 3.0)",
+                t.name,
+                lens.name
+            );
         }
     }
 }
@@ -605,7 +674,10 @@ fn composed_bands_hold_contrast_on_dark_and_light_frames() {
         for cell in &chosen_cells {
             let ratio = crate::frame_html::contrast_ratio(cell, lens);
             assert_eq!(cell.flags & cell_flags::INVERSE, 0);
-            assert!(ratio >= 4.5, "chosen band on {}: {ratio:.2}:1", lens.name);
+            // x-b5b8: chosen and hover share the ONE surface band, so the
+            // chosen card clears the same 3:1 transient-affordance floor
+            // (its sampled status cell also carries the lane accent now).
+            assert!(ratio >= 3.0, "chosen band on {}: {ratio:.2}:1", lens.name);
         }
         for cell in &hover_cells {
             let ratio = crate::frame_html::contrast_ratio(cell, lens);
