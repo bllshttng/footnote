@@ -10,7 +10,6 @@ FNO_REPO_ROOT, and the dependent's manifest lives under tmp_path/.fno so
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,12 @@ from fno import stub_manifest as sm
 from fno.backlog import advance as adv
 from fno.backlog import reconcile_dispatch as rd
 from fno.claims.core import acquire_claim
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 @pytest.fixture
@@ -266,3 +271,43 @@ def test_reconcile_capacity_refusal_skips_with_gate_detail(iso, tmp_path, monkey
     assert skips[0]["data"]["exit_code"] == 79
     assert gate_line in skips[0]["data"]["detail"]
     assert not [e for e in evs if e["type"] == "advance_failed"]
+
+
+# ---- decision rows mirror into the tick's store ----
+
+
+@requires_rust
+def test_reconcile_skip_row_mirrors_into_the_tick_store(iso, tmp_path, monkeypatch):
+    """The reconcile row's journal is writer-relative and dies with a pruned
+    tree, while the tick's store survives every run. reconcile_dispatch shares
+    advance's _emit, so the mirror must hold through this path too - a local
+    re-shadow of the writer would reopen the loss class silently."""
+    tick_store = tmp_path / "tick-store" / "events.jsonl"
+    tick_store.parent.mkdir()
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tick_store))
+    _patch_deps(monkeypatch, [_dep(tmp_path)])
+    calls = _patch_spawn(monkeypatch)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert res[0].decision == "skipped"
+    assert calls == []
+    # The dispatch reservation's claim_acquired row rides the same pinned
+    # store; the assertion is on the mirrored decision row, not exclusivity.
+    assert [e["type"] for e in _events(tick_store)].count("advance_skipped") == 1
+
+
+@requires_rust
+def test_reconcile_dispatched_row_mirrors_into_the_tick_store(iso, tmp_path, monkeypatch):
+    tick_store = tmp_path / "tick-store" / "events.jsonl"
+    tick_store.parent.mkdir()
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tick_store))
+    sm.write("x-dep", [{"stub_id": "a", "file": "f", "kind": "fn"}], tmp_path,
+             contract_test="true")
+    _patch_deps(monkeypatch, [_dep(tmp_path)])
+    _patch_spawn(monkeypatch)
+
+    res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
+
+    assert res[0].decision == "dispatched"
+    assert [e["type"] for e in _events(tick_store)].count("advance_dispatched") == 1

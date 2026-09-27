@@ -138,18 +138,12 @@ impl crate::server::Core {
         if let Some(notice) = notice {
             self.notice_all(notice);
         }
-        // A portal slot's placeholder carries its held identity in its own
-        // argv: a later server re-adopts the shell and re-derives `cmd`
-        // from argv, and without the marker the placeholder would read as
-        // a live viewer of the row.
+        // A portal slot's seat is the parked screen: it carries the held
+        // channel in its own argv (the one mint site, shared with the
+        // no-signal swap), so a later server re-adopts it and re-derives
+        // the hold instead of reading it as a live viewer of the row.
         if let Some(portal) = slot.portal.as_ref() {
-            let spawned = self.spawn_env_placeholder(
-                format!("FNO_PORTAL_HELD={}", portal.row),
-                rows,
-                cols,
-                &spawn_cwd,
-                "held portal placeholder",
-            );
+            let spawned = self.spawn_parked_screen(&portal.row, rows, cols, &spawn_cwd);
             return match spawned {
                 Ok(p) => Some(p),
                 Err(e) => {

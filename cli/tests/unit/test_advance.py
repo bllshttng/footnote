@@ -3732,7 +3732,7 @@ def test_filed_specimen_names_remain_byte_for_byte():
 # ---------------------------------------------------------------------------
 
 
-def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
+def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch, tmp_path):
     """A quota cutover names its destination RECORD on argv.
 
     The credential never touches this wrapper's environment. A non-claude
@@ -3751,7 +3751,8 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setenv("HOME", "/real/home")
+    fake_home = tmp_path / "real-home"
+    monkeypatch.setenv("HOME", str(fake_home))
     adv._spawn_worker(
         "ab-2222aaaa",
         "/w",
@@ -3763,7 +3764,7 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
     cmd = captured["cmd"]
     assert cmd[cmd.index("--dispatch-account") + 1] == "zai-cutover-1"
     # The positive marker: the wrapper's HOME is the REAL one, not the account's.
-    assert captured["env"]["HOME"] == "/real/home"
+    assert captured["env"]["HOME"] == str(fake_home)
 
 
 def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):

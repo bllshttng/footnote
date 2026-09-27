@@ -1244,6 +1244,14 @@ fn snapshot_processes() -> Result<Vec<ProcessRow>, CensusFailure> {
     ))
 }
 
+/// Does `pid` have a child of its own in the process table? `None` when
+/// the snapshot is unavailable: the stand-in prune treats unknown as "has
+/// a child" and never prunes on a fact it cannot see.
+pub fn pid_has_child(pid: u32) -> Option<bool> {
+    let rows = snapshot_processes().ok()?;
+    Some(rows.iter().any(|row| row.ppid == pid))
+}
+
 #[cfg(target_os = "macos")]
 fn snapshot_macos() -> Result<Vec<ProcessRow>, CensusFailure> {
     let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };

@@ -38,6 +38,15 @@ pub(super) fn portal_hold_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_PORTAL_HELD=")
 }
 
+/// The transient machine-view marker (`FNO_VIEW_TRANSIENT=1`), from the
+/// same `env(1)` wrapper. A view pane is never a portal, never persisted,
+/// never restored; the marker rides the argv so a later server re-derives
+/// it on keeper re-adoption and the restore prune can sweep a view it did
+/// not mint.
+pub(super) fn transient_view_from_argv(argv: &[String]) -> bool {
+    env_token_from_argv(argv, "FNO_VIEW_TRANSIENT=").is_some()
+}
+
 /// The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
 /// spawn was routed with `--account`). `None` for a default-account or ad-hoc
