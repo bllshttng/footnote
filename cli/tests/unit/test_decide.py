@@ -641,77 +641,6 @@ def test_ambiguous_coord_without_positive_closure_evidence_is_unscoped(
     assert rows["d-unscoped1"]["lifecycle"] == "unscoped"
 
 
-def test_decide_retract_appends_an_audit_event_and_changes_only_the_projection(
-    root: Path, tmp_graph: Path, index: Path
-):
-    _write_decision_index(
-        index,
-        {
-            "decision_id": "d-retract01",
-            "decision": "coordinate this node",
-            "subject": "x-7d94",
-            "authority_source": "agent",
-            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
-            "ts": "2026-08-20T00:00:00Z",
-        }
-    )
-    before = index.read_bytes()
-    from fno.graph.cli import cli as backlog_app
-
-    result = runner.invoke(
-        backlog_app,
-        [
-            "decide-retract",
-            "d-retract01",
-            "--reason",
-            "the coordination window ended",
-            "--authority",
-            "agent",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert index.read_bytes().startswith(before)
-    events = _events(root)
-    retractions = [event for event in events if event["type"] == "decision_retracted"]
-    assert len(retractions) == 1
-    assert retractions[0]["data"]["target_decision_id"] == "d-retract01"
-
-    listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
-    assert listed.exit_code == 0, listed.output
-    rows = json.loads(listed.stdout)["decisions"]
-    assert rows[0]["decision_id"] == "d-retract01"
-    assert rows[0]["lifecycle_reason"] == "the coordination window ended"
-
-
-def test_agent_cannot_retract_law(root: Path, tmp_graph: Path, index: Path):
-    _write_decision_index(
-        index,
-        {
-            "decision_id": "d-law-retr1",
-            "decision": "standing law",
-            "subject": "law-topic",
-            "authority_source": "operator",
-            "ts": "2026-08-22T00:00:00Z",
-        }
-    )
-    before = index.read_bytes()
-    from fno.graph.cli import cli as backlog_app
-
-    result = runner.invoke(
-        backlog_app,
-        [
-            "decide-retract",
-            "d-law-retr1",
-            "--reason",
-            "agent should not legislate",
-            "--authority",
-            "agent",
-        ],
-    )
-    assert result.exit_code == 3, result.output
-    assert index.read_bytes() == before
-
-
 def test_agent_cannot_supersede_law(
     root: Path, tmp_graph: Path, index: Path
 ):
@@ -745,11 +674,31 @@ def test_agent_cannot_supersede_law(
     assert rows[0]["lifecycle"] == "live"
 
 
+def _append_retraction_event(
+    root: Path, index: Path, decision_id: str, subject: str, reason: str
+) -> None:
+    """Mint a retraction envelope the way the native door writes it: journal
+    first, then the recall index. The reindex tests exercise reindex, not the
+    retract verb itself."""
+    from fno.events import decision_retracted
+
+    event = decision_retracted(
+        target_decision_id=decision_id,
+        subject=subject,
+        reason=reason,
+        authority_source="agent",
+    )
+    envelope = json.dumps(event) + "\n"
+    with project_log("events.jsonl", project_root=root).open("a", encoding="utf-8") as handle:
+        handle.write(envelope)
+    with index.open("a", encoding="utf-8") as handle:
+        handle.write(envelope)
+
+
 def test_reindex_preserves_distinct_retractions_for_one_target(
     root: Path, tmp_graph: Path, index: Path
 ):
     from fno.decide import reindex
-    from fno.graph.cli import cli as backlog_app
 
     recorded = runner.invoke(
         decide_app,
@@ -757,11 +706,7 @@ def test_reindex_preserves_distinct_retractions_for_one_target(
     )
     decision_id = recorded.stdout.strip().splitlines()[-1]
     for reason in ("first reason", "second reason"):
-        result = runner.invoke(
-            backlog_app,
-            ["decide-retract", decision_id, "--reason", reason, "--authority", "agent"],
-        )
-        assert result.exit_code == 0, result.output
+        _append_retraction_event(root, index, decision_id, "x-7d94", reason)
     _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 3
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
@@ -801,18 +746,13 @@ def test_review_list_canonicalizes_node_ids_and_slugs(
 
 def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
     from fno.decide import reindex
-    from fno.graph.cli import cli as backlog_app
 
     recorded = runner.invoke(
         decide_app,
         ["--subject", "x-7d94", "--decision", "temporary", "--authority", "crown"],
     )
     decision_id = recorded.stdout.strip().splitlines()[-1]
-    retracted = runner.invoke(
-        backlog_app,
-        ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
-    )
-    assert retracted.exit_code == 0, retracted.output
+    _append_retraction_event(root, index, decision_id, "x-7d94", "no longer applies")
     _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 2
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
@@ -823,18 +763,13 @@ def test_reindex_counts_decision_and_retraction_keys_once(
     root: Path, tmp_graph: Path, index: Path
 ):
     from fno.decide import reindex
-    from fno.graph.cli import cli as backlog_app
 
     recorded = runner.invoke(
         decide_app,
         ["--subject", "x-7d94", "--decision", "temporary", "--authority", "crown"],
     )
     decision_id = recorded.stdout.strip().splitlines()[-1]
-    retracted = runner.invoke(
-        backlog_app,
-        ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
-    )
-    assert retracted.exit_code == 0, retracted.output
+    _append_retraction_event(root, index, decision_id, "x-7d94", "no longer applies")
 
     counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["added"] == 0
@@ -922,52 +857,6 @@ def test_missing_supersession_target_refuses_before_recording(
     from fno.paths import project_log
 
     assert not project_log("events.jsonl", project_root=root).exists()
-
-
-def test_retraction_origin_is_floored_before_event_persistence(
-    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
-):
-    _patch_claim_receipt_identity(monkeypatch, tmp_path, "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    _write_decision_index(
-        index,
-        {
-            "decision_id": "d-origin01",
-            "decision": "coordination row",
-            "subject": "x-7d94",
-            "authority_source": "agent",
-            "ts": "2026-08-22T00:00:00Z",
-        },
-    )
-    result = runner.invoke(
-        decide_app,
-        [
-            "retract",
-            "d-origin01",
-            "--reason",
-            "withdrawn",
-            "--authority",
-            "agent",
-            "--origin",
-            "operator",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    event = [event for event in _events(root) if event["type"] == "decision_retracted"][-1]
-    assert event["data"]["origin"] == "peer"
-
-
-def test_retract_reports_unreadable_index_without_traceback(
-    root: Path, tmp_graph: Path, index: Path
-):
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.symlink_to(index.parent / "missing-decisions.jsonl")
-    result = runner.invoke(
-        decide_app,
-        ["retract", "d-anything", "--reason", "withdrawn", "--authority", "agent"],
-    )
-    assert result.exit_code == 1
-    assert "cannot read the decision index" in result.output
-    assert "Traceback" not in result.output
 
 
 def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
