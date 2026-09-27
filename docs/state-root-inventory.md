@@ -261,7 +261,7 @@ You do not. The root rows are shrink-only (see The rule): the runtime guard refu
 1. Put the state in a named subfolder. Reach for the root only through a row that already exists.
 2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. When a bash caller needs it, export it from `cli/src/fno/setup/emit_shell.py`, then regenerate `scripts/lib/paths.sh`.
 3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun. `scripts/prune-fno-dir.sh` was deleted for exactly that: never once invoked, while every file on its delete list sat in the root.
-4. If a row above became wrong, fix or delete that row in the same PR - shrinking is the one direction the gate allows.
+4. If a row above became wrong, fix or delete that row in the same PR. Shrinking is the one direction the gate allows.
 
 ## The project space (`~/.fno/spaces/<slug>/`)
 
