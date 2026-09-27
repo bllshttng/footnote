@@ -84,12 +84,14 @@ impl View {
     pub(super) fn sideline_visible_rows(&self) -> usize {
         // The questions block and the sticky menu footer both come off the
         // region before the scroll math runs (h): scrolling to the end lands
-        // the last row above the footer, never under the block.
+        // the last row above the footer, never under the block. The footer
+        // only reserves a row it can spare - a region down to its last row
+        // keeps that row as list, never as chrome (the court rule).
         let rows = (self.term.0 as usize)
             .saturating_sub(self.bottom_row_is_chrome() as usize)
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
-        let pinned = self.painted_rows().len() > rows;
+        let pinned = self.painted_rows().len() > rows && rows >= 2;
         rows.saturating_sub(pinned as usize)
     }
 
@@ -127,8 +129,8 @@ impl View {
         let list_rows = (self.term.0 as usize)
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
-        let pinned = self.painted_rows().len()
-            > list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
         if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(1) {
             return self
                 .painted_rows()
@@ -234,8 +236,9 @@ impl View {
         // The sticky menu row (h): when the rows overflow the region, the
         // menu/add-workspace footer pins directly above the questions block
         // and the widget area gives up its last row, so the footer is never
-        // covered and the rows scroll to their true end above it.
-        let sticky_footer = table_rows_n > 0 && display.len() > table_rows_n;
+        // covered and the rows scroll to their true end above it. A region
+        // down to one row keeps that row as list, never as footer.
+        let sticky_footer = table_rows_n > 1 && display.len() > table_rows_n;
         let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
         // backend) and the blit copies it into the compositor's cells. The

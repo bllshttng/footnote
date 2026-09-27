@@ -5284,8 +5284,11 @@ fn which_key_lists_the_dead_row_removal_verbs() {
     // too - the only in-app documentation that a header's menu offers it.
     assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
     // Display-only: Enter on them must BEL, never dispatch a bogus chord.
+    // Matched by label: bare `X` on a sideline row is display-only, while
+    // prefix+X (questions-show-done) is a real chord that shares the glyph.
     for (i, r) in modal.popup.rows.iter().enumerate() {
-        if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
+        if matches!(r, PopupRow::Entry { glyph, label, .. } if glyph == "X" && label.contains("reap"))
+        {
             assert!(
                 modal.row_events[i].is_none(),
                 "a bare sideline key is not a prefix chord"
@@ -6548,9 +6551,10 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
     // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections): the global section spent five rows
-    // and the V chord one more, so the pin moved from 64.
-    view.term = (73, 100);
+    // ride below the binding sections): the global section spent five rows,
+    // the V chord one more, and the questions block four (q, {, }, X), so
+    // the pin moved from 64.
+    view.term = (77, 100);
     view.open_keys_modal();
     let text = frame_text(&view.compose());
     let modal_tail: String = text
