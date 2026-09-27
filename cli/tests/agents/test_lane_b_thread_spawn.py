@@ -506,13 +506,21 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
     process - never fno-agents-daemon and never the mux server."""
     # A keeper socket must fit AF_UNIX's 104-byte sun_path, and the pytest
     # basetemp does not: rewrite the isolated state root to a short tmp dir
-    # (use_tmpdir's docstring invites overwriting the settings file).
+    # (use_tmpdir's docstring invites overwriting the settings file). That
+    # root sits outside TMPDIR by construction, so the journey declares
+    # ambient-on-purpose - the hermetic guard's own escape hatch - instead
+    # of fighting the socket-length limit the guard cannot know about.
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     settings = lane_b_home / ".fno" / "settings.yaml"
     short_state = short_bind_root("fno-laneb-")  # lifetime is this one journey test
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",
         encoding="utf-8",
     )
+    # The keeper socket follows FNO_AGENTS_HOME's parent, not state_dir
+    # (_lane_b_keeper_socket), so the fixture's deep pin defeats the short
+    # root exactly when the journey needs it. Pin it short too.
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(short_state / ".fno"))
     bin_dir = lane_b_home / "bin"
     bin_dir.mkdir(exist_ok=True)
     stub = bin_dir / "pi"

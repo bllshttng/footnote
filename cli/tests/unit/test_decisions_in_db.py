@@ -1,12 +1,12 @@
 """Decision records round-trip through the graph.db keeper and its node join."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from fno.graph import api
+from tests.fixtures.graph_seed import seed_graph
 
 
 pytestmark = pytest.mark.dev_build
@@ -26,7 +26,7 @@ def _graph(tmp_path: Path, decisions: list[dict] | None = None) -> Path:
     if decisions is not None:
         row["decisions"] = decisions
     path = tmp_path / "graph.json"
-    path.write_text(json.dumps({"entries": [row]}) + "\n", encoding="utf-8")
+    seed_graph(path, {"entries": [row]})
     return path
 
 

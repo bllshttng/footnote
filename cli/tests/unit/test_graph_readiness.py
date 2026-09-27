@@ -10,10 +10,11 @@ uses, asserting the (status, blocked_reason) pair the overlay publishes.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
+
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.statuses import recompute_statuses
 from fno.graph.store import _apply_graph_defaults, commit_rows_via_store, read_graph_strict
@@ -56,7 +57,7 @@ def _entry(eid: str, **kwargs) -> dict:
 
 def _write(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(p, {"entries": entries})
     return p
 
 

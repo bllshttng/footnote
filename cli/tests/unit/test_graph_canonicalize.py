@@ -9,7 +9,6 @@ without a second lookup, light enough not to denormalize the flat store.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,7 @@ from fno.graph.store import (
     read_graph_strict,
     _read_json,
 )
+from tests.fixtures.graph_seed import seed_graph
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -40,7 +40,7 @@ CANONICAL_FIELD_ORDER = canonical_field_order() if find_dev_binary() else []
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(p, {"entries": entries})
     return p
 
 
