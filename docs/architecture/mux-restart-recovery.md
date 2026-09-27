@@ -1,6 +1,6 @@
 # Mux restart recovery
 
-A client reconnect and a mux server restart have different guarantees. Client reconnect keeps the server-owned `Core`, PTYs, panes, and layout alive. Server restart destroys pane-substrate processes because their PTYs are children of the server, but the workspace store (`squads.json`), harness transcripts, worktrees, registry, and append-only spawn receipts remain.
+A client reconnect and a mux server restart have different guarantees. Client reconnect keeps the server-owned `Core`, PTYs, panes, and layout alive. Server restart destroys pane-substrate processes because their PTYs are children of the server. The workspace store (`squads.json`), harness transcripts, worktrees, registry, and append-only spawn receipts remain.
 
 ## Is this page for you?
 
