@@ -1675,22 +1675,11 @@ fn open_picker_at(
     let Some((row, col)) = anchor else {
         return false;
     };
-    let (rows, actions) = picker_rows(l, field, catalog, backlog);
-    let (all_rows, all_actions) = (rows.clone(), actions.clone());
-    // The model picker names its effort-cycling grammar in the footer.
-    let footer = if field == Focus::Model {
-        "up/down move \u{b7} left/right effort \u{b7} type to filter \u{b7} enter pick \u{b7} esc back"
-    } else {
-        "up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"
-    };
-    let title = title_for(field);
-    let mut popup = Popup::new(rows, Anchor::At { row, col })
-        .footer(footer)
-        .full_chrome()
-        .full_width_selection();
-    if !title.is_empty() {
-        popup = popup.title(title);
-    }
+    let (all_rows, all_actions) = picker_rows(l, field, catalog, backlog);
+    // The open popup is the unfiltered walk of the same row set; one
+    // builder answers open and rebuild, so the chrome can never split.
+    let (popup, actions) =
+        filtered_popup(field, &all_rows, &all_actions, "", Anchor::At { row, col });
     l.picker = Some(Picker {
         popup,
         actions,
