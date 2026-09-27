@@ -1831,3 +1831,198 @@ fn a_picker_open_across_the_catalog_landing_refreshes_on_input() {
     );
     assert_eq!(picker.filter, "x", "the query survives the refresh");
 }
+
+fn floor(name: &str) -> super::agent_launcher::ModelChoice {
+    super::agent_launcher::ModelChoice {
+        name: name.to_string(),
+        model: name.to_string(),
+        route: String::new(),
+        provider: None,
+        state: ModelState::Ready,
+        key_env: None,
+        key_file: None,
+    }
+}
+fn choice_ready(name: &str, provider: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = floor(name);
+    m.provider = Some(provider.to_string());
+    m
+}
+
+fn nokey(name: &str, provider: &str, env: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.state = ModelState::NoKey {
+        key_env: env.to_string(),
+        steps: vec![],
+    };
+    m.key_env = Some(env.to_string());
+    m
+}
+fn unreachable(name: &str, provider: &str, reason: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.state = ModelState::Unreachable {
+        reason: reason.to_string(),
+    };
+    m
+}
+
+fn row_labels(rows: &[crate::popup::PopupRow]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+fn row_glyphs(rows: &[crate::popup::PopupRow]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { glyph, .. } => Some(glyph.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn glyph_of(rows: &[crate::popup::PopupRow], label: &str) -> String {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry {
+                glyph, label: l, ..
+            } if l == label => Some(glyph.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+#[test]
+fn flagship_row_leads_and_the_more_row_closes_the_model_list() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![
+            floor("opus"),
+            floor("sonnet"),
+            choice_ready("glm-4.6", "zai"),
+        ];
+        c.more = vec![
+            choice_ready("glm-4.5-air", "zai"),
+            nokey("MiniMax-M2", "minimax", "MINIMAX_API_KEY"),
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let l = v.launcher.take().unwrap();
+    let (body, _) =
+        super::agent_launcher::picker_rows(&l, Focus::Model, &v.launcher_catalog, &v.backlog);
+    let labels = row_labels(&body);
+    let expected = vec![
+        "harness default".to_string(),
+        "opus".to_string(),
+        "glm-4.6".to_string(),
+        "sonnet".to_string(),
+        format!("more{}", '\u{2026}'),
+    ];
+    assert_eq!(
+        labels, expected,
+        "flagship leads the groups; the more row closes the list: {labels:?}"
+    );
+    assert!(
+        body.iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Header(h) if h == "zai")),
+        "the routed provider group renders its header"
+    );
+    assert_eq!(
+        glyph_of(&body, "opus"),
+        "\u{25cf}",
+        "flagship row carries the filled mark"
+    );
+    assert_eq!(
+        glyph_of(&body, "glm-4.6"),
+        "\u{25cf}",
+        "ready rows carry the filled mark"
+    );
+}
+#[test]
+fn more_list_groups_marks_and_esc_steps_back_to_the_main_list() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![
+            choice_ready("glm-4.5-air", "zai"),
+            nokey("MiniMax-M2", "minimax", "MINIMAX_API_KEY"),
+            unreachable(
+                "glm-5",
+                "zai-openai",
+                "claude speaks anthropic; zai-openai serves openai",
+            ),
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let picker = l.picker.as_ref().expect("more list open");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::More);
+    let body = &picker.all_rows;
+    assert_eq!(glyph_of(body, "glm-4.5-air"), "\u{25cf}");
+    assert_eq!(
+        glyph_of(body, "MiniMax-M2"),
+        "\u{25cb}",
+        "nokey rows carry the hollow mark"
+    );
+    assert_eq!(
+        glyph_of(body, "glm-5"),
+        "\u{2013}",
+        "unreachable rows carry the dash"
+    );
+    let minimax_enabled = body.iter().any(|r| {
+        matches!(r,
+        crate::popup::PopupRow::Entry { label, enabled, .. } if label == "MiniMax-M2" && *enabled)
+    });
+    assert!(
+        minimax_enabled,
+        "every more row is enabled so the cursor lands on it"
+    );
+    assert!(
+        body.iter().any(|r| matches!(r,
+        crate::popup::PopupRow::Header(h) if h == "zai")),
+        "rows group by provider"
+    );
+    let (filtered, _) = super::agent_launcher::filtered_popup(
+        Focus::Model,
+        body,
+        &picker.all_actions,
+        "minimax",
+        picker.anchor,
+    );
+    let visible = row_labels(&filtered.rows);
+    assert_eq!(
+        visible,
+        vec!["MiniMax-M2".to_string()],
+        "typing narrows the more list to the matching rows: {visible:?}"
+    );
+    assert!(
+        filtered
+            .rows
+            .iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Header(h) if h == "minimax")),
+        "the matching row's provider header survives the filter"
+    );
+    let current = l.picker.take().unwrap();
+    super::agent_launcher::picker_step_down(&mut l, &v.launcher_catalog, &v.backlog, current);
+    let picker = l.picker.as_ref().expect("back on the main list");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::Main);
+    assert!(
+        picker
+            .all_rows
+            .iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "harness default")),
+        "esc returns to the main list: {:?}",
+        picker.all_rows,
+    );
+}
