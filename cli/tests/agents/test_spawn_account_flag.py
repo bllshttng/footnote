@@ -443,6 +443,12 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
 
     def fake_run(argv, **kw):
         captured["env"] = kw.get("env")
+        # The seal handshake probes `state-root` first and demands the pinned
+        # FNO_STATE_DIR back on the last line, exactly as the real binary answers.
+        if len(argv) > 1 and argv[1] == "state-root":
+            return SimpleNamespace(
+                returncode=0, stdout=f"{kw['env']['FNO_STATE_DIR']}\n", stderr=""
+            )
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"session_id": "0198c0de-1111-7000-8000-00000000000a"}),

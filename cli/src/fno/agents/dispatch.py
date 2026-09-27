@@ -6145,12 +6145,15 @@ def _mux_pane_send(
             return False
     try:
         if confirm and not raw and not review:
-            # Wrapped pane mail rides the Rust typed lane (C11/C12/C17);
-            # raw sends, digests and review keep the Python path below.
-            sent = _mail_inject_pane_lane()
-            if not sent:
-                _record_failure("pane-lane-not-confirmed")
-            return sent
+            # Wrapped pane mail rides the Rust typed lane (C11/C12/C17); raw
+            # sends, digests and review keep the Python path below. No binary:
+            # the Python lane below carries the same confirm contract.
+            from fno import rust_binary as _rb
+            if _rb.resolve_installed_binary() is not None:
+                sent = _mail_inject_pane_lane()
+                if not sent:
+                    _record_failure("pane-lane-not-confirmed")
+                return sent
         sent = _paste_then_submit()
         outcome = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
@@ -6314,7 +6317,7 @@ def _delivery_policy_refusal(
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
-        return BUS_ONLY_POLICY
+        return _gate_answer_in_process(token, body)
     try:
         argv = [str(binary), "mail-hold", "--gate"]
         if park:
@@ -6330,6 +6333,19 @@ def _delivery_policy_refusal(
         return BUS_ONLY_POLICY
     except Exception:  # noqa: BLE001 - fail closed: never lift a hold we could not read
         return BUS_ONLY_POLICY
+
+
+def _gate_answer_in_process(token: str, body: Optional[str]) -> Optional[str]:
+    """The gate's C15 own pass and lapsed-clock read in-process (no binary)."""
+    from fno.agents.self_stamp import resolve_self_session_id
+    from fno.mail import hold as hold_mod
+
+    own = resolve_self_session_id()
+    if own and own.casefold() == token.casefold():
+        return None
+    if hold_mod.lapsed(token):
+        return None
+    return BUS_ONLY_POLICY
 
 
 def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:

@@ -559,7 +559,7 @@ fn hold_receipt(clock: &Clock, name: &str, now: chrono::DateTime<chrono::Utc>) -
         ));
     }
     Some(format!(
-        "held until about {}: {name} is in do-not-disturb; delivers itself then",
+        "held until about {}: {name} is in do-not-disturb (wall clock); delivers itself then",
         hhmm(until)
     ))
 }

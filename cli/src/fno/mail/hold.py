@@ -335,6 +335,14 @@ def remaining_label(handle) -> Optional[str]:
     return f"~{math.ceil(seconds / 60)}m"
 
 
+def _in_process_receipt(target) -> Optional[str]:
+    """The receipt without the gate binary: the shared rule reads the clock."""
+    hold = read_any(target)
+    if hold is None or hold.until is None or hold.until <= _now():
+        return None
+    return clock_description(hold)
+
+
 def bounce_reason(recipient) -> Optional[str]:
     """The busy-mode receipt a sender reads, or None when no hold is running.
 
@@ -347,9 +355,12 @@ def bounce_reason(recipient) -> Optional[str]:
     """
     from fno import rust_binary
 
+    # A row cannot ride the token door (str(row) matches no gate key), and
+    # with no binary the door cannot run at all: read in-process.
+    row_like = hasattr(recipient, "harness_session_id") or hasattr(recipient, "name")
     binary = rust_binary.resolve_installed_binary()
-    if binary is None:
-        return None
+    if row_like or binary is None:
+        return _in_process_receipt(recipient)
     try:
         proc = subprocess.run(
             [str(binary), "mail-hold", "--gate", "--session", str(recipient)],
