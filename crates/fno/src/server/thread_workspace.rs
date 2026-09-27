@@ -30,13 +30,14 @@ impl Core {
 
     /// The spawner rung: the row's `spawned_by_session` edge joined to the
     /// parent registry row(s) by harness session id (trimmed, case-insensitive
-    /// - the same tolerance `spawned_by_name` applies), skipping a row that
-    /// carries the child's own name. A parent pane-hosted on this server
-    /// answers where its pane lives NOW (`find_pane`), so the row lands where
-    /// ResumeAgent would put it; any other parent answers with its own full
-    /// chain one hop deeper. Parents resolving to DIFFERENT workspaces read
-    /// as absent: an ambiguous edge is never a confident wrong answer (the
-    /// `spawned_by_name` rule).
+    /// - the same tolerance `spawned_by_name` applies). The session id is the
+    /// join key, so a parent sharing the child's display name still answers;
+    /// a corrupted self-edge just walks to the hop cap and falls to cwd. A
+    /// parent pane-hosted on this server answers where its pane lives NOW
+    /// (`find_pane`), so the row lands where ResumeAgent would put it; any
+    /// other parent answers with its own full chain one hop deeper. Parents
+    /// resolving to DIFFERENT workspaces read as absent: an ambiguous edge is
+    /// never a confident wrong answer (the `spawned_by_name` rule).
     fn spawner_workspace(&self, a: &RegistryAgent, depth: u32) -> Option<u64> {
         if depth >= HOP_CAP {
             return None;
@@ -48,7 +49,6 @@ impl Core {
         let mut squads = self
             .agents
             .iter()
-            .filter(|p| p.name != a.name)
             .filter(|p| {
                 agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
             })
@@ -324,6 +324,31 @@ mod tests {
             row(
                 "probe",
                 "/nowhere",
+                Some("codex"),
+                Some("sid-child"),
+                Some("sid-parent"),
+            ),
+        ];
+        assert_eq!(core.thread_workspace(&core.agents[1].clone()), Some(1));
+    }
+
+    #[test]
+    fn a_parent_sharing_the_childs_display_name_still_answers() {
+        // The session id is the join key: a parent row named exactly like
+        // its child answers the spawner rung; the name never filters it.
+        let mut core = empty_core();
+        squad_at(&mut core, 1, "/footnote", 5);
+        core.agents = vec![
+            row(
+                "probe",
+                "/footnote",
+                Some("claude"),
+                Some("sid-parent"),
+                None,
+            ),
+            row(
+                "probe",
+                "/other",
                 Some("codex"),
                 Some("sid-child"),
                 Some("sid-parent"),

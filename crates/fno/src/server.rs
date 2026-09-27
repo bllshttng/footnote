@@ -5677,24 +5677,33 @@ impl Core {
         // row with no registry entry, because it matches ANY member named
         // `name` across workspaces, where the resolver would refuse the
         // ambiguity - running it first would split a dangling dead row from
-        // its own resume.
-        let sid = match self.agents.iter().find(|a| a.name == name) {
-            Some(row) => self
-                .thread_workspace(row)
-                .or_else(|| self.session.find_by_cwd(&facts.cwd)),
-            None => self
-                .squad_members
-                .iter()
-                .find(|(_, members)| {
-                    members.iter().any(|member| {
-                        stored_member
-                            .as_ref()
-                            .is_some_and(|stored| stored == member)
-                            || member.worker.as_deref() == Some(name)
+        // its own resume. The row join repeats the selection above: the
+        // member-identity match when a stored member names the row, else the
+        // display name. A name-only find could pick a DIFFERENT row sharing
+        // the display name and place the resume in its workspace.
+        let sid = {
+            let registry_row = self.agents.iter().find(|a| match stored_member.as_ref() {
+                Some(member) => worker_registry_match(member, a, name),
+                None => a.name == name,
+            });
+            match registry_row {
+                Some(row) => self
+                    .thread_workspace(row)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+                None => self
+                    .squad_members
+                    .iter()
+                    .find(|(_, members)| {
+                        members.iter().any(|member| {
+                            stored_member
+                                .as_ref()
+                                .is_some_and(|stored| stored == member)
+                                || member.worker.as_deref() == Some(name)
+                        })
                     })
-                })
-                .map(|(sid, _)| *sid)
-                .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+                    .map(|(sid, _)| *sid)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+            }
         }
         .unwrap_or(view.0);
         // A claude row's resume runs the canonical re-entry
