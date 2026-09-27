@@ -86,28 +86,59 @@ fn strip_ansi(s: &str) -> String {
 
 /// The `(installed, latest)` pair from `uv tool list --outdated`, whose fno
 /// line reads `fno v0.3.1 [latest: 0.3.2]`.
-pub(crate) fn parse_uv_outdated(stdout: &str) -> Option<(String, String)> {
-    strip_ansi(stdout).lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("fno v")?;
-        let (installed, tail) = rest.split_once(' ')?;
-        let latest = tail.trim().strip_prefix("[latest: ")?.strip_suffix(']')?;
-        Some((installed.to_string(), latest.trim().to_string()))
-    })
+pub(crate) fn parse_uv_outdated(stdout: &str) -> Result<Option<(String, String)>, String> {
+    for line in strip_ansi(stdout).lines().map(str::trim) {
+        if line.split_whitespace().next() != Some("fno") {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("fno v") else {
+            return Err("unrecognized fno outdated row".into());
+        };
+        let (installed, tail) = rest
+            .split_once(' ')
+            .ok_or_else(|| "missing latest version".to_string())?;
+        let latest = tail
+            .trim()
+            .strip_prefix("[latest: ")
+            .and_then(|value| value.strip_suffix(']'))
+            .ok_or_else(|| "missing latest version".to_string())?;
+        if installed.is_empty() || latest.trim().is_empty() {
+            return Err("empty version in fno outdated row".into());
+        }
+        return Ok(Some((installed.to_string(), latest.trim().to_string())));
+    }
+    Ok(None)
 }
 
 /// The `(installed, latest)` pair from `brew outdated --json=v2`. A tapped
 /// formula can report its full name (`owner/tap/fno`).
-pub(crate) fn parse_brew_outdated(json: &str) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    value["formulae"].as_array()?.iter().find_map(|f| {
-        let name = f["name"].as_str()?;
+pub(crate) fn parse_brew_outdated(json: &str) -> Result<Option<(String, String)>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let formulae = value
+        .get("formulae")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "missing formulae array".to_string())?;
+    for formula in formulae {
+        let Some(name) = formula.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
         if name != "fno" && !name.ends_with("/fno") {
-            return None;
+            continue;
         }
-        let installed = f["installed_versions"].as_array()?.first()?.as_str()?;
-        let latest = f["current_version"].as_str()?;
-        Some((installed.to_string(), latest.to_string()))
-    })
+        let installed = formula
+            .get("installed_versions")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|versions| versions.first())
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "fno formula is missing an installed version".to_string())?;
+        let latest = formula
+            .get("current_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "fno formula is missing the current version".to_string())?;
+        return Ok(Some((installed.to_string(), latest.to_string())));
+    }
+    Ok(None)
 }
 
 /// Fold a uv receipt and the outdated run into an outcome. `outdated` is only
@@ -126,14 +157,15 @@ where
     match outdated().await {
         Err(e) => ReleaseOutcome::Degraded(format!("uv tool list --outdated: {e}")),
         Ok(stdout) => match parse_uv_outdated(&stdout) {
-            Some((installed, latest)) => ReleaseOutcome::Newer {
+            Ok(Some((installed, latest))) => ReleaseOutcome::Newer {
                 channel: Channel::Uv,
                 installed,
                 latest,
             },
-            None => ReleaseOutcome::Current {
+            Ok(None) => ReleaseOutcome::Current {
                 channel: Channel::Uv,
             },
+            Err(e) => ReleaseOutcome::Degraded(format!("uv tool list --outdated: {e}")),
         },
     }
 }
@@ -175,14 +207,15 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
         return match run(Path::new("brew"), &args, PROBE_TIMEOUT).await {
             Err(e) => ReleaseOutcome::Degraded(format!("brew outdated: {e}")),
             Ok(json) => match parse_brew_outdated(&json) {
-                Some((installed, latest)) => ReleaseOutcome::Newer {
+                Ok(Some((installed, latest))) => ReleaseOutcome::Newer {
                     channel: Channel::Brew,
                     installed,
                     latest,
                 },
-                None => ReleaseOutcome::Current {
+                Ok(None) => ReleaseOutcome::Current {
                     channel: Channel::Brew,
                 },
+                Err(e) => ReleaseOutcome::Degraded(format!("brew outdated: {e}")),
             },
         };
     }
@@ -293,6 +326,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_uv_fno_row_degrades_instead_of_being_current() {
+        let receipt = "[tool]\nrequirements = [{ name = \"fno\" }]\n";
+        let outcome = uv_outcome(Some(receipt), || async {
+            Ok("fno v0.3.1 [newer: 0.3.2]".to_string())
+        })
+        .await;
+        assert!(
+            matches!(outcome, ReleaseOutcome::Degraded(reason) if reason.contains("uv tool list --outdated")),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn current_when_fno_absent_from_outdated_and_missing_receipt_not_applicable() {
         let receipt = "[tool]\nrequirements = [{ name = \"fno\" }]\n";
         let outcome = uv_outcome(Some(receipt), || async {
@@ -311,21 +357,33 @@ mod tests {
     }
 
     #[test]
+    fn malformed_brew_output_is_not_a_current_result() {
+        assert!(parse_brew_outdated("{").is_err());
+        assert!(parse_brew_outdated(r#"{"formulae":[{"name":"fno"}],"casks":[]}"#).is_err());
+        assert!(parse_brew_outdated(r#"{"formulae":[],"casks":[]}"#)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn parsers_strip_ansi_and_read_tapped_brew_formula() {
         assert_eq!(
-            parse_uv_outdated("\u{1b}[1mfno\u{1b}[0m v0.3.1 [latest: 0.3.2]"),
+            parse_uv_outdated("\u{1b}[1mfno\u{1b}[0m v0.3.1 [latest: 0.3.2]").unwrap(),
             Some(("0.3.1".into(), "0.3.2".into()))
         );
         assert_eq!(
-            parse_uv_outdated("fno v0.3.1 \u{1b}[2m[latest: 0.3.2]\u{1b}[0m"),
+            parse_uv_outdated("fno v0.3.1 \u{1b}[2m[latest: 0.3.2]\u{1b}[0m").unwrap(),
             Some(("0.3.1".into(), "0.3.2".into()))
         );
         let brew = r#"{"formulae":[{"name":"bllshttng/tap/fno","installed_versions":["0.3.1"],"current_version":"0.3.2"}],"casks":[]}"#;
         assert_eq!(
-            parse_brew_outdated(brew),
+            parse_brew_outdated(brew).unwrap(),
             Some(("0.3.1".into(), "0.3.2".into()))
         );
-        assert_eq!(parse_brew_outdated(r#"{"formulae":[],"casks":[]}"#), None);
+        assert_eq!(
+            parse_brew_outdated(r#"{"formulae":[],"casks":[]}"#).unwrap(),
+            None
+        );
         assert_eq!(Channel::Brew.upgrade_command(), "brew upgrade fno");
         assert_eq!(Channel::Uv.upgrade_command(), "uv tool upgrade fno");
     }
