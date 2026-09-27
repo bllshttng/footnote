@@ -5910,6 +5910,10 @@ def _mux_pane_send(
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])
+        if self_send:
+            # C15: the pane's own send passed the hold gate (pass=own), so the
+            # pane's DND refusal stands down for this write.
+            send_args.append("--hold-pass")
         if source_label:
             # The floor's audit row joins this dispatch to its bus record by
             # the mail id; declared, never sniffed from the wrapped body.
@@ -5954,6 +5958,40 @@ def _mux_pane_send(
             if proc is None or proc.returncode != 0:
                 return False
         return True
+
+    def _mail_inject_pane_lane() -> bool:
+        """The Rust mail-inject pane lane: one argv, the whole typed-lane
+        contract (C11/C12/C17). ``text`` is the already-gated, already-wrapped
+        body; the lane types it flattened to one line."""
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+        if binary is None:
+            print(
+                f"mux pane {pane} send demoted to durable: the mail-inject binary is missing",
+                file=sys.stderr,
+            )
+            return False
+        recipient_id = (
+            getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+            or session
+        )
+        argv = [
+            str(binary),
+            "mail-inject",
+            "--session",
+            str(recipient_id),
+            "--harness",
+            "pane",
+            "--pane",
+            f"{session}:{pane_id}",
+            "--harness-row",
+            (getattr(entry, "harness", "") or "") or "claude",
+            "--enter-delay-ms",
+            str(int(enter_delay_s * 1000)),
+        ]
+        return _run_mail_inject(argv, text, _MAIL_INJECT_TIMEOUT_S, _record_failure)
 
     def _read_screen() -> Optional[str]:
         proc = _run(["read", pane])
@@ -6123,6 +6161,18 @@ def _mux_pane_send(
             )
             return False
     try:
+        if confirm and not raw and not review:
+            # C11/C12/C17: wrapped mux-pane mail rides the Rust mail-inject
+            # pane lane - one-line typing (never a paste), the quiet gate,
+            # one extra Enter and a bounded withdraw, confirmed by the hosted
+            # harness's own record (the codex landing confirm this lane never
+            # had). Raw sends, digests and review requests keep the Python
+            # path below.
+            sent = _mail_inject_pane_lane()
+            outcome: bool | str = sent
+            if not sent:
+                _record_failure("pane-lane-not-confirmed")
+            return outcome
         sent = _paste_then_submit()
         outcome = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":

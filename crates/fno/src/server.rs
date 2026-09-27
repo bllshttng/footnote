@@ -519,21 +519,6 @@ fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'
     }
 }
 
-/// True only when the current session/pane join names a LIVE row that
-/// explicitly declared the bus-only delivery policy. DND is presence, never
-/// liveness, but an exited row is skipped (matching [`rerun_allowed`]): a hold
-/// stamped on a reaped agent must not veto the shell or successor that
-/// inherited the pane and can never lift it.
-fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
-    agents.iter().any(|a| {
-        !a.exited
-            && a.dnd
-            && a.mux
-                .as_ref()
-                .is_some_and(|(s, p)| s == session && *p == pane)
-    })
-}
-
 /// Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -808,6 +793,10 @@ pub(crate) enum CoreMsg {
         bytes: Vec<u8>,
         guarded: bool,
         expected_identity: Option<String>,
+        /// A send the Rust hold gate already passed (`own`, `control:` or a
+        /// parked-mail replay): the pane's DND refusal stands down for this
+        /// write. Every other guard stays.
+        hold_pass: bool,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `Err` carries the refusal reason: either the read
         /// failed or the registry carries a row whose pane cannot be read
@@ -9348,6 +9337,7 @@ impl Core {
         guarded: bool,
         expected_identity: Option<&str>,
         agents: Result<Vec<RegistryAgent>, &'static str>,
+        hold_pass: bool,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
@@ -9428,9 +9418,10 @@ impl Core {
                 };
             }
         }
-        if agents
-            .as_deref()
-            .is_ok_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+        if !hold_pass
+            && agents
+                .as_deref()
+                .is_ok_and(|rows| agent_rows_join::pane_is_dnd(rows, &self.session_name, pane))
         {
             return ServerMsg::Err {
                 code: err_code::TARGET_DND,
@@ -12003,11 +11994,18 @@ impl Core {
                 bytes,
                 guarded,
                 expected_identity,
+                hold_pass,
                 agents,
                 reply,
             } => {
-                let msg =
-                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
+                let msg = self.pane_send(
+                    pane,
+                    &bytes,
+                    guarded,
+                    expected_identity.as_deref(),
+                    agents,
+                    hold_pass,
+                );
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -13644,6 +13642,7 @@ async fn handle_control(
             bytes,
             guarded,
             expected_identity,
+            hold_pass,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -13668,6 +13667,7 @@ async fn handle_control(
                     bytes,
                     guarded,
                     expected_identity,
+                    hold_pass,
                     agents,
                     reply: reply_tx,
                 })

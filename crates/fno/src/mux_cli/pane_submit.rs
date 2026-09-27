@@ -31,6 +31,7 @@ pub(super) fn send_pane_bytes(
     bytes: Vec<u8>,
     guarded: bool,
     expected_identity: Option<&str>,
+    hold_pass: bool,
 ) -> Result<(), ControlError> {
     match control_roundtrip(
         sock,
@@ -40,6 +41,7 @@ pub(super) fn send_pane_bytes(
             bytes,
             guarded,
             expected_identity: expected_identity.map(str::to_string),
+            hold_pass,
         },
     )? {
         ServerMsg::Ok => Ok(()),
@@ -64,7 +66,7 @@ pub(super) fn submit_pane(
     expected_identity: Option<&str>,
     json: bool,
 ) -> i32 {
-    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity) {
+    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity, false) {
         eprintln!("fno mux pane: {e}");
         return match e {
             ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
@@ -78,7 +80,15 @@ pub(super) fn submit_pane(
     }
     std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
     let baseline = pane_text(sock, session, pane).ok();
-    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity) {
+    if let Err(e) = send_pane_bytes(
+        sock,
+        session,
+        pane,
+        vec![b'\r'],
+        false,
+        expected_identity,
+        false,
+    ) {
         eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
         if let ControlError::FatalCode { code, .. } = e {
             if code == err_code::TARGET_IDENTITY_MISMATCH {
@@ -101,7 +111,15 @@ pub(super) fn submit_pane(
         }
         std::thread::sleep(Duration::from_millis(SUBMIT_CONFIRM_INTERVAL_MS));
         if (attempt + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity);
+            let _ = send_pane_bytes(
+                sock,
+                session,
+                pane,
+                vec![b'\r'],
+                false,
+                expected_identity,
+                false,
+            );
         }
     }
     eprintln!("fno mux pane: text delivered, submission unconfirmed");

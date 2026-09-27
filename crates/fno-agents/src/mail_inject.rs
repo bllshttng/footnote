@@ -135,6 +135,10 @@ pub enum MailInjectHarness {
     Codex,
     Opencode,
     Keeper,
+    /// (v94) The mux-pane lane (C11, C12, C15, C17): typed through
+    /// `fno mux pane send --raw`, DND-passed when the hold gate says so,
+    /// confirmed by the hosted harness's own accepted-turn record.
+    Pane,
 }
 
 impl MailInjectHarness {
@@ -148,6 +152,7 @@ impl MailInjectHarness {
             MailInjectHarness::Codex => "codex",
             MailInjectHarness::Opencode => "opencode",
             MailInjectHarness::Keeper => "keeper-hosted",
+            MailInjectHarness::Pane => "pane",
         }
     }
 }
@@ -197,6 +202,9 @@ pub struct MailInjectArgs {
     /// the payload runs that verb; the only spelling that carries a
     /// session-ending or context-destroying verb past the risk guard.
     pub ack_verb_risk: Option<String>,
+    /// `--pane <session>:<pane_id>`: the pane-lane address (which mux server
+    /// hosts the recipient and which pane id to type into).
+    pub pane: Option<String>,
 }
 
 /// Resolution miss: no roster entry for the session, or a roster entry with no
@@ -243,6 +251,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut probe = false;
     let mut lane_heal = false;
     let mut no_rebind = false;
+    let mut pane: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -262,6 +271,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                     "claude" => MailInjectHarness::Claude,
                     "codex" => MailInjectHarness::Codex,
                     "opencode" => MailInjectHarness::Opencode,
+                    "pane" => MailInjectHarness::Pane,
                     name if keeper_lane_harness(name) => MailInjectHarness::Keeper,
                     _ => {
                         return Err((
@@ -293,6 +303,13 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 );
             }
             "--self-send" => self_send = true,
+            "--pane" => {
+                pane = Some(
+                    it.next()
+                        .ok_or((2, "mail-inject: --pane needs session:pane-id".to_string()))?
+                        .to_string(),
+                );
+            }
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
@@ -344,7 +361,10 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     // the --harness value IS the hosted harness's row name, so the delay
     // resolves off that row here; lane A keeps its enum-keyed resolution.
     let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match harness {
-        MailInjectHarness::Keeper => {
+        // Keeper and pane recipients settle on the HOSTED harness's own row
+        // (the TUI receiving the paste); the pane lane labels no capability
+        // row of its own.
+        MailInjectHarness::Keeper | MailInjectHarness::Pane => {
             enter_delay_for_harness(harness_flag.as_deref().unwrap_or("claude"))
         }
         _ => default_enter_delay_ms(harness),
@@ -363,6 +383,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         no_rebind,
         harness_row: harness_flag,
         ack_verb_risk,
+        pane,
     })
 }
 
@@ -461,6 +482,7 @@ pub fn emit_raw_inject_audit_with_origin(
         // The audit records the LANE; the hosted harness's own row resolved
         // the settle delay and the confirm target at delivery time.
         MailInjectHarness::Keeper => ("keeper-hosted", "keeper-pty"),
+        MailInjectHarness::Pane => ("pane", "mux-pane"),
     };
     let payload_for_event: String = text.chars().take(512).collect();
     let mut fields = serde_json::Map::new();
@@ -929,7 +951,8 @@ fn resolve_keeper_target_in(
 /// harness with no local accepted-turn record types but stays unconfirmed:
 /// composer echo and scrollback repaint are typing progress, never delivery
 ///.
-enum KeeperConfirm {
+#[derive(Debug)]
+enum LaneConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
         path: PathBuf,
@@ -956,55 +979,84 @@ enum KeeperConfirm {
     Refused(&'static str),
 }
 
-fn resolve_keeper_confirm(
-    target: &KeeperTarget,
+fn resolve_confirm(
+    hosted_harness: &str,
     session: &str,
+    cwd: &Path,
     pi_store: Option<&crate::pi::PiStore>,
     grok_root: &Path,
-) -> KeeperConfirm {
-    match target.hosted_harness.as_str() {
+) -> LaneConfirm {
+    match hosted_harness {
         // cursor-agent's chat store is remote (measured: the id appears in no
         // file under its state root after two live turns) and agy keeps its
         // conversations in a sqlite db - neither has a per-turn transcript a
         // confirm could grep, and pty paint is not acceptance evidence.
         // Both type and stay unconfirmed.
-        "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
-        "pi" => {
-            let Some(store) = pi_store else {
-                return KeeperConfirm::Refused("session-store-unreadable");
-            };
-            match crate::pi::lookup_sessions_in(store, &target.cwd, session) {
-                crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+        "cursor-agent" | "agy" => LaneConfirm::Unconfirmable,
+        // Lane A claude: the recipient's own transcript is the confirm
+        // target, exactly the pane lane's claude arm below.
+        "claude" => {
+            match crate::claude_drive::find_transcript_in(
+                &crate::claude_drive::claude_projects_dir(),
+                session,
+            ) {
+                Some(file) => LaneConfirm::Transcript {
                     baseline: transcript_len(&file),
                     path: file,
                 },
-                crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                None => LaneConfirm::PendingStore {
+                    harness: "claude".to_string(),
+                },
+            }
+        }
+        // The codex landing confirm the codex pane never had (C12): a
+        // rollout file is the accepted-turn record the content confirm
+        // greps.
+        "codex" => match crate::codex_store::codex_rollout_path(None, session) {
+            Some(file) => LaneConfirm::Transcript {
+                baseline: transcript_len(&file),
+                path: file,
+            },
+            None => LaneConfirm::PendingStore {
+                harness: "codex".to_string(),
+            },
+        },
+        "pi" => {
+            let Some(store) = pi_store else {
+                return LaneConfirm::Refused("session-store-unreadable");
+            };
+            match crate::pi::lookup_sessions_in(store, cwd, session) {
+                crate::pi::SessionLookup::One { file } => LaneConfirm::Transcript {
+                    baseline: transcript_len(&file),
+                    path: file,
+                },
+                crate::pi::SessionLookup::None => LaneConfirm::PendingStore {
                     harness: "pi".to_string(),
                 },
                 crate::pi::SessionLookup::Duplicate { .. } => {
-                    KeeperConfirm::Refused("duplicate-session-store")
+                    LaneConfirm::Refused("duplicate-session-store")
                 }
                 crate::pi::SessionLookup::Unknown { .. } => {
-                    KeeperConfirm::Refused("session-store-unreadable")
+                    LaneConfirm::Refused("session-store-unreadable")
                 }
             }
         }
         "grok" => match crate::grok_store::lookup_session(grok_root, session) {
-            crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+            crate::pi::SessionLookup::One { file } => LaneConfirm::Transcript {
                 baseline: transcript_len(&file),
                 path: file,
             },
-            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+            crate::pi::SessionLookup::None => LaneConfirm::PendingStore {
                 harness: "grok".to_string(),
             },
             crate::pi::SessionLookup::Duplicate { .. } => {
-                KeeperConfirm::Refused("duplicate-session-store")
+                LaneConfirm::Refused("duplicate-session-store")
             }
             crate::pi::SessionLookup::Unknown { .. } => {
-                KeeperConfirm::Refused("session-store-unreadable")
+                LaneConfirm::Refused("session-store-unreadable")
             }
         },
-        _ => KeeperConfirm::Refused("no-confirm-source"),
+        _ => LaneConfirm::Refused("no-confirm-source"),
     }
 }
 
@@ -1069,8 +1121,14 @@ pub fn deliver_via_keeper_socket_in(
             Err(_) => None,
         },
     };
-    let confirm = resolve_keeper_confirm(&target, session, store, grok_root);
-    if let KeeperConfirm::Refused(reason) = confirm {
+    let confirm = resolve_confirm(
+        &target.hosted_harness,
+        session,
+        &target.cwd,
+        store,
+        grok_root,
+    );
+    if let LaneConfirm::Refused(reason) = confirm {
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
@@ -1100,7 +1158,7 @@ pub fn deliver_via_keeper_socket_in(
     }
     // The keeper `Unconfirmable` arm (cursor-agent, agy) keeps today's shape:
     // it types and never withdraws, because no landing can be seen there.
-    let withdraw_on_silence = !matches!(confirm, KeeperConfirm::Unconfirmable);
+    let withdraw_on_silence = !matches!(confirm, LaneConfirm::Unconfirmable);
     let confirmed = move || -> bool {
         if let Some(stream) = confirm_stream.as_ref() {
             let mut sink = [0u8; 8192];
@@ -1113,31 +1171,44 @@ pub fn deliver_via_keeper_socket_in(
             }
         }
         match &confirm {
-            KeeperConfirm::Transcript { path, baseline } => {
+            LaneConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, &marker, *baseline).unwrap_or(false)
             }
-            KeeperConfirm::PendingStore { harness } => {
-                let hit = match harness.as_str() {
-                    "pi" => match store {
-                        Some(s) => crate::pi::lookup_sessions_in(s, &target.cwd, session),
-                        None => return false,
+            LaneConfirm::PendingStore { harness } => match harness.as_str() {
+                "pi" => match store {
+                    Some(s) => match crate::pi::lookup_sessions_in(s, &target.cwd, session) {
+                        crate::pi::SessionLookup::One { file } => {
+                            confirm_content_after(&file, &marker, 0).unwrap_or(false)
+                        }
+                        _ => false,
                     },
-                    _ => crate::grok_store::lookup_session(grok_root, session),
-                };
-                match hit {
+                    None => false,
+                },
+                "claude" => match crate::claude_drive::find_transcript_in(
+                    &crate::claude_drive::claude_projects_dir(),
+                    session,
+                ) {
+                    Some(file) => confirm_content_after(&file, &marker, 0).unwrap_or(false),
+                    None => false,
+                },
+                "codex" => match crate::codex_store::codex_rollout_path(None, session) {
+                    Some(file) => confirm_content_after(&file, &marker, 0).unwrap_or(false),
+                    None => false,
+                },
+                _ => match crate::grok_store::lookup_session(grok_root, session) {
                     crate::pi::SessionLookup::One { file } => {
                         confirm_content_after(&file, &marker, 0).unwrap_or(false)
                     }
                     _ => false,
-                }
-            }
+                },
+            },
             // No local accepted-turn record exists to grep, so nothing on
             // this lane ever confirms. The budget still runs its
             // full course: the CR resubmits inside it are send retries for a
             // busy recipient, not confirm polls, and the honest outcome is
             // the unconfirmed receipt whose durable recovery Python writes.
-            KeeperConfirm::Unconfirmable => false,
-            KeeperConfirm::Refused(_) => false,
+            LaneConfirm::Unconfirmable => false,
+            LaneConfirm::Refused(_) => false,
         }
     };
     let journal = AgentsHome::from_env().events_jsonl();
@@ -1390,7 +1461,7 @@ fn recipient_capability_row(harness: MailInjectHarness) -> &'static str {
     match harness {
         MailInjectHarness::Codex => "codex",
         MailInjectHarness::Opencode => "opencode",
-        MailInjectHarness::Claude | MailInjectHarness::Keeper => "claude",
+        MailInjectHarness::Claude | MailInjectHarness::Keeper | MailInjectHarness::Pane => "claude",
     }
 }
 /// Retired form, still accepted for queued records.
@@ -1699,6 +1770,168 @@ fn forged_envelope_decision(text: &str) -> Option<i32> {
     forged_envelope_decision_at(text, None)
 }
 
+/// The pane lane's transport: each write rides `fno mux pane send --stdin
+/// --raw`, the same door the writer-claim holder uses, addressed with
+/// `--server` so a foreign session pane is reachable, and `--hold-pass` when
+/// the hold gate passed this text so a DND pane accepts the delivery
+/// (AC17-EDGE) without standing its guard down for anyone else.
+struct PaneTransport {
+    server: String,
+    address: String,
+    fno_id: Option<String>,
+    hold_pass: bool,
+}
+
+impl crate::claude_attach::ControlTransport for PaneTransport {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+        cmd.args([
+            "mux",
+            "pane",
+            "send",
+            &self.address,
+            "--stdin",
+            "--raw",
+            "--server",
+            &self.server,
+        ]);
+        if let Some(id) = &self.fno_id {
+            cmd.args(["--fno-id", id]);
+        }
+        if self.hold_pass {
+            cmd.arg("--hold-pass");
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit());
+        let mut child = cmd.spawn()?;
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(line.as_bytes())?;
+        let status = child.wait()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("pane send refused the write"))
+        }
+    }
+    fn recv_line(&mut self) -> io::Result<Option<String>> {
+        // The confirm loop polls the hosted harness's transcript, never the
+        // subprocess exit stream.
+        Ok(None)
+    }
+}
+
+/// Deliver `text` to a mux pane (C11, C12, C15, C17): the quiet gate, the
+/// one-line flattening and the confirm-or-withdraw cadence of the typed
+/// lanes, with the pane transport underneath and the HOSTED harness's own
+/// accepted-turn record (claude transcript or codex rollout) as the confirm
+/// target -- the landing confirm the codex pane never had.
+fn deliver_via_pane(
+    session: &str,
+    address: &str,
+    hosted_harness: Option<&str>,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    let (server, pane_id) = match address.split_once(':') {
+        Some(pair) => pair,
+        None => return Err(NOT_INJECTABLE),
+    };
+    let row_hosted = hosted_harness
+        .map(str::to_string)
+        .unwrap_or_else(|| resolve_row_harness(session).unwrap_or_else(|| "claude".to_string()));
+    let confirm_cwd = resolve_row_cwd(session);
+    let confirm_target = resolve_confirm(&row_hosted, session, &confirm_cwd, None, &grok_root());
+    if let LaneConfirm::Refused(reason) = confirm_target {
+        return Err(reason);
+    }
+    let mut transport = PaneTransport {
+        server: server.to_string(),
+        address: pane_id.to_string(),
+        fno_id: Some(session.to_string()),
+        // The gate's pass rides the pane write: a `control:` directive or the
+        // pane's own send lands on a held pane (AC17-EDGE); a plain send
+        // carries no pass and the pane's DND refusal stands.
+        hold_pass: crate::mail_hold::gate(session, Some(text), chrono::Utc::now())
+            .pass
+            .is_some(),
+    };
+    let typed_since = now_ms();
+    let marker = typed_marker(text);
+    inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
+        |e| match e {
+            DriveError::UnsafeText => "unsafe-text",
+            _ => "io-error",
+        },
+    )?;
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
+        &mut transport,
+        attempts,
+        Duration::from_millis(interval_ms),
+        one_line(text).len(),
+        typed_since,
+        &journal,
+        session,
+        true,
+        move || match &confirm_target {
+            LaneConfirm::Transcript { path, baseline } => {
+                confirm_content_after(path, &marker, *baseline).unwrap_or(false)
+            }
+            LaneConfirm::PendingStore { harness } => {
+                let file = match harness.as_str() {
+                    "claude" => crate::claude_drive::find_transcript_in(
+                        &crate::claude_drive::claude_projects_dir(),
+                        session,
+                    ),
+                    "codex" => crate::codex_store::codex_rollout_path(None, session),
+                    _ => None,
+                };
+                file.and_then(|f| confirm_content_after(&f, &marker, 0).ok())
+                    .unwrap_or(false)
+            }
+            LaneConfirm::Unconfirmable => false,
+            LaneConfirm::Refused(_) => false,
+        },
+    )
+}
+
+/// The registry row's harness name for `session`, for the pane lane's
+/// confirm-target resolution; None reads claude (the largest confirm set).
+fn resolve_row_harness(session: &str) -> Option<String> {
+    let registry = crate::state::load_registry(&AgentsHome::from_env().registry_json()).ok()?;
+    registry
+        .entries
+        .iter()
+        .find(|e| e.harness_session_id.as_deref() == Some(session))
+        .and_then(|e| e.harness.clone())
+}
+
+/// The registry row's cwd for `session` (pi-scoped confirms); empty when no
+/// row carries it.
+fn resolve_row_cwd(session: &str) -> PathBuf {
+    crate::state::load_registry(&AgentsHome::from_env().registry_json())
+        .ok()
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .find(|e| e.harness_session_id.as_deref() == Some(session))
+                .map(|e| PathBuf::from(&e.cwd))
+        })
+        .unwrap_or_default()
+}
+
+fn grok_root() -> std::path::PathBuf {
+    crate::grok_store::grok_sessions_root()
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -1832,7 +2065,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     // line a delivery could land over. A timeout returns not-delivered and
     // Python queues the mail durable, so it waits on the bus.
     match args.harness {
-        MailInjectHarness::Claude | MailInjectHarness::Keeper => {
+        MailInjectHarness::Claude | MailInjectHarness::Keeper | MailInjectHarness::Pane => {
             if let Err(reason) = wait_for_quiet_in(
                 &home.events_jsonl(),
                 &home.registry_json(),
@@ -1876,6 +2109,21 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             args.enter_delay_ms,
         )
         .map_err(|reason| reason.to_string()),
+        MailInjectHarness::Pane => {
+            let Some(address) = args.pane.clone() else {
+                return emit(false, "pane lane needs --pane <session>:<pane-id>");
+            };
+            deliver_via_pane(
+                &args.session,
+                &address,
+                args.harness_row.as_deref(),
+                &text,
+                args.attempts,
+                args.interval_ms,
+                args.enter_delay_ms,
+            )
+            .map_err(|reason| reason.to_string())
+        }
     };
 
     // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
@@ -3500,6 +3748,92 @@ mod tests {
             contract_enter_delay_ms(&packaged, MailInjectHarness::Codex),
             800
         );
+    }
+
+    #[test]
+    fn parse_args_accepts_the_pane_lane() {
+        // The pane lane parses as its own harness with the pane address
+        // carried beside it; the address itself is required at run, not at
+        // parse (the lane may be selected before the address is known).
+        let a = parse_args(&argv(&[
+            "--session",
+            "ccccdddd-1111-2222-3333-444455556666",
+            "--harness",
+            "pane",
+            "--pane",
+            "main:3",
+        ]))
+        .unwrap();
+        assert_eq!(a.harness, MailInjectHarness::Pane);
+        assert_eq!(a.pane.as_deref(), Some("main:3"));
+        let lane_only = parse_args(&argv(&["--session", "s1", "--harness", "pane"])).unwrap();
+        assert_eq!(lane_only.harness, MailInjectHarness::Pane);
+        assert!(lane_only.pane.is_none());
+    }
+
+    #[test]
+    fn resolve_confirm_finds_a_codex_rollout_in_a_temp_codex_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session = "0199aabb-ccdd-7e88-9000-aabbccddeeff";
+        let rollout = sessions.join(format!("rollout-2026-09-27T00-00-00-{session}.jsonl"));
+        std::fs::write(&rollout, "{}\n").unwrap();
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", temp.path());
+        let target = resolve_confirm(
+            "codex",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        match target {
+            LaneConfirm::Transcript { path, baseline } => {
+                assert_eq!(path, rollout);
+                assert_eq!(baseline, transcript_len(&rollout));
+            }
+            other => panic!("expected a codex rollout confirm target, got {other:?}"),
+        }
+        match prior {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn resolve_confirm_finds_a_claude_transcript_in_a_temp_projects_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "ccccdddd-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, temp.path());
+        let target = resolve_confirm(
+            "claude",
+            session,
+            Path::new("/nowhere"),
+            None,
+            Path::new("/nowhere"),
+        );
+        match target {
+            LaneConfirm::Transcript { path, .. } => assert_eq!(path, transcript),
+            other => panic!("expected a claude transcript confirm target, got {other:?}"),
+        }
+        match prior {
+            Some(v) => std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, v),
+            None => std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV),
+        }
+        drop(guard);
     }
 
     #[test]
