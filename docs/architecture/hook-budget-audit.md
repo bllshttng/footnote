@@ -17,6 +17,8 @@ The command counts include every command entry in each harness event registratio
 
 The Bash registration count drops by five commands per event. The dispatcher keeps all three Rust predicates in one `fno-agents` process and calls the same three Python guards in their existing order. This removes two `fno-agents` binary launches made by the former shell shims. Other same-event guard groups remain separate. A generic shell dispatcher can start each existing script as a child, so it lowers registration counts without cutting process starts.
 
+Other same-event groups retain their own shell or Python entry points. A wrapper that launches each handler adds a process and does not satisfy the spawn-reduction condition. Porting those handlers into one in-process implementation needs separate behavior-preservation evidence and stays outside this measured Bash chain.
+
 | Harness | Event | Before | After | Notes |
 |---|---:|---:|---:|---|
 | Claude | PreToolUse | 15 | 10 | Six Bash guards became one dispatcher command; all other matcher groups remain. |
