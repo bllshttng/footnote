@@ -411,7 +411,7 @@ pub fn ls(json: bool) -> i32 {
                 } else {
                     ""
                 };
-                println!("{name}: {clients} clients, {squads} squads, {panes} panes{tail}")
+                println!("{name}: {clients} clients, {squads} workspaces, {panes} panes{tail}")
             }
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
             Probe::Wedged => {
@@ -640,7 +640,7 @@ fn render_picker(p: &Picker) -> String {
                 squads,
                 panes,
             } => format!(
-                "{}  ({clients} clients, {squads} squads, {panes} panes)",
+                "{}  ({clients} clients, {squads} workspaces, {panes} panes)",
                 row.name
             ),
             Probe::Unqueryable => format!("{}  (alive, unqueryable)", row.name),
@@ -1383,23 +1383,23 @@ const PRUNE_REMEDY: &str = "fno mux workspace prune";
 fn squad_store_verdict(total: usize, orphan: usize) -> Check {
     if total == 0 {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Na,
-            detail: "no squads persisted".into(),
+            detail: "no workspaces persisted".into(),
             remedy: None,
         }
     } else if orphan == 0 {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Ok,
-            detail: format!("{total} squad(s), none orphaned"),
+            detail: format!("{total} workspace(s), none orphaned"),
             remedy: None,
         }
     } else {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Warn,
-            detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
+            detail: format!("{orphan} orphaned workspace(s) (no surviving origin, no live member)"),
             remedy: Some(PRUNE_REMEDY.into()),
         }
     }
@@ -1705,7 +1705,7 @@ fn sweep_scope(answered: usize, unreachable: &[String]) -> SweepScope {
 /// zero.
 fn unreachable_notice(unreachable: &[String]) -> String {
     format!(
-        "server liveness incomplete for session(s) {}; no squad records changed",
+        "server liveness incomplete for session(s) {}; no workspace records changed",
         unreachable.join(", ")
     )
 }
@@ -6025,7 +6025,7 @@ mod tests {
     fn mux_render_picker_marks_cursor_and_dims_stale() {
         let mut p = Picker::new(vec![live("work"), stale("dead")]);
         let out = render_picker(&p);
-        assert!(out.contains("work  (1 clients, 2 squads, 3 panes)"));
+        assert!(out.contains("work  (1 clients, 2 workspaces, 3 panes)"));
         assert!(out.contains("dead  (stale)"));
         assert!(out.contains("\x1b[2m"), "stale row dimmed");
         assert!(out.contains("\x1b[7m"), "live cursor row reversed");
@@ -6959,7 +6959,7 @@ mod tests {
     fn squad_store_verdict_empty_is_na() {
         let c = squad_store_verdict(0, 0);
         assert_eq!(c.verdict, Verdict::Na);
-        assert_eq!(c.name, "squad store");
+        assert_eq!(c.name, "workspace store (squads.json)");
         assert!(c.remedy.is_none());
     }
 
@@ -6967,7 +6967,7 @@ mod tests {
     fn squad_store_verdict_clean_is_ok() {
         let c = squad_store_verdict(7, 0);
         assert_eq!(c.verdict, Verdict::Ok);
-        assert!(c.detail.contains("7 squad(s), none orphaned"));
+        assert!(c.detail.contains("7 workspace(s), none orphaned"));
     }
 
     #[test]

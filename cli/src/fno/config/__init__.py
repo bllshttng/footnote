@@ -3714,10 +3714,14 @@ class MuxBlock(BaseModel):
     # from config.toml, matching the `hover_focus` startup path.
     status_row: bool = True
     # The mux chrome theme name: one of the shipped palettes the modal
-    # chrome reads (`terminal`, `catppuccin`, `tokyo-night`, `gruvbox`). Read by
-    # the interactive Rust client via the same config ladder as `hover_focus`;
-    # an unknown name falls back to `terminal` WITH a notice, never silently.
-    # `terminal` (the default, None) inherits the emulator's own colors.
+    # chrome reads (`footnote-superscript`, `footnote-paper`, `terminal`,
+    # `catppuccin`, `tokyo-night`, `gruvbox`). Read by the interactive Rust
+    # client via the same config ladder as `hover_focus`; an unknown name
+    # falls back to the default `footnote-superscript` WITH a notice, never
+    # silently. None resolves to the default too, or `footnote-paper` when
+    # the terminal reports a light background (COLORFGBG). Role overrides
+    # `mux.theme.brand` / `mux.theme.needs_you` (#rrggbb quoted dotted keys
+    # in [mux], read by the Rust client) pin those two roles under any theme.
     theme: Optional[str] = None
 
     @field_validator("shell_integration", mode="before")

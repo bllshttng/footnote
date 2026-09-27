@@ -45,8 +45,10 @@ use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, Swee
 use self::rename_overlay::RenameTarget;
 use row_menu::build_row_menu;
 
-// The placement pickers (attach `p`, portal `P`) live in their own module;
-// client.rs is shrink-only under the file-budget gate.
+// The placement pickers (attach `p`, portal `P`) and the launch moment
+// (terminal guard + splash) live in their own modules; client.rs is
+// shrink-only under the file-budget gate.
+mod launch;
 mod placement_pickers;
 
 use self::placement_pickers::{
@@ -573,47 +575,6 @@ fn config_says_off(stdout: &str) -> bool {
     stdout.trim() == "off"
 }
 
-/// Restore the terminal on every exit path, including panics.
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn enter() -> Result<Self, String> {
-        terminal::enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
-        let mut out = std::io::stdout();
-        // Surface an alt-screen failure instead of silently painting over the
-        // user's scrollback. The guard exists from here, so raw mode is
-        // restored by Drop on the error path.
-        let guard = TerminalGuard;
-        crossterm::execute!(out, terminal::EnterAlternateScreen)
-            .map_err(|e| format!("alternate screen: {e}"))?;
-        // Mouse capture stays on for the client's whole life (US1/US2/US3): the
-        // server routes every pane-rect event by the pane's live mode. Drop's
-        // MODE_RESET (which lists 1000/1002/1006 off) turns it back off on exit.
-        out.write_all(crate::mouse::ENABLE)
-            .and_then(|_| out.flush())
-            .map_err(|e| format!("enable mouse: {e}"))?;
-        Ok(guard)
-    }
-}
-
-/// Every DEC/private mode `ModeSync` can set, reset. Emitted unconditionally
-/// on exit (codex P2): a focused vim's mouse reporting or bracketed paste
-/// must never survive onto the user's real terminal after `fno` exits, and
-/// tracking exactly-what-was-set buys nothing over resetting the fixed set
-/// `vt::mode_diff` can emit. Unknown sequences (kitty CSI-u on a plain
-/// terminal) are ignored by terminals by design.
-const MODE_RESET: &[u8] =
-    b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?2004l\x1b[=0;1u";
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(MODE_RESET);
-        let _ = crossterm::execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
-        let _ = terminal::disable_raw_mode();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // View state + pure composition
 // ---------------------------------------------------------------------------
@@ -1012,6 +973,13 @@ struct View {
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
+    /// The questions block's operator prefs (the toggle, the height, and
+    /// whether answered questions show), each persisted through the view
+    /// store. The block itself reads them at layout time.
+    questions_block: questions::BlockPrefs,
+    /// Pending escape bytes in questions-detail mode (the same split-arrow
+    /// safety as [`View::ans_esc`]).
+    question_esc: Vec<u8>,
     /// The questions block's refresh: the last kick and the in-flight flag
     /// (the feed fold's single-flight discipline), every 10 s.
     questions_kick_at: Option<Instant>,
@@ -1080,9 +1048,10 @@ struct View {
     hover_focus: bool,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
-    /// an explicit apply from the settings modal. `terminal` (the default)
-    /// inherits the emulator's own colors so every pre-theme render is
-    /// byte-identical.
+    /// an explicit apply from the settings modal. `footnote-superscript` is
+    /// the default; a terminal reporting a light background defaults to
+    /// `footnote-paper`, and `terminal` stays available as the no-op that
+    /// inherits the emulator's own colors.
     theme: Theme,
     /// The board's work-queue cards, verbatim off the wire Layout. The
     /// sidebar renders none of them (the lane is gone); the launcher's
@@ -1441,6 +1410,10 @@ mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
+// The per-section view defaults (Expanded/LiveOnly/Collapsed), moved out of
+// this file (file budget); the elsewhere section now takes the Expanded-tier
+// default with the active squad.
+mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
 mod pane_paint;
@@ -2154,6 +2127,8 @@ impl View {
             questions_fold: None,
             questions_degraded: false,
             question_detail: None,
+            question_esc: Vec::new(),
+            questions_block: questions::BlockPrefs::load(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -4276,10 +4251,17 @@ impl View {
             return Some(hit);
         }
         // The questions block pins above the court block: a click on its
-        // rows opens the detail overlay on that question.
+        // rows opens the full questions view on that question; the `+N more`
+        // row opens the list. The header toggles nothing here (the key does).
         if col < panel_w {
-            if let Some(id) = questions::hit_at(self, self.term.0 as usize, row) {
-                return Some(ChromeHit::OpenQuestionDetail(id));
+            match questions::hit_at(self, self.term.0 as usize, row) {
+                Some(questions::QuestionHit::Row(id)) => {
+                    return Some(ChromeHit::OpenQuestionDetail(id));
+                }
+                Some(questions::QuestionHit::More) => {
+                    return Some(ChromeHit::OpenQuestionsList);
+                }
+                None => {}
             }
         }
         // Tab strip (row 0, scoped to the content columns since US1): it
@@ -4296,7 +4278,7 @@ impl View {
             }
             let mut c = panel_w as usize;
             for span in self.tab_bar_window() {
-                let w = span.text.chars().count();
+                let w = tab_text_cols(&span.text);
                 if col >= c && col < c + w {
                     return match span.hit? {
                         TabHit::Tab(tid) => Some(ChromeHit::Cmds(vec![Command::SelectTab(tid)])),
@@ -4308,7 +4290,13 @@ impl View {
             return None;
         }
         // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
+        // in full-screen mode). Off/narrow => no panel. Under the docked
+        // board the column is the board's own surface: no agents rows, no
+        // footer, no density button - a click must resolve nothing here or
+        // it acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
         let paint_w = self.sideline_paint_w();
         if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
@@ -4621,34 +4609,6 @@ impl View {
         }
     }
 
-    /// The `display_rows()` index a hover cell falls on in the sideline, or
-    /// `None` when the cell is not a sideline text cell - a pane, the divider
-    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
-    /// sideline geometry exactly so the highlight lands where a click would
-    ///.
-    fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
-        // The sideline owns row 0 in normal mode (the strip moved right of
-        // the divider), so display row `i` maps directly from `row`. A cell
-        // on the divider or in the strip's content columns returns None.
-        // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
-        let paint_w = self.sideline_paint_w();
-        if paint_w == 0 || col as usize >= paint_w - 1 {
-            return None;
-        }
-        // Full-screen sideline paints below the strip; invert the same
-        // offset the painter used.
-        let top = self.sideline_top();
-        if (row as usize) < top {
-            return None;
-        }
-        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
-            return None;
-        }
-        let i = row as usize - top + self.sideline_offset();
-        (i < self.painted_rows().len()).then_some(i)
-    }
-
     /// Fold one bare-motion (hover) report into the sideline highlight and the
     /// focus-follows-mouse debounce state. Does NOT fire focus - it only
     /// records which pane the pointer is settling on and when it first landed
@@ -4891,81 +4851,6 @@ impl View {
         // pending, the layout that just added the tab opens rename on it. Last
         // so `open_rename` clearing the selector/nav is never re-clobbered.
         self.maybe_prompt_new_tab_name();
-    }
-
-    /// A section's effective view, resolved live every frame. The one
-    /// authority behind both the caret glyph and the row filter, so they can
-    /// never disagree. Order:
-    ///   1. An explicit persisted operator choice wins verbatim - it survives a
-    ///      restart and outranks every computed default below (Locked 2, AC1-FR).
-    ///   2. Else a computed default, recomputed from the layout in hand:
-    ///      - the active squad opens `Expanded`, downgrading to
-    ///        `LiveOnly` when the section is majority-exited so the dead rows
-    ///        fold behind the header's `✗N` while the live agents stay up;
-    ///      - an inactive squad stays `Collapsed` - surfacing live rows across
-    ///        every idle workspace is the opposite of attention-focus;
-    ///      - the pull-section `~ elsewhere` defaults
-    ///        `Collapsed`, one click from their own header + rollup.
-    /// The active-squad default lives HERE, not in a map-seed: a seed is
-    /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
-    /// mid-session, and it pollutes the map that should hold only choices.
-    fn section_view(&self, key: &SectionKey) -> SectionView {
-        if let Some(chosen) = self.section_view.get(key).copied() {
-            return chosen;
-        }
-        match key {
-            SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
-            SectionKey::Squad(_) | SectionKey::Elsewhere => SectionView::Collapsed,
-        }
-    }
-
-    /// The Expanded-tier computed default: `Expanded`, or `LiveOnly` when the
-    /// section is majority-exited (its dead rows then fold behind the header's
-    /// `✗N` while the live rows stay). Only ever downgrades an Expanded default;
-    /// never upgrades a Collapsed inactive squad (Locked 3).
-    fn expanded_or_live_only(&self, key: &SectionKey) -> SectionView {
-        if self.majority_exited(key) {
-            SectionView::LiveOnly
-        } else {
-            SectionView::Expanded
-        }
-    }
-
-    /// Whether `key` names the currently active squad. Compared through
-    /// `squad_matches` (allocation-free) rather than minting a `SectionKey` for
-    /// the active id on every call - `section_view` is per-section-per-frame hot.
-    fn is_active_squad(&self, key: &SectionKey) -> bool {
-        self.layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .is_some_and(|s| squad_matches(s, key))
-    }
-
-    /// Strict-majority-exited over the section's own rows (`exited * 2 > total`).
-    /// Zero rows is never a majority (an empty section keeps Expanded) and a
-    /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
-    /// Walks the same membership `section_dead_rows` does, live off the layout
-    /// and never cached, so it tracks agents exiting mid-session. Only the
-    /// Expanded-tier key (the active squad) reaches it; every other key has
-    /// no squad match and reads as "not a majority".
-    fn majority_exited(&self, key: &SectionKey) -> bool {
-        let Some(id) = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| squad_matches(s, key))
-            .map(|s| s.id)
-        else {
-            return false;
-        };
-        let mut total = 0usize;
-        let mut exited = 0usize;
-        for a in self.layout.agents.iter().filter(|a| a.squad == Some(id)) {
-            total += 1;
-            exited += a.exited as usize;
-        }
-        exited * 2 > total
     }
 
     /// Advance a section one step through the view cycle: pure client
@@ -5326,18 +5211,6 @@ impl View {
         peek.last_fetch = Instant::now();
         peek.refresh_pending = true;
         Some((seq, peek.name.clone()))
-    }
-
-    /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since US1) minus the bottom chrome row,
-    /// minus the court block's rows at the bottom. The block is the
-    /// subtraction point's only second customer, so `clamp_sideline_scroll`
-    /// and `reveal_focus_row` inherit the shrunk window without a second
-    /// fix.
-    fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize)
-            .saturating_sub(self.bottom_row_is_chrome() as usize)
-            .saturating_sub(self.court_block_rows())
     }
 
     /// The sideline TableState's offset, read and written through the Cell
@@ -6102,8 +5975,9 @@ impl View {
         else {
             return spans;
         };
-        // The home workspace wears the f[no] brand mark in place of its name:
-        // `f` bold, `[no]` dim amber (draw_tab_bar splits the two tones).
+        // The home workspace wears the Ｆ[no] brand mark in place of its name:
+        // `Ｆ` bold, `[no]` the reverse-video stamp (draw_tab_bar splits the
+        // two tones).
         if s.name == "fno" {
             let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
             spans.push(TabSpan {
@@ -6134,7 +6008,7 @@ impl View {
             let (glyph_prefix, fg, glyph_flags) =
                 match tab_rollup_state(&self.layout.agents, s.id, t.id) {
                     Some(st) => {
-                        let style = lattice_style(st, self.theme.accent);
+                        let style = lattice_style(st, self.theme.needs_you);
                         (format!("{} ", style.glyph), style.fg, style.flags)
                     }
                     None => (String::new(), Color::Default, 0),
@@ -6145,8 +6019,11 @@ impl View {
             } else {
                 0
             };
+            // One cell of padding inside each side of every tab label: the
+            // inactive shape already reads ` label `, the active brackets get
+            // theirs as `[ label ]`.
             let text = if i == s.active_tab {
-                format!("[{label}]")
+                format!("[ {label} ]")
             } else {
                 format!(" {label} ")
             };
@@ -6182,7 +6059,7 @@ impl View {
     /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
         let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
-        let span_w = |s: &TabSpan| s.text.chars().count();
+        let span_w = |s: &TabSpan| tab_text_cols(&s.text);
         let full = self.tab_bar_spans();
         if full.iter().map(span_w).sum::<usize>() <= width {
             return full;
@@ -6295,17 +6172,17 @@ impl View {
                 } else {
                     cell_flags::BOLD
                 };
-                (self.theme.accent, f)
+                (self.theme.brand, f)
             } else if matches!((lifted_tab, span.hit), (Some(t), Some(TabHit::Tab(tid))) if t == tid)
             {
                 (span.fg, span.flags | cell_flags::DIM)
             } else {
                 (span.fg, span.flags)
             };
-            // The brand mark's `[no]` drops to the dim amber wordmark tone for
-            // just those four chars; every other span paints uniform.
-            let is_mark = span.role == SpanRole::Squad && span.text.trim() == "f[no]";
-            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Wordmark, &self.theme);
+            // The brand mark's `[no]` drops to the reverse-video stamp tone
+            // for just those four chars; every other span paints uniform.
+            let is_mark = span.role == SpanRole::Squad && span.text.trim() == crate::wordmark::TEXT;
+            let (mark_fg, _, mark_flags) = cell_style(crate::theme::Role::Stamp, &self.theme);
             let mut in_no = false;
             for ch in span.text.chars() {
                 if ch == '[' {
@@ -6325,7 +6202,22 @@ impl View {
                     bg: Color::Default,
                     flags,
                 };
-                c += 1;
+                // A double-width glyph claims its second column (the spacer
+                // every renderer skips), or the rest of the strip desyncs
+                // against a standards-compliant terminal.
+                let w = glyph_cols(ch);
+                if w == 2 {
+                    if c + 1 >= cols {
+                        break 'spans;
+                    }
+                    cells[c + 1] = Cell {
+                        c: ' ',
+                        fg,
+                        bg: Color::Default,
+                        flags: flags | cell_flags::WIDE_SPACER,
+                    };
+                }
+                c += w;
                 if is_mark && in_no && ch == ']' {
                     in_no = false;
                 }
@@ -6693,21 +6585,6 @@ fn paint_legacy_row(
     }
 }
 
-/// The status column's word per lattice state, shortened to fit the
-/// 5-column cell (operator, 2026-09-21; the fleet's mail vocabulary keeps
-/// the long forms). `Unmeasured` and `Empty` keep their glyphs.
-fn status_word(s: LatticeState) -> &'static str {
-    match s {
-        LatticeState::Working => "Work",
-        LatticeState::Idle => "Idle",
-        LatticeState::Blocked => "Input",
-        LatticeState::DoneUnseen => "Done",
-        LatticeState::Exited => "Stop",
-        LatticeState::Unmeasured => "?",
-        LatticeState::Empty => "\u{2205}",
-    }
-}
-
 /// The message column's markdown strip: bold markers, backtick code spans
 /// and a leading `#` header marker come off - the row reads the sentence,
 /// not the markup.
@@ -6787,14 +6664,22 @@ enum DisplayRow<'a> {
 /// Display columns a sideline glyph occupies. The client draws chrome one glyph
 /// per cell, so a double-width glyph must claim two columns (plus a WIDE_SPACER)
 /// or it desyncs the rest of the row against a standards-compliant terminal.
-/// ponytail: only the menu trigram block (U+2630..U+2637) is wide in the
-/// sideline today; widen this if a CJK/emoji glyph ever lands here.
+/// ponytail: only the menu trigram block (U+2630..U+2637) and the mark's
+/// full-width `Ｆ` (U+FF26) are wide today; widen this if a CJK/emoji glyph
+/// ever lands here.
 fn glyph_cols(ch: char) -> usize {
-    if ('\u{2630}'..='\u{2637}').contains(&ch) {
+    if ch == '\u{FF26}' || ('\u{2630}'..='\u{2637}').contains(&ch) {
         2
     } else {
         1
     }
+}
+
+/// Display columns a tab-strip span paints, wide glyphs counted - the one
+/// width both the painter, the scroll-window fitter and the hit-test walk,
+/// so a span's painted width and its clickable width can never disagree.
+fn tab_text_cols(text: &str) -> usize {
+    text.chars().map(glyph_cols).sum()
 }
 
 /// A squad's [`SectionKey`]. Deliberately NOT keyed on `name`: a derived squad
@@ -6945,7 +6830,7 @@ fn blank_straddling_pair(cells: &mut [Cell], cols: usize, row: usize, start: usi
 /// counter takes it on, because a count computed before the hiding is precisely
 /// the confidently-wrong number the rest of this function exists to avoid.
 fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
-    let w = |s: &TabSpan| s.text.chars().count();
+    let w = |s: &TabSpan| tab_text_cols(&s.text);
     let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
     // Keeps the first and last character: the brackets or padding spaces that
     // mark the active tab, and the squad label's own surrounding spaces.
@@ -7097,6 +6982,8 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
+    /// Open the questions view on the list (the `+N more` row's click).
+    OpenQuestionsList,
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -7756,53 +7643,12 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
 
-/// The unified icon lattice: ONE state->style mapping every renderer
-/// (sideline rows, tab rollups, overlays) calls, so glyph, weight,
-/// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
-/// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
-/// a new variant is a compile error at every call site, never a silent glyph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LatticeState {
-    Working,
-    Idle,
-    Blocked,
-    DoneUnseen,
-    Exited,
-    /// A terminal row with no positive corroboration: no confirmed-
-    /// dead pid, no confirmed-gone pane. Distinct from `Exited` because the
-    /// operator's routing decision turns on it - `Exited` means respawn is
-    /// safe, `Unmeasured` means look before you spawn.
-    Unmeasured,
-    /// A live pane that positively read as nothing-running-yet: OSC
-    /// 133 markers active, no command open, no completed block. Distinct from
-    /// `Idle` (a completed block, the prompt back) and from `Unmeasured` (no
-    /// reading at all): a pristine shell is an honest zero, not a waiting
-    /// worker and not an unknown.
-    Empty,
-}
-
-/// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
-/// as the reference value the lattice tests assert against. Production reads the
-/// live theme's accent (`self.theme.accent`), so this is test-only - under the
-/// default `terminal` theme the two are the same `Indexed(3)`.
+// The icon lattice itself lives in `crate::lattice`; these re-exports keep
+// every `use super::*` renderer and test reading the same paths as before.
 #[cfg(test)]
-const LATTICE_ACCENT: Color = Color::Indexed(3);
+pub(crate) use crate::lattice::LATTICE_ACCENT;
+pub(crate) use crate::lattice::{lattice_glyph, lattice_style, status_word, LatticeState};
 
-struct LatticeStyle {
-    glyph: char,
-    flags: u8,
-    fg: Color,
-}
-
-/// The single source of glyph/weight/color per state. Every state differs from
-/// every other by GLYPH alone (BOLD/DIM/accent are reinforcement, never the
-/// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
-///
-/// `accent` is the needs-attention color, now the active theme's accent rather
-/// than a hardcoded yellow: under `terminal` it is `Indexed(3)` (the
-/// emulator's own amber, preserved exactly), under a named theme it is the
-/// palette's pick. Only the one caller that reads `.fg` supplies it; callers
-/// that want only the glyph/flags use [`lattice_glyph`] and stay out of color.
 /// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
 /// on Blocked (attention is never re-colored) and the lattice fg as the
@@ -7818,27 +7664,6 @@ fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
         a.account.as_deref(),
     )
     .unwrap_or(fallback)
-}
-
-fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
-    let (glyph, flags, fg) = match s {
-        LatticeState::Working => ('●', cell_flags::BOLD, Color::Default),
-        LatticeState::Idle => ('○', 0, Color::Default),
-        LatticeState::Blocked => ('▲', cell_flags::BOLD, accent),
-        LatticeState::DoneUnseen => ('✓', cell_flags::BOLD, Color::Default),
-        LatticeState::Exited => ('✗', cell_flags::DIM, Color::Default),
-        LatticeState::Unmeasured => ('?', cell_flags::DIM, Color::Default),
-        LatticeState::Empty => ('∅', cell_flags::DIM, Color::Default),
-    };
-    LatticeStyle { glyph, flags, fg }
-}
-
-/// The glyph + flags for a state, with no color. For every caller that does not
-/// read `.fg` (i.e. every caller except the one accent-colored span), so they
-/// do not have to thread a theme accent they never use.
-fn lattice_glyph(s: LatticeState) -> (char, u8) {
-    let st = lattice_style(s, Color::Default);
-    (st.glyph, st.flags)
 }
 
 /// (US2) Severity order for the header rollup strip: most-severe first,
@@ -8431,6 +8256,9 @@ async fn attach_and_run(
 
     // Raw stdin -> channel; scanned by the prefix layer below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    // A spare sender for the launch splash: it re-queues the chunk that
+    // ended it, so typed-ahead input is never lost.
+    let splash_tx = stdin_tx.clone();
     std::thread::Builder::new()
         .name("fno-mux-stdin".into())
         .spawn(move || {
@@ -8454,10 +8282,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = TerminalGuard::enter()?;
-    if !stashed_modesync.is_empty() {
-        raw_out(&stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
-    }
+    let guard = launch::begin(&mut stdin_rx, &splash_tx, &theme, &stashed_modesync).await?;
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer
@@ -9434,7 +9259,7 @@ async fn attach_and_run(
                     }
                     SweepMsg::Applied { closed, reaped, removed } => {
                         view.set_notice(format!(
-                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} squad row(s)"
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} workspace row(s)"
                         ));
                     }
                     SweepMsg::Failed(reason) => {
@@ -9484,29 +9309,12 @@ async fn attach_and_run(
                 // held: release it to the pane.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
-                    // The composer holds the keyboard while open: a flushed
-                    // candidate feeds its folder (Esc closes the composer),
-                    // never a pane that may not even be painted.
-                    if view.launcher.is_some() {
-                        match event {
-                            Event::Forward(chunk) => {
-                                if let Err(e) = agent_launcher::launcher_keys(
-                                    &mut view, &chunk, &mut sock_w,
-                                )
-                                .await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                            event => {
-                                if let Err(e) =
-                                    dispatch_event(&mut view, event, &mut sock_w).await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                        }
-                    } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                    // A flushed candidate feeds the overlay that holds the
+                    // keyboard (the composer's folder, the board's), never a
+                    // pane that may not even be painted.
+                    if let Err(e) =
+                        overlay_keys::flush_released_chord(&mut view, event, &mut sock_w).await
+                    {
                         break Err(e);
                     }
                 }
@@ -10668,6 +10476,9 @@ async fn dispatch_event(
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
+        Event::ToggleQuestionsBlock => questions::toggle_block(view),
+        Event::ResizeQuestionsBlock(delta) => questions::resize_block(view, delta),
+        Event::ToggleQuestionsDone => questions::toggle_show_done(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -10968,6 +10779,7 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
+        ChromeHit::OpenQuestionsList => view.open_questions_list(),
     }
     Ok(())
 }
@@ -11105,7 +10917,7 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
             )
             .await
-            .map_err(|e| format!("move-squad send failed: {e}"))?;
+            .map_err(|e| format!("move-workspace send failed: {e}"))?;
             return Ok(());
         }
         // A workspace section's Remove opens the SAME confirm the keyboard
@@ -11866,7 +11678,13 @@ async fn execute_aux_action(
             // it never writes the graph. On a write failure the in-memory theme
             // STAYS (applied this session) and the notice says so honestly,
             // never claiming a persistence it did not achieve.
-            let (theme, warn) = Theme::from_name(&name);
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (theme, warn) = crate::digest_overlay::theme_role_overrides(
+                Path::new(&cwd),
+                Theme::from_name(&name),
+            );
             view.theme = theme;
             let notice = match spawn_config_set("mux.theme", &name).await {
                 Ok(()) => match warn {
@@ -12878,7 +12696,7 @@ async fn selector_keys(
                             &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
                         )
                         .await
-                        .map_err(|e| format!("move-squad send failed: {e}"))?;
+                        .map_err(|e| format!("move-workspace send failed: {e}"))?;
                     }
                     None => view.set_notice("only a workspace row can be reordered".into()),
                 }
@@ -13315,7 +13133,7 @@ async fn nav_goto(
     if let Some(sq) = target.goto_squad.filter(|_| switching_squad) {
         write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
             .await
-            .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+            .map_err(|e| format!("nav select-workspace send failed: {e}"))?;
     }
     if let Some(tid) = target.goto_tab {
         // Skip SelectTab only when the target is already the active view's tab
@@ -13375,7 +13193,7 @@ async fn create_keys(
                                 }),
                             )
                             .await
-                            .map_err(|e| format!("new-squad send failed: {e}"))?;
+                            .map_err(|e| format!("new-workspace send failed: {e}"))?;
                             view.create = None;
                             view.create_esc.clear();
                             break;

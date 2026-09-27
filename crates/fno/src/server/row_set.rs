@@ -254,13 +254,11 @@ impl Core {
                             .is_some_and(|entry| entry.pty.is_child_alive())
                     });
                     let resumable = !detached_live && self.row_resumable_in_session(a);
-                    // Attribute the row to the squad holding its recorded
-                    // membership FIRST (cwd ownership only as a fallback), so
-                    // the panel shows it where ResumeAgent will actually place
+                    // Attribute the row to its workspace (recorded member,
+                    // then the spawner's, then the project default), so the
+                    // panel shows it where ResumeAgent will actually place
                     // the pane - the two lookups must agree.
-                    let squad = self
-                        .member_squad_for_agent(a)
-                        .or_else(|| self.session.find_by_cwd(&a.cwd));
+                    let squad = self.thread_workspace(a);
                     out.push(AgentRow {
                         harness: a.harness.clone(),
                         model: a.model.clone(),
@@ -325,9 +323,9 @@ impl Core {
                     // Never a mission squad: that id names a render-time header
                     // the client draws from names alone, so a row grouped under
                     // one is drawn by no section at all and disappears.
-                    let squad = self
-                        .member_squad_for_agent(a)
-                        .or_else(|| self.session.find_by_cwd(&a.cwd));
+                    // Membership, then the spawner's workspace, then the
+                    // project default - the one thread-workspace resolver.
+                    let squad = self.thread_workspace(a);
                     // (US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (AC2-UI), a squad-matched row for the foreign-cwd

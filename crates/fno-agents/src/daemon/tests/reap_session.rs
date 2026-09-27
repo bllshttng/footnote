@@ -43,11 +43,12 @@ fn x2774_spawn(name: &str, short_id: &str, sid: &str) -> state::RegistryEntry {
 /// The x-2774 sweep harness: production graph read over a staged graph.json,
 /// staged transcripts, stop confirmed, no tree.
 #[allow(clippy::too_many_arguments)]
-fn x2774_sweep(
+fn x2774_sweep_at(
     home: &AgentsHome,
     emitter: &EventEmitter,
     grace: i64,
     dry_run: bool,
+    now: i64,
     transcripts: impl Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
     agents: crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> GcSummary {
@@ -59,13 +60,34 @@ fn x2774_sweep(
         7,
         &gc_sweep::read_graph_entries,
         &transcripts,
-        &staged_ages(&transcripts),
+        &staged_ages_at(now, &transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &move || agents.clone(),
         &|_| (None, None),
         &|_| None,
+    )
+}
+
+/// The wall-clock wrapper: each pass reads its own now, as before the
+/// injected-clock variant existed.
+fn x2774_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace: i64,
+    dry_run: bool,
+    transcripts: impl Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    agents: crate::claude_roster::ClaudeAgentsSnapshot,
+) -> GcSummary {
+    x2774_sweep_at(
+        home,
+        emitter,
+        grace,
+        dry_run,
+        crate::daemon::now_epoch_secs(),
+        transcripts,
+        agents,
     )
 }
 
@@ -407,13 +429,24 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         crate::claude_roster::ClaudeAgentRow::new("t-nostop", Some("working")),
         crate::claude_roster::ClaudeAgentRow::new("t-donefresh", Some("done")),
     ]);
-    let dry = x2774_sweep(&home, &emitter, 900, true, &picks, roster.clone());
-    let acting = x2774_sweep(&home, &emitter, 900, false, &picks, roster);
+    // One now for both passes: the seam answers identical ages, so the
+    // agreement asserts below hold byte for byte (CI flake 2026-09-27 read
+    // active ages 10 against 11 across the two wall reads).
+    let now = crate::daemon::now_epoch_secs();
+    let dry = x2774_sweep_at(&home, &emitter, 900, true, now, &picks, roster.clone());
+    let acting = x2774_sweep_at(&home, &emitter, 900, false, now, &picks, roster);
     assert_eq!(
         dry.kept_open_work_stale, acting.kept_open_work_stale,
         "open-work bucket agrees"
     );
-    assert_eq!(dry.kept_active, acting.kept_active, "active bucket agrees");
+    // The bucket's second element is the transcript age. Both passes judged
+    // the staged world against ONE injected now, so the tuples agree byte
+    // for byte; per-pass wall reads flaked here when a row crossed a second
+    // boundary between the passes (CI, 2026-09-27: 10 vs 11).
+    assert_eq!(
+        dry.kept_active, acting.kept_active,
+        "active bucket agrees row for row"
+    );
     assert_eq!(
         dry.kept_no_provenance, acting.kept_no_provenance,
         "provenance bucket agrees"

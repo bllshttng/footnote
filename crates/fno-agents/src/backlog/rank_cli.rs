@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::node_ref::has_node_id_prefix;
 use super::settings;
 use crate::backlog_ready::{
     descendants_of, epics_with_child_progress, get_str, in_progress_epic_ids, is_dict,
@@ -93,33 +94,6 @@ impl RankArgs {
         args.task_id = task_id?;
         Some(args)
     }
-}
-
-/// `has_node_id_prefix`: a well-formed `<prefix>-<4..8 hex>` id, or any
-/// string carrying the configured/legacy prefix with a non-strict suffix.
-fn has_node_id_prefix(s: &str) -> bool {
-    if is_wellformed_node_id(s) {
-        return true;
-    }
-    s.starts_with(settings::node_id_prefix().as_str()) || s.starts_with("ab-")
-}
-
-/// `[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}` fullmatch.
-fn is_wellformed_node_id(s: &str) -> bool {
-    let Some((prefix, suffix)) = s.split_once('-') else {
-        return false;
-    };
-    let mut chars = prefix.chars();
-    let valid_prefix = matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
-        && chars.count() <= 7
-        && prefix
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-    let valid_suffix = (4..=8).contains(&suffix.len())
-        && suffix
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
-    valid_prefix && valid_suffix
 }
 
 /// The fence: the harness name when an agent runs this, `None` in an
@@ -659,8 +633,8 @@ pub fn run(tail: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::active_backlog::DrainResolve;
+    use crate::backlog::node_ref::is_wellformed_node_id;
     use serde_json::json;
-
     fn wellformed_cases() -> Vec<(&'static str, bool)> {
         vec![
             ("x-aaaa1111", true),

@@ -1,59 +1,21 @@
 //! The provider-cap sweep resolves a live thread worker's transcript the way
-//! `fno agents peek` does.
+//! `fno agents peek` does - natively, in the binary.
 //!
 //! A thread row carries only its 8-hex short id. The transcript is planted
-//! where peek's resolver finds it - the store, named by the full uuid the
-//! short id prefixes - with NO sessions-dir record, the shape that used to
-//! read `transcript-not-found` while the lane walled. The binary's
-//! `fno agents transcript-paths` child is stood in by a script that calls the
-//! checkout's real `fno.provenance.resolver.resolve_transcript`, so the
-//! resolution through the store is the production one, deploy-independent.
+//! where peek's resolver finds it - the claude projects store, named by the
+//! full uuid the short id prefixes - with NO sessions-dir record, the shape
+//! that used to read `transcript-not-found` while the lane walled.
 
 use serde_json::Value;
-use std::path::PathBuf;
 use std::process::Command;
 
 const CLIENT: &str = env!("CARGO_BIN_EXE_fno-agents");
-const CLI_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../cli/src");
 
 const SHORT: &str = "d8996f9b";
 const UUID: &str = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
 
 const OK_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-22T07:00:00.000Z","message":{"role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"Running the tests now."}]}}"#;
 const FOUR29_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-22T08:15:00.000Z","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-22 09:41:13]"}]}}"#;
-
-/// The stand-in `fno` binary: pins the child contract (argv head, python
-/// runtime, stdin payload) and answers through the checkout's real resolver.
-fn write_fake_fno(dir: &std::path::Path) -> PathBuf {
-    let script = format!(
-        r#"#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-argv = sys.argv[1:]
-assert argv[:2] == ["agents", "transcript-paths"], argv
-assert os.environ.get("FNO_AGENTS_RUNTIME") == "python", "the child must run the python runtime"
-sys.path.insert(0, {cli_src:?})
-from fno.provenance.resolver import resolve_transcript
-
-payload = json.load(sys.stdin)
-answer = {{}}
-for sid in payload.get("ids") or []:
-    root = payload.get("projects_root")
-    rt = resolve_transcript("claude", sid, "/", projects_root=Path(root) if root else None)
-    answer[sid] = rt.transcript_path if rt.resolved and rt.transcript_path else None
-print(json.dumps(answer))
-"#,
-        cli_src = CLI_SRC
-    );
-    let path = dir.join("fake-fno");
-    std::fs::write(&path, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    path
-}
 
 #[test]
 fn thread_row_resolves_its_transcript_where_peek_finds_it() {
@@ -76,12 +38,10 @@ fn thread_row_resolves_its_transcript_where_peek_finds_it() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("registry.json"), registry).unwrap();
 
-    let fno = write_fake_fno(root);
     let output = Command::new(CLIENT)
         .args(["provider-cap", "status", "--json"])
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_HOME", &home)
-        .env("FNO_BIN", &fno)
         .env("FNO_CLAUDE_PROJECTS_DIR", &projects)
         .env("FNO_AGENTS_RUNTIME", "rust")
         .output()

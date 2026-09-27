@@ -149,6 +149,11 @@ pub struct Popup {
     /// uncapped. The which-key modal caps at 60 so a tall table scrolls in a
     /// fixed window instead of growing one row per binding.
     pub body_cap_pct: usize,
+    /// Keep the LABEL column whole on a narrow block and clip the HINT
+    /// instead. The default protects the hint (the key modal's stable
+    /// action id); a picker whose hint is a prose error needs the opposite:
+    /// the diagnosis label must never ellipsize.
+    pub label_first: bool,
 }
 
 /// One laid-out line ready to draw, plus its style and the selected sub-span
@@ -221,6 +226,7 @@ impl Popup {
             full_width_selection: false,
             plain_body: false,
             body_cap_pct: 0,
+            label_first: false,
         }
     }
 
@@ -256,6 +262,13 @@ impl Popup {
     /// Cap the viewport at a percent of terminal rows (see the field doc).
     pub fn body_cap_pct(mut self, pct: usize) -> Self {
         self.body_cap_pct = pct;
+        self
+    }
+
+    /// Keep the label column whole and clip the hint instead (see the field
+    /// doc).
+    pub fn label_first(mut self) -> Self {
+        self.label_first = true;
         self
     }
 
@@ -567,6 +580,27 @@ impl Popup {
                             },
                             None,
                         )
+                    } else if self.label_first {
+                        // The LEFT column is exact; the hint clips. A picker's
+                        // hint is prose (a refusal's reason, a route), and the
+                        // label is the diagnosis - the reverse of the key
+                        // modal, whose hint is the stable id.
+                        let left = format!(" {glyph} {label}");
+                        let left_w = chrome::str_cols(&left).min(width);
+                        let room = width.saturating_sub(left_w + 2);
+                        let hint_text = clip_cols(hint, room);
+                        let gap = width
+                            .saturating_sub(left_w + chrome::str_cols(&hint_text) + 1)
+                            .max(1);
+                        let mut text = left;
+                        text.push_str(&" ".repeat(gap));
+                        text.push_str(&hint_text);
+                        (
+                            pad(&text, width),
+                            vec![],
+                            Role::Body,
+                            (!disabled && selected).then_some((0, width)),
+                        )
                     } else {
                         // The right column is EXACT; the left one ellipsizes. Padding
                         // the whole row and letting `pad` clip from the right ate the
@@ -735,6 +769,19 @@ fn pad(s: &str, w: usize) -> String {
     }
 }
 
+/// Clip `s` to `w` display columns, ellipsizing when the cut removes
+/// anything (the label-first hint column's cut; [`pad`] pads to a fixed
+/// block instead).
+fn clip_cols(s: &str, w: usize) -> String {
+    if chrome::str_cols(s) <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    chrome::fit_ellipsis(s, w)
+}
+
 /// Center `s` within `w` display columns (space padded); truncates via [`pad`]
 /// when too wide.
 fn center(s: &str, w: usize) -> String {
@@ -792,6 +839,45 @@ mod tests {
             enabled: true,
         }
     }
+
+    #[test]
+    fn label_first_keeps_the_label_whole_and_clips_the_hint() {
+        // The composer's regression: a disabled row whose LABEL names the
+        // failure must not ellipsize so a long prose hint can paint. The
+        // default keeps the hint whole instead; both shapes hold.
+        let rows = vec![disabled(
+            "\u{2022}",
+            "model list unavailable",
+            "account records unavailable: Usage: fno-py config get [OPTIONS] {key}",
+        )];
+        let entry_line = |p: &Popup| -> String {
+            p.render((24, 120))
+                .lines
+                .iter()
+                .map(|l| l.text.clone())
+                .find(|t| t.contains("unavailable"))
+                .expect("the entry row renders")
+        };
+        let wide_hint = Popup::new(rows.clone(), Anchor::At { row: 1, col: 1 })
+            .full_chrome()
+            .full_width_selection();
+        let text = entry_line(&wide_hint);
+        assert!(
+            !text.contains("model list unavailable"),
+            "the default protects the hint and clips the label: {text:?}"
+        );
+        let label_whole = Popup::new(rows, Anchor::At { row: 1, col: 1 })
+            .full_chrome()
+            .full_width_selection()
+            .label_first();
+        let text = entry_line(&label_whole);
+        assert!(
+            text.contains("model list unavailable"),
+            "label_first keeps the label whole: {text:?}"
+        );
+        assert!(!text.contains("{key}"), "the long hint clips: {text:?}");
+    }
+
     fn disabled(g: &str, l: &str, reason: &str) -> PopupRow {
         PopupRow::Entry {
             glyph: g.into(),
@@ -1148,7 +1234,10 @@ mod tests {
         // an absence alone, which cannot tell "no color" from "nothing ran".
         let p = Popup::new(vec![entry("a", "one", "x")], Anchor::Center).title("T");
         let r = p.render((24, 80));
-        let theme = Theme::default_theme();
+        // The property belongs to the `terminal` theme specifically: it is
+        // the no-op whose whole contract is byte-identity, while the default
+        // theme paints the chrome.
+        let theme = Theme::from_name("terminal").0;
         let mut cells = vec![Cell::default(); 24 * 80];
         draw(&mut cells, 24, 80, &r, &theme);
         // Positive control: the popup drew its top-left border corner.

@@ -16,12 +16,8 @@ from fno.claims.io import claim_path, read_claim_file, serialize_claim
 from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
-from fno.rust_binary import find_dev_binary
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 DEAD_PID = 2**30  # far above any live pid; is_live() reads it as dead

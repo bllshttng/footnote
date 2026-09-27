@@ -1,13 +1,20 @@
-//! The `f[no]` brand mark, carried over from footnote.sh: a serif-feeling `f`
-//! with `[no]` beside it in dimmed amber. One row only (user ruling,
-//! 2026-09-25): a terminal cannot superscript and a two-row layout read odd.
+//! The `Ｆ[no]` brand mark, carried over from footnote.sh: the full-width
+//! `Ｆ` (U+FF26, two cells) with the `[no]` stamp directly after it, no gap.
+//! The stamp is reverse video: an off-white label under a dark theme, an ink
+//! label under a light one. One row only (user ruling, 2026-09-25): a
+//! terminal cannot superscript and a two-row layout read odd.
 
 use crate::theme::Role;
 
-/// One row of `(text, role)`: the `f` in the bold title role, `[no]` in the
-/// dim amber wordmark role.
+/// The mark as one string: the full-width `Ｆ` then `[no]`. The tab bar's
+/// width math reads this through [`glyph widths`](crate::client glyph_cols),
+/// so the `Ｆ` claims its two columns.
+pub const TEXT: &str = "\u{FF26}[no]";
+
+/// One row of `(text, role)`: the `Ｆ` in the bold title role, `[no]` in the
+/// reverse-video stamp role.
 pub fn one_row() -> Vec<(&'static str, Role)> {
-    vec![("f", Role::Title), ("[no]", Role::Wordmark)]
+    vec![("\u{FF26}", Role::Title), ("[no]", Role::Stamp)]
 }
 
 #[cfg(test)]
@@ -16,21 +23,23 @@ mod tests {
     use crate::theme::Theme;
 
     #[test]
-    fn one_row_is_the_f_then_the_bracketed_no() {
+    fn one_row_is_the_fullwidth_f_then_the_bracketed_no() {
         let row = one_row();
-        assert_eq!(row[0], ("f", Role::Title));
-        assert_eq!(row[1], ("[no]", Role::Wordmark));
+        assert_eq!(row[0], ("\u{FF26}", Role::Title));
+        assert_eq!(row[1], ("[no]", Role::Stamp));
+        let joined: String = row.iter().map(|(s, _)| *s).collect();
+        assert_eq!(joined, TEXT);
     }
 
     #[test]
-    fn the_wordmark_role_resolves_dim_amber_under_every_theme() {
-        for name in ["terminal", "catppuccin", "tokyo-night", "gruvbox"] {
+    fn the_stamp_role_is_inverse_under_every_theme() {
+        for name in crate::theme::THEME_NAMES {
             let t = Theme::from_name(name).0;
-            let (fg, _bg, flags) = crate::theme::cell_style(Role::Wordmark, &t);
-            assert_eq!(fg, t.accent, "{name}");
+            let (fg, _bg, flags) = crate::theme::cell_style(Role::Stamp, &t);
+            assert_eq!(fg, t.stamp, "{name}");
             assert_eq!(
-                flags & crate::proto::cell_flags::DIM,
-                crate::proto::cell_flags::DIM,
+                flags & crate::proto::cell_flags::INVERSE,
+                crate::proto::cell_flags::INVERSE,
                 "{name}"
             );
         }

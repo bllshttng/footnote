@@ -327,6 +327,94 @@ fn f_key_toggles_full_screen() {
     );
 }
 
+// The docked board's column owns no agents rows. A press anywhere in it
+// resolves no sideline row, no drag source, and no chrome hit - the board is
+// keyboard-driven, and a click must never act on a phantom agent row.
+#[test]
+fn board_column_resolves_no_agents_rows_or_chrome_hits() {
+    let v = sideline_backlog_view();
+    // A cell well inside the board column (panel 28 wide), below the strip.
+    assert_eq!(v.sideline_row_at(10, 14), None);
+    assert!(v.row_drag_source_at(10, 14).is_none());
+    assert!(v.press_hold_row_at(10, 14).is_none());
+    assert!(v.chrome_hit(10, 14).is_none());
+}
+
+// the board is a modal like the composer - prefix chords still
+// resolve while it holds the keyboard (which-key parity). Before the fix the
+// prefix byte fell into the board's byte catch-all: `^B C` toggled nothing
+// and `^B ?` opened the board's own keys overlay instead of the keybinds.
+#[test]
+fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut scanner = crate::keys::Scanner::default();
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let flow =
+            super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'C'], &mut sock)
+                .await
+                .expect("the board owns the chunk")
+                .expect("route runs");
+        assert!(matches!(flow, StdinFlow::Continue));
+    });
+    assert!(v.court.is_expanded(), "^B C toggled the court fold");
+    assert!(v.backlog_board.is_some(), "the board survives the chord");
+    // `^B ?` opens the GLOBAL keybinds, never the board's own keys overlay
+    // (that stays on the bare key).
+    let mut scanner = crate::keys::Scanner::default();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'?'], &mut sock)
+            .await
+            .expect("the board owns the chunk")
+            .expect("route runs");
+    });
+    assert!(
+        v.keys_modal.is_some(),
+        "^B ? opened the global keybinds modal"
+    );
+    assert!(
+        v.backlog_board
+            .as_ref()
+            .map(|b| !b.keys_overlay)
+            .unwrap_or(false),
+        "the board's keys overlay did not arm behind the chord"
+    );
+}
+
+// a chord that opens a lower-priority modal over the docked board hands the
+// keyboard to that modal: `^B i` opens the composer, and a Tab then cycles
+// the composer's tab - it never falls through to the board's folder.
+#[test]
+fn a_modal_opened_over_the_board_owns_the_keyboard() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut scanner = crate::keys::Scanner::default();
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'i'], &mut sock)
+            .await
+            .expect("the board owns the chunk")
+            .expect("route runs");
+    });
+    assert!(v.launcher.is_some(), "^B i opened the composer");
+    assert!(v.backlog_board.is_some(), "the board stays docked");
+    let mut scanner = crate::keys::Scanner::default();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[b'\t'], &mut sock)
+            .await
+            .expect("the composer owns the chunk")
+            .expect("route runs");
+    });
+    let l = v.launcher.as_ref().expect("the composer is still open");
+    assert_ne!(
+        l.focus,
+        super::agent_launcher::Focus::Harness,
+        "Tab cycled the composer's tab; the byte reached the composer, not the board"
+    );
+    assert!(v.backlog_board.is_some(), "the board stays docked");
+}
+
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
 // content, region-framed, with the card rows visible.
@@ -461,8 +549,8 @@ fn backlog_panel_cells_carry_distinct_attributes() {
     let band_line = text.lines().nth(band_row).expect("band line");
     let id_col = band_line.find("x-2").expect("id on the cursor row");
     let band = cell_at(&frame, band_row, id_col, cols);
-    assert_eq!(band.bg, crate::proto::Color::Indexed(0), "band surface");
-    assert_eq!(band.fg, crate::proto::Color::Indexed(3), "band accent text");
+    assert_eq!(band.bg, view.theme.sel, "band surface");
+    assert_eq!(band.fg, view.theme.brand, "band accent text");
     // A non-cursor card id keeps the accent slot and a plain title.
     let id_row = text
         .lines()

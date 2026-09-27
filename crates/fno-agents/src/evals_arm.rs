@@ -261,8 +261,10 @@ pub(crate) fn self_exe() -> String {
         .unwrap_or_else(|_| "fno-agents".into())
 }
 
-/// kill(pid, 0): existence probe, no signal delivered. EPERM counts as alive
-/// (the process exists, we lack leave); only "no such process" reads as dead.
+/// kill(pid, 0): existence probe, no signal delivered. rc==0 reads as alive;
+/// every error including EPERM (a foreign-owned live process) reads as dead.
+/// Its callers only ever probe fno's own spawned children, so a foreign-owned
+/// pid is never a live worker.
 pub(crate) fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill(0) sends no signal; it only queries the process's existence.
     unsafe { libc::kill(pid as i32, 0) == 0 }

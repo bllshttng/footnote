@@ -75,6 +75,82 @@ impl View {
         }
     }
 
+    /// Sideline rows the cursor can occupy: the full terminal height (the
+    /// sideline owns row 0 since US1) minus the bottom chrome row,
+    /// minus the court block's rows at the bottom. The block is the
+    /// subtraction point's only second customer, so `clamp_sideline_scroll`
+    /// and `reveal_focus_row` inherit the shrunk window without a second
+    /// fix.
+    pub(super) fn sideline_visible_rows(&self) -> usize {
+        // The questions block and the sticky menu footer both come off the
+        // region before the scroll math runs (h): scrolling to the end lands
+        // the last row above the footer, never under the block. The footer
+        // only reserves a row it can spare - a region down to its last row
+        // keeps that row as list, never as chrome (the court rule).
+        let rows = (self.term.0 as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
+            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let pinned = self.painted_rows().len() > rows && rows >= 2;
+        rows.saturating_sub(pinned as usize)
+    }
+
+    /// The `display_rows()` index a hover cell falls on in the sideline, or
+    /// `None` when the cell is not a sideline text cell - a pane, the divider
+    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
+    /// sideline geometry exactly so the highlight lands where a click would
+    ///.
+    pub(super) fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
+        // The board column paints its own surface and owns no agents display
+        // rows: every resolver that answers "which sideline row is this"
+        // (hover, right-click menu, drag pickup, press-hold) must answer
+        // none there, or a press on the board acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
+        // The sideline owns row 0 in normal mode (the strip moved right of
+        // the divider), so display row `i` maps directly from `row`. A cell
+        // on the divider or in the strip's content columns returns None.
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
+            return None;
+        }
+        // Full-screen sideline paints below the strip; invert the same
+        // offset the painter used.
+        let top = self.sideline_top();
+        if (row as usize) < top {
+            return None;
+        }
+        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
+            return None;
+        }
+        // The sticky menu footer (h): when the rows overflow, the
+        // menu/add-workspace row pins directly above the questions block, so
+        // a click or hover there is the footer's row even though its display
+        // row has scrolled away. Checked ahead of the offset path: the
+        // covered display row must never win. The pinned test reads the same
+        // raw region `sideline_visible_rows` starts from, so a list that
+        // exactly fits never reads as pinned here.
+        let list_rows = (self.term.0 as usize)
+            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let raw_rows = list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let pinned = self.painted_rows().len() > raw_rows && raw_rows >= 2;
+        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(1) {
+            return self
+                .painted_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::NewSquad));
+        }
+        let i = row as usize - top + self.sideline_offset();
+        if i < self.painted_rows().len() {
+            return Some(i);
+        }
+        None
+    }
+
     pub(super) fn draw_sideline(
         &self,
         cells: &mut [Cell],
@@ -117,7 +193,7 @@ impl View {
             }
             let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
             let (border_fg, border_flags) = if border_active {
-                (self.theme.accent, cell_flags::BOLD)
+                (self.theme.brand, cell_flags::BOLD)
             } else {
                 (Color::Default, cell_flags::DIM)
             };
@@ -156,7 +232,7 @@ impl View {
         let chrome_rows = self.bottom_row_is_chrome() as usize;
         let (block_rows, block_lines) = self.court_block_layout(rows);
         let (q_rows, q_lines) = questions::block_rows(self, rows)
-            .map(|(n, lines, _)| (n, lines))
+            .map(|b| (b.n, b.lines))
             .unwrap_or((0, Vec::new()));
         let list_rows = rows.saturating_sub(block_rows).saturating_sub(q_rows);
         // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
@@ -164,6 +240,13 @@ impl View {
         // answer to the same height, or the render-time scroll lands the
         // selected row under the chrome that paints over it.
         let table_rows_n = list_rows.saturating_sub(chrome_rows);
+        // The sticky menu row (h): when the rows overflow the region, the
+        // menu/add-workspace footer pins directly above the questions block
+        // and the widget area gives up its last row, so the footer is never
+        // covered and the rows scroll to their true end above it. A region
+        // down to one row keeps that row as list, never as footer.
+        let sticky_footer = table_rows_n > 1 && display.len() > table_rows_n;
+        let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
         // backend) and the blit copies it into the compositor's cells. The
         // court block and the dock own the rows below the list, so the
@@ -176,7 +259,7 @@ impl View {
         let mut buf = RtBuffer::empty(area);
         // The widget area is the top slice of the column; the dock paints
         // into the same Buffer below it, before the one blit.
-        let table_area = RtRect::new(0, 0, text_w as u16, table_rows_n as u16);
+        let table_area = RtRect::new(0, 0, text_w as u16, table_h as u16);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
         let mut st = self.sideline_state.get().with_selected(self.selector);
@@ -216,7 +299,7 @@ impl View {
         // style; its Agent and CardDetail rows use one paired overlay here.
         for (i, drow) in display.iter().enumerate().skip(off) {
             let r = i - off;
-            if r >= table_rows_n {
+            if r >= table_h {
                 break;
             }
             let mark_caret = matches!(
@@ -310,7 +393,7 @@ impl View {
                 self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
             }
             if mark_caret && text_w >= 1 {
-                cells[r * cols].fg = self.theme.accent;
+                cells[r * cols].fg = self.theme.brand;
             }
             if matches!(drow, DisplayRow::NewSquad) {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
@@ -386,7 +469,11 @@ impl View {
         // width - the same rule every sideline row follows.
         // The questions block just above the court block: the row list
         // stopped above both; the open rows render normal, the not-ready and
-        // answered rows DIM.
+        // answered rows DIM. The sticky menu footer rides directly above the
+        // block when the rows overflow (h).
+        if sticky_footer {
+            self.paint_new_squad_footer(cells, list_rows - 1, cols, text_w, panel_w);
+        }
         questions::paint_block(q_lines, cells, list_rows, rows, cols, text_w);
         court_block::paint_court_block(cells, block_lines, list_rows + q_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
@@ -397,7 +484,7 @@ impl View {
         // accent IS the affordance.
         let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
         let (border_fg, border_flags) = if border_active {
-            (self.theme.accent, cell_flags::BOLD)
+            (self.theme.brand, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };
@@ -449,7 +536,7 @@ impl View {
             }
             DisplayRow::Agent(a) => {
                 let lat = agent_lattice_state(a);
-                let style = lattice_style(lat, self.theme.accent);
+                let style = lattice_style(lat, self.theme.needs_you);
                 let mut flags = style.flags;
                 if a.external && lat != LatticeState::Blocked {
                     flags |= cell_flags::DIM;
@@ -461,7 +548,7 @@ impl View {
                 // stay ordinary.
                 let focus_bit = if focus_exited { cell_flags::DIM } else { 0 };
                 let cell_fg = if focus_exited {
-                    self.theme.accent
+                    self.theme.brand
                 } else {
                     status_fg
                 };

@@ -108,6 +108,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # value instead of the one the code under test states. Keeping NO_COLOR
     # visible here reproduces that false positive on the Python side.
     "NO_COLOR",
+    # The mux client's light-background probe (digest_overlay.rs theme_for):
+    # a developer's terminal reports its own palette, and a suite must not
+    # resolve the theme from the machine it happens to run on.
+    "COLORFGBG",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
     "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
@@ -243,6 +247,14 @@ _RUNNER_PASSTHROUGH = (
     # opt-in live agy journey. Real HOME is restored because agy's credential,
     # its conversation store and its Stop hooks.json all live there.
     "FNO_AGY_LIVE",
+    # opt-in live codex journey (cli/tests/agents/test_codex_thread_effort_journey.py).
+    # Without this keep the FNO_* prefix sweep clears the flag before the module
+    # reads it, so the journey skips for someone who set it - an acceptance
+    # nobody can run. It spends real tokens only when the flag is set.
+    "FNO_CODEX_LIVE",
+    # opt-in live relay journey (cli/tests/relay/test_roundtrip.py): drives the
+    # live daemon RPC substrate, same skip-for-someone-who-set-it trap.
+    "FNO_LIVE_RELAY",
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which

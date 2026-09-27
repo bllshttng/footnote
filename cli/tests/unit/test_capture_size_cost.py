@@ -106,9 +106,27 @@ def test_normalize_type(value, expected):
 def test_valid_node_types_is_the_one_vocabulary():
     """`backlog update --type` validates against this same set, not a copy."""
     assert VALID_NODE_TYPES == frozenset({"feature", "epic", "bug", "roadmap"})
-    result = runner.invoke(app, ["backlog", "update", "ab-nope0001", "--type", "banana"])
-    assert result.exit_code == 1
-    assert "invalid type 'banana'" in result.output
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", "ab-nope0001", "--type", "banana"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    assert "invalid type 'banana'" in out
 
 
 def test_intake_copies_type_from_frontmatter(tmp_path, monkeypatch):

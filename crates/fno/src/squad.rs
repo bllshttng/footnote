@@ -332,7 +332,7 @@ impl Session {
             return MoveTabOutcome::Refused("no such tab");
         };
         if self.squad(dst).is_none() {
-            return MoveTabOutcome::Refused("no such squad");
+            return MoveTabOutcome::Refused("no such workspace");
         }
         if src_id == dst {
             return MoveTabOutcome::Refused("already there");
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(s.move_tab(999, 2), MoveTabOutcome::Refused("no such tab"));
         assert_eq!(
             s.move_tab(10, 999),
-            MoveTabOutcome::Refused("no such squad")
+            MoveTabOutcome::Refused("no such workspace")
         );
         assert_eq!(
             s.move_tab(10, 1),

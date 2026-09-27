@@ -446,9 +446,18 @@ pub enum Event {
     SearchOpen,
     /// Open the session navigator (prefix+f): a global goto picker over
     /// a flat catalog of every squad/tab/agent/card. The client owns the typing
-    /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
+    /// mode (text filter, Tab state pane focus, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
+    /// Toggle the questions sideline block on/off (prefix+q). Hidden means
+    /// fully gone (zero rows); the choice persists in the view store.
+    ToggleQuestionsBlock,
+    /// Grow/shrink the questions block by a row (prefix+} / prefix+{).
+    /// The height persists; the block never crowds the last agent row out.
+    ResizeQuestionsBlock(i8),
+    /// Show/hide answered and done questions in the block (prefix+X).
+    /// Hidden (default): at most one dim count line.
+    ToggleQuestionsDone,
     /// Open the settings modal (prefix+S). The same surface the sideline
     /// menu's `settings` row opens, reached from the keyboard. Case pair
     /// with `s` (toggle-status), the h/H focus/resize convention.
@@ -1150,7 +1159,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "find",
             OpenNav,
             Navigation,
-            "find: goto squad/tab/pane/agent",
+            "find: goto workspace/tab/pane/agent",
         ),
         // global
         b(
@@ -1188,7 +1197,35 @@ fn default_bindings() -> Vec<KeyBinding> {
             "court",
             OpenCourt,
             Global,
-            "the court (load, census, lanes)", // minimize/expand, sideline
+            "the court block (load, census, lanes)", // minimize/expand, sideline
+        ),
+        b(
+            b'q',
+            "toggle-questions-block",
+            ToggleQuestionsBlock,
+            Global,
+            "toggle the questions block",
+        ),
+        b(
+            b'}',
+            "grow-questions-block",
+            ResizeQuestionsBlock(1),
+            Global,
+            "grow the questions block",
+        ),
+        b(
+            b'{',
+            "shrink-questions-block",
+            ResizeQuestionsBlock(-1),
+            Global,
+            "shrink the questions block",
+        ),
+        b(
+            b'X',
+            "questions-show-done",
+            ToggleQuestionsDone,
+            Global,
+            "show/hide answered questions",
         ),
         b(
             b'O',
@@ -2353,8 +2390,8 @@ mod tests {
 
     #[test]
     fn client_keys_prefix_unmapped_swallows_with_bell() {
-        // The 'q' must NOT be forwarded - swallow + BEL.
-        assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
+        // An unbound byte ('u' here) must NOT be forwarded - swallow + BEL.
+        assert_eq!(scan_all(&[b"\x02u"]), vec![Event::Bell]);
 
         // (AC2-INV) The never-leak guarantee, swept over the whole byte
         // space rather than one specimen. adds ONE deliberate held-byte

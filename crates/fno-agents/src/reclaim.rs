@@ -468,6 +468,18 @@ fn cargo_build_dirs_lane(home: &AgentsHome, apply: bool, include_cwd_root: bool)
     lane
 }
 
+/// The Claude config tmp lane: orphaned `.claude.json.tmp.*` atomic-write
+/// temp files (a claude process killed mid-write), reaped only when the file
+/// is past [`crate::claude_config_tmp::TMP_MIN_AGE`] and its pid is dead.
+fn claude_config_tmp_lane(apply: bool) -> Lane {
+    let rep = crate::claude_config_tmp::sweep(apply, SystemTime::now());
+    let note = rep.note(apply);
+    let mut lane = Lane::new("claude_config_tmp", rep.reaped);
+    lane.bytes = rep.bytes_reaped;
+    lane.note = note;
+    lane
+}
+
 fn write_receipt(home: &AgentsHome, lanes: &[Lane]) -> std::io::Result<()> {
     let path = receipt_path(home);
     if let Some(parent) = path.parent() {
@@ -621,6 +633,7 @@ fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_
     lanes.push(codex_quarantines);
     drop(codex_lock);
     lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
+    lanes.push(claude_config_tmp_lane(apply));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {
         None => uv.note = "uv not found".to_string(),

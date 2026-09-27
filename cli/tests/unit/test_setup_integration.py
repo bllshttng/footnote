@@ -416,6 +416,7 @@ def pi_agent_env(tmp_path, monkeypatch):
     return agent
 
 
+@pytest.mark.dev_build
 def test_pi_install_copies_extension_and_is_installed(tmp_path, pi_agent_env):
     assert I._pi_is_installed() is False
 
@@ -433,6 +434,7 @@ def test_pi_install_copies_extension_and_is_installed(tmp_path, pi_agent_env):
     assert I._pi_is_installed() is True
 
 
+@pytest.mark.dev_build
 def test_pi_is_installed_false_when_stale(tmp_path, pi_agent_env):
     dest = pi_agent_env / "extensions" / "footnote.ts"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -478,6 +480,7 @@ def _fake_agy_adapter(tmp_path, monkeypatch):
     return adapter
 
 
+@pytest.mark.dev_build
 def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)  # keep any workspace writes inside the tmp tree
@@ -499,6 +502,7 @@ def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch,
     assert not (tmp_path / ".agent").exists()
 
 
+@pytest.mark.dev_build
 def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -522,6 +526,7 @@ def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
     assert res.status == "manual" and not res.ok
 
 
+@pytest.mark.dev_build
 def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     _fake_agy_adapter(tmp_path, monkeypatch)
@@ -531,6 +536,7 @@ def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch, agy_rus
     assert I._agy_is_installed() is False
 
 
+@pytest.mark.dev_build
 def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch, agy_rust_door):
     # {"footnote": {"Stop": null}} must not TypeError on the any() iteration.
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -541,6 +547,7 @@ def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch, agy_rust_doo
     assert I._agy_is_installed() is False
 
 
+@pytest.mark.dev_build
 def test_agy_install_refuses_malformed_and_preserves_bytes(tmp_path, monkeypatch, agy_rust_door):
     # A malformed FOREIGN file is refused, never overwritten: the bytes the
     # user (or another tool) owns survive an install attempt byte for byte.
@@ -562,6 +569,7 @@ def test_agy_install_refuses_malformed_and_preserves_bytes(tmp_path, monkeypatch
     assert hooks.read_bytes() == before, "malformed bytes must be preserved"
 
 
+@pytest.mark.dev_build
 def test_agy_install_keeps_disabled_disabled(tmp_path, monkeypatch, agy_rust_door):
     # footnote.enabled = false is the operator's decision: install refreshes
     # the handler and reports it, and never flips enabled back on.
@@ -591,6 +599,7 @@ def test_agy_install_keeps_disabled_disabled(tmp_path, monkeypatch, agy_rust_doo
     assert data["footnote"]["Stop"][0]["command"] == str(adapter)
 
 
+@pytest.mark.dev_build
 def test_agy_is_installed_honest_without_adapter(tmp_path, monkeypatch, agy_rust_door):
     # A footnote Stop entry with no resolvable adapter is unverifiable, and
     # unverifiable is not installed.

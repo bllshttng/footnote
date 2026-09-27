@@ -2527,12 +2527,12 @@ class SquadAwareRunner(FakeRunner):
                 sid = int(scope[3:])
                 if sid not in self.squads:
                     return subprocess.CompletedProcess(
-                        argv, 1, "", f"no such squad id: {sid}"
+                        argv, 1, "", f"no such workspace id: {sid}"
                     )
                 rows = self.squads[sid]
             else:
                 return subprocess.CompletedProcess(
-                    argv, 1, "", f"no such squad: {scope}"
+                    argv, 1, "", f"no such workspace: {scope}"
                 )
             return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
         if list(argv[1:4]) == ["mux", "tab", "join"]:
