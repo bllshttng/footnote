@@ -2,6 +2,7 @@
 //! surfaces (kept out of the over-budget client_tests.rs; each shrink is
 //! banked).
 
+use super::keys_modal::keys_modal_keys;
 use super::tests::two_pane_view;
 use super::*;
 use crate::vt::frame_text;
@@ -36,19 +37,18 @@ fn client_compose_keys_modal_renders_the_which_key_reference() {
         "fixed height: deep sections sit below the fold (scroll/filter to them)"
     );
     // The two-column anatomy: the global `w` row renders key then label on
-    // one line, key left.
+    // one line, key left. The ` w ` cell matches only the w row - the
+    // Ctrl+Opt+Left meta row's label also says "row selector".
     let key_line = text
         .lines()
-        .find(|l| l.contains("sideline row selector"))
+        .find(|l| l.contains(" w ") && l.contains("sideline row selector"))
         .expect("the global w row renders");
-    let wcol = key_line.find("w").expect("the w key cell");
+    let wcol = key_line.find(" w ").expect("the w key cell");
     let label = key_line.find("sideline row selector").unwrap();
     assert!(wcol < label, "key column left of the label: {key_line:?}");
-    // The glyph legend still rides the tail (reference material).
-    assert!(
-        text.contains("right-click works only where the terminal forwards it"),
-        "the tail notes render on the unfiltered modal"
-    );
+    // The tail notes + glyph legend sit BELOW the fold at scroll 0 (they
+    // ride after every section, panes included) and are reached by scroll;
+    // x7683_keys_modal_names_every_menu_trigger pins that reachability.
 }
 
 #[tokio::test]
@@ -70,18 +70,23 @@ async fn keys_modal_j_k_and_filter_drive_the_plain_body_modal() {
             .0
     };
     let start = sel_row(&v);
-    keys_modal_keys(&mut v, &mut Scanner::default(), b"k", &mut Vec::new())
+    keys_modal_keys(&mut v, &mut Scanner::default(), b"k", &mut Vec::<u8>::new())
         .await
         .unwrap();
     assert_eq!(sel_row(&v), start, "k at the top stays (no wrap)");
-    keys_modal_keys(&mut v, &mut Scanner::default(), b"j", &mut Vec::new())
+    keys_modal_keys(&mut v, &mut Scanner::default(), b"j", &mut Vec::<u8>::new())
         .await
         .unwrap();
     assert!(sel_row(&v) > start, "j moves the cursor down a row");
     // '/' opens the filter; typing narrows; the query rides the hint line.
-    keys_modal_keys(&mut v, &mut Scanner::default(), b"/detach", &mut Vec::new())
-        .await
-        .unwrap();
+    keys_modal_keys(
+        &mut v,
+        &mut Scanner::default(),
+        b"/detach",
+        &mut Vec::<u8>::new(),
+    )
+    .await
+    .unwrap();
     let text = frame_text(&v.compose());
     assert!(
         text.contains("/detach"),
@@ -113,7 +118,7 @@ async fn keys_modal_j_k_and_filter_drive_the_plain_body_modal() {
         &mut v,
         &mut Scanner::default(),
         b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f",
-        &mut Vec::new(),
+        &mut Vec::<u8>::new(),
     )
     .await
     .unwrap();

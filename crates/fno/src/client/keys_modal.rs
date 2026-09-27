@@ -150,6 +150,186 @@ pub(crate) fn keys_modal_with_filter(filter: Option<&str>) -> KeysModal {
     }
 }
 
+/// One printable byte while the modal is open, in the modal's own grammar:
+/// `/` enters the live filter, j/k move the cursor (and keep scrolling into
+/// the inert tail at either end), any other byte falls through to the chord
+/// dispatch. Returns whether the modal consumed the byte.
+pub(crate) fn keys_modal_byte(view: &mut View, b: u8) -> bool {
+    let filtering = view.keys_modal.as_ref().is_some_and(|m| m.filter.is_some());
+    if filtering {
+        // Filter input: printable bytes edit the query, backspace pops it
+        // (an empty backspace exits the filter), anything else is inert. A
+        // changed query rebuilds the rows.
+        let mut edited = false;
+        if let Some(m) = view.keys_modal.as_mut() {
+            match b {
+                0x7f | 0x08 => {
+                    let q = m.filter.as_mut().expect("filtering");
+                    if q.pop().is_none() {
+                        m.filter = None;
+                    }
+                    edited = true;
+                }
+                _ if b.is_ascii_graphic() || b == b' ' => {
+                    m.filter.as_mut().expect("filtering").push(b as char);
+                    edited = true;
+                }
+                _ => {}
+            }
+        }
+        if edited {
+            view.keys_modal = Some(keys_modal_with_filter(
+                view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()),
+            ));
+        }
+        return true;
+    }
+    match b {
+        // The search key: enter filter mode (empty query).
+        b'/' => {
+            view.keys_modal = Some(keys_modal_with_filter(Some("")));
+            true
+        }
+        // The modal's scroll keys (the footer names them). At either end of
+        // the selectable rows the key keeps scrolling, so the inert tail
+        // (the right-click notes, the glyph legend) stays keyboard-reachable.
+        b'j' | b'k' => {
+            let down = b == b'j';
+            if let Some(m) = view.keys_modal.as_mut() {
+                let before = m.popup.selected();
+                m.popup.nav(if down { NavDir::Down } else { NavDir::Up });
+                if m.popup.selected() == before {
+                    m.popup.scroll_by(if down { 1 } else { -1 });
+                }
+            }
+            view.follow_modal_selection();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Which-key modal keys (US3). Esc closes; arrows/pgup scroll+select;
+/// Enter/`click` run the selected row; a bound printable key runs immediately
+/// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
+/// is folded like every other overlay (carried across reads) so a split arrow
+/// sequence can never leak its tail into a pane (codex P2). No key ever reaches
+/// a pane.
+pub(crate) async fn keys_modal_keys(
+    view: &mut View,
+    scanner: &mut Scanner,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.keys_modal_esc);
+    let toks = fold_modal_keys(&mut esc, bytes);
+    view.keys_modal_esc = esc;
+    for tok in toks {
+        if view.keys_modal.is_none() {
+            break; // closed mid-chunk: swallow the rest, never forward
+        }
+        match tok {
+            ModalKey::Esc => view.keys_modal = None,
+            ModalKey::Up => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Up);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Down => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Down);
+                }
+                view.follow_modal_selection();
+            }
+            ModalKey::Left => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Left);
+                }
+            }
+            ModalKey::Right => {
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.nav(NavDir::Right);
+                }
+            }
+            ModalKey::PageUp => {
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(-page);
+                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
+                }
+            }
+            ModalKey::PageDown => {
+                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
+                if let Some(m) = view.keys_modal.as_mut() {
+                    m.popup.scroll_by(page);
+                    m.popup.clamp_sel_to_view(trows);
+                }
+            }
+            ModalKey::Enter => {
+                if matches!(
+                    keys_modal_execute_selected(view, scanner, sock_w).await?,
+                    DispatchFlow::Detach
+                ) {
+                    return Ok(StdinFlow::Detach);
+                }
+            }
+            ModalKey::Byte(b) => {
+                if !keys_modal_byte(view, b) {
+                    match resolve_chord(b) {
+                        // Unbound key dismisses (AC2-EDGE): no action fires.
+                        Event::Bell => view.keys_modal = None,
+                        // Bound key runs immediately through the SAME dispatch
+                        // a typed chord uses (Locked 3), then the modal closes.
+                        ev => {
+                            view.keys_modal = None;
+                            // Parity with a typed chord: modal execution arms any
+                            // repeatable event too (the scanner never saw this byte).
+                            scanner.arm_if_repeat(&ev, Instant::now());
+                            if matches!(
+                                dispatch_event(view, ev, sock_w).await?,
+                                DispatchFlow::Detach
+                            ) {
+                                return Ok(StdinFlow::Detach);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Run the modal's selected row (Enter/click) through the shared dispatch, then
+/// close - a header/meta row with no chord BELs and stays open (nothing ran, so
+/// the "execute always closes" invariant is not tripped). Returns the dispatch
+/// flow so a detach chord (prefix+d) run from the modal actually detaches.
+async fn keys_modal_execute_selected(
+    view: &mut View,
+    scanner: &mut Scanner,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<DispatchFlow, String> {
+    let ev = view.keys_modal.as_ref().and_then(|m| {
+        m.popup
+            .selected()
+            .and_then(|(ri, _)| m.row_events.get(ri).cloned().flatten())
+    });
+    match ev {
+        Some(ev) => {
+            view.keys_modal = None;
+            // Parity with a typed chord: modal execution arms any repeatable
+            // event too (the scanner never saw a key here).
+            scanner.arm_if_repeat(&ev, Instant::now());
+            dispatch_event(view, ev, sock_w).await
+        }
+        None => {
+            let _ = raw_out(b"\x07");
+            Ok(DispatchFlow::Continue)
+        }
+    }
+}
+
 /// One mouse report while the which-key modal is open (US3): hover moves
 /// the selection, the wheel scrolls, a left click on a row runs it, a click off
 /// the popup dismisses (click-elsewhere).
@@ -194,7 +374,7 @@ pub(crate) async fn keys_modal_mouse(
                         m.popup.select(t);
                     }
                     if matches!(
-                        super::keys_modal_execute_selected(view, scanner, sock_w).await?,
+                        keys_modal_execute_selected(view, scanner, sock_w).await?,
                         DispatchFlow::Detach
                     ) {
                         return Ok(StdinFlow::Detach);
