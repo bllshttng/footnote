@@ -325,8 +325,11 @@ impl Core {
                     // Never a mission squad: that id names a render-time header
                     // the client draws from names alone, so a row grouped under
                     // one is drawn by no section at all and disappears.
+                    // Membership, then the spawn edge (the spawner's squad),
+                    // then cwd as the legacy fallback.
                     let squad = self
                         .member_squad_for_agent(a)
+                        .or_else(|| self.parent_edge_squad_for_agent(a))
                         .or_else(|| self.session.find_by_cwd(&a.cwd));
                     // (US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
