@@ -176,26 +176,37 @@ def test_shared_session_start_does_not_duplicate_claude_registration(
 def test_spawned_worker_restamps_without_consulting_the_optin_knob(tmp_path: Path) -> None:
     """x-1e34: a footnote-spawned worker (FNO_AGENT_SELF) takes the restamp path.
 
-    Two things are asserted because both are load-bearing. `--agent-self` must
-    reach the entry point (registration keys on the re-mintable session id and
-    would append a second row instead of correcting the first), and the
-    auto_register_sessions knob must NOT be consulted -- it governs whether a
-    hand-started terminal JOINS the roster, while a spawned worker is already on
-    it and its row going stale is a defect at any knob setting.
+    The daemon's session-report ingest holds the reported id on every lane;
+    the bounded Python restamp supplements it on the pane lane only
+    (FNO_AGENT_ROW_PENDING), the path that heals the row's mux ref and opens
+    the parked pending graph row. Two things stay load-bearing. `--agent-self`
+    must reach both the thin report and the entry point (registration keys on
+    the re-mintable session id and would append a second row instead of
+    correcting the first), and the auto_register_sessions knob must NOT be
+    consulted -- it governs whether a hand-started terminal JOINS the roster,
+    while a spawned worker is already on it and its row going stale is a
+    defect at any knob setting.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    capture = tmp_path / "agents-argv"
+    capture = tmp_path / "uv-argv"
+    agents_capture = tmp_path / "agents-argv"
     knob_read = tmp_path / "knob-read"
-    # The worker restamp is the thin binary report: a mock fno-agents (pinned
-    # through the resolver's env override) records the args it received.
-    agents = bin_dir / "fno-agents"
-    agents.write_text(
-        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$AGENTS_CAPTURE"\n', encoding="utf-8"
+    uv = bin_dir / "uv"
+    uv.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$UV_CAPTURE\"\n", encoding="utf-8"
     )
-    agents.chmod(0o755)
+    uv.chmod(0o755)
+    # The thin session-report verb rides fno-agents, resolved through
+    # FNO_AGENTS_BIN; the mock records its argv so the report lane is visible.
+    agents_bin = bin_dir / "fno-agents"
+    agents_bin.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$AGENTS_CAPTURE"\n',
+        encoding="utf-8",
+    )
+    agents_bin.chmod(0o755)
     # A mock `fno` that records any call and answers the knob with `false`: if
-    # the restamp were gated on it, the hook would exit before reporting.
+    # the restamp were gated on it, the hook would exit before reaching uv.
     fno = bin_dir / "fno"
     fno.write_text(
         '#!/usr/bin/env bash\ntouch "$KNOB_READ"\necho false\nexit 0\n', encoding="utf-8"
@@ -213,12 +224,18 @@ def test_spawned_worker_restamps_without_consulting_the_optin_knob(tmp_path: Pat
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_CODE_SESSION_ID": "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e",
         "FNO_AGENT_SELF": "target-x-f0c2",
-        "FNO_AGENTS_BIN": str(agents),
-        "AGENTS_CAPTURE": str(capture),
+        # Pane substrate: the only worker lane that still runs the Python
+        # restamp beside the thin report.
+        "FNO_AGENT_ROW_PENDING": "target-x-f0c2",
+        "FNO_AGENTS_BIN": str(agents_bin),
+        "AGENTS_CAPTURE": str(agents_capture),
+        "UV_CAPTURE": str(capture),
         "KNOB_READ": str(knob_read),
     }
     subprocess.run(["bash", str(HOOK)], check=True, env=env)
 
+    report = agents_capture.read_text(encoding="utf-8").splitlines()
+    assert report[report.index("--agent-self") + 1] == "target-x-f0c2"
     argv = capture.read_text(encoding="utf-8").splitlines()
     assert argv[argv.index("--agent-self") + 1] == "target-x-f0c2"
     assert argv[argv.index("--harness") + 1] == "claude"
