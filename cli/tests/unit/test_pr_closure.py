@@ -228,15 +228,13 @@ def test_a_missing_rust_leg_stops_loudly(monkeypatch):
         parse_closure_trailer("Fixes x-aaaa")
 
 
+@pytest.mark.dev_build
 def test_the_shared_corpus_parses_through_the_real_leg(monkeypatch):
     # AC15: the Python forwarder over the REAL binary returns the corpus's
-    # claim column, the same rows the Rust unit test reads. Skips without a
-    # dev build (the smoke CI shard deletes it on purpose).
+    # claim column, the same rows the Rust unit test reads.
     from fno.rust_binary import find_dev_binary
 
     binary = find_dev_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     monkeypatch.setattr("fno.pr.closure.verb_call", _REAL_VERB_CALL)
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
     corpus = json.loads(

@@ -264,6 +264,26 @@ _NEEDS_STORE_KEEPER = (
 )
 
 
+_dev_build_absent_cache: bool | None = None
+
+
+def _dev_build_absent() -> bool:
+    """True when this checkout has no fno-agents dev build.
+
+    The ``dev_build`` marker means "runs with the dev build present"
+    (tests/test-dev-build-suites.sh); the smoke pytest legs delete that
+    build on purpose, so a marked test skips there - the same contract
+    ``native_backlog_door`` implements for the door suites. One probe per
+    session: the check is a filesystem walk, and collection hits it per item.
+    """
+    global _dev_build_absent_cache
+    if _dev_build_absent_cache is None:
+        from fno.rust_binary import find_dev_binary
+
+        _dev_build_absent_cache = find_dev_binary() is None
+    return _dev_build_absent_cache
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Keep filed parallel racers on one worker without skipping them, and
@@ -274,6 +294,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "no fno-agents-worker binary, so the graph store keeper cannot "
             "spawn; build it with `cargo build -p fno-agents`"
         )
+    )
+    skip_no_dev_build = pytest.mark.skip(
+        reason="no fno-agents dev build (cargo build --manifest-path crates/fno-agents/Cargo.toml)"
     )
     for item in items:
         nodeid = item.nodeid.replace("\\", "/")
@@ -287,6 +310,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(skip_no_keeper)
         if "native_backlog_door" in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.dev_build)
+        if item.get_closest_marker("dev_build") is not None and _dev_build_absent():
+            item.add_marker(skip_no_dev_build)
     spec = os.environ.get("FNO_PYTEST_SHARD", "").strip()
     if spec:
         items[:] = [

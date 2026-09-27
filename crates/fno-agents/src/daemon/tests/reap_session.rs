@@ -413,7 +413,25 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         dry.kept_open_work_stale, acting.kept_open_work_stale,
         "open-work bucket agrees"
     );
-    assert_eq!(dry.kept_active, acting.kept_active, "active bucket agrees");
+    // The bucket's second element is the transcript age, re-read from the
+    // wall clock per sweep; two sweeps that straddle a second boundary
+    // disagree by one (CI, 2026-09-27: 10 vs 11). The rows must agree and
+    // the ages must agree within clock drift, not byte for byte.
+    let active_ids =
+        |rows: &[(String, i64)]| -> Vec<String> { rows.iter().map(|(id, _)| id.clone()).collect() };
+    assert_eq!(
+        active_ids(&dry.kept_active),
+        active_ids(&acting.kept_active),
+        "active bucket agrees row for row"
+    );
+    for (dry_row, acting_row) in dry.kept_active.iter().zip(acting.kept_active.iter()) {
+        assert!(
+            (dry_row.1 - acting_row.1).abs() <= 2,
+            "the age reads agree within clock drift: {:?} vs {:?}",
+            dry_row,
+            acting_row
+        );
+    }
     assert_eq!(
         dry.kept_no_provenance, acting.kept_no_provenance,
         "provenance bucket agrees"

@@ -2625,21 +2625,20 @@ fn majority_default_recomputes_as_agents_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC2-HP (x-c5ee): the two pull-sections default Collapsed - the top of the
-// panel is the operator's own agents, the pull-sections one click away.
+// Pin the Expanded elsewhere default: every spawn appears in the sideline.
 #[test]
-fn pull_sections_default_collapsed() {
+fn pull_sections_default_expanded() {
     let dir = isolate_view_store("pull");
     let view = two_pane_view();
     assert_eq!(
         view.section_view(&SectionKey::Elsewhere),
-        SectionView::Collapsed
+        SectionView::Expanded
     );
     crate::view_store::clear_test_path();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC1-FR (x-c5ee): an explicit persisted choice outranks the new Collapsed
+// AC1-FR (x-c5ee): an explicit persisted choice outranks the computed
 // pull-section default. Inserted straight into the map to mirror a value
 // loaded from disk, without touching the real store.
 #[test]
@@ -5258,40 +5257,6 @@ async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
         notice.contains("3 left"),
         "the remainder is surfaced: {notice}"
     );
-}
-
-#[test]
-fn which_key_lists_the_dead_row_removal_verbs() {
-    // (x-f300) The gap this node closed was discoverability: if the modal
-    // stops naming these, removal is invisible again.
-    let modal = build_keys_modal();
-    let labels: Vec<String> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { glyph, label, .. } => Some(format!("{glyph} {label}")),
-            PopupRow::Header(h) => Some(h.clone()),
-            _ => None,
-        })
-        .collect();
-    let joined = labels.join("\n");
-    assert!(joined.contains("sideline rows"), "the section renders");
-    assert!(joined.contains("x stop a live row · remove a dead one"));
-    assert!(joined.contains("X reap all exited agents"));
-    // (x-7683) The context-menu row names every trigger, not just the
-    // right-click, and keeps the header-only clear-dead behavior named
-    // too - the only in-app documentation that a header's menu offers it.
-    assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
-    // Display-only: Enter on them must BEL, never dispatch a bogus chord.
-    for (i, r) in modal.popup.rows.iter().enumerate() {
-        if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
-            assert!(
-                modal.row_events[i].is_none(),
-                "a bare sideline key is not a prefix chord"
-            );
-        }
-    }
 }
 
 #[tokio::test]

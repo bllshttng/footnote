@@ -107,3 +107,52 @@ fn idle_fold_takes_every_non_attention_state() {
         "dead rows are the section view's business"
     );
 }
+
+// d-954c2cbf: every spawn appears in the sideline. The elsewhere section
+// defaults Expanded, so a live orphan row paints without the operator
+// expanding anything (x-3909).
+#[test]
+fn a_live_paneless_orphan_row_renders_without_expanding_elsewhere() {
+    let dir = isolate_view_store("paneless-orphan-visible");
+    let mut orphan = paneless_bg_row("stray-thread");
+    orphan.squad = None;
+    let v = view_with_agents(vec![orphan]);
+    assert!(
+        v.display_rows()
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "stray-thread")),
+        "a live orphan renders by default, not behind the fold"
+    );
+    crate::view_store::clear_test_path();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The LiveOnly half of the same default: a majority-exited elsewhere section
+// keeps its live rows up and folds the dead ones behind the rollup.
+#[test]
+fn a_majority_exited_elsewhere_section_folds_dead_rows_only() {
+    let dir = isolate_view_store("paneless-orphan-liveonly");
+    let mut live = paneless_bg_row("live-thread");
+    live.squad = None;
+    let mut stale = paneless_bg_row("stale-thread");
+    stale.squad = None;
+    stale.exited = true;
+    let mut stale2 = paneless_bg_row("stale-thread-2");
+    stale2.squad = None;
+    stale2.exited = true;
+    let v = view_with_agents(vec![stale, stale2, live]);
+    let rows = v.display_rows();
+    assert!(
+        rows.iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "live-thread")),
+        "the live row stays up"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name.starts_with("stale-thread"))),
+        "dead rows fold behind the header rollup"
+    );
+    crate::view_store::clear_test_path();
+    let _ = std::fs::remove_dir_all(&dir);
+}

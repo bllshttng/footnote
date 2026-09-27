@@ -189,6 +189,17 @@ struct StoreFile {
     /// The backlog board's full-screen toggle. Default absent = false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     board_full: Option<serde_json::Value>,
+    /// The questions sideline block's visibility. Default absent = shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    questions_block: Option<serde_json::Value>,
+    /// The questions block's height in rows. Default absent = 4 (header plus
+    /// three rows: small, so session rows keep their share).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    questions_height: Option<serde_json::Value>,
+    /// Whether the block also shows answered and done questions. Default
+    /// absent = hidden (one dim count line instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    questions_show_done: Option<serde_json::Value>,
 }
 
 /// Which view the sideline column paints. `Agents` is the agent list the
@@ -238,6 +249,76 @@ pub fn load_board_full() -> bool {
 pub fn save_board_full(full: bool) {
     mutate(|file| {
         file.board_full = serde_json::to_value(full).ok();
+    });
+}
+
+/// Read the questions block's visibility. Absent or corrupt reads as `true`:
+/// the block ships visible, and the toggle key persists a clean value.
+pub fn load_questions_block() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return true;
+    }
+    read_raw()
+        .questions_block
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Persist the questions block's visibility. Best-effort like every other
+/// write.
+pub fn save_questions_block(visible: bool) {
+    mutate(|file| {
+        file.questions_block = serde_json::to_value(visible).ok();
+    });
+}
+
+/// The questions block's shipped height: the header plus three body rows.
+pub const QUESTIONS_DEFAULT_HEIGHT: u16 = 4;
+
+/// Read the questions block's height pref. Absent, corrupt, or out of range
+/// reads as the shipped default; a resize persists a clamped clean value.
+pub fn load_questions_height() -> u16 {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return QUESTIONS_DEFAULT_HEIGHT;
+    }
+    read_raw()
+        .questions_height
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|h| (2..=60).contains(h))
+        .unwrap_or(QUESTIONS_DEFAULT_HEIGHT)
+}
+
+/// Persist the questions block's height, clamped to the legal range.
+/// Best-effort like every other write.
+pub fn save_questions_height(height: u16) {
+    let clamped = height.clamp(2, 60);
+    mutate(|file| {
+        file.questions_height = serde_json::to_value(clamped).ok();
+    });
+}
+
+/// Read the questions block's show-answered pref. Absent or corrupt reads as
+/// `false`: done and answered questions stay hidden behind one dim count
+/// line until the key shows them.
+pub fn load_questions_show_done() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .questions_show_done
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Persist the questions block's show-answered pref. Best-effort like every
+/// other write.
+pub fn save_questions_show_done(show: bool) {
+    mutate(|file| {
+        file.questions_show_done = serde_json::to_value(show).ok();
     });
 }
 
@@ -776,6 +857,41 @@ mod tests {
         assert_eq!(load_sideline_view(), SidelineView::Backlog);
         save_sideline_view(SidelineView::Agents);
         assert_eq!(load_sideline_view(), SidelineView::Agents);
+    }
+
+    // The questions block prefs: absent reads shipped defaults (visible,
+    // height 4, answered hidden), a corrupt value reads the default, and
+    // save/load round-trips; the height clamps to its legal range.
+    #[test]
+    fn questions_block_prefs_absent_corrupt_and_round_trip() {
+        let _s = Scratch::new("questions-block");
+        assert!(load_questions_block(), "absent reads visible");
+        assert_eq!(
+            load_questions_height(),
+            QUESTIONS_DEFAULT_HEIGHT,
+            "absent reads the shipped height"
+        );
+        assert!(!load_questions_show_done(), "absent reads hidden");
+        std::fs::write(
+            view_path(),
+            r#"{"questions_block":"sure","questions_height":99,"questions_show_done":3}"#,
+        )
+        .unwrap();
+        assert!(load_questions_block(), "corrupt reads visible");
+        assert_eq!(
+            load_questions_height(),
+            QUESTIONS_DEFAULT_HEIGHT,
+            "corrupt height reads the default"
+        );
+        assert!(!load_questions_show_done(), "corrupt reads hidden");
+        save_questions_block(false);
+        save_questions_height(12);
+        save_questions_show_done(true);
+        assert!(!load_questions_block());
+        assert_eq!(load_questions_height(), 12);
+        assert!(load_questions_show_done());
+        save_questions_height(500);
+        assert_eq!(load_questions_height(), 60, "an out-of-range save clamps");
     }
 
     // The board layout pref: absent reads the shipped default (every model

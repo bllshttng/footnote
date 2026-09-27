@@ -160,6 +160,27 @@ def test_explicit_parent_is_never_second_guessed(graph):
     assert "rollup:" not in res.stderr
 
 
+def test_filing_under_a_closed_parent_refuses_instead_of_dropping(graph):
+    """x-1c7f: a closed parent cannot hold a live child. The strand healers
+    (the reconcile re-parent sweep, the close-guard release) clear that edge
+    after birth, so exiting 0 with the flag would drop it on the floor. The
+    birth path refuses naming why instead."""
+    done = _epic("x-done0001", "shipped mux epic")
+    done["status"] = "done"
+    g = graph([done, _epic("x-mux0001", "mux pane layout polish")])
+    title = "mux pane layout polish resize"
+
+    res = _invoke(
+        "backlog", "idea", title, "--cwd", "/tmp/proj", "--parent", "x-done0001", "--difficulty", "low", "--separate"
+    )
+
+    assert res.exit_code == 1
+    assert "x-done0001" in res.stderr
+    assert "done" in res.stderr
+    assert "reconcile" in res.stderr
+    assert all(e.get("title") != title for e in _nodes(g))
+
+
 def test_bug_type_is_exempt_from_the_ladder(graph):
     """AC6: a bug never gets a rollup line, however well it scores."""
     graph([_epic("x-mux0001", "mux pane layout polish")])

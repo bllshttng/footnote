@@ -10,22 +10,19 @@ uses, asserting the (status, blocked_reason) pair the overlay publishes.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
+from tests.fixtures.graph_seed import seed_graph
+
 from fno.graph.statuses import recompute_statuses
 from fno.graph.store import _apply_graph_defaults, commit_rows_via_store, read_graph_strict
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
 # worker binary (the parity-test convention).
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
@@ -60,7 +57,7 @@ def _entry(eid: str, **kwargs) -> dict:
 
 def _write(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(p, {"entries": entries})
     return p
 
 
