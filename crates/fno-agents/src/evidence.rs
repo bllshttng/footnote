@@ -93,37 +93,73 @@ pub fn find_code_claims(text: &str) -> Vec<String> {
     claims
 }
 
-fn tracked_files(root: &Path) -> Vec<String> {
+/// The bounded-walk ceiling for a non-repo root. A hermetic test tmp dir
+/// holds a handful of files; a state root like ~/.fno holds worktrees and
+/// build dirs no citation can name.
+const WALK_CAP: usize = 1_000;
+
+/// Why the bounded walk stopped. `Full` is the caller-visible bound; `Io`
+/// keeps today's ignore-and-continue posture for an unreadable dir.
+enum WalkStop {
+    Full,
+    Io,
+}
+
+impl From<std::io::Error> for WalkStop {
+    fn from(_: std::io::Error) -> Self {
+        WalkStop::Io
+    }
+}
+
+fn tracked_files(root: &Path) -> Result<Vec<String>, String> {
     if let Ok(out) = Command::new("git")
         .arg("ls-files")
         .current_dir(root)
         .output()
     {
         if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout)
+            return Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect();
+                .collect());
         }
     }
-    // Not a repo (a hermetic test tmp dir): every file counts.
+    // Not a repo (a hermetic test tmp dir): a bounded walk stands in for
+    // ls-files. Nested checkouts and target dirs are skipped, and past
+    // WALK_CAP files the root refuses the citation check - a state root is
+    // not a citation target, and walking it is the 120s decide timeout.
     let mut files: Vec<String> = Vec::new();
-    let _ = walk_files(root, root, &mut files);
+    match walk_files(root, root, &mut files) {
+        Err(WalkStop::Full) => {
+            return Err(format!(
+                "the root {} is not a usable git repository (the walk stopped at \
+                 {WALK_CAP} files); run from the repo so citations resolve against \
+                 tracked files",
+                root.display()
+            ));
+        }
+        _ => {}
+    }
     files.sort();
-    files
+    Ok(files)
 }
 
-fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), WalkStop> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
         if p.is_dir() {
-            if p.file_name().and_then(|n| n.to_str()) != Some(".git") {
+            let name = p.file_name().and_then(|n| n.to_str());
+            let nested_checkout = p.join(".git").exists();
+            if name != Some(".git") && name != Some("target") && !nested_checkout {
                 walk_files(root, &p, out)?;
             }
         } else if let Ok(rel) = p.strip_prefix(root) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
+            if out.len() >= WALK_CAP {
+                return Err(WalkStop::Full);
+            }
         }
     }
     Ok(())
@@ -137,7 +173,10 @@ pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
     if !claims.iter().any(|c| citation_re().is_match(c)) {
         return Vec::new();
     }
-    let tracked = tracked_files(root);
+    let tracked = match tracked_files(root) {
+        Ok(tracked) => tracked,
+        Err(message) => return vec![message],
+    };
     let tracked_norm: Vec<String> = tracked.iter().map(|p| p.replace('\\', "/")).collect();
     let mut failures: Vec<String> = Vec::new();
     for claim in claims {
@@ -908,8 +947,39 @@ mod tests {
     fn tracked_paths_normalize_windows_separators() {
         let dir = tempfile::tempdir().expect("tmp");
         write_file(dir.path(), "src/a.py", 5);
-        let tracked = tracked_files(dir.path());
+        let tracked = tracked_files(dir.path()).expect("tracked");
         assert_eq!(tracked, vec!["src/a.py"]);
+    }
+
+    // Inside a non-repo root a nested checkout and a target dir are
+    // skipped, so a state root never walks its worktrees.
+    #[test]
+    fn bounded_walk_skips_nested_checkouts_and_target_dirs() {
+        let dir = tempfile::tempdir().expect("tmp");
+        write_file(dir.path(), "src/a.py", 5);
+        write_file(dir.path(), "worktrees/wt/cli/b.py", 5);
+        std::fs::write(dir.path().join("worktrees/wt/.git"), "gitdir: elsewhere").expect("marker");
+        write_file(dir.path(), "target/debug/c.rs", 5);
+        let tracked = tracked_files(dir.path()).expect("tracked");
+        assert_eq!(tracked, vec!["src/a.py"]);
+    }
+
+    // A non-repo root past the cap refuses the citation check instead of
+    // walking unbounded, and names the root.
+    #[test]
+    fn oversized_non_repo_root_refuses_naming_the_root() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for i in 0..WALK_CAP + 1 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x").expect("write");
+        }
+        let failures = check_citations("see a.py:1", dir.path());
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains(&dir.path().to_string_lossy().to_string()),
+            "{}",
+            failures[0]
+        );
+        assert!(failures[0].contains("run from the repo"), "{}", failures[0]);
     }
 
     #[test]
