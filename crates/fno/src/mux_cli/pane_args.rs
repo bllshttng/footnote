@@ -77,8 +77,9 @@ pub(crate) const SPLIT_ANCHOR_HELP: &str = "a --split needs an anchor: pass \
 
 /// The dispatch-side application of the split default to a parsed pane
 /// command: a split with no anchor halves the caller's own pane, and a
-/// pane-less caller is refused with `--from` named. Lives beside the rule
-/// it applies; the doors call this instead of re-deriving it.
+/// pane-less caller is refused with `--from` named. Dispatch-time, after
+/// the fit refusal has had its say. Lives beside the rule it applies; the
+/// doors call this instead of re-deriving it.
 pub(crate) fn apply_split_anchor_default(parsed: &mut ParsedPane) -> Result<(), String> {
     let PaneCmd::Run { placement, .. } = &mut parsed.cmd else {
         return Ok(());
