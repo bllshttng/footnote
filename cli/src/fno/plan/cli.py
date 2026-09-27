@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
@@ -77,8 +78,9 @@ def set_expected(ctx: typer.Context) -> None:
     help=(
         "Print the save path for a NEW plan/design doc: the resolved plans dir "
         "(plansDirectory -> config.plans_dir) joined with the config.plans_filename "
-        "template (strftime + {slug}/{node}). /think and /blueprint shell this "
-        "instead of hardcoding a filename convention."
+        "template (strftime + {slug}/{node}). Resolution is the Rust chain; this "
+        "verb forwards to it through the pydoor. /think and /blueprint shell "
+        "this instead of hardcoding a filename convention."
     ),
 )
 def path(
@@ -88,9 +90,22 @@ def path(
         False, "--name-only", help="Print just the rendered filename, no directory."
     ),
 ) -> None:
-    from fno.paths import plan_doc_filename, plan_doc_path
+    from fno.rust_binary import resolve_binary
 
-    print(plan_doc_filename(slug, node) if name_only else plan_doc_path(slug, node))
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("fno do plan path: the fno-agents binary was not found", err=True)
+        raise typer.Exit(code=1)
+    args = ["state", "plan-path", "--slug", slug, "--node", node]
+    if name_only:
+        args.append("--name-only")
+    proc = subprocess.run([str(binary), *args], capture_output=True, text=True)
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.returncode != 0:
+        if proc.stderr:
+            typer.echo(proc.stderr.rstrip(), err=True)
+        raise typer.Exit(code=proc.returncode or 1)
 
 
 # Update the module docstring's verb list when adding verbs above.

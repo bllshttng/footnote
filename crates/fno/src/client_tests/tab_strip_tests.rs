@@ -10,20 +10,21 @@ fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
     // no forced ordinal, truncated to TAB_LABEL_W.
     let mut view = two_pane_view();
     let spans = view.tab_bar_spans();
+    // spans[0] is the pinned Ｆ[no] mark; the squad label follows, then tabs.
     assert_eq!(
-        spans[1].text, " 1 ",
+        spans[2].text, " 1 ",
         "unnamed digit collapse: zero regression"
     );
     // The active tab keeps one cell of padding inside each bracket.
-    assert_eq!(spans[2].text, "[ 2 ]");
+    assert_eq!(spans[3].text, "[ 2 ]");
     view.layout.squads[0].tabs[0].name = "x-abcd".into();
     view.layout.squads[0].tabs[0].named = true;
     view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
     view.layout.squads[0].tabs[1].named = true;
     let spans = view.tab_bar_spans();
-    assert_eq!(spans[1].text, " x-abcd ", "chosen name renders alone");
+    assert_eq!(spans[2].text, " x-abcd ", "chosen name renders alone");
     assert_eq!(
-        spans[2].text, "[ a-very-long-wo ]",
+        spans[3].text, "[ a-very-long-wo ]",
         "name alone truncates to 14, padded inside the brackets"
     );
 }
@@ -114,56 +115,59 @@ fn tab_strip_rollup_surfaces_hidden_attention_with_accent() {
         .agents
         .push(tab_agent(Some(0), Some(AgentBadge::Blocked), false));
     let spans = view.tab_bar_spans();
-    // spans[0] = squad name, [1] = tab 0 (blocked, inactive), [2] = tab 1 (no live panes).
-    assert_eq!(spans[1].text, " ▲ 1 ", "blocked tab: label preceded by ▲");
+    // spans[0] = the pinned mark, [1] = squad name, [2] = tab 0 (blocked,
+    // inactive), [3] = tab 1 (no live panes).
+    assert_eq!(spans[2].text, " ▲ 1 ", "blocked tab: label preceded by ▲");
     assert_eq!(
-        spans[1].fg, LATTICE_ACCENT,
+        spans[2].fg, LATTICE_ACCENT,
         "blocked rollup carries the accent"
     );
     assert_eq!(
-        spans[1].flags & cell_flags::BOLD,
+        spans[2].flags & cell_flags::BOLD,
         cell_flags::BOLD,
         "blocked rollup carries BOLD"
     );
     // AC2-EDGE: a tab with no live panes shows no rollup glyph and no accent -
     // byte-identical to a pre-feature stateless tab.
-    assert_eq!(spans[2].text, "[ 2 ]");
-    assert_eq!(spans[2].fg, Color::Default);
+    assert_eq!(spans[3].text, "[ 2 ]");
+    assert_eq!(spans[3].fg, Color::Default);
 }
 
 #[test]
-fn tab_strip_renders_the_fno_brand_bracketed() {
-    // US4/AC3-HP: the mux's home workspace surfaces the bare brand in the
-    // tab strip's leading label - render `Ｆ[no]`, not `fno`. Other names
-    // pass through untouched.
+fn tab_strip_pins_the_brand_mark_in_every_workspace() {
+    // US4/AC3-HP, restated by the 2026-09-27 ruling: the Ｆ[no] mark is
+    // PINNED at the strip's top-left, before tab 1, in every workspace; the
+    // workspace label follows as its own span (brand_label passthrough).
     assert_eq!(brand_label("fno"), "f[no]");
     assert_eq!(brand_label("footnote"), "footnote");
     let mut view = two_pane_view();
-    let active = view.layout.active_squad;
-    view.layout
-        .squads
-        .iter_mut()
-        .find(|s| s.id == active)
-        .expect("active squad")
-        .name = "fno".into();
     let spans = view.tab_bar_spans();
     assert_eq!(
         spans[0].text, " Ｆ[no] ",
-        "the leading brand label is the fullwidth mark"
+        "the pinned mark leads the strip in every workspace"
     );
-}
-
-#[test]
-fn the_tab_bar_mark_paints_a_fullwidth_f_and_a_reverse_stamp() {
-    // x-8c5a: the mark is the full-width `Ｆ` (two cells) with the `[no]`
-    // stamp directly after it, no gap; the stamp is reverse video.
-    let mut view = two_pane_view();
+    assert_eq!(
+        spans[1].text, " footnote ",
+        "the workspace label follows the mark"
+    );
+    // Renaming the workspace never moves or duplicates the mark.
     view.layout
         .squads
         .iter_mut()
         .find(|s| s.id == view.layout.active_squad)
         .expect("active squad")
         .name = "fno".into();
+    let spans = view.tab_bar_spans();
+    assert_eq!(spans[0].text, " Ｆ[no] ");
+    assert_eq!(spans[1].text, " f[no] ");
+}
+
+#[test]
+fn the_tab_bar_mark_paints_a_fullwidth_f_and_a_reverse_stamp() {
+    // x-8c5a: the mark is the full-width `Ｆ` (two cells) with the `[no]`
+    // stamp directly after it, no gap; the stamp is reverse video. The pin
+    // paints in EVERY workspace, so the default fixture shows it.
+    let view = two_pane_view();
     let frame = view.compose();
     let panel_w = view.panel_w() as usize;
     let cols = frame.cols as usize;
