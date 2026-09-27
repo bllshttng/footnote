@@ -20,7 +20,7 @@ from __future__ import annotations
 import typer
 
 from fno.approvals.cli import approvals_app
-from fno.decide.cli import backlog_decide, backlog_decisions
+from fno.decide.cli import backlog_decide
 from fno.inbox.operator_turns import operator_app
 from fno.king.cli import board_cmd
 from fno.notify.cli import notify_app
@@ -46,4 +46,3 @@ inbox_app.add_typer(operator_app, name="user")
 inbox_app.add_typer(operator_app, name="operator", hidden=True)
 inbox_app.command("board")(board_cmd)
 inbox_app.command("decide")(backlog_decide)
-inbox_app.command("decisions")(backlog_decisions)

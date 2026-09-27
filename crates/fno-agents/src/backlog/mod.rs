@@ -9,6 +9,7 @@ pub mod commands;
 pub mod comments;
 pub mod costs;
 pub mod decisions;
+pub mod decisions_cli;
 pub mod done_evidence;
 pub mod encounters;
 pub mod entities;
