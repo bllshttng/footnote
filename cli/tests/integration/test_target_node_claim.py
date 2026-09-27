@@ -19,6 +19,8 @@ from pathlib import Path
 from tests._init_space import install_state_path_stub
 from tests.fixtures.graph_seed import seed_graph
 
+from fno.rust_binary import find_dev_binary
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 
@@ -105,6 +107,10 @@ def _sandbox(tmp_path: Path):
     py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
     py.chmod(0o755)
 
+    native = find_dev_binary()
+    if native is None:
+        pytest.skip("no dev fno-agents build under crates/fno-agents/target")
+
     env = os.environ.copy()
     env.update({
         "TARGET_START": "1",
@@ -115,6 +121,8 @@ def _sandbox(tmp_path: Path):
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
         "MOCK_ABI_SHIM": str(REPO_ROOT / "scripts" / "roadmap-tasks.py"),
+        "MOCK_ABI_NATIVE": str(native),
+        "MOCK_ABI_STATE_DIR": str(home / ".fno"),
         **stub_env,
     })
     return repo, home, log, env

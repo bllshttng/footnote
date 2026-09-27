@@ -277,11 +277,31 @@ def test_canonical_done_refuses_over_live_children(tmp_graph):
 
 def test_canonical_done_force_reparents_to_nearest_live_ancestor(tmp_graph):
     grand, parent, kids = _seed_stranded_family(tmp_graph)
-    runner.invoke(
-        app,
-        ["backlog", "update", parent, "--completion-note", "deliberate close"],
-        catch_exceptions=False,
+    # The update leaf answers natively; the completion-note setup drives the
+    # dev binary over the same store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    note = _sp.run(
+        [str(binary), "backlog", "update", parent,
+         "--completion-note", "deliberate close"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
     )
+    assert note.returncode == 0, note.stderr
     r = runner.invoke(
         app,
         ["backlog", "done", parent, "--force", "--reason", "deliberate close"],

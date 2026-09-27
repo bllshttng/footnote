@@ -253,7 +253,9 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
 # ---------------------------------------------------------------------------
 
 _ADVERTISED_BACKLOG_VERBS = {
-    "add", "idea", "get", "update", "view", "next", "done", "defer",
+    # `update` moved with the update port: the native binary advertises it,
+    # the python menu no longer lists it.
+    "add", "idea", "get", "view", "next", "done", "defer",
     "triage", "note",
 }
 
@@ -396,14 +398,42 @@ def _seed_node(tmp_graph: Path, node: dict) -> None:
     commit_rows_via_store(tmp_graph, lambda rows: rows + [node])
 
 
+def _native_update(tmp_graph: Path, *args: str, home: str | None = None):
+    """The update leaf answers natively now; drive the dev binary over the
+    same store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": home or str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def test_cmd_update_project_repoints_node(tmp_graph):
     """fno backlog update <id> --project <name> updates the project field."""
     _seed_node(tmp_graph, {
         "id": "ab-12345678", "project": "myvault", "cwd": "/old/cwd",
         "title": "x", "type": "feature",
     })
-    r = _invoke("backlog", "update", "ab-12345678", "--project", "example-pipeline")
-    assert r.exit_code == 0, r.output
+    code, out = _native_update(tmp_graph, "ab-12345678", "--project", "example-pipeline")
+    assert code == 0, out
 
     node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-12345678")
     assert node["project"] == "example-pipeline"
@@ -416,12 +446,13 @@ def test_cmd_update_project_and_cwd_atomic(tmp_graph):
         "id": "ab-aaaaaaaa", "project": "myvault", "cwd": "/home/user/myvault",
         "title": "y", "type": "feature",
     })
-    r = _invoke(
-        "backlog", "update", "ab-aaaaaaaa",
+    code, out = _native_update(
+        tmp_graph,
+        "ab-aaaaaaaa",
         "--project", "example-pipeline",
         "--cwd", "/tmp/example-pipeline",
     )
-    assert r.exit_code == 0, r.output
+    assert code == 0, out
 
     node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-aaaaaaaa")
     assert node["project"] == "example-pipeline"
@@ -434,9 +465,9 @@ def test_cmd_update_empty_project_errors(tmp_graph):
         "id": "ab-bbbbbbbb", "project": "myvault", "cwd": "/old",
         "title": "z", "type": "feature",
     })
-    r = _invoke("backlog", "update", "ab-bbbbbbbb", "--project", "")
-    assert r.exit_code == 1, r.output
-    assert "must be a non-empty string" in r.output
+    code, out = _native_update(tmp_graph, "ab-bbbbbbbb", "--project", "")
+    assert code == 1, out
+    assert "must be a non-empty string" in out
 
 
 def test_cmd_update_empty_cwd_errors(tmp_graph):
@@ -445,29 +476,31 @@ def test_cmd_update_empty_cwd_errors(tmp_graph):
         "id": "ab-cccccccc", "project": "myvault", "cwd": "/old",
         "title": "z", "type": "feature",
     })
-    r = _invoke("backlog", "update", "ab-cccccccc", "--cwd", "")
-    assert r.exit_code == 1, r.output
-    assert "must be a non-empty string" in r.output
+    code, out = _native_update(tmp_graph, "ab-cccccccc", "--cwd", "")
+    assert code == 1, out
+    assert "must be a non-empty string" in out
 
 
-def test_cmd_update_cwd_expands_tilde(tmp_graph, monkeypatch):
+def test_cmd_update_cwd_expands_tilde(tmp_graph):
     """--cwd '~/foo' is expanded to /home/foo."""
-    monkeypatch.setenv("HOME", "/Users/testuser")
     _seed_node(tmp_graph, {
         "id": "ab-dddddddd", "project": "foo", "cwd": "/old",
         "title": "z", "type": "feature",
     })
-    r = _invoke("backlog", "update", "ab-dddddddd", "--cwd", "~/code/foo")
-    assert r.exit_code == 0, r.output
+    code, out = _native_update(
+        tmp_graph, "ab-dddddddd", "--cwd", "~/code/foo",
+        home="/Users/testuser",
+    )
+    assert code == 0, out
 
     node = next(e for e in _read_store(tmp_graph) if e["id"] == "ab-dddddddd")
     assert node["cwd"] == "/Users/testuser/code/foo"
 
 
 def test_cmd_update_project_on_missing_node_errors(tmp_graph):
-    r = _invoke("backlog", "update", "ab-deadbeef", "--project", "foo")
-    assert r.exit_code == 1, r.output
-    assert "not found" in r.output
+    code, out = _native_update(tmp_graph, "ab-deadbeef", "--project", "foo")
+    assert code == 1, out
+    assert "not found" in out
 
 
 def test_intake_routes_to_frontmatter_project_end_to_end(tmp_graph, tmp_path, monkeypatch):

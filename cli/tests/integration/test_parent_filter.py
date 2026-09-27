@@ -43,12 +43,31 @@ def _add(title, **opts) -> str:
     return json.JSONDecoder().raw_decode(r.output)[0]["id"]
 
 
-def _set_parent(child_id, parent_id):
-    r = runner.invoke(
-        app, ["backlog", "update", child_id, "--parent", parent_id],
-        catch_exceptions=False,
+def _set_parent(tmp_graph, child_id, parent_id):
+    # The update leaf answers natively; the --parent mutation drives the dev
+    # binary over the same store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", child_id, "--parent", parent_id],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
     )
-    assert r.exit_code == 0, r.output
+    assert proc.returncode == 0, proc.stderr
 
 
 def _epic_with_children(tmp_graph):
@@ -56,8 +75,8 @@ def _epic_with_children(tmp_graph):
     c1 = _add("Child one")
     c2 = _add("Child two")
     loose = _add("Loose node")
-    _set_parent(c1, epic)
-    _set_parent(c2, epic)
+    _set_parent(tmp_graph, c1, epic)
+    _set_parent(tmp_graph, c2, epic)
     return epic, c1, c2, loose
 
 
@@ -119,8 +138,8 @@ def test_parent_combines_with_priority_order(tmp_graph):
     epic = _add("Epic")
     lo = _add("low child", priority="p3")
     hi = _add("high child", priority="p1")
-    _set_parent(lo, epic)
-    _set_parent(hi, epic)
+    _set_parent(tmp_graph, lo, epic)
+    _set_parent(tmp_graph, hi, epic)
     r = runner.invoke(
         app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
         catch_exceptions=False,

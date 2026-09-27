@@ -38,7 +38,8 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
     "backlog-add": ["backlog", "add", "--help"],
     "backlog-idea": ["backlog", "idea", "--help"],
     "backlog-intake": ["backlog", "intake", "--help"],
-    "backlog-update": ["backlog", "update", "--help"],
+    # backlog-update moved with the update port: the native binary answers
+    # --help now (pinned below, next to native-find).
     "backlog-next": ["backlog", "next", "--help"],
     "backlog-ready": ["backlog", "ready", "--help"],
     "backlog-capture-add": ["backlog", "capture", "add", "--help"],
@@ -73,6 +74,16 @@ def test_backlog_find_native_help_registers() -> None:
     from tests._native_door import run_native
 
     code, out, err = run_native("backlog", "find", "--help")
+    assert code == 0, err
+    assert "Usage" in out + err
+
+
+def test_backlog_update_native_help_registers() -> None:
+    """`backlog update --help` moved with the update port: the binary's flag
+    decls still parse and the surface answers."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "update", "--help")
     assert code == 0, err
     assert "Usage" in out + err
 

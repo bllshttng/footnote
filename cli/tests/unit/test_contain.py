@@ -47,6 +47,34 @@ def _invoke(*args):
     return runner.invoke(app, list(args), catch_exceptions=False)
 
 
+def _native_update(g: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def _read_entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
@@ -134,7 +162,7 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     # the forced close re-parents the kids - irrelevant here, the owner is
     # done either way and contain must still refuse. The completion note
     # satisfies the close-evidence rule; the force keeps the child gate.
-    _invoke("backlog", "update", owner, "--completion-note", "setup: done owner")
+    _native_update(tmp_graph, owner, "--completion-note", "setup: done owner")
     _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
@@ -227,7 +255,7 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     # _cascade_close_parents (an all-children-done epic closes automatically).
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     kid = kids[0]
-    _invoke("backlog", "update", kid, "--completion-note", "setup: done target")
+    _native_update(tmp_graph, kid, "--completion-note", "setup: done target")
     _invoke("backlog", "done", kid)
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"
@@ -450,8 +478,8 @@ def test_release_drops_owner_pr_link_and_records_released_from(tmp_graph):
         return entries
 
     commit_rows_via_store(tmp_graph, _stamp)
-    r = _invoke("backlog", "update", child, "--parent", other)
-    assert r.exit_code == 0, r.output
+    code, out = _native_update(tmp_graph, child, "--parent", other)
+    assert code == 0, out
     rows = _by_id(tmp_graph)
     c = rows[child]
     assert c.get("contained_in") is None
@@ -484,7 +512,7 @@ def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
         return entries
 
     commit_rows_via_store(tmp_graph, _stamp)
-    assert _invoke("backlog", "update", child, "--parent", "null").exit_code == 0
+    assert _native_update(tmp_graph, child, "--parent", "null")[0] == 0
     c = _by_id(tmp_graph)[child]
     assert c.get("pr_number") is None
     assert c["additional_prs"] == [
@@ -516,7 +544,7 @@ def test_release_keeps_same_number_pr_from_another_repo(tmp_graph):
         return entries
 
     commit_rows_via_store(tmp_graph, _stamp)
-    assert _invoke("backlog", "update", child, "--parent", "null").exit_code == 0
+    assert _native_update(tmp_graph, child, "--parent", "null")[0] == 0
     c = _by_id(tmp_graph)[child]
     assert c["pr_number"] == 900
     assert c["pr_url"] == "https://github.com/other/repo/pull/900"
