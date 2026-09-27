@@ -2299,10 +2299,12 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
                     .collect()
             }),
         // Present-but-null is a probed CLEAR, so a held answer must stay a
-        // string and an unprobed ask omits the key entirely.
-        supplied_dispatch_hold: payload
-            .get("dispatch_hold_reason")
-            .map(|v| v.as_str().map(str::to_owned)),
+        // string and an unprobed or malformed ask omits the key entirely.
+        supplied_dispatch_hold: payload.get("dispatch_hold_reason").map(|v| match v {
+            Value::String(reason) => Some(reason.to_owned()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        }),
     })
 }
 
@@ -3800,6 +3802,31 @@ mod tests {
             PreviewVerdict::Go { .. } => Vec::new(),
             PreviewVerdict::Blocked(rows) => rows,
         }
+    }
+
+    #[test]
+    fn a_supplied_dispatch_hold_answer_rides_the_preview_without_a_probe() {
+        // Held: the supplied reason becomes the blocker, no probe runs.
+        let held = Request {
+            supplied_dispatch_hold: Some(Some("held by the crown".to_string())),
+            ..preview_request(8)
+        };
+        let codes: Vec<String> = preview_blockers(&clean(), &held)
+            .into_iter()
+            .map(|b| b.code.to_string())
+            .collect();
+        assert!(
+            codes.iter().any(|c| c == "dispatch_hold"),
+            "the supplied held answer must block"
+        );
+        // Clear: no dispatch_hold blocker either way.
+        let clear = Request {
+            supplied_dispatch_hold: Some(None),
+            ..preview_request(8)
+        };
+        assert!(!preview_blockers(&clean(), &clear)
+            .iter()
+            .any(|b| b.code == "dispatch_hold"));
     }
 
     #[test]

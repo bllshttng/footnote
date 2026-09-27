@@ -19,6 +19,7 @@ from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_
 GRAPHQL_RESERVE = 200
 REFUSED = 75
 _PROBE_TTL_S = 60.0  # healthy probe answers are reused this long
+_TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 
@@ -240,22 +241,23 @@ def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
     return remaining, reset
 
 
-def _cached_probe(cache: Path) -> Optional[tuple[int, int]]:
-    """A fresh, healthy cached probe answer as ``(remaining, reset)``, else None."""
-    try:
-        row = json.loads(cache.read_text())
-        if time.time() - row["ts"] < _PROBE_TTL_S and row["remaining"] > GRAPHQL_RESERVE:
-            return row["remaining"], row["reset"]
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return None
-
-
-def _record_probe(cache: Path, remaining: int, reset: int) -> None:
-    try:
-        cache.write_text(json.dumps({"ts": time.time(), "remaining": remaining, "reset": reset}))
-    except OSError:
-        pass
+def _probe_quota(cache, gh, cwd, runner, env, timeout):
+    """Live `rate_limit` probe or a fresh healthy cached answer; cache=None never reads or writes."""
+    if cache is not None:
+        try:
+            row = json.loads(cache.read_text())
+            if time.time() - row["ts"] < _PROBE_TTL_S and row["remaining"] > GRAPHQL_RESERVE:
+                return row["remaining"], row["reset"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    probe = runner([gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env)
+    remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
+    if cache is not None and remaining is not None and remaining > GRAPHQL_RESERVE and reset is not None:
+        try:
+            cache.write_text(json.dumps({"ts": time.time(), "remaining": remaining, "reset": reset}))
+        except OSError:
+            pass
+    return remaining, reset
 
 
 def _pr_number(args: Sequence[str]) -> str:
@@ -471,7 +473,8 @@ def execute_graphql(
     if not gh:
         return Result(127, "", "gh not found on PATH")
     lock = lock_path or quota_lock_path()
-    cache = probe_cache or lock.with_name("github-quota-probe.json")
+    cache = (None if any(v in os.environ for v in _TOKEN_ENV)
+             else (probe_cache or lock.with_name("github-quota-probe.json")))
     lock.parent.mkdir(parents=True, exist_ok=True)
     with _locked_path(lock) as handle:
         try:
@@ -479,14 +482,7 @@ def execute_graphql(
                 env = delegate_environment()
             except ProxyIdentityError as exc:
                 return Result(2, "", proxy_identity_refusal(exc))
-            remaining, reset = _cached_probe(cache) or (None, None)
-            if remaining is None:
-                probe = runner(
-                    [gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env
-                )
-                remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
-                if remaining is not None and remaining > GRAPHQL_RESERVE and reset is not None:
-                    _record_probe(cache, remaining, reset)
+            remaining, reset = _probe_quota(cache, gh, cwd, runner, env, timeout)
             if purpose == "discretionary":
                 if remaining is None:
                     return Result(REFUSED, "", _refusal(gh_args, reset=None, unavailable=True))

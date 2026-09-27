@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -799,3 +800,48 @@ def test_backoff_live_is_false_when_the_verb_is_unavailable(monkeypatch):
 
     monkeypatch.setattr(_quota, "_gh_budget", unavailable)
     assert _quota.backoff_live() is False
+
+
+def test_a_healthy_cached_probe_skips_the_live_probe(tmp_path):
+    calls = []
+    cache = tmp_path / "quota-probe.json"
+    cache.write_text(json.dumps({"ts": time.time(), "remaining": 5000, "reset": 1787072400}))
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["api", "graphql", "-f", "query={viewer{login}}"],
+        runner=_runner(5000, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+        probe_cache=cache,
+    )
+    assert result.returncode == 0
+    assert all(c[-2:] != ["api", "rate_limit"] for c in calls), calls
+
+
+def test_a_drained_probe_answer_is_never_cached(tmp_path):
+    calls = []
+    cache = tmp_path / "quota-probe.json"
+    _quota.execute_graphql(
+        "discretionary",
+        ["api", "graphql", "-f", "query={viewer{login}}"],
+        runner=_runner(0, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+        probe_cache=cache,
+    )
+    assert not cache.exists(), "a drained bucket must keep probing live"
+
+
+def test_a_stale_cache_row_probes_live_again(tmp_path):
+    calls = []
+    cache = tmp_path / "quota-probe.json"
+    cache.write_text(json.dumps({"ts": time.time() - 3600, "remaining": 5000, "reset": 1787072400}))
+    _quota.execute_graphql(
+        "discretionary",
+        ["api", "graphql", "-f", "query={viewer{login}}"],
+        runner=_runner(5000, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+        probe_cache=cache,
+    )
+    assert any(c[-2:] == ["api", "rate_limit"] for c in calls), calls
