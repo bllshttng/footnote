@@ -20,6 +20,15 @@ import pytest
 pytestmark = pytest.mark.usefixtures("_no_global_tick_events")
 
 
+@pytest.fixture(autouse=True)
+def _free_gh_budget(monkeypatch):
+    """The drain's fleet-budget read must never answer from the real ledger
+    inside a test."""
+    import fno.pr_watch._dispatch as _dispatch_mod
+
+    monkeypatch.setattr(_dispatch_mod, "_gh_budget_backoff_left", lambda: 0.0)
+
+
 # ---------------------------------------------------------------------------
 # AC1-HP: _emit_event writes a valid canonical event to events.jsonl
 # ---------------------------------------------------------------------------
