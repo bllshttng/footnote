@@ -4314,6 +4314,39 @@ event_types:
           description: "The bound row's own fno session id (the durable identity). Null when no row binds."
     consumers: [operator]
 
+  - name: operator_typing
+    retention: durable
+    description: "A human typed keystrokes into a mux pane or portal without pressing Enter (C11 feed): the positive draft marker that lets mail wait for a live edit. Written at the CoreMsg::Input choke point, at most one row per pane per 5 s burst window, and never when the burst carried an Enter (that writes operator_submit)."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, via, typed_ms, resolution]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belongs to."
+        pane:
+          type: integer
+          description: "The pane id the keystrokes landed on."
+        via:
+          enum: [pane, portal, shell]
+          description: "pane: a pane hosting a registry row. portal: a pane seating a portal. shell: a pane with no registry or portal row (a hand-started harness)."
+        typed_ms:
+          type: integer
+          description: "Epoch milliseconds the burst reached the server. The join key the mail quiet wait reads."
+        resolution:
+          enum: [ok, unresolved]
+          description: "ok: a registry or portal row bound the pane, so the row names whose draft is live. unresolved: no row bound (shell pane); the typing still counts, nothing joins to it."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id, else its effective identity. Null when no row binds or the row carries no id."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis. Null when no row binds."
+        fno_id:
+          type: [string, "null"]
+          description: "The bound row's own fno session id (the durable identity). Null when no row binds."
+    consumers: [operator]
+
   - name: mail_origin_classified
     retention: durable
     description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
