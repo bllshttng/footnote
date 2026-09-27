@@ -1389,7 +1389,8 @@ pub(crate) fn decide_with_payload(
                     // the same fidelity join at merge time
                     // (authorized_merge.rs:523), and DonePRGreen is a shipped
                     // terminal, so the later join sees a delivered row rather
-                    // than the x-9ec5 DoneAwaitingMerge trap. The park names who
+                    // than stranding a row on a non-shipped terminal no later
+                    // merge ever restamps. The park names who
                     // merges so a human (or the merge queue) owns the next act.
                     let ruling = node_id.as_deref().and_then(awaiting_merge::ruling_hold);
                     let merge_delegated = manifest_no_merge || ruling.is_some();
