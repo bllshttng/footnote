@@ -216,6 +216,11 @@ pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
     if !view.questions_block.visible {
         return None;
     }
+    // The block is agents-view chrome like the court block: under the docked
+    // board it paints nothing, so it holds no rows and claims no clicks.
+    if view.sideline_view != crate::view_store::SidelineView::Agents {
+        return None;
+    }
     let now = crate::digest_overlay::now_secs();
     let fold = view.questions_fold.as_ref()?;
     let court = view.court_block_layout(term_rows).0;

@@ -327,6 +327,48 @@ fn f_key_toggles_full_screen() {
     );
 }
 
+// x-1a50: the board is a modal like the composer - prefix chords still
+// resolve while it holds the keyboard (which-key parity). Before the fix the
+// prefix byte fell into the board's byte catch-all: `^B C` toggled nothing
+// and `^B ?` opened the board's own keys overlay instead of the keybinds.
+#[test]
+fn prefix_chords_resolve_while_the_board_holds_the_keyboard() {
+    let mut v = key_view(board_with(board_inputs()));
+    let mut scanner = crate::keys::Scanner::default();
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let flow =
+            super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'C'], &mut sock)
+                .await
+                .expect("the board owns the chunk")
+                .expect("route runs");
+        assert!(matches!(flow, StdinFlow::Continue));
+    });
+    assert!(v.court.is_expanded(), "^B C toggled the court fold");
+    assert!(v.backlog_board.is_some(), "the board survives the chord");
+    // `^B ?` opens the GLOBAL keybinds, never the board's own keys overlay
+    // (that stays on the bare key).
+    let mut scanner = crate::keys::Scanner::default();
+    rt.block_on(async {
+        super::super::overlay_keys::route(&mut v, &mut scanner, &[0x02, b'?'], &mut sock)
+            .await
+            .expect("the board owns the chunk")
+            .expect("route runs");
+    });
+    assert!(
+        v.keys_modal.is_some(),
+        "^B ? opened the global keybinds modal"
+    );
+    assert!(
+        v.backlog_board
+            .as_ref()
+            .map(|b| !b.keys_overlay)
+            .unwrap_or(false),
+        "the board's keys overlay did not arm behind the chord"
+    );
+}
+
 // The composed frame paints the backlog inside the sideline column: the
 // filter bar, the board pane and the detail pane are the column's
 // content, region-framed, with the card rows visible.

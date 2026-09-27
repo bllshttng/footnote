@@ -11,8 +11,13 @@ impl View {
     /// Rows the court block owns at the bottom of the sideline: three when
     /// minimized, the expanded reading's height when expanded, and ZERO when
     /// the terminal cannot hold it beside at least one sideline row - the
-    /// block yields, the rows never do.
+    /// block yields, the rows never do. Zero too when the sideline shows the
+    /// backlog board: the board paints the full column, and rows the block
+    /// does not paint there must not come off the hit math's region.
     pub(super) fn court_block_rows(&self) -> usize {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
+            return 0;
+        }
         let block = if self.court.is_expanded() {
             self.court.expanded_lines(&self.agent_ages()).len()
         } else {
@@ -40,6 +45,9 @@ impl View {
     /// must reserve for them: zero when the terminal cannot hold the block
     /// beside at least one row - the block yields, the rows never do.
     pub(super) fn court_block_layout(&self, term_rows: usize) -> (usize, Vec<String>) {
+        if self.sideline_view != crate::view_store::SidelineView::Agents {
+            return (0, Vec::new());
+        }
         let lines = if self.court.is_expanded() {
             self.court.expanded_lines(&self.agent_ages())
         } else {
