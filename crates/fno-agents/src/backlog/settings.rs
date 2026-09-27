@@ -62,6 +62,13 @@ fn read_flat(path: &std::path::Path) -> Value {
     parsed
 }
 
+/// The parsed config candidates, first-priority order. The birth hook reads
+/// nested config flags through this walk (autonomy master switch,
+/// think_spawn gate and caps).
+pub(crate) fn config_candidates() -> Vec<Value> {
+    candidates().iter().map(|p| read_flat(p)).collect()
+}
+
 /// The configured node-id prefix, or the legacy `ab-`. The first candidate
 /// carrying a non-empty `backlog.id_prefix` wins.
 pub fn node_id_prefix() -> String {
