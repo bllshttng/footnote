@@ -86,6 +86,7 @@ mod shutdown_capture;
 mod slot_capture;
 mod squad_persistence;
 mod squad_sync;
+mod thread_workspace;
 mod truth_probe;
 mod workspace_restore;
 use self::session_guard::{ConnAlive, SocketGuard};
@@ -5667,20 +5668,32 @@ impl Core {
         if dry_run {
             return ResumeOutcome::Planned;
         }
-        let sid = self
-            .squad_members
-            .iter()
-            .find(|(_, members)| {
-                members.iter().any(|member| {
-                    stored_member
-                        .as_ref()
-                        .is_some_and(|stored| stored == member)
-                        || member.worker.as_deref() == Some(name)
+        // The resumed pane lands where the row renders: a registry row asks
+        // the one thread-workspace resolver (member, then spawner, then
+        // cwd); the loose stored-member rung answers only for a receipt-only
+        // row with no registry entry, because it matches ANY member named
+        // `name` across workspaces, where the resolver would refuse the
+        // ambiguity - running it first would split a dangling dead row from
+        // its own resume.
+        let sid = match self.agents.iter().find(|a| a.name == name) {
+            Some(row) => self
+                .thread_workspace(row)
+                .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+            None => self
+                .squad_members
+                .iter()
+                .find(|(_, members)| {
+                    members.iter().any(|member| {
+                        stored_member
+                            .as_ref()
+                            .is_some_and(|stored| stored == member)
+                            || member.worker.as_deref() == Some(name)
+                    })
                 })
-            })
-            .map(|(sid, _)| *sid)
-            .or_else(|| self.session.find_by_cwd(&facts.cwd))
-            .unwrap_or(view.0);
+                .map(|(sid, _)| *sid)
+                .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+        }
+        .unwrap_or(view.0);
         // A claude row's resume runs the canonical re-entry
         // plan; the `None` arm fires the off-loop resolution and the
         // gesture replays with the verdict staged. A receipt-only row
@@ -6503,47 +6516,6 @@ impl Core {
         self.worker_pane
             .get(&agent.name)
             .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
-    }
-
-    fn member_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
-        let exact: Vec<u64> = match (agent.harness.as_deref(), agent_harness_session_id(agent)) {
-            (Some(harness), Some(session_id)) => self
-                .squad_members
-                .iter()
-                .filter_map(|(sid, members)| {
-                    members
-                        .iter()
-                        .any(|member| {
-                            member.worker.as_deref() == Some(agent.name.as_str())
-                                && member.harness.as_deref() == Some(harness)
-                                && member.harness_session_id.as_deref() == Some(session_id)
-                        })
-                        .then_some(*sid)
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        if exact.len() == 1 {
-            return exact.first().copied();
-        }
-        if exact.len() > 1 {
-            return None;
-        }
-        let legacy: Vec<u64> = self
-            .squad_members
-            .iter()
-            .filter_map(|(sid, members)| {
-                members
-                    .iter()
-                    .any(|member| {
-                        member.worker.as_deref() == Some(agent.name.as_str())
-                            && member.harness.is_none()
-                            && member.harness_session_id.is_none()
-                    })
-                    .then_some(*sid)
-            })
-            .collect();
-        (legacy.len() == 1).then(|| legacy[0])
     }
 
     fn unique_worker_pane_by_name(&self, name: &str) -> Result<Option<u64>, ()> {
@@ -10496,17 +10468,26 @@ impl Core {
                 // origin-less named target still starts claude in the agent's
                 // dir. Captured before target resolution because owner routing
                 // and the spawn cwd both derive from this one row.
-                let row_cwd = self
+                let matched_row = self
                     .agents
                     .iter()
                     .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))
+                    .cloned();
+                let row_cwd = matched_row
+                    .as_ref()
                     .map(|a| a.cwd.clone())
                     .unwrap_or_default();
-                // Resolve the OWNING squad (Locked 2) as the CurrentRoute
-                // default: the squad whose `owns_path` matches the row cwd, so
-                // the attach lands where the agent lives, not the viewer's
-                // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self.session.find_by_cwd(&row_cwd).unwrap_or(view.0);
+                // Resolve the OWNING workspace (Locked 2) as the CurrentRoute
+                // default through the one thread-workspace resolver (member,
+                // then spawner, then the row's cwd), so the attach lands where
+                // the agent lives, not the viewer's workspace; fall back to the
+                // project default for a rowless attach id, and to the viewed
+                // workspace for an orphan (AC1-EDGE).
+                let owner = matched_row
+                    .as_ref()
+                    .and_then(|row| self.thread_workspace(row))
+                    .or_else(|| self.session.find_by_cwd(&row_cwd))
+                    .unwrap_or(view.0);
                 // (G3) An anchored drop ("attach beside THIS pane") names a
                 // concrete pane the operator can see, which overrides owner
                 // routing: the pane lands in the anchor's OWN tab, resolved from
