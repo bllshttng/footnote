@@ -119,12 +119,9 @@ pub fn keeper_lane_harness(name: &str) -> bool {
     attach_unsupported && resume_supported
 }
 
-/// Interval multiple at which the confirm loop re-sends the wire-level CR. The
-/// initial CR (from `inject_with_submit`) can be swallowed mid-paste by a BUSY
-/// recipient streaming a turn, leaving the envelope sitting unsent; re-Entering
-/// every ~2s (8 * 250ms) lands it once the recipient drains. Idempotent: a bare
-/// Enter on an empty/already-submitted input box is a no-op in CC.
-const CR_RESUBMIT_EVERY: u32 = 8;
+/// The C11 quiet-gate budget, and its 1 s poll: long enough to let a burst
+/// age out, short enough that Python still answers its live-lane timeout.
+const QUIET_WAIT_S: u64 = 30;
 
 /// Live-inject target harness. `claude` is the default `control.sock` path;
 /// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8);
@@ -589,29 +586,122 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
         .map_err(|e| DriveError::Io(e.to_string()))
 }
 
-/// Poll `confirmed` (a content check on the recipient transcript), re-sending the
-/// raw wire-level CR every `CR_RESUBMIT_EVERY` intervals so a CR the busy recipient
-/// swallowed mid-paste gets re-Entered once it drains. `Ok(())` on a confirmed
-/// landing, `Err("not-confirmed")` on budget exhaustion. Extracted from the
-/// transport + transcript so the retry cadence is unit-testable against a `Fake`
-/// (interval=ZERO). Re-send errors are ignored: it is best-effort, and a dead
-/// transport fails the confirm anyway.
-fn confirm_with_cr_retry<T: crate::claude_attach::ControlTransport>(
+/// The C12 confirm: poll the content confirm for half the budget, send ONE
+/// more wire-level CR (the one the busy recipient swallowed), poll the rest,
+/// and on total silence withdraw the typed line with DEL bytes -- unless the
+/// operator has typed since the inject (a typing row newer than
+/// `typed_since_ms`), because their text is in the composer now and the
+/// withdraw would eat it. `withdraw_on_silence: false` keeps the keeper
+/// `Unconfirmable` arm's shape: it types and never withdraws, because no
+/// landing can be seen there. Replaces the old re-Enter-every-8-polls
+/// cadence: one extra Enter is the measured fix for a swallowed CR, and a
+/// bounded withdraw beats an unconfirmed unknown. Re-send errors are
+/// ignored: it is best-effort, and a dead transport fails the confirm anyway.
+fn confirm_or_withdraw<T: crate::claude_attach::ControlTransport>(
     transport: &mut T,
     attempts: u32,
     interval: Duration,
+    typed_chars: usize,
+    typed_since_ms: i64,
+    journal: &Path,
+    session: &str,
+    withdraw_on_silence: bool,
     mut confirmed: impl FnMut() -> bool,
 ) -> Result<(), &'static str> {
-    for i in 0..attempts.max(1) {
+    let half = (attempts.max(1) / 2).max(1);
+    for _ in 0..half {
         if confirmed() {
             return Ok(());
         }
         std::thread::sleep(interval);
-        if (i + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = transport.send_line("\r");
-        }
     }
+    let _ = transport.send_line("\r");
+    for _ in half..attempts.max(1) {
+        if confirmed() {
+            return Ok(());
+        }
+        std::thread::sleep(interval);
+    }
+    if !withdraw_on_silence {
+        return Err("not-confirmed");
+    }
+    // Withdraw only when the operator has not typed since the inject: a
+    // typing row newer than `typed_since_ms` means their text is in the
+    // composer now, and the DEL write would eat it with our line.
+    let ts = crate::operator_witness::typing_state(journal, session, now_ms());
+    let typed_since_inject = ts.newest_typing_ms.is_some_and(|t| t > typed_since_ms);
+    if ts.recent || typed_since_inject {
+        return Err("not-confirmed");
+    }
+    let _ = transport.send_line(&"\u{7f}".repeat(typed_chars));
     Err("not-confirmed")
+}
+
+/// Epoch milliseconds now, the typing-feed join key.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// The C11/C14 quiet gate: poll the recipient's typing witness and its
+/// effective registry state every `poll` for up to `budget`, so mail never
+/// lands over a live draft or into a session that is asking the operator a
+/// question. Proceeds when the operator is neither typing nor holding an
+/// unfinished draft and the row is not Blocked. On timeout the reason is
+/// whichever blocker held last; Python maps any not-delivered reason to the
+/// durable queue, so the mail waits on the bus. The injectable clock and
+/// sleeper keep the cadence unit-testable.
+fn wait_for_quiet_in(
+    journal: &Path,
+    registry_path: &Path,
+    session: &str,
+    budget: Duration,
+    poll: Duration,
+    now: &mut impl FnMut() -> i64,
+    sleeper: &mut impl FnMut(Duration),
+) -> Result<(), &'static str> {
+    let deadline = now() + budget.as_millis() as i64;
+    loop {
+        let ts = crate::operator_witness::typing_state(journal, session, now());
+        let blocked = registry_row_blocked(registry_path, session);
+        if !ts.recent && !ts.draft && !blocked {
+            return Ok(());
+        }
+        let blocker = if blocked {
+            "session-asking"
+        } else {
+            "user-typing"
+        };
+        if now() >= deadline {
+            return Err(blocker);
+        }
+        sleeper(poll);
+    }
+}
+
+/// True when the registry row `session` addresses is effectively Blocked
+/// (a question picker, a permission wall): the C14 "session-asking" state.
+/// An unreadable registry or no row never blocks.
+fn registry_row_blocked(registry_path: &Path, session: &str) -> bool {
+    let Ok(registry) = crate::state::load_registry(registry_path) else {
+        return false;
+    };
+    let Some(entry) = registry.entries.iter().find(|e| {
+        e.harness_session_id.as_deref() == Some(session)
+            || (session.len() == 8
+                && e.harness_session_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with(session)))
+    }) else {
+        return false;
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::wait::effective_state(entry, now_secs).0 == crate::wait::EffState::Blocked
 }
 
 /// The escaped form of `marker` as it appears inside a transcript JSONL line: the
@@ -741,6 +831,9 @@ pub fn deliver_via_control_sock_in(
     // so attach side-effects cannot be mistaken for our turn landing (codex peer
     // P2); the content confirm scans only lines appended past this offset.
     let baseline = transcript_len(&transcript);
+    // The withdraw guard's clock: typing the operator does AFTER this instant
+    // is theirs, so the line is never deleted out from under them.
+    let typed_since = now_ms();
     // The typed turn's opening line -- its `<fno_mail>` open tag, unchanged by
     // the one-line flattening -- is the content marker the confirm greps for;
     // it is recorded verbatim once the turn submits.
@@ -752,10 +845,16 @@ pub fn deliver_via_control_sock_in(
         },
     )?;
 
-    confirm_with_cr_retry(
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
         &mut transport,
         attempts,
         Duration::from_millis(interval_ms),
+        one_line(text).len(),
+        typed_since,
+        &journal,
+        session,
+        true,
         || confirm_content_after(&transcript, &marker, baseline).unwrap_or(false),
     )
 }
@@ -913,8 +1012,8 @@ fn resolve_keeper_confirm(
 /// connect to its keeper socket, type the envelope as one flattened line in
 /// an `Input` frame, settle the hosted harness's own delay, then
 /// send the wire-level CR - and confirm by CONTENT in the hosted harness's
-/// accepted-turn records, re-Entering on the same cadence as the claude lane
-/// (both loops are the SHARED `inject_with_submit` / `confirm_with_cr_retry`
+/// accepted-turn records, withdrawing on total silence like the claude lane
+/// (both loops are the SHARED `inject_with_submit` / `confirm_or_withdraw`
 /// pair; only the transport and the confirm target differ). A hosted harness
 /// with no local record (cursor-agent, agy) types and stays unconfirmed:
 /// pty paint is typing progress, never delivery.
@@ -977,6 +1076,7 @@ pub fn deliver_via_keeper_socket_in(
         return Err(reason);
     }
     let mut transport = KeeperTransport { stream };
+    let typed_since = now_ms();
     // The typed turn's opening line (unchanged by the one-line flattening)
     // is the content marker the confirm greps for: recorded verbatim once
     // the turn is accepted, and matched as the FULL line - never a truncated
@@ -998,6 +1098,9 @@ pub fn deliver_via_keeper_socket_in(
     if let Some(cs) = confirm_stream.as_ref() {
         let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
     }
+    // The keeper `Unconfirmable` arm (cursor-agent, agy) keeps today's shape:
+    // it types and never withdraws, because no landing can be seen there.
+    let withdraw_on_silence = !matches!(confirm, KeeperConfirm::Unconfirmable);
     let confirmed = move || -> bool {
         if let Some(stream) = confirm_stream.as_ref() {
             let mut sink = [0u8; 8192];
@@ -1037,10 +1140,16 @@ pub fn deliver_via_keeper_socket_in(
             KeeperConfirm::Refused(_) => false,
         }
     };
-    confirm_with_cr_retry(
+    let journal = AgentsHome::from_env().events_jsonl();
+    confirm_or_withdraw(
         &mut transport,
         attempts,
         Duration::from_millis(interval_ms),
+        one_line(text).len(),
+        typed_since,
+        &journal,
+        session,
+        withdraw_on_silence,
         confirmed,
     )
 }
@@ -1714,6 +1823,29 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let home = crate::paths::AgentsHome::from_env();
     if let Some(code) = forged_envelope_decision_at(&text, Some(&home.registry_json())) {
         return code;
+    }
+
+    // The quiet gate (C11, C14): no byte is typed while the operator is
+    // typing, holds an unfinished draft, or the recipient is Blocked (a
+    // question picker, a permission wall). The codex and opencode lanes type
+    // into no composer and skip it: their turns do not compose from a prompt
+    // line a delivery could land over. A timeout returns not-delivered and
+    // Python queues the mail durable, so it waits on the bus.
+    match args.harness {
+        MailInjectHarness::Claude | MailInjectHarness::Keeper => {
+            if let Err(reason) = wait_for_quiet_in(
+                &home.events_jsonl(),
+                &home.registry_json(),
+                &args.session,
+                Duration::from_secs(QUIET_WAIT_S),
+                Duration::from_secs(1),
+                &mut now_ms,
+                &mut |d| std::thread::sleep(d),
+            ) {
+                return emit(false, reason);
+            }
+        }
+        MailInjectHarness::Codex | MailInjectHarness::Opencode => {}
     }
 
     let result: Result<(), String> = match args.harness {
@@ -2768,36 +2900,309 @@ mod tests {
         assert_eq!(cap_env_int("FNO_TEST_CAP_INT", 5000), 5000);
     }
 
+    fn empty_journal(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mailinj-jrnl-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("events.jsonl")
+    }
+
+    fn write_typing_row(journal: &Path, session: &str) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_typing",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "typed_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
+    }
+
+    fn confirm_fixture() -> (Fake, PathBuf) {
+        (Fake { sent: Vec::new() }, empty_journal("c"))
+    }
+
     #[test]
-    fn busy_recipient_gets_raw_paste_then_retried_crs() {
-        let mut t = Fake { sent: Vec::new() };
-        inject_with_submit(&mut t, "hi MARKER", Duration::ZERO).unwrap();
-        // Confirm never fires -> the loop exhausts its budget, re-Entering a raw CR
-        // once per CR_RESUBMIT_EVERY window.
-        let attempts = 2 * CR_RESUBMIT_EVERY; // two resubmit windows
-        let r = confirm_with_cr_retry(&mut t, attempts, Duration::ZERO, || false);
+    fn no_confirm_for_half_the_budget_sends_exactly_one_extra_cr_then_lands() {
+        let (mut t, journal) = confirm_fixture();
+        let mut calls = 0;
+        // attempts 10 -> half 5. The confirm turns true on the FIRST poll of
+        // the second half, i.e. right after the one extra CR.
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            5,
+            0,
+            &journal,
+            "s1",
+            true,
+            || {
+                calls += 1;
+                calls > 5
+            },
+        );
+        assert_eq!(r, Ok(()), "a turn recorded after the extra CR confirms");
+        assert_eq!(t.sent, vec!["\r".to_string()], "exactly one extra CR");
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn total_silence_sends_one_cr_then_withdraws_with_del_bytes() {
+        let (mut t, journal) = confirm_fixture();
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || false,
+        );
         assert_eq!(r, Err("not-confirmed"));
-        // payload + initial CR (inject_with_submit) + one CR per resubmit window.
-        assert_eq!(t.sent.len() as u32, 2 + attempts / CR_RESUBMIT_EVERY);
-        // Every write after the paste is a bare raw CR -- no JSON, no auth.
-        for line in &t.sent[1..] {
-            assert_eq!(line, "\r");
-        }
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string(), "\u{7f}".repeat(7)],
+            "one extra CR, then one DEL write of the typed length"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn a_typing_row_after_the_inject_sends_no_del() {
+        let (mut t, journal) = confirm_fixture();
+        write_typing_row(&journal, "s1");
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || false,
+        );
+        assert_eq!(r, Err("not-confirmed"));
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string()],
+            "the operator's text is in the composer; nothing more is sent"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn the_keeper_unconfirmable_arm_types_and_never_withdraws() {
+        let (mut t, journal) = confirm_fixture();
+        let r = confirm_or_withdraw(
+            &mut t,
+            10,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            false,
+            || false,
+        );
+        assert_eq!(r, Err("not-confirmed"));
+        assert_eq!(
+            t.sent,
+            vec!["\r".to_string()],
+            "no landing visible, no withdraw: one extra CR only"
+        );
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_lets_a_typing_row_age_out_then_proceeds() {
+        use std::cell::Cell;
+        let journal = empty_journal("quiet-age");
+        let row_ms = now_ms() - 3_000; // the typing row is 3s old at t0
+        write_typing_row_at(&journal, "s2", row_ms);
+        // A submit AFTER the typing row closes the draft, so once the row
+        // ages past the 15s recent window the gate sees quiet.
+        submit_row_at(&journal, "s2", row_ms + 500);
+        let registry = std::env::temp_dir().join("fno-no-registry-here");
+        // A fake clock advancing 1s per poll (the row ages past the 15s
+        // recent window after ~12 ticks), ZERO poll sleep.
+        let tick = Cell::new(0i64);
+        let now = || row_ms + 3_000 + tick.get() * 1_000;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s2",
+            Duration::from_secs(30),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Ok(()), "the burst ages out and delivery proceeds");
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_times_out_with_user_typing_and_writes_nothing() {
+        use std::cell::Cell;
+        let journal = empty_journal("quiet-draft");
+        let base = now_ms();
+        write_typing_row_at(&journal, "s1", base - 1_000);
+        // A draft: the typing row is later than the (absent) submit row, so
+        // it never ages into quiet inside the budget. The fake clock advances
+        // 10ms per poll so the deadline is always reachable.
+        let registry = std::env::temp_dir().join("fno-no-registry-here");
+        let tick = Cell::new(0i64);
+        let now = || base + tick.get() * 10;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s1",
+            Duration::from_millis(50),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Err("user-typing"));
+        let _ = std::fs::remove_file(&journal);
+    }
+
+    #[test]
+    fn wait_for_quiet_times_out_with_session_asking_on_a_blocked_row() {
+        let journal = empty_journal("quiet-blocked");
+        let dir =
+            std::env::temp_dir().join(format!("mailinj-reg-{}-quietblocked", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = dir.join("registry.json");
+        let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let row = serde_json::json!({
+            "name": "wk", "status": "live", "cwd": "/repo", "harness": "claude",
+            "harness_session_id": "s1",
+            "created_at": "2026-09-26T00:00:00Z",
+            "inside_leg": {
+                "state": "blocked", "seq": 1, "received_at": now_iso, "ttl_ms": 60000
+            },
+        });
+        std::fs::write(
+            &registry,
+            serde_json::json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [row]}).to_string(),
+        )
+        .unwrap();
+        use std::cell::Cell;
+        let base = now_ms();
+        let tick = Cell::new(0i64);
+        let now = || base + tick.get() * 10;
+        let mut now = now;
+        let sleeper = |_d: Duration| tick.set(tick.get() + 1);
+        let mut sleeper = sleeper;
+        let r = wait_for_quiet_in(
+            &journal,
+            &registry,
+            "s1",
+            Duration::from_millis(50),
+            Duration::ZERO,
+            &mut now,
+            &mut sleeper,
+        );
+        assert_eq!(r, Err("session-asking"));
+        let _ = std::fs::remove_file(&journal);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_typing_row_at(journal: &Path, session: &str, typed_ms: i64) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_typing",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "typed_ms": typed_ms,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
+    }
+
+    fn submit_row_at(journal: &Path, session: &str, submit_ms: i64) {
+        let row = serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_submit",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main", "pane": 7, "via": "pane",
+                "submit_ms": submit_ms,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        });
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal)
+            .unwrap();
+        writeln!(f, "{row}").unwrap();
     }
 
     #[test]
     fn confirm_stops_on_landing_without_extra_cr() {
-        let mut t = Fake { sent: Vec::new() };
+        let (mut t, journal) = confirm_fixture();
         let mut calls = 0;
-        let r = confirm_with_cr_retry(&mut t, 40, Duration::ZERO, || {
-            calls += 1;
-            calls >= 2
-        });
+        let r = confirm_or_withdraw(
+            &mut t,
+            40,
+            Duration::ZERO,
+            7,
+            0,
+            &journal,
+            "s1",
+            true,
+            || {
+                calls += 1;
+                calls >= 2
+            },
+        );
         assert_eq!(r, Ok(()));
         assert!(
             t.sent.is_empty(),
-            "landing before a resubmit window sends no CR"
+            "landing before the half budget sends no CR"
         );
+        let _ = std::fs::remove_file(&journal);
     }
 
     #[test]
