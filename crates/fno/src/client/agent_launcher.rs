@@ -1605,13 +1605,13 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     // The floor stands; codex tops up from its own models cache and every
     // harness merges its configured account rows over the floor. opencode
     // owns its list outright (above).
-    let codex_cache = if rows.iter().any(|row| row.name == "codex") {
+    let (codex_cache, codex_hidden) = if rows.iter().any(|row| row.name == "codex") {
         match codex_models_cache_path().map(|path| std::fs::read_to_string(path)) {
             Some(Ok(text)) => parse_codex_models(&text),
-            _ => Vec::new(),
+            _ => (Vec::new(), Vec::new()),
         }
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     for row in &mut rows {
         if row.name == "opencode" {
@@ -1619,6 +1619,11 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
             row.models_error = opencode_error.clone();
         } else {
             if row.name == "codex" {
+                // The live cache wins over the floor: a slug it hides is
+                // retired even when the table still lists it. Configured
+                // account rows merge after, so an explicit route survives.
+                row.models
+                    .retain(|m| !codex_hidden.iter().any(|slug| *slug == m.model));
                 merge_model_choices(&mut row.models, &codex_cache);
             }
             if let Some(list) = by_harness.get(&row.name) {
@@ -1755,22 +1760,28 @@ fn codex_models_cache_path() -> Option<std::path::PathBuf> {
     Some(home.join("models_cache.json"))
 }
 
-/// Parse codex's models_cache.json: one ModelChoice per models[].slug whose
-/// visibility is not "hide". A missing or unreadable cache parses to an
-/// empty list: the capability-table floor stands, never an error row.
-pub(crate) fn parse_codex_models(text: &str) -> Vec<ModelChoice> {
+/// Parse codex's models_cache.json into (visible, hidden): one ModelChoice
+/// per models[].slug whose visibility is not "hide", plus the hidden slugs
+/// so the live cache can retire floor entries. A missing or unreadable
+/// cache parses to two empty lists: the capability-table floor stands,
+/// never an error row.
+pub(crate) fn parse_codex_models(text: &str) -> (Vec<ModelChoice>, Vec<String>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let Some(models) = value.get("models").and_then(|v| v.as_array()) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut models_out = Vec::new();
+    let mut hidden = Vec::new();
     for model in models {
         let Some(slug) = model.get("slug").and_then(|v| v.as_str()) else {
             continue;
         };
         if model.get("visibility").and_then(|v| v.as_str()) == Some("hide") {
+            if !hidden.iter().any(|known: &String| known == slug) {
+                hidden.push(slug.to_string());
+            }
             continue;
         }
         if models_out
@@ -1787,7 +1798,7 @@ pub(crate) fn parse_codex_models(text: &str) -> Vec<ModelChoice> {
             verdict: "ok".to_string(),
         });
     }
-    models_out
+    (models_out, hidden)
 }
 
 /// Append `extra` choices whose (model id, provider) pair is new, so the

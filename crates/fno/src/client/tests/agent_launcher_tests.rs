@@ -815,12 +815,17 @@ fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
         {"slug":"gpt-6-luna"},
         {"slug":"gpt-6-astra"}
     ]}"#;
-    let models = super::agent_launcher::parse_codex_models(cache);
+    let (models, hidden) = super::agent_launcher::parse_codex_models(cache);
     let ids: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
     assert_eq!(
         ids,
         vec!["gpt-6-luna", "gpt-6-astra"],
         "hide drops, dupes collapse"
+    );
+    assert_eq!(
+        hidden,
+        vec!["gpt-reserve"],
+        "hidden slugs come back by name"
     );
     assert!(
         models
@@ -828,10 +833,14 @@ fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
             .all(|m| m.provider.is_none() && m.verdict == "ok"),
         "cache slugs are harness-native choices"
     );
+    let (empty_models, empty_hidden) = super::agent_launcher::parse_codex_models("not json");
     assert!(
-        super::agent_launcher::parse_codex_models("not json").is_empty()
-            && super::agent_launcher::parse_codex_models("{}").is_empty(),
+        empty_models.is_empty() && empty_hidden.is_empty(),
         "an unreadable cache is the floor-stands case, never an error"
+    );
+    assert!(
+        super::agent_launcher::parse_codex_models("{}").0.is_empty(),
+        "a cache without a models list is the same floor-stands case"
     );
 }
 
