@@ -1392,10 +1392,11 @@ def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
         claude.index("--allowedTools") < claude.index("--disallowedTools")
 
     codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
-    codex_dirs = [
-        codex[i + 1] for i, token in enumerate(codex) if token == "--add-dir"
-    ]
-    assert "/extra" in codex_dirs
+    # The codex pane's only launch form rides --remote, and codex >= 0.156.1
+    # refuses --add-dir there, so even an operator-typed grant rides out with
+    # the strip (the codex --add-dir MAPPING is still pinned by the tier3
+    # refusal tests: an unmappable cell still fails closed).
+    assert "--add-dir" not in codex
     agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
     assert agy[agy.index("--add-dir") + 1] == "/extra"
     opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
@@ -1411,24 +1412,30 @@ def _pane_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_build_pane_argv_codex_grants_git_metadata_write(tmp_path: Path) -> None:
-    """AC4-HP: a sandboxed codex pane in a repo carries --add-dir <.git>.
-
-    Same trap as the headless lane: workspace-write makes .git read-only, so
-    without the grant the pane worker cannot commit at all.
-    """
+def test_build_pane_argv_codex_drops_the_git_grant_on_the_remote_launch(
+    tmp_path: Path,
+) -> None:
+    """x-0a75: the AC4-HP .git grant inverted. codex >= 0.156.1 refuses
+    `--add-dir` on a `--remote` launch, so riding the grant killed the pane
+    before it painted; the create pane now strips every root grant and the
+    roots are the daemon's business. `git_writable_args` itself is still
+    covered on the lanes that can carry it."""
     from fno.agents.mux_spawn import build_pane_argv
 
     repo = _pane_repo(tmp_path)
     argv = build_pane_argv("codex", "t", repo, False, None)
 
-    assert "--add-dir" in argv
-    assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+    assert "--remote" in argv
+    assert "--add-dir" not in argv
+    assert str((repo / ".git").resolve()) not in argv
 
 
-def test_build_pane_argv_codex_grants_plan_directory(
+def test_build_pane_argv_codex_drops_the_plan_grant_on_the_remote_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Same inversion for the plan-dir grant: the pane strips it, the spawn
+    reaches ready, and a bounded worker's plan writes are the daemon's to
+    grant."""
     from fno.agents.harnesses import codex as codex_mod
     from fno.agents.mux_spawn import build_pane_argv
 
@@ -1438,8 +1445,8 @@ def test_build_pane_argv_codex_grants_plan_directory(
 
     argv = build_pane_argv("codex", "t", repo, False, None)
 
-    grants = [argv[i + 1] for i, token in enumerate(argv) if token == "--add-dir"]
-    assert str(plan_dir) in grants
+    assert "--add-dir" not in argv
+    assert str(plan_dir) not in argv
 
 
 @pytest.fixture
@@ -1456,16 +1463,12 @@ def no_state_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path) -> None:
-    """AC5-EDGE: the GIT grant follows whether the pane is actually sandboxed.
-
-    Only the two unsandboxed postures skip it. --full-auto and any
-    <sandbox>:<approval> form are still sandboxed and still need it.
-
-    Asserted on the git common dir rather than on the bare presence of
-    ``--add-dir``: fno's state-root grant now rides the same flag on every
-    posture, so the flag alone no longer names which grant is under test. An
-    absence has two explanations and this one is pinned to the symbol.
+def test_build_pane_argv_codex_strip_covers_every_posture(tmp_path: Path) -> None:
+    """x-0a75, posture axis: the codex refusal of `--add-dir` beside `--remote`
+    is an argv-level check with no posture exception, so the strip covers the
+    bypass postures and the sandboxed ones alike. Asserted on the git common
+    dir rather than on the bare flag, so the grant under test is pinned to its
+    symbol and an absent state-root grant cannot fake a pass.
     """
     from fno.agents.harnesses.codex import _git_common_dir
     from fno.agents.mux_spawn import build_pane_argv
@@ -1478,33 +1481,27 @@ def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path)
     assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="yolo"
     )
-    assert git_dir in build_pane_argv(
+    assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="full-auto"
     )
-    assert git_dir in build_pane_argv(
+    assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="workspace-write:on-request"
     )
 
 
-def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Path) -> None:
-    """AC-EDGE: --add-dir is repeatable; a caller's own grant survives."""
+def test_build_pane_argv_codex_strip_drops_the_user_grant_too(tmp_path: Path) -> None:
+    """x-0a75, composition axis inverted: nothing composes on the codex pane
+    any more, including a grant the operator typed. The spawn must still reach
+    ready on the seeded pane, so the strip removes the pair whole and keeps
+    the seed behind `--`."""
     from fno.agents.mux_spawn import build_pane_argv
 
-    from fno.agents.writable_dirs import worker_writable_dirs
-
     repo = _pane_repo(tmp_path)
-    argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
+    argv = build_pane_argv("codex", "seed text", repo, False, None, add_dir="/extra")
 
-    # git common dir + plan dir + the caller's own grant, plus fno's state-root
-    # set. Counted from the resolver rather than hardcoded, because the state
-    # set's SIZE is machine-dependent (one entry, or two when the plan lives in
-    # a vault); its presence is asserted by name below.
-    assert argv.count("--add-dir") == 3 + len(worker_writable_dirs(repo))
-    assert "/extra" in argv
-    # The caller's explicit grant leads fno's computed set: it composes, never
-    # replaced by it.
-    first_state = worker_writable_dirs(repo)[0]
-    assert argv.index("/extra") < argv.index(first_state)
+    assert argv.count("--add-dir") == 0
+    assert "/extra" not in argv
+    assert argv[-2:] == ["--", "seed text"]
 
 
 def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
