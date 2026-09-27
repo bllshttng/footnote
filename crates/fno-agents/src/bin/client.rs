@@ -951,8 +951,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
     // Inside-leg state push (E3.2): a per-turn hook reports {working|blocked|done}.
     // `report`: sends to an ALREADY-RUNNING daemon; must never lazy-start one.
+    // `report --kind session` rides the SAME action (the action list is
+    // shrink-only): the SessionStart transport with the raw payload on stdin.
     if verb == "report" {
-        return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
+        return fno_agents::session_report::run_report_dispatch(
+            &args[1..],
+            &AgentsHome::from_env(),
+        )
+        .await;
     }
     // `wait`: poll registry.json directly for a state (no daemon RPC).
     if verb == "wait" {
@@ -3711,6 +3717,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--force" | "-F" => {
                 params.insert("force".into(), Value::Bool(true));
+            }
+            "--cross-project" if verb == "rm" || verb == "stop" => {
+                // The lifecycle verbs' store heal resolves through the same
+                // project-confinement refusal resume/adopt answer with this
+                // flag; accept it so the refusal's taught remedy is a form
+                // these verbs take.
+                params.insert("cross_project".into(), Value::Bool(true));
             }
             "--no-wait" => {
                 // Spawn-gate escape: fail immediately at max_live

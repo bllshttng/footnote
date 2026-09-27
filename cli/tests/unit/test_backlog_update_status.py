@@ -28,7 +28,7 @@ def _node(node_id: str, **overrides) -> dict:
     base = {
         "id": node_id,
         "slug": f"slug-{node_id}",
-        "title": f"node {node_id}",
+        "title": "sample node",
         "project": "fno",
         "type": "feature",
         "parent": None,

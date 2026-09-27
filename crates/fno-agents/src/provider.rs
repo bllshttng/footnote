@@ -727,7 +727,7 @@ pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
 }
 
 fn plan_content_dir(cwd: &std::path::Path) -> Option<String> {
-    let out = match std::process::Command::new("fno")
+    let out = match std::process::Command::new(crate::scrape::fno_bin())
         .args(["do", "plan", "path", "--slug", "codex-sandbox-grant"])
         .current_dir(cwd)
         .output()
@@ -2066,7 +2066,11 @@ mod tests {
             ),
         );
         let old_path = std::env::var_os("PATH");
+        let prev_bin = std::env::var_os("FNO_BIN");
         unsafe { std::env::set_var("PATH", crate::path_with(std::path::Path::new(&bin))) };
+        // The codex lane execs through scrape::fno_bin, which under cfg!(test)
+        // answers only a declared FNO_BIN: pin the same stub PATH pins.
+        unsafe { std::env::set_var("FNO_BIN", bin.join("fno")) };
 
         let mut create_ctx = create_ctx();
         create_ctx.cwd = dir.path().to_path_buf();
@@ -2082,6 +2086,10 @@ mod tests {
         match old_path {
             Some(path) => unsafe { std::env::set_var("PATH", path) },
             None => unsafe { std::env::remove_var("PATH") },
+        }
+        match prev_bin {
+            Some(v) => unsafe { std::env::set_var("FNO_BIN", v) },
+            None => unsafe { std::env::remove_var("FNO_BIN") },
         }
 
         let grants: Vec<&String> = create

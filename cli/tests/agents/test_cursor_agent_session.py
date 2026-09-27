@@ -138,20 +138,18 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     """The thread bit reads true behind the live keeper journey
     (cli/scripts/smoke/cursor-agent-keeper-journey.py), so a one-shot
     dispatch resolves onto the keeper lane and the row's lane answer is
-    keeper. The autonomous /target template still refuses at the loop gate:
-    loop_participation stays extension until a stop-hook firing marker is
-    proven, so a looping command cannot resolve."""
+    keeper. The loop refusal for the autonomous /target template lives in
+    the fno-agents target-family leaf (capability_leaves.rs): loop_participation
+    stays extension until a stop-hook firing marker is proven, and the
+    packaged row refuses there rather than in this module, whose assertions
+    must not depend on the machine's installed binary."""
     from fno.agents.harness_map import (
-        DispatchResolveError,
-        capabilities,
-        check_loop_participation,
         resolve_dispatch,
         thread_lane,
+        thread_seatable,
     )
 
     assert thread_lane("cursor-agent") == "keeper"
-    from fno.agents.harness_map import thread_seatable
-
     assert thread_seatable("cursor-agent") is True
     resolved = resolve_dispatch(
         harness="cursor-agent",
@@ -160,8 +158,6 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     )
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
-    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
-        check_loop_participation("cursor-agent", "/target")
 
 
 def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():

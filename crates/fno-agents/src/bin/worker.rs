@@ -76,6 +76,20 @@ fn main() {
         law_exec_lane();
         return;
     }
+    if let Some(idx) = args.iter().position(|a| a == "--law-exec-arg") {
+        let request = args
+            .get(idx + 1)
+            .map(|s| s.clone())
+            .unwrap_or_else(|| "fno-agents-worker: --law-exec-arg needs a request".to_string());
+        if args.get(idx + 1).is_none() {
+            eprintln!("{request}");
+            std::process::exit(2);
+        }
+        // The request rides argv so stdin stays INHERITED: the retract door
+        // proves the operator by the real terminal fd, which a piped stdin
+        // can never be.
+        std::process::exit(fno_agents::law_match::run_law_match_str(&request));
+    }
     if args.iter().any(|a| a == "--keeper" || a == "--pane") {
         if let Err(msg) = pane_keeper_lane(&args) {
             eprintln!("fno-agents-worker: {msg}");
@@ -87,7 +101,9 @@ fn main() {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
              (claude stream-json adoption), --store-keeper (graph store), \
-             --store-exec (one store request), or --law-exec (one law request)"
+             --store-exec (one store request), --law-exec (one law request on \
+             stdin), or --law-exec-arg <request> (one law request by argv, \
+             stdin inherited)"
         );
         std::process::exit(2);
     }

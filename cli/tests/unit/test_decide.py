@@ -413,7 +413,7 @@ def test_both_decision_surfaces_preserve_engine_authority_refusal(
 def _node(nid: str, **over) -> dict:
     base = {
         "id": nid,
-        "title": f"node {nid}",
+        "title": "sample node",
         "status": "ready",
         "type": "feature",
         "priority": "p2",

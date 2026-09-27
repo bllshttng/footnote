@@ -23,6 +23,13 @@ def scheduler_from_env(default: str = "session") -> str:
     return value or default
 
 
+def tick_store_path() -> Path:
+    """The journal the arm readouts scan: test pin when set, else the global
+    state root; shared so a paired row mirrors into the same store."""
+    pin = os.environ.get("FNO_EVENTS_PATH")  # test pin
+    return Path(pin) if pin else state_dir() / "events.jsonl"
+
+
 def emit_tick(arm: str, *, scheduler: str, interval_s: int, acted: int = 0,
               skip_reason: Optional[str] = None, detail: Optional[str] = None,
               events_path: Optional[Path] = None) -> bool:
@@ -30,8 +37,7 @@ def emit_tick(arm: str, *, scheduler: str, interval_s: int, acted: int = 0,
     row must never break the arm it observes."""
     try:
         if events_path is None:
-            pin = os.environ.get("FNO_EVENTS_PATH")  # test pin
-            events_path = Path(pin) if pin else state_dir() / "events.jsonl"
+            events_path = tick_store_path()
         data: dict[str, Any] = {"arm": arm, "scheduler": scheduler,
                                 "acted": acted, "interval_s": int(interval_s)}
         if skip_reason is not None:

@@ -8,7 +8,7 @@ import io
 import json
 import sys
 import tempfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,16 +35,41 @@ def _setup_state(tmp_path: Path, target_sid: str, nonce: str, transcript_uuid: s
     return state_dir
 
 
+@contextmanager
+def _captured_appends():
+    """Capture envelopes at the append_event boundary.
+
+    append_event commits to the events.db store (no file fallback) and the
+    hermetic fence refuses a pytest tmp journal path, so tests stub only the
+    commit. The envelope is already validated: `_build` runs the real
+    validate() before returning it.
+    """
+    import fno.events as fno_events
+
+    captured = []
+    original_append = fno_events.append_event
+    fno_events.append_event = lambda event, events_path=None, **kwargs: captured.append(event)
+    try:
+        yield captured
+    finally:
+        fno_events.append_event = original_append
+
+
 def test_emit_ledger_transition_uses_target_session_id():
     """Regression test for ab-31391d35.
 
     `_emit_ledger_transition` MUST emit the target session_id (the scalar
     `entry["session_id"]`, set from `state.get("session_id")`), NOT
     `sessions[0]` which is the Claude transcript UUID passed by the stop
-    hook as a CLI arg. The stop hook's `verify_provenance` greps
-    events.jsonl by the target session_id read from target-state.md, so
+    hook as a CLI arg. The stop hook's `verify_provenance` filters gate
+    events by the target session_id read from target-state.md, so
     emitting with the transcript UUID makes the event invisible to the
     gate (no_transition_for_gate diagnostic).
+
+    append_event commits to the events.db store (no file fallback), and
+    the hermetic fence refuses a pytest tmp journal path, so the envelope
+    is captured at the append boundary instead. `_build` has already run
+    the real envelope validation by the time the stub sees it.
     """
     target_sid = "20260420T091434Z-56177-a1b2c3"
     transcript_uuid = "11111111-2222-3333-4444-555555555555"
@@ -52,7 +77,7 @@ def test_emit_ledger_transition_uses_target_session_id():
 
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)
-        state_dir = _setup_state(tmp_path, target_sid, nonce, transcript_uuid)
+        _setup_state(tmp_path, target_sid, nonce, transcript_uuid)
 
         entry = {
             "type": "execution",
@@ -64,35 +89,27 @@ def test_emit_ledger_transition_uses_target_session_id():
             "pr_number": 42,
         }
 
-        register_task._emit_ledger_transition(entry)
+        with _captured_appends() as captured:
+            register_task._emit_ledger_transition(entry)
 
-        events_file = state_dir / "events.jsonl"
-        assert events_file.exists(), (
-            f"events.jsonl was not created at {events_file}; "
-            "_emit_ledger_transition silently no-op'd"
+        assert captured, (
+            "_emit_ledger_transition never reached append_event; "
+            "the ledger_updated gate event was not emitted"
         )
+        assert len(captured) == 1, f"expected one emit, got {len(captured)}"
 
-        lines = [line for line in events_file.read_text().splitlines() if line.strip()]
-        assert lines, (
-            f"events.jsonl is empty at {events_file}; "
-            "_emit_ledger_transition wrote nothing"
-        )
-
-        events = [json.loads(line) for line in lines]
-        transitions = [e for e in events if e.get("type") == "phase_transition"]
-        assert transitions, (
-            f"No phase_transition event in events.jsonl. Lines: {lines}"
-        )
-
-        event_data = transitions[0].get("data", {})
+        event_data = captured[0].get("data", {})
         emitted_sid = event_data.get("session_id")
+
+        assert captured[0].get("type") == "phase_transition", (
+            f"expected phase_transition, got {captured[0].get('type')!r}"
+        )
 
         assert emitted_sid == target_sid, (
             f"Expected emitted session_id == target_sid ({target_sid!r}), "
             f"got {emitted_sid!r}. The bug: _emit_ledger_transition reads "
             "sessions[0] (transcript UUID) instead of entry.get('session_id') "
-            "(target session_id from state). Fix at "
-            "scripts/metrics/register-task.py:735-736."
+            "(target session_id from state)."
         )
 
         assert emitted_sid != transcript_uuid, (
@@ -113,6 +130,10 @@ def test_emit_ledger_transition_warns_when_session_id_missing():
     event with session_id="" - which verify_provenance can never match, silently
     turning the ledger_updated gate into a no-op. The warning makes the failure
     mode visible (downstream gate trip is the intended diagnostic).
+
+    append_event commits to the events.db store (no file fallback), and the
+    hermetic fence refuses a pytest tmp journal path, so the skip is proven by
+    append_event never being called, not by a journal file staying absent.
     """
     nonce = "abcdef0123456789"
     transcript_uuid = "11111111-2222-3333-4444-555555555555"
@@ -140,18 +161,19 @@ def test_emit_ledger_transition_warns_when_session_id_missing():
             "pr_number": 99,
         }
 
-        buf = io.StringIO()
-        with redirect_stderr(buf):
-            register_task._emit_ledger_transition(entry)
-        stderr_text = buf.getvalue()
+        with _captured_appends() as captured:
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                register_task._emit_ledger_transition(entry)
+            stderr_text = buf.getvalue()
 
         assert "Warning" in stderr_text and "session_id" in stderr_text, (
             f"Expected stderr warning about missing session_id; got: {stderr_text!r}"
         )
 
-        events_file = state_dir / "events.jsonl"
-        assert not events_file.exists() or not events_file.read_text().strip(), (
-            "events.jsonl was written despite missing session_id; emit should be skipped"
+        assert not captured, (
+            "append_event was reached despite missing session_id; "
+            "emit should be skipped"
         )
 
 
@@ -620,6 +642,91 @@ def test_main_legacy_still_rejects_missing_session_id():
                     raise AssertionError("missing session id must exit 1")
         finally:
             sys.argv = orig_argv
+
+
+# ── derive_phases: post-collapse derivation (x-6aa0) ─────────────────────────
+
+
+def _post_collapse_state(**overrides):
+    """A manifest as the control-plane collapse writes it: no input_type and
+    no completion-gate booleans, only the input shape and the skip flags."""
+    state = {
+        "input": "x-6aa0",
+        "plan_path": None,
+        "no_external": False,
+        "no_docs": False,
+        "no_ship": False,
+        "no_browser": False,
+    }
+    state.update(overrides)
+    return state
+
+
+def test_derive_phases_node_input_build_run_never_plan_only():
+    # x-6aa0: a node-input do/review/ship run recorded phases ["think", "plan"]
+    # (dead gate keys + input_type defaulting to "idea"), the fold's plan-only
+    # discriminator then read the row planned, and the fidelity gate wedged the
+    # stop gate until merge. The row must carry build phases instead.
+    completed, skipped = register_task.derive_phases(_post_collapse_state(), pr_number=2605)
+    assert "execute" in completed
+    assert "ship" in completed
+    assert "think" not in completed
+    assert "plan" not in completed
+    assert "think" in skipped and "plan" in skipped
+
+
+def test_derive_phases_idea_input_records_think_plan():
+    # A bare-idea run thinks and plans in-session: those phases are real.
+    completed, _ = register_task.derive_phases(_post_collapse_state(input="add user auth"))
+    assert "think" in completed and "plan" in completed
+
+
+def test_derive_phases_plan_path_skips_think_plan():
+    completed, skipped = register_task.derive_phases(
+        _post_collapse_state(input="docs/plans/auth", plan_path="docs/plans/auth")
+    )
+    assert "think" in skipped and "plan" in skipped
+    assert "think" not in completed and "plan" not in completed
+
+
+def test_derive_phases_no_ship_flag_skips_ship():
+    completed, skipped = register_task.derive_phases(
+        _post_collapse_state(no_ship=True), pr_number=None
+    )
+    assert "ship" in skipped
+    assert "ship" not in completed
+
+
+def test_derive_phases_skip_flags_record_skipped():
+    _, skipped = register_task.derive_phases(
+        _post_collapse_state(no_external=True, no_docs=True), pr_number=None
+    )
+    assert "external" in skipped and "docs" in skipped
+
+
+def test_build_entry_node_input_row_not_planned_in_the_fold():
+    # End-to-end against the consumer that wedged: the row build_entry writes
+    # for a shipped node-input run must never satisfy the fold's
+    # plan-only discriminator.
+    from fno.scoreboard.fold import _is_planned_row
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sid = "20260926T203805Z-cl94622-e9d44b"
+        _write_ship_artifact(root, sid, 2605)
+        orig_git = register_task.git_cmd
+        orig_gh = register_task._pr_number_from_gh
+        register_task.git_cmd = lambda *a: (str(root) if a[:1] == ("rev-parse",) else "")
+        register_task._pr_number_from_gh = lambda cwd: None
+        try:
+            entry = register_task.build_entry(
+                _post_collapse_state(session_id=sid), "tid"
+            )
+        finally:
+            register_task.git_cmd = orig_git
+            register_task._pr_number_from_gh = orig_gh
+        assert entry["pr_number"] == 2605
+        assert not _is_planned_row(entry)
 
 
 def _run_standalone() -> int:

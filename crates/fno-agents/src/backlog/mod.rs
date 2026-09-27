@@ -38,6 +38,7 @@ pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod title_gate;
 pub mod update_cli;
 
 use crate::backlog::model::Node;

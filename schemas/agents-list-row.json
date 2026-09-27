@@ -143,7 +143,9 @@
       "spawned_by_cwd",
       "spawned_by_harness",
       "spawned_by_session",
+      "start_source",
       "stop",
+      "transcript_path",
       "turn_policy_source"
     ]
   },

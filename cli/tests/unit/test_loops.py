@@ -112,6 +112,45 @@ def test_cli_status_reports_corrupt_state(isolated_home, monkeypatch):
     assert "treated as paused" in result.output
 
 
+def test_cli_status_formats_epoch_milliseconds_as_iso(isolated_home, monkeypatch):
+    from fno import loops
+
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": True,
+            "state": "paused",
+            "who": "tester",
+            "paused_at": 1_789_261_620_000,
+            "expires_at": 1_789_265_220_000,
+        },
+    )
+    result = runner.invoke(loops.loops_app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "since 2026-09-13T01:07:00Z" in result.output
+    assert "expires 2026-09-13T02:07:00Z" in result.output
+    assert "1789261620000" not in result.output
+
+
+def test_cli_status_reports_unavailable_breaker(isolated_home, monkeypatch):
+    from fno import loops
+
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": True,
+            "state": "unavailable",
+            "error": "invalid expires_at",
+        },
+    )
+    result = runner.invoke(loops.loops_app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "failing closed" in result.output
+    assert "invalid expires_at" in result.output
+
+
 def test_cli_ls_with_no_loops_configured(isolated_home):
     from fno.loops import loops_app
 

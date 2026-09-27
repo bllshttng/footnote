@@ -991,6 +991,9 @@ pub(crate) struct SlotReservation {
     pub state: &'static str,
     /// The `model_provider` metadata tag the provider count reads.
     pub provider: Option<String>,
+    /// The claim is a named reservation that this same name may redeem.
+    #[serde(skip)]
+    pub redeemable: bool,
 }
 
 /// Live `worker:<name>` slot claims under the GLOBAL claims root, named.
@@ -1042,6 +1045,11 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
                         .get("model_provider")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    redeemable: rec
+                        .metadata
+                        .get("reserved_by")
+                        .and_then(Value::as_str)
+                        .is_some_and(|by| !by.is_empty()),
                 });
             }
             (claims::ClaimState::Corrupted, _) => {
@@ -1166,7 +1174,7 @@ fn maybe_emit_spawn_cap_escape() {
     if !spawn_cap_would_emit(|k| std::env::var(k).ok()) {
         return;
     }
-    let _ = std::process::Command::new("fno")
+    let _ = std::process::Command::new(crate::scrape::fno_bin())
         .args([
             "doctor",
             "event",
@@ -1798,6 +1806,9 @@ fn decide_gate(
                         let mut warnings = Vec::new();
                         let (live, reservations) = slot_reading(registry_path, &mut warnings);
                         let slots = live.len() + reservations.len();
+                        let redeeming_own_reservation = reservations
+                            .iter()
+                            .any(|reservation| reservation.name == name && reservation.redeemable);
                         last_slots = slots;
                         let succession = input.succession_scope.as_deref().map(|scope| {
                             spawn_gate_lanes::succession_replaces(
@@ -1813,7 +1824,11 @@ fn decide_gate(
                         for w in &warnings {
                             eprintln!("{w}");
                         }
-                        if slots.saturating_sub(replaced) < cap {
+                        if slots
+                            .saturating_sub(usize::from(redeeming_own_reservation))
+                            .saturating_sub(replaced)
+                            < cap
+                        {
                             let slot_reading = succession
                                 .as_ref()
                                 .and_then(|result| result.as_ref().ok())
@@ -3173,6 +3188,11 @@ mod tests {
             reason: "wedged lock".into(),
             holds: Vec::new(),
             source: Some("file".into()),
+            target: None,
+            expires_at: None,
+            origin: None,
+            mail: None,
+            mail_session_id: None,
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 

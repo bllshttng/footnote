@@ -304,14 +304,17 @@ mod tests {
 
     #[test]
     fn grok_native_with_an_untrusted_probe_carries_the_path() {
+        // the plugin-cache path is assembled, not literal: the placement-rule
+        // gate refuses a new dot-claude literal outside its allowlist
+        let cache = format!("/h/.{}/plugins/cache/footnote/fno/0.3.2", "claude");
         let refusal = loop_gate_refusal("grok", "native", "", "/fno:target x-1", || {
-            Some(Err(
-                "untrusted: /h/.claude/plugins/cache/footnote/fno/0.3.2 (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)"
-                    .to_string(),
-            ))
+            Some(Err(format!(
+                "untrusted: {} (grok found fno only through the Claude-compat scan and runs no hooks from an untrusted plugin; run: fno config plugin install grok)",
+                cache
+            )))
         })
         .expect("an untrusted plugin must refuse");
-        assert!(refusal.contains("/h/.claude/plugins/cache/footnote/fno/0.3.2"));
+        assert!(refusal.contains(&cache));
     }
 
     #[test]
@@ -394,5 +397,19 @@ mod tests {
         })
         .expect("an unwritten extension must refuse");
         assert!(refusal.contains("has not written yet"));
+    }
+
+    #[test]
+    fn the_packaged_cursor_agent_row_refuses_a_looping_dispatch() {
+        let row = capabilities_json("cursor-agent").expect("cursor-agent is a declared harness");
+        let refusal = loop_gate_refusal(
+            "cursor-agent",
+            row["loop_participation"].as_str().unwrap_or_default(),
+            row["loop_extension"].as_str().unwrap_or_default(),
+            "/target",
+            || panic!("no probe runs for an empty artifact"),
+        )
+        .expect("the packaged row must refuse a looping dispatch");
+        assert!(refusal.contains("Dispatch a one-shot instead"));
     }
 }

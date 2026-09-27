@@ -31,6 +31,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 mod blocking_bound;
 mod claude_stop;
 mod fleet_arms;
+mod lifecycle;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
@@ -41,6 +42,7 @@ pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
+use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
@@ -1630,7 +1632,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {
-        let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
         let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
         let live = Arc::clone(&ab_live);
         let shutdown = Arc::clone(&ab_shutdown);
@@ -1856,13 +1858,9 @@ struct Ctx {
     /// `None` on platforms/paths where it is unavailable (the guard degrades to
     /// a bare existence check, like the worker path).
     pid_start_time: Option<u64>,
-    /// Early-push buffer (inside-out E3.3, buffer-on-early-push): inside-leg
-    /// reports keyed by session_id that arrived before their registry row
-    /// existed (a per-turn hook can fire faster than the daemon registers the
-    /// pane). Flushed onto the row at creation (`handle_spawn` /
-    /// `spawn_claude_stream_lane`). Bounded by [`PENDING_INSIDE_LEG_CAP`] so a
-    /// flood of pushes for sessions that never register cannot grow without
-    /// limit. Highest seq wins per session.
+    /// Early-push buffer (E3.3): inside-leg reports that arrived before their
+    /// registry row existed; flushed onto the row at creation, highest seq
+    /// wins, bounded by [`PENDING_INSIDE_LEG_CAP`].
     pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
     /// Live connections to the SHARED codex app-server daemon, one per codex
     /// thread worker, keyed by registry name. Not children: this supervisor
@@ -1873,20 +1871,15 @@ struct Ctx {
     codex_threads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CodexThreadHandle>>>,
 }
 
-/// Cap on the early-push buffer (E3.3). A report for a NEW session is dropped
-/// (logged `buffer_full`) once the buffer is at cap; an already-buffered
-/// session's seq still advances (no new key). 64 covers any realistic burst of
-/// panes registering at once while staying a hard ceiling.
+/// Cap on the early-push buffer (E3.3): a report for a NEW session is dropped
+/// (logged `buffer_full`) at cap; an already-buffered session's seq still
+/// advances. 64 covers any realistic burst of panes registering at once.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-/// One actor task per thread owns its daemon connection exclusively.
-/// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
-/// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
-/// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
-/// active turn, the steer RPC was unreachable, the detached seed task held the
-/// same lock, and `stop` removed a handle whose turn task still owned a clone
-/// while stamping `Exited`. Consumers now send [`ThreadCommand`]s and never
-/// touch the driver; see `crates/fno-agents/src/codex_thread.rs`.
+/// One actor task per thread owns its daemon connection exclusively. The
+/// older `Arc<Mutex<CodexThread>>` baked whole-turn exclusion into the handle
+/// type: follow-up asks blocked behind the active turn and `stop` raced the
+/// turn task. Consumers send [`ThreadCommand`]s; see `codex_thread.rs`.
 type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
 use crate::codex_thread::InterruptOutcome;
@@ -2105,6 +2098,14 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
+        // SessionStart report: one thin per-harness hook posts the raw
+        // payload; the registry holds id/transcript/source additively.
+        Some("session-report") => {
+            run_blocking(ctx, req, |ctx: &Ctx, req: &Request| {
+                crate::session_report::handle_session_report(&ctx.home, &ctx.emitter, req)
+            })
+            .await
+        }
         _ => Response::err(
             req.id,
             ErrorCode::UnknownMethod,
@@ -4596,44 +4597,6 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// Resolve lifecycle tokens through the all-source client resolver. Return the
-/// resolved row itself because the helper may have just adopted a store-only
-/// session that is absent from the caller's pre-heal registry snapshot.
-async fn entry_for_lifecycle(
-    registry: &state::Registry,
-    token: &str,
-    registry_path: &std::path::Path,
-) -> Result<Option<RegistryEntry>, String> {
-    let Value::Array(rows) = serde_json::to_value(&registry.entries)
-        .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
-    else {
-        return Err("could not inspect registry identities".to_string());
-    };
-    let worker_token = token.to_string();
-    let path = registry_path.to_path_buf();
-    let resolved = tokio::task::spawn_blocking(move || {
-        crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
-    })
-    .await
-    .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
-    match resolved {
-        Ok(entry) => {
-            let mut entry: RegistryEntry = serde_json::from_value(entry)
-                .map_err(|exc| format!("resolved identity row is unreadable: {exc}"))?;
-            entry.backfill_harness_aliases();
-            if let Some(legacy) = entry.backfill_short_id() {
-                return Err(format!(
-                    "resolved identity row {:?} has conflicting transport ids (legacy={legacy:?})",
-                    entry.name
-                ));
-            }
-            Ok(Some(entry))
-        }
-        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(None),
-        Err(err) => Err(err.message()),
-    }
-}
-
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let mut response = stop_body(ctx, req).await;
     attach_stopped_claims_release(ctx, req, "stop", &mut response).await;
@@ -4645,22 +4608,35 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
+    // stop shares rm's cross-project grant: its store heal resolves through
+    // the same confinement refusal that names --cross-project.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     if entry.status == AgentStatus::Exited {
         // An exited agent needs no stop work. (Pre-G4 this also force-cleared a
@@ -4881,18 +4857,25 @@ async fn attach_stopped_claims_release(
         return;
     };
     // A stop leaves the row (terminal); an rm removes it, so the caller
-    // passes the resolved identity instead of re-reading the registry.
+    // passes the resolved identity instead of re-reading the registry. The
+    // requested token may be a session id rather than the row name (a
+    // stop-by-id, or a cross-project heal that just minted the row), so
+    // resolve through the same finder the lifecycle verbs resolve with; an
+    // exact-name miss here dropped the healed row's claims on the floor.
     let identity = load_registry_offloaded(ctx.home.registry_json())
         .await
         .ok()
         .and_then(|registry| {
-            registry
-                .entries
-                .iter()
-                .find(|e| e.name == name)
-                .map(|e| (e.harness_session_id.clone(), Some(e.cwd.clone())))
+            registry.find_name_or_full_session_id(name).map(|e| {
+                (
+                    Some(e.name.clone()),
+                    e.harness_session_id.clone(),
+                    Some(e.cwd.clone()),
+                )
+            })
         });
-    let (session_id, cwd) = identity.unwrap_or((None, None));
+    let (resolved_name, session_id, cwd) = identity.unwrap_or((None, None, None));
+    let name: &str = resolved_name.as_deref().unwrap_or(name);
     release_stopped_claims_into(&ctx.emitter, name, session_id, cwd, verb, response);
 }
 
@@ -5212,7 +5195,7 @@ pub enum PaneProbe {
 /// "absent" means the mux layer itself said the pane is gone.
 pub(crate) fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let pane = pane_id.to_string();
-    let mut child = match std::process::Command::new("fno")
+    let mut child = match std::process::Command::new(crate::scrape::fno_bin())
         .args([
             "mux", "pane", "read", "--server", session, "--lines", "1", &pane,
         ])
@@ -5343,22 +5326,36 @@ async fn handle_rm_with(
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // rm is the one lifecycle verb whose caller can name a session whose cwd
+    // resolves outside this project (the store heal's refusal prescribes
+    // --cross-project for exactly that case); forward the grant to resolution.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     let audit = RemovalAuditContext::from_request(req, &entry);
     // Computed once (self-review finding): every other reference in this
@@ -6069,7 +6066,7 @@ pub(crate) fn apply_session_transition(
 /// shell-and-parse-a-marker pattern). Fails closed to `None` on anything but
 /// a clean exit with a non-empty `session_id=` line.
 fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(crate::scrape::fno_bin())
         .args(["agents", "codex-session-for-pid", &pid.to_string()])
         .output()
         .ok()?;
@@ -6956,7 +6953,7 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an
 /// inside-leg report.
-enum UuidBackfill {
+pub(crate) enum UuidBackfill {
     None,
     One(usize),
     Ambiguous,
@@ -6970,7 +6967,7 @@ enum UuidBackfill {
 /// the leading hex group of `full_uuid` (`3228ccad` -> `3228ccad-c078-...`).
 /// Two rows sharing that short-id is ambiguous -> refuse rather than backfill
 /// the wrong row (AC1-ERR).
-fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
+pub(crate) fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
     let mut found = None;
     for (i, e) in entries.iter().enumerate() {
         // Only a claude bg row owns a jobId + uuid identity; skip any other

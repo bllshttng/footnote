@@ -2964,7 +2964,7 @@ fn fallback_state_root(cwd: &std::path::Path, warn: bool) -> PathBuf {
 /// final fallback, `mux doctor`'s stranding check, and the sidecar root, so
 /// they can never drift apart.
 #[cfg(not(test))]
-fn legacy_state_root() -> PathBuf {
+pub(crate) fn legacy_state_root() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
@@ -3046,7 +3046,7 @@ fn config_state_root() -> Option<StateRoot> {
 /// (this crate is TOML-only by convention), so it warns like the other
 /// decline cases instead of splitting silently.
 #[cfg(not(test))]
-fn warn_once_legacy_yaml_state_dir() {
+pub(crate) fn warn_once_legacy_yaml_state_dir() {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         if let Some(yaml) = legacy_global_yaml_state_dir_hint() {
@@ -3073,7 +3073,7 @@ fn warn_once_legacy_yaml_state_dir() {
 /// runs first there; this mirror expands neither) and `~user` forms (Python
 /// resolves them through the passwd database; `$HOME/user` would be a
 /// different root).
-fn expand_state_dir(raw: &str) -> Option<PathBuf> {
+pub(crate) fn expand_state_dir(raw: &str) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() || raw.contains('{') || raw.contains('$') {
         return None;
@@ -3131,7 +3131,7 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
 /// every Python surface expands it and moves elsewhere. Say so once instead
 /// of leaving the split silent.
 #[cfg(not(test))]
-fn warn_once_unexpandable_state_dir(raw: &str) {
+pub(crate) fn warn_once_unexpandable_state_dir(raw: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         record_config_warning(

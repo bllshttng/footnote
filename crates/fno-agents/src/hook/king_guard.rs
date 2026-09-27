@@ -109,6 +109,11 @@ pub fn run(_args: &[String]) -> i32 {
 
     // 6. Manifest: the reign declaration. Registry row, not file presence,
     //    proved authority; the manifest must name court for THIS session.
+    //    Keyed on the crown row's cwd (the writer's key, as stop.rs's
+    //    king_manifest_in), never the payload cwd: a court whose shell sits
+    //    outside the repo still meets its court, and the deny region below
+    //    draws from the same root. Relative write targets still resolve
+    //    against the payload cwd, where the shell stands.
     let cwd = payload
         .get("cwd")
         .and_then(Value::as_str)
@@ -116,14 +121,17 @@ pub fn run(_args: &[String]) -> i32 {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let manifest = super::events_space(&cwd)
-        .join("kings")
-        .join(format!("{crown_scope}.md"));
-    if !crown_scope.is_empty()
-        && (crown_scope.contains("..") || crown_scope.contains('/') || crown_scope.contains('\\'))
+    let root = if row.cwd.is_empty() {
+        cwd.clone()
+    } else {
+        PathBuf::from(&row.cwd)
+    };
+    let manifest = match crate::loop_reign::manifest_path(&super::events_space(&root), crown_scope)
     {
-        return allow("");
-    }
+        Ok(m) => m,
+        // An unsafe or empty scope never names a manifest; never-block allows.
+        Err(_) => return allow(""),
+    };
     let Ok(content) = std::fs::read_to_string(&manifest) else {
         return allow("");
     };
@@ -135,7 +143,7 @@ pub fn run(_args: &[String]) -> i32 {
     }
 
     // 7. Mode knob: refuse (default) | warn | off.
-    let mode = config_lookup(&cwd, &["king", "implementation_guard"])
+    let mode = config_lookup(&root, &["king", "implementation_guard"])
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "refuse".to_string());
     if mode == "off" {
@@ -145,8 +153,8 @@ pub fn run(_args: &[String]) -> i32 {
     // 8. The repo root is the only DENY region. Realpath containment has no
     //    unresolvable state, so the never-block contract needs no escape
     //    hatch here: outside the repo allows, whatever it is.
-    let repo_root = crate::paths::worktree_repo_root(&cwd);
-    let roots = write_roots(config_lookup(&cwd, &["king", "write_roots"]), &repo_root);
+    let repo_root = crate::paths::worktree_repo_root(&root);
+    let roots = write_roots(config_lookup(&root, &["king", "write_roots"]), &repo_root);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload

@@ -254,9 +254,13 @@ use watch_lease::{harness_can_idle, watch_target, watch_window_ms, CONTINUE_WORK
 /// The fno binary every loop-check surface shells, resolved through the same
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
 /// default `fno`). One resolver so a stubbed test and a live gate cannot
-/// disagree about which binary answered.
+/// disagree about which binary answered. Under `cfg!(test)` an unset var
+/// answers a path that cannot exec (`scrape::declared_fno`): a lib unit
+/// test gets only the porcelain it declared.
 pub(crate) fn loopcheck_fno_bin() -> String {
-    std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+    crate::scrape::declared_fno(
+        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").map(|v| v.to_string_lossy().into_owned()),
+    )
 }
 
 /// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
@@ -277,10 +281,8 @@ fn best_effort_notify(title: &str, body: &str) {
     if std::env::var("FNO_LOOPCHECK_NO_NOTIFY").as_deref() == Ok("1") {
         return;
     }
-    // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
-    // hands the raw OsString straight to the spawn (gemini review).
-    let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-    crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
+    let fno_bin = loopcheck_fno_bin();
+    crate::operator_notice::notify_operator_with(std::ffi::OsStr::new(&fno_bin), title, body, None);
 }
 
 // ── main decision function ────────────────────────────────────────────────────
@@ -319,6 +321,43 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     decide_with_payload(&parsed, hook_input.as_deref())
 }
 
+fn pause_subject(parsed: &LoopCheckArgs) -> crate::fleet_incident::Subject<'_> {
+    let manifest = std::fs::read_to_string(&parsed.state_path).unwrap_or_default();
+    let mut session_ids = Vec::new();
+    for field in [
+        "fno_id",
+        "session_id",
+        "harness_session_id",
+        "claude_session_id",
+        "claude_transcript_id",
+        "codex_thread_id",
+        "gemini_session_id",
+        "opencode_session_id",
+    ] {
+        if let Some(id) = scan_manifest_field(&manifest, field) {
+            if !id.eq_ignore_ascii_case("null") && !session_ids.contains(&id) {
+                session_ids.push(id);
+            }
+        }
+    }
+    if let Some(id) = parsed.harness_session.as_deref() {
+        if !session_ids.contains(&id.to_string()) {
+            session_ids.push(id.to_string());
+        }
+    }
+    let node = scan_manifest_field(&manifest, "graph_node_id").or_else(|| {
+        scan_manifest_field(&manifest, "target_claim_key")
+            .and_then(|key| key.strip_prefix("node:").map(str::to_string))
+    });
+    crate::fleet_incident::Subject {
+        session_ids,
+        node,
+        territory: scan_manifest_field(&manifest, "territory")
+            .or_else(|| scan_manifest_field(&manifest, "scope")),
+        cwd: &parsed.cwd,
+    }
+}
+
 /// The decision core with the Stop payload as a parameter :
 /// the native `hook stop` handler calls this in process with the payload it
 /// already read, and tests replay recorded payloads, so the stdin handoff is
@@ -336,7 +375,8 @@ pub(crate) fn decide_with_payload(
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         0,
     );
-    if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
+    let subject = pause_subject(parsed);
+    if let Some(message) = crate::loops_pause::pause_message(&subject) {
         return (0, paused_output(&parsed.driver, &message));
     }
     // The king uses a separate manifest and decision path.
@@ -1334,8 +1374,7 @@ pub(crate) fn decide_with_payload(
                 // fail-open on a stale/missing fno (the merge gate is the backstop).
                 let mut fidelity_block: Option<String> = None;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
-                    let fno_bin =
-                        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
+                    let fno_bin = std::ffi::OsString::from(loopcheck_fno_bin());
                     match evaluate_plan_fidelity(
                         manifest.plan_path.as_deref(),
                         &fno_bin,
