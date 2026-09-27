@@ -1480,7 +1480,7 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
 /// enforces: `include_str!`ed at compile time, regenerated from the
 /// canonical copy by fno-agents' build.rs. The catalog is the set of
 /// `[harness.<name>]` tables; there is no UI-only list to drift.
-const CAPABILITY_TOML: &str = include_str!("../harness_capabilities.toml");
+pub(crate) const CAPABILITY_TOML: &str = include_str!("../harness_capabilities.toml");
 
 /// The next free portal index in the active layout, smallest first. A
 /// thread placement opens its new portal here; a stale read costs one
@@ -1490,10 +1490,11 @@ fn next_free_portal(view: &View) -> u8 {
     (0..=u8::MAX).find(|p| !used.contains(p)).unwrap_or(0)
 }
 
-/// The catalog read: a compiled-in table plus PATH stats, then bounded reads
-/// for configured routing rows and OpenCode's installed model list. Delivered
-/// through the probe channel so the dock has one "not yet read" and "read"
-/// shape; async because both reads are subprocesses.
+/// The catalog read: a compiled-in table (each harness's model floor
+/// included) plus PATH stats, then bounded reads for configured routing
+/// rows, codex's own model cache, and OpenCode's installed model list.
+/// Delivered through the probe channel so the dock has one "not yet read"
+/// and "read" shape; async because the subprocess reads are.
 pub(crate) async fn load_catalog() -> CatalogOutcome {
     let Ok(parsed) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
         return CatalogOutcome::Degraded("harness catalog: capability table unparseable".into());
@@ -1517,11 +1518,23 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                             .filter_map(|x| x.as_str().map(str::to_string))
                             .collect()
                     });
+            let models = caps.get("models").and_then(|v| v.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|slug| ModelChoice {
+                        name: slug.to_string(),
+                        model: slug.to_string(),
+                        route: String::new(),
+                        provider: None,
+                        verdict: "ok".to_string(),
+                    })
+                    .collect()
+            });
             HarnessChoice {
                 name: name.clone(),
                 native: true,
                 installed: on_path(name),
-                models: Vec::new(),
+                models: models.unwrap_or_default(),
                 models_error: None,
                 efforts,
                 permission_modes,
@@ -1589,12 +1602,28 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
     } else {
         (Vec::new(), None)
     };
+    // The floor stands; codex tops up from its own models cache and every
+    // harness merges its configured account rows over the floor. opencode
+    // owns its list outright (above).
+    let codex_cache = if rows.iter().any(|row| row.name == "codex") {
+        match codex_models_cache_path().map(|path| std::fs::read_to_string(path)) {
+            Some(Ok(text)) => parse_codex_models(&text),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     for row in &mut rows {
         if row.name == "opencode" {
             row.models = opencode_models.clone();
             row.models_error = opencode_error.clone();
-        } else if let Some(list) = by_harness.get(&row.name) {
-            row.models = list.clone();
+        } else {
+            if row.name == "codex" {
+                merge_model_choices(&mut row.models, &codex_cache);
+            }
+            if let Some(list) = by_harness.get(&row.name) {
+                merge_model_choices(&mut row.models, list);
+            }
         }
     }
     CatalogOutcome::Ok(rows, models_err)
@@ -1713,6 +1742,67 @@ pub(crate) fn parse_opencode_models(stdout: &str) -> Vec<ModelChoice> {
         });
     }
     models
+}
+
+/// codex's own model catalog cache, maintained by codex under CODEX_HOME
+/// (default ~/.codex).
+fn codex_models_cache_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
+        })?;
+    Some(home.join("models_cache.json"))
+}
+
+/// Parse codex's models_cache.json: one ModelChoice per models[].slug whose
+/// visibility is not "hide". A missing or unreadable cache parses to an
+/// empty list: the capability-table floor stands, never an error row.
+pub(crate) fn parse_codex_models(text: &str) -> Vec<ModelChoice> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(models) = value.get("models").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut models_out = Vec::new();
+    for model in models {
+        let Some(slug) = model.get("slug").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if model.get("visibility").and_then(|v| v.as_str()) == Some("hide") {
+            continue;
+        }
+        if models_out
+            .iter()
+            .any(|choice: &ModelChoice| choice.model == slug)
+        {
+            continue;
+        }
+        models_out.push(ModelChoice {
+            name: slug.to_string(),
+            model: slug.to_string(),
+            route: String::new(),
+            provider: None,
+            verdict: "ok".to_string(),
+        });
+    }
+    models_out
+}
+
+/// Append `extra` choices whose (model id, provider) pair is new, so the
+/// floor list stays first and the live sources (codex's cache, configured
+/// account records) fill in without duplicates.
+pub(crate) fn merge_model_choices(base: &mut Vec<ModelChoice>, extra: &[ModelChoice]) {
+    for choice in extra {
+        if base
+            .iter()
+            .any(|m| m.model == choice.model && m.provider == choice.provider)
+        {
+            continue;
+        }
+        base.push(choice.clone());
+    }
 }
 
 // -- picker ------------------------------------------------------------------
@@ -1991,7 +2081,10 @@ fn picker_rows(
                     // The Model body groups by provider (the opencode
                     // ruling): one header per connected provider with its
                     // provider/model ids under it; a model with no provider
-                    // groups under the harness itself.
+                    // groups under the harness itself. A routed pin's group
+                    // leads and the harness-own floor sorts last, so the
+                    // configured rows stay above the fold on a short
+                    // terminal.
                     let mut groups: Vec<(String, Vec<&ModelChoice>)> = Vec::new();
                     for m in models.iter() {
                         let key = m.provider.clone().unwrap_or_else(|| harness.clone());
@@ -2000,7 +2093,12 @@ fn picker_rows(
                             None => groups.push((key, vec![m])),
                         }
                     }
-                    groups.sort_by(|a, b| a.0.cmp(&b.0));
+                    groups.sort_by(|a, b| {
+                        let harness_own = |g: &(String, Vec<&ModelChoice>)| g.0 == harness;
+                        harness_own(a)
+                            .cmp(&harness_own(b))
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
                     for (key, list) in &groups {
                         rows.push(PopupRow::Header(key.clone()));
                         actions.push(None);

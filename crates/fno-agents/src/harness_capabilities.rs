@@ -217,6 +217,13 @@ pub struct HarnessCapabilities {
     /// `efforts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_modes: Option<Vec<String>>,
+    /// The mux composer's Model-tab floor: this harness's own launchable
+    /// model ids, measured off the vendor's published roster or its model
+    /// catalog. Absent where the harness owns a live list (opencode) or
+    /// declares none; configured account records merge in on top at read
+    /// time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     pub resume: String,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,

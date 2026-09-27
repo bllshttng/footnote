@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 22
+map_version = 23
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -14,6 +14,12 @@ permission_bypass = ["--dangerously-skip-permissions"]
 # list is read off this harness's own mapper or `--help`, never from memory.
 efforts = ["low", "medium", "high", "xhigh", "max"]
 permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"]
+# The Model tab's floor for this harness: the launchable model ids, so the
+# composer never reads an empty list just because no account record pins a
+# model. Family aliases plus the current full ids, off the vendor's published
+# roster (2026-09-27). Configured account records merge in on top at read
+# time, so a routed pin keeps its route.
+models = ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-1"]
 resume = "native-session"
 autonomous_pane = false
 route_on_pane = true
@@ -188,6 +194,10 @@ permission_modes = [
     "workspace-write:untrusted", "workspace-write:on-failure", "workspace-write:on-request", "workspace-write:never",
     "danger-full-access:untrusted", "danger-full-access:on-failure", "danger-full-access:on-request", "danger-full-access:never",
 ]
+# Model-tab floor, read off codex's own models_cache.json (2026-09-27; the
+# visibility=hide rows gpt-reserve and codex-auto-review are excluded). The
+# live cache merges in on top at read time, so a fresher catalog wins.
+models = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
 resume = "native-thread"
 # A codex thread lives on the SHARED `codex app-server daemon`, which owns it.
 # So it survives mux death AND `fno-agents-daemon` death: neither process
