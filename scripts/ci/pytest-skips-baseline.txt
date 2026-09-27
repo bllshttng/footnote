@@ -433,3 +433,6 @@ cli/tests/unit/test_task_context_binding.py::test_gate_refuses_wrong_node::marke
 cli/tests/unit/test_task_context_binding.py::test_no_declared_binding_is_no_gate::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_worktree_reap_equivalence.py::_gate_binary::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_worktree_reap_equivalence.py::_gate_env::pytest.skip  # on main before this ratchet
+cli/tests/unit/test_reconcile_dispatch.py::<module>::mark.skipif  # on main before this ratchet
+cli/tests/unit/test_reconcile_dispatch.py::test_reconcile_dispatched_row_mirrors_into_the_tick_store::marker.requires_rust  # on main before this ratchet
+cli/tests/unit/test_reconcile_dispatch.py::test_reconcile_skip_row_mirrors_into_the_tick_store::marker.requires_rust  # on main before this ratchet
