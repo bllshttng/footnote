@@ -28,7 +28,7 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 
 A real message (not a slash command, a `!` line, or a raw send) starts the conversation hold by itself. It lasts while the session answers plus the configured grace (2 minutes by default) and restarts with each message. `Off` or `cancel` ends it now. A DND you set with a duration keeps its full length. The conversation rules never shorten or replace it.
 
-While a hold is live: `control:` mail and the session's own sends pass, so you can always reach yourself. A `--raw` send to the held session parks and runs once through the raw door when the hold ends. Mail never lands while you are typing in the pane or while the session is asking you something; it waits and delivers when you go quiet. The sender's receipt says when the hold ends. Relay the receipt verbatim.
+While a hold is live: `control:` mail and the session's own sends pass, so you can always reach yourself. When the hold ends, a `--raw` send parked at the gate runs once through the raw door. Mail never lands while you are typing in the pane. It also waits out a question the session is asking. When you go quiet, it delivers. The sender's receipt names the time the hold ends. Relay the receipt verbatim.
 
 ## Report the real receipt
 
