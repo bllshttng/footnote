@@ -1012,6 +1012,13 @@ struct View {
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
+    /// The questions block's operator prefs (the toggle, the height, and
+    /// whether answered questions show), each persisted through the view
+    /// store. The block itself reads them at layout time.
+    questions_block: questions::BlockPrefs,
+    /// Pending escape bytes in questions-detail mode (the same split-arrow
+    /// safety as [`View::ans_esc`]).
+    question_esc: Vec<u8>,
     /// The questions block's refresh: the last kick and the in-flight flag
     /// (the feed fold's single-flight discipline), every 10 s.
     questions_kick_at: Option<Instant>,
@@ -2158,6 +2165,8 @@ impl View {
             questions_fold: None,
             questions_degraded: false,
             question_detail: None,
+            question_esc: Vec::new(),
+            questions_block: questions::BlockPrefs::load(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -4280,10 +4289,17 @@ impl View {
             return Some(hit);
         }
         // The questions block pins above the court block: a click on its
-        // rows opens the detail overlay on that question.
+        // rows opens the full questions view on that question; the `+N more`
+        // row opens the list. The header toggles nothing here (the key does).
         if col < panel_w {
-            if let Some(id) = questions::hit_at(self, self.term.0 as usize, row) {
-                return Some(ChromeHit::OpenQuestionDetail(id));
+            match questions::hit_at(self, self.term.0 as usize, row) {
+                Some(questions::QuestionHit::Row(id)) => {
+                    return Some(ChromeHit::OpenQuestionDetail(id));
+                }
+                Some(questions::QuestionHit::More) => {
+                    return Some(ChromeHit::OpenQuestionsList);
+                }
+                None => {}
             }
         }
         // Tab strip (row 0, scoped to the content columns since US1): it
@@ -4623,34 +4639,6 @@ impl View {
                 let _ = raw_out(b"\x07");
             }
         }
-    }
-
-    /// The `display_rows()` index a hover cell falls on in the sideline, or
-    /// `None` when the cell is not a sideline text cell - a pane, the divider
-    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
-    /// sideline geometry exactly so the highlight lands where a click would
-    ///.
-    fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
-        // The sideline owns row 0 in normal mode (the strip moved right of
-        // the divider), so display row `i` maps directly from `row`. A cell
-        // on the divider or in the strip's content columns returns None.
-        // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
-        let paint_w = self.sideline_paint_w();
-        if paint_w == 0 || col as usize >= paint_w - 1 {
-            return None;
-        }
-        // Full-screen sideline paints below the strip; invert the same
-        // offset the painter used.
-        let top = self.sideline_top();
-        if (row as usize) < top {
-            return None;
-        }
-        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
-            return None;
-        }
-        let i = row as usize - top + self.sideline_offset();
-        (i < self.painted_rows().len()).then_some(i)
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
@@ -5255,18 +5243,6 @@ impl View {
         peek.last_fetch = Instant::now();
         peek.refresh_pending = true;
         Some((seq, peek.name.clone()))
-    }
-
-    /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since US1) minus the bottom chrome row,
-    /// minus the court block's rows at the bottom. The block is the
-    /// subtraction point's only second customer, so `clamp_sideline_scroll`
-    /// and `reveal_focus_row` inherit the shrunk window without a second
-    /// fix.
-    fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize)
-            .saturating_sub(self.bottom_row_is_chrome() as usize)
-            .saturating_sub(self.court_block_rows())
     }
 
     /// The sideline TableState's offset, read and written through the Cell
@@ -7026,6 +7002,8 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
+    /// Open the questions view on the list (the `+N more` row's click).
+    OpenQuestionsList,
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -10597,6 +10575,9 @@ async fn dispatch_event(
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
+        Event::ToggleQuestionsBlock => questions::toggle_block(view),
+        Event::ResizeQuestionsBlock(delta) => questions::resize_block(view, delta),
+        Event::ToggleQuestionsDone => questions::toggle_show_done(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -10897,6 +10878,7 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
+        ChromeHit::OpenQuestionsList => view.open_questions_list(),
     }
     Ok(())
 }
