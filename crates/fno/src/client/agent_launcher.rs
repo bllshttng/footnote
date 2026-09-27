@@ -27,8 +27,8 @@ use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchSt
 /// paste from growing the carry forever.
 const MAX_PASTE_CARRY: usize = 16 * 1024;
 const MAX_LAUNCH_FLAGS_CHARS: usize = 1024;
-const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
-const LAUNCH_WORKTREE_PROTO: u32 = 94;
+pub(crate) const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
+pub(crate) const LAUNCH_WORKTREE_PROTO: u32 = 94;
 
 /// The editor's prompt gutter: the marker glyph and one space, before the
 /// first message row. The message wraps inside what remains.
@@ -890,7 +890,9 @@ async fn submit(
     let worktree = if matches!(&policy, Some(Ok(w)) if w == "never") {
         Some(false)
     } else {
-        explicit.or_else(|| policy.is_some().then_some(true))
+        // A failed policy read is as good as an unread one: the default
+        // needs a READ policy, never a guess (AC6-EDGE).
+        explicit.or_else(|| policy.as_ref().filter(|r| r.is_ok()).map(|_| true))
     };
     let Some(worktree) = worktree else {
         l.phase = Phase::Refused {
@@ -943,19 +945,19 @@ async fn submit(
         })
 }
 
+pub(crate) fn version_at_least(version: Option<u32>, min: u32) -> bool {
+    version.is_some_and(|version| version >= min)
+}
+
 fn wire_at_least(session: &str, min: u32) -> bool {
     let version = crate::proto::socket_path(session)
         .ok()
         .and_then(|socket| crate::mux_rows::read_wire_version(&socket));
-    version.is_some_and(|version| version >= min)
+    version_at_least(version, min)
 }
 
 fn supports_launch_extra_axes(session: &str) -> bool {
     wire_at_least(session, LAUNCH_EXTRA_AXES_PROTO)
-}
-
-pub(crate) fn launch_extra_axes_supported(version: Option<u32>) -> bool {
-    version.is_some_and(|version| version >= LAUNCH_EXTRA_AXES_PROTO)
 }
 
 // -- input folding -----------------------------------------------------------

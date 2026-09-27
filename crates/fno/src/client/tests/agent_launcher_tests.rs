@@ -21,10 +21,6 @@ impl Drop for WireVersionFixture {
     }
 }
 
-fn current_wire_fixture() -> (String, WireVersionFixture) {
-    wire_fixture_at(91)
-}
-
 fn wire_fixture_at(version: u32) -> (String, WireVersionFixture) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1178,12 +1174,14 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
 
 #[test]
 fn launch_extra_axes_require_a_stamped_compatible_server() {
-    assert!(!super::agent_launcher::launch_extra_axes_supported(None));
-    assert!(!super::agent_launcher::launch_extra_axes_supported(Some(
-        90
-    )));
-    assert!(super::agent_launcher::launch_extra_axes_supported(Some(91)));
-    assert!(super::agent_launcher::launch_extra_axes_supported(Some(92)));
+    use super::agent_launcher::{version_at_least, LAUNCH_EXTRA_AXES_PROTO, LAUNCH_WORKTREE_PROTO};
+    assert!(!version_at_least(None, LAUNCH_EXTRA_AXES_PROTO));
+    assert!(!version_at_least(Some(90), LAUNCH_EXTRA_AXES_PROTO));
+    assert!(version_at_least(Some(91), LAUNCH_EXTRA_AXES_PROTO));
+    assert!(version_at_least(Some(92), LAUNCH_EXTRA_AXES_PROTO));
+    // The worktree gate sits one generation later.
+    assert!(!version_at_least(Some(93), LAUNCH_WORKTREE_PROTO));
+    assert!(version_at_least(Some(94), LAUNCH_WORKTREE_PROTO));
 }
 
 #[test]
@@ -2064,6 +2062,48 @@ fn unread_facts_refuse_the_launch_instead_of_guessing() {
         "[x] worktree",
         "the explicit pick clears the ? state"
     );
+}
+
+#[test]
+fn a_failed_policy_read_refuses_like_an_unread_one() {
+    // AC6-EDGE covers the failed read as well as the missing one: a facts
+    // row whose policy read failed paints `worktree ?` and refuses the
+    // launch with its reason instead of guessing a checked default.
+    let mut v = view_with_launcher();
+    let mut failed = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(_, _, facts) = &mut failed {
+        *facts = vec![ProjectFacts {
+            cwd: std::env::current_dir().unwrap().display().to_string(),
+            current: Some("main".into()),
+            branches: vec!["main".into()],
+            policy: Err("policy verb failed".into()),
+        }];
+    }
+    v.launcher_catalog = Some(failed);
+    sync_catalog(&mut v);
+    assert_eq!(
+        v.launcher
+            .as_ref()
+            .unwrap()
+            .chip_label(Focus::Worktree, &v.launcher_catalog),
+        "worktree ?",
+        "a failed read names itself"
+    );
+    let (session, _wire_fixture) = wire_fixture_at(94);
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    match &v.launcher.as_ref().unwrap().phase {
+        Phase::Refused { reason, .. } => assert!(
+            reason.contains("worktree policy unread"),
+            "the refusal names the unread policy: {reason}"
+        ),
+        other => panic!("expected a pre-wire refusal, got {other:?}"),
+    }
 }
 
 #[test]
