@@ -1763,7 +1763,6 @@ check_python_rows_file() {
                         fi
                     fi
                 fi
-                declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
                 if [[ -z "$declared" ]]; then
                     findings+=("$path is a Grant naming $id with no declared size - write the row as Grant $id +N naming the added lines the ruling's budget covers, so the rows can be summed")
                 else
@@ -1876,7 +1875,7 @@ check_code_index_file() {
         local dname dpath
         while IFS=$'\t' read -r dname _ _ dpath; do
             [[ -z "$dname" ]] && continue
-            if ! grep -Eq "^[[:space:]]*-[[:space:]]*name:[[:space:]]*$dname[[:space:]]*$" <<< "$block"; then
+            if ! grep -Eq "^[[:space:]]*-[[:space:]]*name:[[:space:]]*${dname}[[:space:]]*$" <<< "$block"; then
                 findings+=("code index $dname is present ($dpath) and the plan does not record asking it. Ask it by role and record it under code_index.providers, with status unavailable or error if the ask failed")
             fi
         done <<< "$detection"
@@ -1910,7 +1909,7 @@ check_code_index_file() {
         done < <(sed -n 's/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' <<< "$block")
     fi
 
-    local first_h2 rows row verdict evid
+    local first_h2 rows row verdict
     first_h2=$(awk '/^##[[:space:]]/ { print; exit }' "$file")
     if [[ "$first_h2" != "## Existence audit" ]]; then
         findings+=("the first ## heading is '${first_h2:-none}' - the audit is the plan's first section: ## Existence audit, one row per claim, each with a verdict cell")
