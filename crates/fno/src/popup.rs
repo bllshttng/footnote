@@ -1148,7 +1148,10 @@ mod tests {
         // an absence alone, which cannot tell "no color" from "nothing ran".
         let p = Popup::new(vec![entry("a", "one", "x")], Anchor::Center).title("T");
         let r = p.render((24, 80));
-        let theme = Theme::default_theme();
+        // The property belongs to the `terminal` theme specifically: it is
+        // the no-op whose whole contract is byte-identity, while the default
+        // theme paints the chrome.
+        let theme = Theme::from_name("terminal").0;
         let mut cells = vec![Cell::default(); 24 * 80];
         draw(&mut cells, 24, 80, &r, &theme);
         // Positive control: the popup drew its top-left border corner.

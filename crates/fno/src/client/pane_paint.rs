@@ -115,7 +115,7 @@ impl View {
             };
             let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
             let (fg, flags) = if lit {
-                (self.theme.accent, cell_flags::BOLD)
+                (self.theme.brand, cell_flags::BOLD)
             } else {
                 (Color::Default, cell_flags::DIM)
             };
@@ -263,11 +263,11 @@ impl View {
                     drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
                 let blank = beside_framed && !has_unframed_nb && !grabbable && !dropping;
                 let (fg, flags) = if dropping {
-                    (self.theme.accent, cell_flags::INVERSE)
+                    (self.theme.brand, cell_flags::INVERSE)
                 } else if grabbable {
-                    (self.theme.accent, cell_flags::BOLD)
+                    (self.theme.brand, cell_flags::BOLD)
                 } else if outline {
-                    (self.theme.accent, 0)
+                    (self.theme.brand, 0)
                 } else if blank {
                     (Color::Default, 0)
                 } else {
@@ -304,7 +304,7 @@ impl View {
                 for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
                     if covered[r * cols + c] {
                         let cell = &mut cells[r * cols + c];
-                        cell.fg = self.theme.accent;
+                        cell.fg = self.theme.brand;
                         cell.flags |= cell_flags::INVERSE;
                     }
                 }
@@ -361,7 +361,7 @@ impl View {
         let agent = self.layout.agents.iter().find(|a| a.pane_id == Some(pid));
         let status = agent.map(|a| {
             let st = agent_lattice_state(a);
-            let ls = lattice_style(st, self.theme.accent);
+            let ls = lattice_style(st, self.theme.needs_you);
             (ls.glyph, ls.flags, ls.fg, status_word(st))
         });
         let fields = crate::pane_border::EdgeFields {
@@ -376,14 +376,14 @@ impl View {
         };
         let laid = crate::pane_border::edges(&fields, rect, has_grip);
         let (border_fg, border_flags) = if focused_pane {
-            (self.theme.accent, 0)
+            (self.theme.brand, 0)
         } else {
             (Color::Default, cell_flags::DIM)
         };
         // The name rides the rule: focused = accent bold, dim otherwise. No
         // fill and no caps - focus reads through the border color alone.
         let name_style = if focused_pane {
-            (self.theme.accent, cell_flags::BOLD)
+            (self.theme.brand, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };

@@ -186,7 +186,7 @@ impl View {
             }
             let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
             let (border_fg, border_flags) = if border_active {
-                (self.theme.accent, cell_flags::BOLD)
+                (self.theme.brand, cell_flags::BOLD)
             } else {
                 (Color::Default, cell_flags::DIM)
             };
@@ -386,7 +386,7 @@ impl View {
                 self.paint_card_pr_if_it_fits(cells, r, cols, text_w, drow);
             }
             if mark_caret && text_w >= 1 {
-                cells[r * cols].fg = self.theme.accent;
+                cells[r * cols].fg = self.theme.brand;
             }
             if matches!(drow, DisplayRow::NewSquad) {
                 self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
@@ -477,7 +477,7 @@ impl View {
         // accent IS the affordance.
         let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
         let (border_fg, border_flags) = if border_active {
-            (self.theme.accent, cell_flags::BOLD)
+            (self.theme.brand, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };
@@ -529,7 +529,7 @@ impl View {
             }
             DisplayRow::Agent(a) => {
                 let lat = agent_lattice_state(a);
-                let style = lattice_style(lat, self.theme.accent);
+                let style = lattice_style(lat, self.theme.needs_you);
                 let mut flags = style.flags;
                 if a.external && lat != LatticeState::Blocked {
                     flags |= cell_flags::DIM;
@@ -541,7 +541,7 @@ impl View {
                 // stay ordinary.
                 let focus_bit = if focus_exited { cell_flags::DIM } else { 0 };
                 let cell_fg = if focus_exited {
-                    self.theme.accent
+                    self.theme.brand
                 } else {
                     status_fg
                 };

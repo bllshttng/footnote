@@ -314,7 +314,8 @@ fn chosen_card_paints_accent_across_both_lines() {
     v.layout.focus = 5;
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     let frame = v.compose();
-    let accent = v.theme.accent;
+    let accent = v.theme.brand;
+    let band_text = v.theme.band_text;
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
@@ -322,7 +323,7 @@ fn chosen_card_paints_accent_across_both_lines() {
         let row = display_i - offset;
         for cell in &frame.cells[row * cols..row * cols + text_w] {
             assert_eq!(cell.bg, accent, "the chosen color fills the card line");
-            assert_eq!(cell.fg, crate::theme::BAND_TEXT, "dark band text");
+            assert_eq!(cell.fg, band_text, "the theme's band text on the band");
             assert_eq!(cell.flags, 0, "no INVERSE and no DIM inside the band");
         }
     }
@@ -337,7 +338,7 @@ fn hovering_the_chosen_card_keeps_the_chosen_color_on_both_lines() {
     let (agent_i, detail_i) = card_rows_for(&v, "w1");
     v.hover_row = Some(detail_i);
     let frame = v.compose();
-    let accent = v.theme.accent;
+    let accent = v.theme.brand;
     let cols = frame.cols as usize;
     let text_w = v.sideline_paint_w().saturating_sub(1);
     let offset = v.sideline_offset();
@@ -459,11 +460,11 @@ fn list_mode_matches_its_frozen_frame_cell_snapshot() {
     v.sideline_width = 80;
     let frame = v.compose();
 
-    // Re-frozen when the bracket crown tag left the sideline: the registry
-    // label is the name, so the tag cells are gone.
+    // Re-frozen when the padded active-tab label (`[ 2 ]`, x-8c5a item 6)
+    // changed the tab-strip cells the frame snapshot covers.
     assert_eq!(
         frame_cell_snapshot_digest(&frame.cells),
-        0x8f03cc1b0244586,
+        0x462e2dae835ef3c6,
         "List frame-cell snapshot"
     );
 }
@@ -508,7 +509,13 @@ fn lens_contrast(fg: Color, bg: Color, lens: crate::frame_html::Theme) -> f64 {
 
 fn shipped_mux_themes() -> Vec<crate::theme::Theme> {
     let mut themes = vec![crate::theme::Theme::default_theme()];
-    for name in ["catppuccin", "tokyo-night", "gruvbox"] {
+    for name in [
+        "footnote-paper",
+        "terminal",
+        "catppuccin",
+        "tokyo-night",
+        "gruvbox",
+    ] {
         let (t, warn) = crate::theme::Theme::from_name(name);
         assert!(warn.is_none(), "{name} must ship without a warning");
         themes.push(t);
@@ -548,10 +555,10 @@ fn the_dark_anchor_is_the_luminance_pick_on_every_accent() {
     // x-cd1c D1: dark text on light accents is not taste, it is measurement.
     // On a light terminal the default fg loses to the dark anchor on every
     // shipped accent, which is the pick the band records.
-    let mut accents = vec![crate::theme::Theme::default_theme().accent];
+    let mut accents = vec![crate::theme::Theme::default_theme().brand];
     for name in ["catppuccin", "tokyo-night", "gruvbox"] {
         let (t, _) = crate::theme::Theme::from_name(name);
-        accents.push(t.accent);
+        accents.push(t.brand);
     }
     let light_fg = Color::Rgb(0xf2, 0xf2, 0xf2);
     for bg in accents {
