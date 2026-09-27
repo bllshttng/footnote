@@ -259,8 +259,14 @@ if ! "$MUX_BIN" mux thread "$CLAUDE_NAME" --portal 0 >/dev/null 2>&1; then
     fi
 fi
 sleep 1
-"$MUX_BIN" mux thread "$CODEX_NAME" --portal 2 --split right >/dev/null 2>&1 || \
-    echo "[plant] portal 2's first reach did not fill; the verb will still answer for it by name"
+# The split's anchor is portal 0's cell: this caller is a paneless control
+# client, so `--split` without `--from` refuses. A restore answers only for
+# portals that were opened (the TV rule), so a failed plant is a FAILED
+# PROOF - retry once for the fresh-server reach race, then die loudly.
+if ! "$MUX_BIN" mux thread "$CODEX_NAME" --portal 2 --split right --from 'portal 0' >/dev/null 2>&1; then
+    echo "[plant] portal 2's reach refused; retrying once" >&2
+    "$MUX_BIN" mux thread "$CODEX_NAME" --portal 2 --split right --from 'portal 0' >&2
+fi
 
 # A codex PANE worker: the keeper-hosted survivor whose child pid must not
 # change across either kill.
