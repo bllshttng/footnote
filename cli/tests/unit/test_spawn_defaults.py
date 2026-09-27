@@ -11,12 +11,9 @@ import json
 
 import pytest
 
-
-requires_rust = pytest.mark.dev_build
-
-
 from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
+requires_rust = pytest.mark.dev_build
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
