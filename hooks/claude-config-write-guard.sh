@@ -82,7 +82,7 @@ elif command -v python3 >/dev/null 2>&1; then
 import sys, json, re
 def norm(s): return re.sub(r"/\./", "/", re.sub(r"/+", "/", s))
 try:
-    d = json.load(sys.stdin); ti = d
+    d = json.load(sys.stdin); ti = d.get("tool_input") or {}
     print(d.get("tool_name") or ""); print(norm(ti.get("file_path") or ""))
     print(norm((ti.get("command") or "").replace("\n", " "))); print(d.get("session_id") or "")
 except Exception:
@@ -94,21 +94,11 @@ fi
 # Fail-open on an unparsable payload that still named a token (see header).
 [[ -n "$TOOL" ]] || _approve
 
-# ── 3. Config dirs, keep-list, job dir the refusal names ─────────────────────
+# ── 3. Config dirs, keep-list ────────────────────────────────────────────────
 AMBIENT="${HOME%/}/.claude"
 CFGS=("$AMBIENT")
 if [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}" != "$AMBIENT" ]]; then
     CFGS+=("${CLAUDE_CONFIG_DIR%/}")
-fi
-
-if [[ -n "$SESSION_ID" ]]; then
-    # The payload's own session outranks any inherited CLAUDE_JOB_DIR: an
-    # exported env can belong to a different session than the one gated.
-    JOB_DIR="${CFGS[0]}/jobs/${SESSION_ID:0:8}/tmp"
-elif [[ -n "${CLAUDE_JOB_DIR:-}" ]]; then
-    JOB_DIR="${CLAUDE_JOB_DIR%/}/tmp"
-else
-    JOB_DIR="${CFGS[0]}/jobs/<session-id>/tmp"
 fi
 
 # _physical ABS -> ABS with its nearest existing ancestor resolved physically,
@@ -151,18 +141,32 @@ _resolve_matched() {
     _physical "$t"
 }
 
-# _refuse_for ABS -> blocks when ABS sits directly inside a config dir,
-# outside the keep-list and the harness-owned dotfiles. Shared verdict: the
-# tool branches hand it the resolved path and fall through when it returns 1.
+# _refuse_for ABS -> blocks when ABS sits directly inside a config dir (or is
+# a config dir itself: `cp staged ~/.claude/` lands a top-level file), outside
+# the keep-list and the harness-owned dotfiles. The refusal names a job tmp
+# dir under the VIOLATED namespace, so an isolated-account write is never
+# pointed at the ambient one.
 _refuse_for() {
-    local abs="$1" name phys
+    local abs="$1" name phys cfg i jobdir
     name="${abs##*/}"
-    for phys in "${PHYS_CFGS[@]}"; do
-        if [[ "$abs" == "$phys"/* && "$abs" != "$phys"/*/* ]]; then
+    for i in "${!PHYS_CFGS[@]}"; do
+        phys="${PHYS_CFGS[$i]}"
+        cfg="${CFGS[$i]}"
+        if [[ "$abs" == "$phys" || "$abs" == "$phys"/* && "$abs" != "$phys"/*/* ]]; then
             if _keeplisted "$name" || [[ "$name" == .claude.json* ]]; then
                 return 1
             fi
-            _block "$abs is a write directly inside the Claude config dir (${CFGS[0]}). Scratch belongs in this session's job dir: $JOB_DIR. Subdirectories (jobs/, projects/, plugins/) stay allowed."
+            if [[ -n "$SESSION_ID" ]]; then
+                # The payload's own session outranks any inherited
+                # CLAUDE_JOB_DIR: an exported env can belong to a different
+                # session than the one gated.
+                jobdir="${cfg}/jobs/${SESSION_ID:0:8}/tmp"
+            elif [[ -n "${CLAUDE_JOB_DIR:-}" ]]; then
+                jobdir="${CLAUDE_JOB_DIR%/}/tmp"
+            else
+                jobdir="${cfg}/jobs/<session-id>/tmp"
+            fi
+            _block "$abs is a write directly inside the Claude config dir ($cfg). Scratch belongs in this session's job dir: $jobdir. Subdirectories (jobs/, projects/, plugins/) stay allowed."
         fi
     done
     return 1
@@ -191,7 +195,10 @@ for arm in "${arms[@]}"; do
     [[ -n "$path_arm" ]] && path_arm+='|'
     path_arm+="$arm"
 done
-pp="((${path_arm})/${name_cls})"
+pp="((${path_arm})(/${name_cls})?)($|[/[:space:];|&:)])"
+# The boundary group after the path keeps the arm from matching a proper
+# prefix of a SIBLING name (~/.claude.json, ~/.claude-alt): without it the
+# bare-dir form would read any .claude* file at \$HOME as the directory.
 op='([>]{1,2}|\&[>]|[>]\&|[>][|]|[>]!)'
 nosep='[^;|&]*'
 
