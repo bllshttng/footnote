@@ -297,7 +297,7 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "agents": {"ask", "list", "logs", "loop", "loop-check", "needs", "resume", "rm", "spawn"},
     "annotate": {"list"},
     "approvals": set(),
-    "backlog": {"advance", "done", "get", "next", "queued", "reconcile", "update"},
+    "backlog": {"advance", "done", "get", "next", "queued", "reconcile"},
     "bundle": set(),
     "carveout": set(),
     "claim": {"release"},
@@ -575,7 +575,7 @@ lowercase = per-command value flags. -p is "the primary thing this
 command is about" and differs by family:
 
   fno agents ask                        -H harness    (-c cwd, -t timeout)
-  fno backlog add/idea/update/intake    -p priority   (-c cwd, -d details, -t type/title)
+  fno backlog add/idea/intake           -p priority   (-c cwd, -d details, -t type/title)
   fno backlog next/ready/find           -p project    (find: -s status, -d domain)
   fno backlog capture add               -p priority   (-s source, -w where)
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)

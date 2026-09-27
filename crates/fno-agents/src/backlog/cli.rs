@@ -150,6 +150,11 @@ pub fn run(args: &[String]) -> i32 {
         "update" if leads_with_engine_door(resolved.tail) => {
             super::patch::run_update(resolved.tail)
         }
+        // The legacy field-flag surface: native when every flag in the tail
+        // is one the port owns, else the compat forward with the original
+        // argv, so the not-yet-ported flags keep their Python answers until
+        // their wave lands.
+        "update" => super::update_cli::run(resolved.tail),
         // The folded batch read: the engine contract is a leading or
         // trailing `--graph`, several ids without the single-id render
         // flags, or the stdin tracker door (zero positionals: the engine's

@@ -11,6 +11,7 @@
 
 use serde_json::{json, Value};
 
+use super::node_ref::{archive_hit, resolve_tiers};
 use super::render::{py_json_compact, py_json_pretty, render_grouped};
 
 /// The unreadable-store exit: click reserves 2 for usage, so 3 is the first
@@ -61,44 +62,6 @@ impl GetArgs<'_> {
     }
 }
 
-/// Deterministic tiers 1 to 3, exact only: exact id, exact slug
-/// (case insensitive), bare 4 to 8 lowercase hex re-prefixed by the
-/// configured prefix then the legacy `ab-`.
-fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value> {
-    for e in entries {
-        if e.get("id").and_then(Value::as_str) == Some(query) {
-            return Some(e);
-        }
-    }
-    let q_lc = query.to_lowercase();
-    for e in entries {
-        let slug = e.get("slug").and_then(Value::as_str);
-        if slug.is_some_and(|s| !s.is_empty()) && slug == Some(q_lc.as_str()) {
-            return Some(e);
-        }
-    }
-    let bare_hex = query.len() >= 4
-        && query.len() <= 8
-        && query
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
-    if bare_hex {
-        let mut prefixes = vec![super::settings::node_id_prefix()];
-        prefixes.push("ab-".to_string());
-        prefixes.dedup();
-        for p in &prefixes {
-            let cand = format!("{p}{query}");
-            if let Some(hit) = entries
-                .iter()
-                .find(|e| e.get("id").and_then(Value::as_str) == Some(cand.as_str()))
-            {
-                return Some(hit);
-            }
-        }
-    }
-    None
-}
-
 /// The `--field` arm: `_status` keeps its pre-rename alias, a missing field
 /// prints `null`, containers print compact JSON, scalars print raw.
 fn render_field(row: &Value, field: &str) -> String {
@@ -123,28 +86,6 @@ fn resolved_cwd(row: &Value) -> Value {
         return json!(p);
     }
     row.get("cwd").cloned().unwrap_or(Value::Null)
-}
-
-/// The archive read-through on a working-graph miss: the tiers, else a
-/// `previous_id` hit; the row stamps `_archived`.
-fn archive_hit(entries: &[Value], query: &str) -> Option<Value> {
-    if let Some(hit) = resolve_tiers(entries, query) {
-        let mut row = hit.clone();
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert("_archived".to_string(), Value::Bool(true));
-        }
-        return Some(row);
-    }
-    for e in entries {
-        if e.get("previous_id").and_then(Value::as_str) == Some(query) {
-            let mut row = e.clone();
-            if let Some(obj) = row.as_object_mut() {
-                obj.insert("_archived".to_string(), Value::Bool(true));
-            }
-            return Some(row);
-        }
-    }
-    None
 }
 
 /// The whole ladder. `run` returns the process exit code.

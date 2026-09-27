@@ -49,7 +49,6 @@ config schema
 # L10 capture and shape work
 backlog idea
 backlog get
-backlog update
 backlog next
 backlog ready
 backlog done
