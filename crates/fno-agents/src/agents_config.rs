@@ -243,6 +243,32 @@ pub fn machine_locks_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".fno/locks"))
 }
 
+/// `state-root`: the seal-handshake door. A parent that pins
+/// `FNO_STATE_DIR` around a moved HOME (Python `seal_state_root`) execs
+/// this binary before relying on the pin and reads this door's one-line
+/// answer: the state root the inherited env actually resolves. A binary
+/// built before the carrier existed fails the echo check, and the parent
+/// refuses instead of letting the reads strand under the moved HOME.
+/// Transport-only (registers no verb; the shrink law allows none) and
+/// matched in main() before the runtime builds, so a probe is microseconds.
+pub fn run_state_root_probe() -> i32 {
+    match state_root_probe_line() {
+        Some(line) => {
+            println!("{line}");
+            0
+        }
+        None => {
+            eprintln!("state-root: no resolvable state root (set FNO_STATE_DIR or HOME)");
+            1
+        }
+    }
+}
+
+fn state_root_probe_line() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    state_dir(&cwd).map(|root| root.to_string_lossy().into_owned())
+}
+
 /// PR-status cache directory, including its process-local override.
 pub fn pr_status_cache_dir(cwd: &Path) -> Option<PathBuf> {
     if let Some(path) = non_empty_env("FNO_PR_STATUS_CACHE_DIR") {
@@ -1427,6 +1453,24 @@ mod tests {
             None => std::env::remove_var("FNO_STATE_DIR"),
         }
         clear_config_env();
+    }
+
+    #[test]
+    fn the_state_root_probe_door_echoes_the_carrier() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_STATE_DIR");
+        std::env::set_var("FNO_STATE_DIR", "/pinned-state");
+
+        assert_eq!(
+            state_root_probe_line().as_deref(),
+            Some("/pinned-state"),
+            "the door must answer the root the seal pinned, so the parent's echo check holds"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
     }
 
     #[test]
