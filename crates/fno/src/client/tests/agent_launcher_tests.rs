@@ -771,6 +771,104 @@ fn account_rows_supply_model_and_provider_options() {
     );
 }
 
+/// The regression behind the model-floor contract: a claude account with no
+/// pinned model
+/// emptied the Model tab, because the catalog read every harness but
+/// opencode solely from account records. The capability table now floors
+/// each harness's list with its own measured model ids.
+#[test]
+fn the_capability_table_floors_claude_and_codex_model_lists() {
+    let parsed: toml::Value = toml::from_str(super::agent_launcher::CAPABILITY_TOML).unwrap();
+    let floor = |harness: &str| -> Vec<String> {
+        parsed["harness"][harness]["models"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{harness} carries a models floor"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    let claude = floor("claude");
+    for want in ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5"] {
+        assert!(
+            claude.iter().any(|m| m == want),
+            "claude floor names {want}: {claude:?}"
+        );
+    }
+    let codex = floor("codex");
+    for want in ["gpt-6-luna", "gpt-6-astra", "gpt-5.5"] {
+        assert!(
+            codex.iter().any(|m| m == want),
+            "codex floor names {want}: {codex:?}"
+        );
+    }
+    assert!(
+        parsed["harness"]["opencode"].get("models").is_none(),
+        "opencode owns its list through its model command; no floor"
+    );
+}
+
+#[test]
+fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
+    let cache = r#"{"models":[
+        {"slug":"gpt-6-luna","visibility":"list"},
+        {"slug":"gpt-reserve","visibility":"hide"},
+        {"slug":"gpt-6-luna"},
+        {"slug":"gpt-6-astra"}
+    ]}"#;
+    let (models, hidden) = super::agent_launcher::parse_codex_models(cache);
+    let ids: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["gpt-6-luna", "gpt-6-astra"],
+        "hide drops, dupes collapse"
+    );
+    assert_eq!(
+        hidden,
+        vec!["gpt-reserve"],
+        "hidden slugs come back by name"
+    );
+    assert!(
+        models
+            .iter()
+            .all(|m| m.provider.is_none() && m.verdict == "ok"),
+        "cache slugs are harness-native choices"
+    );
+    let (empty_models, empty_hidden) = super::agent_launcher::parse_codex_models("not json");
+    assert!(
+        empty_models.is_empty() && empty_hidden.is_empty(),
+        "an unreadable cache is the floor-stands case, never an error"
+    );
+    assert!(
+        super::agent_launcher::parse_codex_models("{}").0.is_empty(),
+        "a cache without a models list is the same floor-stands case"
+    );
+}
+
+#[test]
+fn account_pins_merge_over_the_model_floor_without_duplicates() {
+    let floor = vec![super::agent_launcher::ModelChoice {
+        name: "opus".into(),
+        model: "opus".into(),
+        route: String::new(),
+        provider: None,
+        verdict: "ok".into(),
+    }];
+    let pins = super::agent_launcher::parse_configured_account_models(
+        r#"{"value":[{"id":"a","harness":"claude","route_provider_id":"zai","model_name":"glm-5.3-flash[1m]","route":"zai/glm-5.3-flash[1m]"}]}"#,
+    )
+    .unwrap();
+    let mut merged = floor;
+    super::agent_launcher::merge_model_choices(&mut merged, &pins["claude"]);
+    super::agent_launcher::merge_model_choices(&mut merged, &pins["claude"]);
+    assert_eq!(merged.len(), 2, "floor first, the routed pin merged once");
+    assert_eq!(merged[0].name, "opus", "the floor leads");
+    assert_eq!(
+        merged[1].provider.as_deref(),
+        Some("zai"),
+        "the pin keeps its route"
+    );
+}
+
 /// The regression that forced the tab rewrite: the unavailable row's LABEL
 /// used to be ellipsized to fit the long error hint, so "model list
 /// unavailable" never reached the screen in CI. Labels stay whole; the
