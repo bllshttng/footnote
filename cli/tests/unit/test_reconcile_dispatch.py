@@ -273,7 +273,7 @@ def test_reconcile_capacity_refusal_skips_with_gate_detail(iso, tmp_path, monkey
     assert not [e for e in evs if e["type"] == "advance_failed"]
 
 
-# ---- decision rows mirror into the tick's store (x-e1aa) ----
+# ---- decision rows mirror into the tick's store ----
 
 
 @requires_rust
