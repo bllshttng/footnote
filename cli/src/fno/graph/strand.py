@@ -95,6 +95,30 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
     return freed
 
 
+def birth_parent_refusal(entries: list[dict], node: dict, parent: str) -> Optional[str]:
+    """Refusal line for a birth ``--parent`` that cannot hold the child, else None. A
+    closed parent refuses because the healers in this module clear that edge after birth
+    (x-1c7f); an unresolvable parent keeps the lenient birth pass-through."""
+    from fno.graph._constants import EPIC_NEST_MAX_DEPTH
+    from fno.graph._intake import _find_node, _would_exceed_epic_depth
+    from fno.graph.rollup import CLOSED_STATUSES
+    target = _find_node(entries, parent)
+    if target is None:
+        return None
+    status = target.get("status")
+    if status in CLOSED_STATUSES:
+        return (
+            f"Error: --parent {target['id']} is {status}; the next reconcile re-parents children of closed "
+            f"nodes, so the edge would not survive. File under a live parent, or without --parent."
+        )
+    if _would_exceed_epic_depth(entries, node, target):
+        return (
+            f"Error: parenting epic {node.get('id')} under {target['id']} exceeds the "
+            f"{EPIC_NEST_MAX_DEPTH}-level cap (mission -> epic -> leaf); an epic nests only under a mission"
+        )
+    return None
+
+
 def _reparent_live_children(
     entries: list[dict], dead_id: Optional[str]
 ) -> list[tuple[str, Optional[str]]]:
