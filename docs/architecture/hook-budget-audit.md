@@ -10,9 +10,9 @@ The command counts include every command entry in each harness event registratio
 |---|---:|---|
 | Claude | 48 before, 43 after | 16 events |
 | Codex | 36 before, 31 after | 9 events |
-| OpenCode | 2 logical lifecycle callbacks | `session.created` plus idle (`session.idle` in 1.x, `session.status` in 2.x) |
-| Pi | 4 in-process callbacks | `session_shutdown`, `resources_discover`, `before_agent_start`, `agent_settled` |
-| AGY | 2 command hooks | `Stop`, `PreInvocation` |
+| OpenCode | 2 logical lifecycle callbacks | `cli/src/fno/setup/assets/opencode/footnote.js`: `session.created` plus idle (`session.idle` in 1.x, `session.status` in 2.x) |
+| Pi | 4 in-process callbacks | `cli/src/fno/setup/assets/pi/footnote.ts`: `session_shutdown`, `resources_discover`, `before_agent_start`, `agent_settled` |
+| AGY | 2 command hooks | `crates/fno-agents/src/agy_hooks.rs` registers `Stop` and `PreInvocation` adapters. |
 | DeepSeek Harness | 0 in-repository hook registrations | none found |
 
 The Bash registration count drops by five commands per event. The dispatcher keeps all three Rust predicates in one `fno-agents` process and calls the same three Python guards in their existing order. This removes two `fno-agents` binary launches made by the former shell shims.
