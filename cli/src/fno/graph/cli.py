@@ -5075,7 +5075,7 @@ def cmd_bases(
     out: Optional[str] = typer.Option(
         None,
         "--out",
-        help="Directory to emit the .base files into (default: internal/fno/backlog/).",
+        help="Directory to emit the .base files into (default: the capture-inbox dir).",
     ),
 ) -> None:
     """Emit the canonical epic/mission progress Base files ().
@@ -5085,9 +5085,9 @@ def cmd_bases(
     file: written | unchanged | refused.
     """
     from fno.graph._bases import BASES, write_base
-    from fno.graph._intake import repo_root
+    from fno.paths import inbox_path
 
-    out_dir = Path(out) if out else Path(repo_root()) / "internal" / "fno" / "backlog"
+    out_dir = Path(out) if out else inbox_path().parent
     for name, content in BASES.items():
         target = out_dir / name
         action = write_base(target, content)

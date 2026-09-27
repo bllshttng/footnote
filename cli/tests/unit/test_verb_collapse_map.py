@@ -338,8 +338,7 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # command-tree cutover deleted the 29 mux rows (the native tree declares
     # those paths; the ratchet reads the generated inventory): 82 -> 81.
     # The update cut-over retired the `backlog update` KEEP row: 81 -> 80.
-    # The decide shim's native retract door deleted its Python action,
-    # freeing the `decide retract` KEEP row: 80 -> 79.
+    # The native retract port retired the old `decide retract` Python alias: 80 -> 79.
     assert projected == 79
     assert projected <= 99
 
