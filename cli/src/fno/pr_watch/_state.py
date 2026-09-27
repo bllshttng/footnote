@@ -315,17 +315,20 @@ class WatermarkStore:
         assert self._data is not None
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
+        tmp_path: Optional[Path] = None
+
         def _write_tmp() -> Path:
+            nonlocal tmp_path
             fd, tmp_str = tempfile.mkstemp(
                 dir=self._path.parent,
                 prefix=".pr-watcher-state.tmp.",
             )
+            tmp_path = Path(tmp_str)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2)
                 fh.write("\n")
-            return Path(tmp_str)
+            return tmp_path
 
-        tmp_path: Optional[Path] = None
         try:
             tmp_path = _write_tmp()
             try:
