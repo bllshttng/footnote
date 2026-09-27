@@ -1,4 +1,4 @@
-# Vocabulary: user, superuser, and the reserved token `operator`
+# Vocabulary: user, superuser, the reserved token `operator`, and workspace
 
 This document states what the words mean in this repo, where each sense lives, and which senses stay spelled `operator` forever. The authority an agent can never synthesize is called **superuser** (law d-cfc62071, `operator`'s ruling of 2026-09-14). It was formerly spelled `operator authority`.
 
@@ -45,6 +45,20 @@ Each phrasing below was weighed against the table during the authority rename an
 ## A deliberate omission
 
 `crates/fno-agents/src/finalize.rs` keeps its generic human-facing string. A Rust copy of `display_name()` is a second implementation of one behavior. A parity harness forcing the two to agree costs more than the string staying generic.
+
+## Workspace, squad, project, project group
+
+The user said it on 2026-09-27: "i think of workspaces as an object that houses threads. and each thread can have different cwds (not just worktrees)." One word had drifted into three meanings: this mux grouping, the config project group, and `project.id`'s git resolution. The senses below settle them. axis-vocabulary.md's one-line ruling ("Workspace and squad are one object under two names") lives here now.
+
+| Sense | Where | Renamed? |
+|---|---|---|
+| Workspace | the mux object that houses threads: the `Squad` type in `crates/fno/src/squad.rs`. It has an id, an optional name, zero or more cwds (`origins`), and member threads. The one user-facing word. | Yes. Every string a person reads says workspace; the ruling at `mux_cli.rs` keeps code names until a real `PROTO_VERSION` bump. |
+| Squad | the code name for the same object: the Rust type, the `squads.json` store, the wire keys `squad`, `squad_id` and `squads`, the kv receipt keys `squad=`, the hidden `--squad` alias, and the tombstoned `fno mux squad` verb. | No. Code and wire names survive; prose and person-read strings do not. |
+| Membership | the one resolver in `crates/fno/src/server/thread_workspace.rs`: the recorded member answers first, then the spawner's workspace (the `spawned_by_session` edge), then the project default. A thread's cwd is its own property and decides membership only on the last rung. | New rule, no rename. |
+| Project | one repo, named by `project.id` through git. It is the default workspace for a thread nobody placed. | No. |
+| Project group | the config key `work.workspaces.<name>.projects[]` and the `mux.board_scope = workspace:<name>` value. Called a project group in prose. | No. The key keeps its spelling and its data: it is already in users' config.toml, the same call this page makes for `routing.operator_*`. Migration: none. |
+| `fno agents workspace` | the worktree-lifecycle verb group, unrelated to the mux object. `.claude/rules/worktrees.md` names it. | No. |
+| Squad (company topology) | `direct, loop, squad, pipeline` in `cli/src/fno/company/topology.py`: a group of workers as an org shape. | Homonym, like the shell `operator`. Out of scope. |
 
 ## Before you run sed
 

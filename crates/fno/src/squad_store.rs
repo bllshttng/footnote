@@ -672,10 +672,10 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     let mut notice_parts = Vec::new();
     match (dropped, dropped_lc) {
         (0, 0) => {}
-        (s, 0) => notice_parts.push(format!("dropped {s} malformed squad member(s)")),
+        (s, 0) => notice_parts.push(format!("dropped {s} malformed workspace member(s)")),
         (0, l) => notice_parts.push(format!("dropped {l} malformed lifecycle record(s)")),
         (s, l) => notice_parts.push(format!(
-            "dropped {s} malformed squad member(s) and {l} lifecycle record(s)"
+            "dropped {s} malformed workspace member(s) and {l} lifecycle record(s)"
         )),
     }
     if repaired > 0 {
@@ -685,7 +685,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             String::new()
         };
         notice_parts.push(format!(
-            "repaired {repaired} squad row(s) carrying both a name and a key{folded_note}"
+            "repaired {repaired} workspace row(s) carrying both a name and a key{folded_note}"
         ));
     }
     let notice = (!notice_parts.is_empty()).then(|| notice_parts.join("; "));

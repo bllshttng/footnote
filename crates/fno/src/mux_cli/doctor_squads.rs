@@ -13,7 +13,7 @@ use super::*;
 pub(super) fn legacy_squads_newer_check() -> Check {
     if !proto::legacy_fallback_allowed() {
         return Check {
-            name: "legacy squads store".into(),
+            name: "legacy workspace store".into(),
             verdict: Verdict::Na,
             detail: "an explicit override isolates the store on purpose".into(),
             remedy: None,
@@ -30,14 +30,14 @@ pub(super) fn legacy_squads_newer_check() -> Check {
     };
     if !newer {
         return Check {
-            name: "legacy squads store".into(),
+            name: "legacy workspace store".into(),
             verdict: Verdict::Na,
             detail: "no legacy copy is outrunning the resolved store".into(),
             remedy: None,
         };
     }
     Check {
-        name: "legacy squads store".into(),
+        name: "legacy workspace store".into(),
         verdict: Verdict::Warn,
         detail: format!(
             "the legacy {} is newer than the resolved {}; a pre-upgrade \
@@ -62,7 +62,7 @@ pub(super) fn legacy_squads_newer_check() -> Check {
 pub(super) fn agents_squads_orphan_check() -> Check {
     if !proto::legacy_fallback_allowed() {
         return Check {
-            name: "agents-home squads store".into(),
+            name: "agents-home workspace store".into(),
             verdict: Verdict::Na,
             detail: "an explicit override isolates the store on purpose".into(),
             remedy: None,
@@ -79,7 +79,7 @@ pub(super) fn agents_squads_orphan_check() -> Check {
     };
     if same_file {
         return Check {
-            name: "agents-home squads store".into(),
+            name: "agents-home workspace store".into(),
             verdict: Verdict::Na,
             detail: "the agents-home path is the resolved store".into(),
             remedy: None,
@@ -87,18 +87,18 @@ pub(super) fn agents_squads_orphan_check() -> Check {
     }
     if !orphan.exists() {
         return Check {
-            name: "agents-home squads store".into(),
+            name: "agents-home workspace store".into(),
             verdict: Verdict::Na,
             detail: "no store at the agents-home path".into(),
             remedy: None,
         };
     }
     Check {
-        name: "agents-home squads store".into(),
+        name: "agents-home workspace store".into(),
         verdict: Verdict::Warn,
         detail: format!(
             "{} sits beside the live agent files, but no code reads it; the \
-             live squad store is {}",
+             live workspace store is {}",
             orphan.display(),
             primary.display()
         ),

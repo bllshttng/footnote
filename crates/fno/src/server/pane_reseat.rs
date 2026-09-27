@@ -382,12 +382,13 @@ impl Core {
             // The portal's cell left the tree mid-reseat: land the pane on
             // its own tab instead of losing it.
         }
-        // The graft: a fresh tab in the owner-routed squad (the
+        // The graft: a fresh tab in the owner-routed workspace (the
         // reattach_detached_pane shape), so the pane keeps rendering while
-        // owning no squad membership. `find_by_cwd` answers a live squad id by
-        // construction; the fallback is the squad the pane came from, live
-        // since `find_pane` and untouched in between (no await points).
-        let dest = self.session.find_by_cwd(&cwd).unwrap_or(squad);
+        // owning no squad membership. The one thread-workspace resolver
+        // answers (member, then spawner, then the row's cwd); the fallback
+        // is the workspace the pane came from, live since `find_pane` and
+        // untouched in between (no await points).
+        let dest = self.thread_workspace(&row).unwrap_or(squad);
         let tid = self.session.mint_tab_id();
         self.session
             .squad_mut(dest)
