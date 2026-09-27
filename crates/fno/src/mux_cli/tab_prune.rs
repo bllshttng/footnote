@@ -171,7 +171,7 @@ pub(super) fn live_tab_label(tab: &LiveTab) -> String {
     let squad = tab
         .squad_name
         .clone()
-        .unwrap_or_else(|| format!("squad {}", tab.squad_id));
+        .unwrap_or_else(|| format!("workspace {}", tab.squad_id));
     match &tab.tab_name {
         Some(name) if !name.is_empty() => format!(
             "{} / {squad} / \u{201c}{name}\u{201d} (tab {})",
@@ -551,13 +551,13 @@ mod tests {
         let notice = unreachable_notice(&["x7b5e-proof".into()]);
         assert!(notice.contains("x7b5e-proof"), "{notice}");
         assert!(
-            notice.contains("no squad records changed"),
+            notice.contains("no workspace records changed"),
             "the refusal still says nothing changed: {notice}"
         );
         let two = unreachable_notice(&["a-dead".into(), "z-dead".into()]);
         assert_eq!(
             two,
-            "server liveness incomplete for session(s) a-dead, z-dead; no squad records changed"
+            "server liveness incomplete for session(s) a-dead, z-dead; no workspace records changed"
         );
     }
 
@@ -682,7 +682,7 @@ mod tests {
             ..tab
         };
         let label = live_tab_label(&unnamed);
-        assert!(label.contains("squad 3"), "{label}");
+        assert!(label.contains("workspace 3"), "{label}");
         assert!(label.contains("unnamed"), "{label}");
     }
 

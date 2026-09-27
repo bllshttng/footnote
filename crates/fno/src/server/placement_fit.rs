@@ -46,7 +46,7 @@ impl Core {
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let mut refused_with_room = false;
         for ti in 0..self.session.squads[si].tabs.len() {

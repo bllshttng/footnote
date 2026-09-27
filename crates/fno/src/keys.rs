@@ -1159,7 +1159,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "find",
             OpenNav,
             Navigation,
-            "find: goto squad/tab/pane/agent",
+            "find: goto workspace/tab/pane/agent",
         ),
         // global
         b(

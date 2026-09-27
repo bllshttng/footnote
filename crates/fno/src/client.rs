@@ -9292,7 +9292,7 @@ async fn attach_and_run(
                     }
                     SweepMsg::Applied { closed, reaped, removed } => {
                         view.set_notice(format!(
-                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} squad row(s)"
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} workspace row(s)"
                         ));
                     }
                     SweepMsg::Failed(reason) => {
@@ -10967,7 +10967,7 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
             )
             .await
-            .map_err(|e| format!("move-squad send failed: {e}"))?;
+            .map_err(|e| format!("move-workspace send failed: {e}"))?;
             return Ok(());
         }
         // A workspace section's Remove opens the SAME confirm the keyboard
@@ -12746,7 +12746,7 @@ async fn selector_keys(
                             &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
                         )
                         .await
-                        .map_err(|e| format!("move-squad send failed: {e}"))?;
+                        .map_err(|e| format!("move-workspace send failed: {e}"))?;
                     }
                     None => view.set_notice("only a workspace row can be reordered".into()),
                 }
@@ -13183,7 +13183,7 @@ async fn nav_goto(
     if let Some(sq) = target.goto_squad.filter(|_| switching_squad) {
         write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
             .await
-            .map_err(|e| format!("nav select-squad send failed: {e}"))?;
+            .map_err(|e| format!("nav select-workspace send failed: {e}"))?;
     }
     if let Some(tid) = target.goto_tab {
         // Skip SelectTab only when the target is already the active view's tab
@@ -13243,7 +13243,7 @@ async fn create_keys(
                                 }),
                             )
                             .await
-                            .map_err(|e| format!("new-squad send failed: {e}"))?;
+                            .map_err(|e| format!("new-workspace send failed: {e}"))?;
                             view.create = None;
                             view.create_esc.clear();
                             break;

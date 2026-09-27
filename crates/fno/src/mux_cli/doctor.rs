@@ -16,7 +16,7 @@ pub(super) fn squad_store_check() -> Check {
     }
     let Some(live) = live_set_or_unknown() else {
         return Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Warn,
             detail: "agent registry unreadable; orphan count unknown".into(),
             remedy: Some(PRUNE_REMEDY.into()),

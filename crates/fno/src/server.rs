@@ -2958,7 +2958,7 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err("squad name cannot be blank".into());
+                    return Err("workspace name cannot be blank".into());
                 }
                 let cwds: Vec<String> = self
                     .session
@@ -2976,15 +2976,15 @@ impl Core {
                     .map(|(s, _)| s);
                 match (hits.next(), hits.next()) {
                     (Some(s), None) => Ok(Some(s.id)),
-                    (Some(_), Some(_)) => Err(format!("ambiguous squad name: {n}")),
-                    (None, _) => Err(format!("no such squad: {n}")),
+                    (Some(_), Some(_)) => Err(format!("ambiguous workspace name: {n}")),
+                    (None, _) => Err(format!("no such workspace: {n}")),
                 }
             }
             PaneTarget::SquadId(id) => self
                 .session
                 .squad(*id)
                 .map(|s| Some(s.id))
-                .ok_or_else(|| format!("no such squad id: {id}")),
+                .ok_or_else(|| format!("no such workspace id: {id}")),
         }
     }
 
@@ -3024,7 +3024,7 @@ impl Core {
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err("selected squad vanished".into());
+            return Err("selected workspace vanished".into());
         };
         let new_tab = |this: &mut Self, si: usize| {
             let tid = this.session.mint_tab_id();
@@ -3124,13 +3124,16 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err((err_code::BAD_REQUEST, "squad name cannot be blank".into()));
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        "workspace name cannot be blank".into(),
+                    ));
                 }
                 match self.resolve_placement_target(&placement.target, None) {
                     Ok(d) => (d, None),
                     // Coupled to resolve_placement_target's error text: a name matching NO squad is
                     // creatable; an ambiguous name (2+ matches) still errors - never silently pick one.
-                    Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
+                    Err(e) if e.starts_with("no such workspace") => (None, Some(n.to_string())),
                     Err(e) => return Err((err_code::BAD_REQUEST, e)),
                 }
             }
@@ -3223,9 +3226,9 @@ impl Core {
         let sq = self
             .session
             .squad(sid)
-            .ok_or_else(|| format!("no such squad id: {sid}"))?;
+            .ok_or_else(|| format!("no such workspace id: {sid}"))?;
         if sq.tabs.is_empty() {
-            return Err(format!("squad {sid} has no tabs"));
+            return Err(format!("workspace {sid} has no tabs"));
         }
         sq.resolve_tab(sel)
     }
@@ -3263,12 +3266,12 @@ impl Core {
             self.reap_pane(pid);
             return Err((
                 err_code::BAD_REQUEST,
-                "a --tab/--at placement needs a resolved squad".into(),
+                "a --tab/--at placement needs a resolved workspace".into(),
             ));
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         // An explicit `New` tab ignores any anchor - it is born with this pane.
         if matches!(placement.tab, Some(TabSel::New)) {
@@ -3524,10 +3527,10 @@ impl Core {
     /// List a squad's tabs for [`ControlVerb::TabLs`].
     fn tab_ls(&self, squad: &PaneTarget) -> Result<Vec<TabInfo>, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
-        let sq = self
-            .session
-            .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+        let sq = self.session.squad(sid).ok_or((
+            err_code::BAD_REQUEST,
+            format!("no such workspace id: {sid}"),
+        ))?;
         let active_ti = sq.active_tab.min(sq.tabs.len().saturating_sub(1));
         Ok(sq
             .tabs
@@ -3560,7 +3563,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -3588,7 +3591,7 @@ impl Core {
         let sq = self
             .session
             .squad_mut(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?;
         let tid = sq.tabs[ti].id;
         sq.tabs[ti].name = clean;
         // A template tab's stored spec is keyed by tab name; a rename
@@ -3647,7 +3650,7 @@ impl Core {
         let tid = self
             .session
             .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?
             .tabs[from]
             .id;
         if self.reorder_tab(sid, tid, (dest as i64 - from as i64) as i32) {
@@ -3797,10 +3800,10 @@ impl Core {
                 .collect()),
             LayoutScope::Squad(t) => {
                 let sid = self.resolve_squad(t)?;
-                let sq = self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+                let sq = self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?;
                 Ok(vec![self.squad_layout(sq, agents)])
             }
             LayoutScope::Tab { squad, tab } => {
@@ -4217,10 +4220,10 @@ impl Core {
             PaneTarget::CurrentRoute => self.session.squads.iter().collect(),
             t => {
                 let sid = self.resolve_squad(t)?;
-                vec![self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?]
+                vec![self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?]
             }
         };
         // Resolve one dictionary form across the candidates. An absent form
@@ -4572,7 +4575,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -5211,7 +5214,7 @@ impl Core {
     fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
         self.resolve_placement_target(target, self.session.active_squad)
             .map_err(|e| (err_code::BAD_REQUEST, e))?
-            .ok_or((err_code::BAD_REQUEST, "no target squad".into()))
+            .ok_or((err_code::BAD_REQUEST, "no target workspace".into()))
     }
 
     /// A one-line refusal/notice to ONE client (BEL + transient message on
@@ -6699,7 +6702,7 @@ impl Core {
         match outcome {
             Ok((outcome, batch)) => {
                 if !self.persist_result(Ok(batch)) {
-                    self.notice(client_id, "sweep skipped: squad store changed");
+                    self.notice(client_id, "sweep skipped: workspace store changed");
                     return;
                 }
                 self.reload_members_from_store();
@@ -6746,7 +6749,7 @@ impl Core {
         // prune-shaped; a write error degrades to a notice, never refuses
         // (AC2-FR / AC-ERR1).
         if let Err(e) = crate::squad_store::collapse_duplicate_squads() {
-            self.notice_all(format!("squad collapse at restore skipped: {e}"));
+            self.notice_all(format!("workspace collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
         self.store_generations = loaded.generations;
@@ -6793,7 +6796,7 @@ impl Core {
                 ) {
                     Ok(batch) => self.store_generations.extend(batch.generations),
                     Err(e) => {
-                        self.notice_all(format!("squad prune at restore skipped: {e}"));
+                        self.notice_all(format!("workspace prune at restore skipped: {e}"));
                     }
                 }
                 continue;
@@ -10073,7 +10076,7 @@ impl Core {
                     // A stale id (squad died racing the selector) is refused
                     // fail-closed; the client re-anchors off the next Layout
                     // it already received.
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -10830,7 +10833,7 @@ impl Core {
                             }
                         }
                     }
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -10839,7 +10842,7 @@ impl Core {
                 // its tabs, drop the squad, re-anchor views. Destructiveness is
                 // gated client-side by a confirm; the server just executes.
                 let Some(pos) = self.session.squads.iter().position(|s| s.id == id) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 // De-persist the whole squad up front (user dismissed it - it
@@ -10885,7 +10888,7 @@ impl Core {
                 // to the list bounds; an already-at-edge move is a silent no-op
                 // (holding a reorder key at the top must not bell).
                 let Some(idx) = self.session.squads.iter().position(|s| s.id == squad) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 let len = self.session.squads.len() as i64;
