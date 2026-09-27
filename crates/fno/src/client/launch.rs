@@ -53,9 +53,12 @@ impl Drop for TerminalGuard {
 }
 
 /// Enter the terminal, replay stashed ModeSync state, then draw the launch
-/// splash. Returns the guard: dropping it restores the terminal.
+/// splash. Returns the guard: dropping it restores the terminal. `tx` is
+/// the stdin channel's sender: the splash hands back the bytes that ended
+/// it, so no typed-ahead key is lost.
 pub(super) async fn begin(
     rx: &mut mpsc::Receiver<Vec<u8>>,
+    tx: &mpsc::Sender<Vec<u8>>,
     theme: &Theme,
     stashed_modesync: &[u8],
 ) -> Result<TerminalGuard, String> {
@@ -63,6 +66,6 @@ pub(super) async fn begin(
     if !stashed_modesync.is_empty() {
         super::raw_out(stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
     }
-    crate::splash::run(rx, theme).await;
+    crate::splash::run(rx, tx, theme).await;
     Ok(guard)
 }

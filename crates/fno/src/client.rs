@@ -8250,6 +8250,9 @@ async fn attach_and_run(
 
     // Raw stdin -> channel; scanned by the prefix layer below.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    // A spare sender for the launch splash: it re-queues the chunk that
+    // ended it, so typed-ahead input is never lost.
+    let splash_tx = stdin_tx.clone();
     std::thread::Builder::new()
         .name("fno-mux-stdin".into())
         .spawn(move || {
@@ -8273,7 +8276,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(&mut stdin_rx, &theme, &stashed_modesync).await?;
+    let guard = launch::begin(&mut stdin_rx, &splash_tx, &theme, &stashed_modesync).await?;
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer

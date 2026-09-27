@@ -275,8 +275,15 @@ fn animated() -> bool {
 }
 
 /// Draw the splash before the first UI paint. `rx` is the raw stdin
-/// channel: any byte skips to the last frame.
-pub async fn run(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, theme: &Theme) {
+/// channel: any byte skips to the last frame. The chunk that ended the
+/// animation is handed back through `tx` WHOLE, so typed-ahead input and
+/// multi-byte escape sequences reach the UI exactly as they would have
+/// without the splash.
+pub async fn run(
+    rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    theme: &Theme,
+) {
     let fits = terminal::size()
         .ok()
         .and_then(|(cols, rows)| origin_for(cols, rows))
@@ -290,15 +297,18 @@ pub async fn run(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, theme: &Theme) {
         return;
     }
     let start = Instant::now();
-    for (i, (at, frame)) in schedule().into_iter().enumerate() {
-        if i > 0 {
-            let wait = Duration::from_secs_f64(at).saturating_sub(start.elapsed());
+    for (at, frame) in schedule() {
+        let wait = Duration::from_secs_f64(at).saturating_sub(start.elapsed());
+        if wait > Duration::ZERO {
             match tokio::time::timeout(wait, rx.recv()).await {
                 // A keypress (or stdin closing) skips to the last frame.
-                Ok(Some(_)) | Ok(None) => {
-                    if frame != FINAL {
-                        draw(FINAL, theme);
-                    }
+                Ok(Some(chunk)) => {
+                    draw(FINAL, theme);
+                    let _ = tx.send(chunk).await;
+                    return;
+                }
+                Ok(None) => {
+                    draw(FINAL, theme);
                     return;
                 }
                 Err(_elapsed) => {}
