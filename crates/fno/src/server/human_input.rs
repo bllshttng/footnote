@@ -191,6 +191,48 @@ pub(super) fn has_human_keystroke(bytes: &[u8]) -> bool {
     false
 }
 
+/// The class of a submitted line, after escape sequences and leading
+/// whitespace are stripped. The attended auto-hold arms on `Message` only
+/// (x-5198 R2/R3): a slash command, a `!` shell line, and an empty Enter
+/// never count as conversation, and any of them resets the streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    Empty,
+    Slash,
+    Shell,
+    Message,
+}
+
+fn line_kind(line: &[u8]) -> LineKind {
+    let mut i = 0;
+    while i < line.len() {
+        match line[i] {
+            0x1b => {
+                let skip = terminal_reply_len(&line[i..]);
+                // A reply shape skips whole; any other escape skips ESC
+                // plus one byte (a meta pair or a two-byte sequence).
+                i += if skip > 0 {
+                    skip
+                } else if line[i..].starts_with(b"\x1b[") {
+                    let fin = line[i + 2..]
+                        .iter()
+                        .position(|b| (0x40..=0x7e).contains(b))
+                        .map(|p| i + 2 + p + 1)
+                        .unwrap_or(line.len());
+                    fin
+                } else {
+                    (i + 2).min(line.len())
+                };
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            b'/' => return LineKind::Slash,
+            b'!' => return LineKind::Shell,
+            _ => return LineKind::Message,
+        }
+    }
+    LineKind::Empty
+}
+
 /// The `operator_submit` journal row: where and when a human pressed Enter.
 /// No typed text is ever recorded. Pure so tests can assert the envelope.
 fn submit_row(
@@ -419,16 +461,40 @@ impl Core {
     /// submit witness. A keystroke here is past the relay guard - PaneSend
     /// and relay writes never reach this - and past the reply classifier:
     /// terminal-generated loopback (focus reports, query replies, mouse
-    /// encodings) is not steering, so a viewed row arms nothing.
+    /// encodings) is not steering, so a viewed row arms nothing. Under the
+    /// attended auto-hold ruling (x-5198 R2) the hold arms only on a real
+    /// conversation: the SECOND consecutive Enter on a non-empty text line.
+    /// Slash, shell and empty lines break the streak; focus alone never arms.
     pub(super) fn input_tail(&mut self, focus: u64, bytes: &[u8]) {
         if !has_human_keystroke(bytes) {
             return;
         }
         self.touch(focus, "inject", true);
-        let submitted = is_submit(bytes);
-        self.arm_attended_hold(focus, submitted);
-        if submitted {
-            self.witness_submit(focus);
+        if !is_submit(bytes) {
+            self.line_buf
+                .entry(focus)
+                .or_default()
+                .extend_from_slice(bytes);
+            return;
+        }
+        self.witness_submit(focus);
+        let mut line = self.line_buf.remove(&focus).unwrap_or_default();
+        let cr = bytes.iter().position(|b| *b == 0x0d).unwrap_or(bytes.len());
+        line.extend_from_slice(&bytes[..cr]);
+        if let Some(rest) = bytes.get(cr + 1..) {
+            self.line_buf
+                .entry(focus)
+                .or_default()
+                .extend_from_slice(rest);
+        }
+        if line_kind(&line) == LineKind::Message {
+            let streak = self.real_streak.entry(focus).or_default();
+            *streak = (*streak).min(1) + 1;
+            if *streak >= 2 {
+                self.arm_attended_hold(focus, true);
+            }
+        } else {
+            self.real_streak.remove(&focus);
         }
     }
 }
@@ -746,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_arms_the_hold_once_and_a_submit_re_arms() {
+    fn two_real_messages_arm_and_later_ones_re_arm() {
         use crate::server::CoreMsg;
         // The final submit fires a real witness append: pin the journal like
         // every other Input-driving test (the FNO_AGENTS_HOME guard), or the
@@ -781,30 +847,37 @@ mod tests {
             id: 1,
             bytes: b"ship".to_vec(),
         });
-        let first = *core
-            .hold_arm_last
-            .get(&7)
-            .expect("the first keystroke armed the hold");
-        // Ten more bytes inside the window: no re-arm (one spawn per window).
-        for _ in 0..10 {
-            core.handle(CoreMsg::Input {
-                id: 1,
-                bytes: b"x".to_vec(),
-            });
-        }
-        assert_eq!(
-            *core.hold_arm_last.get(&7).unwrap(),
-            first,
-            "no re-arm inside the window: one spawn per burst"
+        assert!(
+            core.hold_arm_last.is_empty(),
+            "composition alone never arms: only a real conversation does"
         );
-        // A submit forces the re-arm the plan gives notify-self's job.
+        // The first real message: no arm yet (the R2 two-message rule).
         core.handle(CoreMsg::Input {
             id: 1,
             bytes: b" it\r".to_vec(),
         });
         assert!(
+            core.hold_arm_last.is_empty(),
+            "one real message never arms: the hold wants a conversation"
+        );
+        // The second consecutive real message arms.
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"ship it\r".to_vec(),
+        });
+        let first = *core
+            .hold_arm_last
+            .get(&7)
+            .expect("the second consecutive real message armed the hold");
+        // The next real message re-arms at once (force), so a running
+        // conversation keeps its clock ahead of the five-minute lift.
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"onward\r".to_vec(),
+        });
+        assert!(
             *core.hold_arm_last.get(&7).unwrap() > first,
-            "a submit re-armed the hold"
+            "a later real message re-armed the hold"
         );
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
@@ -812,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_replies_arm_nothing_and_a_keystroke_still_arms() {
+    fn replies_and_one_message_arm_nothing_two_consecutive_ones_arm() {
         use crate::server::CoreMsg;
         let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
             .lock()
@@ -861,13 +934,23 @@ mod tests {
             core.hold_arm_last.is_empty(),
             "terminal-generated replies never arm the attended hold"
         );
+        // One real message does not arm either (the R2 two-message rule).
         core.handle(CoreMsg::Input {
             id: 1,
-            bytes: b"a".to_vec(),
+            bytes: b"a\r".to_vec(),
+        });
+        assert!(
+            core.hold_arm_last.is_empty(),
+            "one real message never arms the hold"
+        );
+        // The second consecutive real message arms.
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"b\r".to_vec(),
         });
         assert!(
             core.hold_arm_last.contains_key(&7),
-            "a typed keystroke still arms the hold"
+            "two consecutive real messages arm the hold"
         );
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
@@ -943,7 +1026,11 @@ mod tests {
         });
         core.handle(CoreMsg::Input {
             id: 1,
-            bytes: b"x".to_vec(),
+            bytes: b"hello\r".to_vec(),
+        });
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"world\r".to_vec(),
         });
         assert!(
             core.hold_arm_last.contains_key(&7),
@@ -985,12 +1072,89 @@ mod tests {
         });
         core.handle(CoreMsg::Input {
             id: 1,
-            bytes: b"hello".to_vec(),
+            bytes: b"hello\r".to_vec(),
+        });
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"world\r".to_vec(),
         });
         assert!(
             core.hold_arm_last.is_empty(),
             "a pane no registry row binds arms nothing"
         );
         drop(guard);
+    }
+
+    #[test]
+    fn a_slash_shell_or_empty_line_resets_the_streak() {
+        use crate::server::CoreMsg;
+        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fno-hold-streak-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        // Each case runs two real messages with the breaking line between
+        // them; none may arm, because the streak never reaches two.
+        for breaker in [&b"/compact\r"[..], b"!ls\r", b"\r"] {
+            let mut core = witness_test_core(7);
+            core.clients.push(crate::server::Client {
+                id: 1,
+                reliable_tx: tokio::sync::mpsc::channel(1).0,
+                dirty: Default::default(),
+                notify: Arc::new(tokio::sync::Notify::new()),
+                synced_modes: Default::default(),
+                view: (1, 1),
+                visible: Default::default(),
+                dims: (24, 80),
+                passive: false,
+                last_press: None,
+            });
+            core.handle(CoreMsg::Input {
+                id: 1,
+                bytes: b"hello\r".to_vec(),
+            });
+            core.handle(CoreMsg::Input {
+                id: 1,
+                bytes: breaker.to_vec(),
+            });
+            core.handle(CoreMsg::Input {
+                id: 1,
+                bytes: b"world\r".to_vec(),
+            });
+            assert!(
+                core.hold_arm_last.is_empty(),
+                "a breaking line reset the streak; breaker: {breaker:?}"
+            );
+        }
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_kind_classes_the_submitted_line() {
+        assert_eq!(super::line_kind(b""), super::LineKind::Empty);
+        assert_eq!(super::line_kind(b"   "), super::LineKind::Empty);
+        assert_eq!(super::line_kind(b"/compact"), super::LineKind::Slash);
+        assert_eq!(super::line_kind(b"  /compact"), super::LineKind::Slash);
+        assert_eq!(super::line_kind(b"!ls -la"), super::LineKind::Shell);
+        assert_eq!(super::line_kind(b"hello there"), super::LineKind::Message);
+        assert_eq!(super::line_kind(b"\x1b[Ihello"), super::LineKind::Message);
+        assert_eq!(
+            super::line_kind(b"\x1b[12;34Rworld"),
+            super::LineKind::Message
+        );
+        assert_eq!(
+            super::line_kind(b"\x1bOA big idea"),
+            super::LineKind::Message
+        );
     }
 }

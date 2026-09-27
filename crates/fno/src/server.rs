@@ -1617,6 +1617,14 @@ pub(crate) struct Core {
     /// Per-pane last attended-hold arm time: a keystroke past the window
     /// since the last arm re-arms the pane session's mail hold.
     hold_arm_last: HashMap<u64, Instant>,
+    /// Per-pane human bytes typed since the last Enter: the submitted line
+    /// the attended-hold line classes read. Purged with the pane in
+    /// [`Core::reap_pane`].
+    line_buf: HashMap<u64, Vec<u8>>,
+    /// Per-pane consecutive real-message count: the attended hold arms on
+    /// the SECOND consecutive text line (x-5198 R2); a slash, shell or
+    /// empty line resets it. Purged with the pane in [`Core::reap_pane`].
+    real_streak: HashMap<u64, u32>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -12887,6 +12895,8 @@ async fn serve(
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
         hold_arm_last: HashMap::new(),
+        line_buf: HashMap::new(),
+        real_streak: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
