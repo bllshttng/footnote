@@ -95,9 +95,8 @@ ADD_DIR_PROVIDERS = ("claude", "codex", "agy", "cursor-agent")
 def strip_remote_add_dirs(argv: list[str]) -> list[str]:
     """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``.
 
-    codex >= 0.156.1 refuses the pair, so an unstripped pane dies unpainted
-    (x-0a75). The resume lanes already made this trade; tokens survive
-    verbatim.
+    codex >= 0.156.1 refuses the pair, so an unstripped pane dies unpainted;
+    the resume lanes already made this trade. Tokens survive verbatim.
     """
     if "--remote" not in argv:
         return argv
