@@ -73,7 +73,8 @@ pub(crate) fn emit_allow() -> i32 {
 /// `emit_to_both` uses, shared by every native guard so the rows stay
 /// byte-identical (as `hooks/lib/guard-mark.sh` did).
 pub(crate) fn emit_guard_decision(cwd: &Path, guard: &str, tool: &str, denied: bool) {
-    let path = crate::paths::events_path(cwd);
+    let path =
+        crate::state_path::resolve("events", cwd).unwrap_or_else(|| crate::paths::events_path(cwd));
     let event = json!({
         "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "type": "guard_decision",

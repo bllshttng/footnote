@@ -22,6 +22,7 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["hook", "pretooluse-bash"])
         .current_dir(&repo)
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_REPO_ROOT", &repo)
         .env("FNO_EVENTS_PATH", &events)
         .env("HOME", &home)

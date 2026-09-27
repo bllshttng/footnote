@@ -140,4 +140,4 @@ Other configured commands do not emit a per-invocation marker that can serve as 
 
 ## Timing
 
-CI runs `hook_budget_bash_pretooluse_dispatch` through the existing hook-latency harness. The artifact records each elapsed time. The job prints p90, maximum, and `exec_count`. The measured result is added here after CI completes. The native event journal cannot measure harness dispatch overhead.
+CI `hook_budget_bash_pretooluse_dispatch` completed on PR head `9f5521a11f12`: p90 410.1 ms, maximum 420.9 ms, `exec_count=14`, within the 1000 ms budget. The native event journal cannot measure harness dispatch overhead.

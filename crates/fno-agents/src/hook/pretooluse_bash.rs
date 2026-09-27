@@ -28,11 +28,11 @@ pub fn run(_args: &[String]) -> i32 {
     let mut refusals = Vec::new();
 
     if let Some(root) = plugin_root.as_deref() {
-        if let Some(reason) = run_python_guard(&root, "git-protection.py", &raw) {
+        if let Some(reason) = run_python_guard(&root, "bg-process-guard.py", &raw) {
             refusals.push(reason);
         }
     } else {
-        eprintln!("pretooluse-bash: plugin root unavailable; skipping git-protection guard");
+        eprintln!("pretooluse-bash: plugin root unavailable; skipping bg-process-guard");
     }
 
     let bin_refusal = super::bin_install_guard::judge(&payload);
@@ -40,11 +40,11 @@ pub fn run(_args: &[String]) -> i32 {
     refusals.extend(bin_refusal);
 
     if let Some(root) = plugin_root.as_deref() {
-        if let Some(reason) = run_python_guard(&root, "bg-process-guard.py", &raw) {
+        if let Some(reason) = run_python_guard(&root, "git-protection.py", &raw) {
             refusals.push(reason);
         }
     } else {
-        eprintln!("pretooluse-bash: plugin root unavailable; skipping bg-process-guard");
+        eprintln!("pretooluse-bash: plugin root unavailable; skipping git-protection guard");
     }
 
     let pipe_refusal = super::pipe_guard::judge(&payload);
