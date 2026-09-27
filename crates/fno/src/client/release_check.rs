@@ -138,6 +138,9 @@ pub(crate) fn parse_brew_outdated(json: &str) -> Result<Option<(String, String)>
             .get("current_version")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "fno formula is missing the current version".to_string())?;
+        if installed.trim().is_empty() || latest.trim().is_empty() {
+            return Err("fno formula has an empty version".into());
+        }
         return Ok(Some((installed.to_string(), latest.to_string())));
     }
     Ok(None)
@@ -364,6 +367,10 @@ mod tests {
         assert!(parse_brew_outdated(r#"{"formulae":[{"name":"fno"}],"casks":[]}"#).is_err());
         assert!(parse_brew_outdated(
             r#"{"formulae":[{"name":"other","installed_versions":["0.1"],"current_version":"0.2"}],"casks":[]}"#
+        )
+        .is_err());
+        assert!(parse_brew_outdated(
+            r#"{"formulae":[{"name":"fno","installed_versions":[""],"current_version":"0.2"}],"casks":[]}"#
         )
         .is_err());
         assert!(parse_brew_outdated(r#"{"formulae":[],"casks":[]}"#)
