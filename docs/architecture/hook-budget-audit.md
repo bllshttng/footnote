@@ -140,4 +140,4 @@ Other configured commands do not emit a per-invocation marker that can serve as 
 
 ## Timing
 
-CI `hook_budget_bash_pretooluse_dispatch` completed on PR head `9f5521a11f12`: p90 410.1 ms, maximum 420.9 ms, `exec_count=14`, within the 1000 ms budget. The native event journal cannot measure harness dispatch overhead.
+CI `hook_budget_bash_pretooluse_dispatch` completed on PR head `b03303a7dfa6`: p90 420.8 ms, maximum 436.2 ms, `exec_count=11`, within the 1000 ms budget. The prior measured head reported 14 execs; the pinned event-path fast path removes three path-discovery execs. The native event journal cannot measure harness dispatch overhead.

@@ -52,13 +52,44 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
         .unwrap_or_default()
         .contains("[fno pipe guard]"));
 
-    let rows = std::fs::read_to_string(events).expect("guard events");
-    let guards: Vec<String> = rows
+    let rows = std::fs::read_to_string(&events).expect("Python guard events");
+    let python_guards: Vec<String> = rows
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
         .collect();
-    let expected: Vec<String> = [
+    let native_rows = fno_agents::event_store::query_events(
+        &events,
+        &fno_agents::event_store::EventQuery::of_types(&["guard_decision"]),
+    )
+    .expect("native guard decisions");
+    let native_guards: Vec<String> = native_rows
+        .iter()
+        .filter_map(|row| serde_json::from_str::<Value>(&row.line).ok())
+        .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        python_guards,
+        vec![
+            "bg-process-guard".to_string(),
+            "git-protection".to_string(),
+            "recursive-grep-guard".to_string()
+        ],
+        "Python guards retain their registration order"
+    );
+    assert_eq!(
+        native_guards,
+        vec![
+            "bin-install-guard".to_string(),
+            "pipe-guard".to_string(),
+            "test-run-guard".to_string()
+        ],
+        "native guards retain their registration order"
+    );
+    let mut guards = python_guards;
+    guards.extend(native_guards);
+    guards.sort();
+    let mut expected: Vec<String> = [
         "bg-process-guard",
         "bin-install-guard",
         "git-protection",
@@ -69,8 +100,6 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
     .into_iter()
     .map(str::to_owned)
     .collect();
-    assert_eq!(
-        guards, expected,
-        "every guard must run once, in its former registration order"
-    );
+    expected.sort();
+    assert_eq!(guards, expected, "every guard must run once");
 }
