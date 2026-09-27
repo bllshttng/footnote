@@ -50,7 +50,7 @@ from typing import Any, Callable, Iterator, Literal, Optional, Tuple
 
 from fno import paths
 from fno.harness_identity import (
-    OWNERSHIP_LIVE_STATUSES as _LIVE,
+    OWNERSHIP_LIVE_STATUSES as _OWNERSHIP_LIVE_STATUSES,
     canonical_handle,
     claude_transport_short_id,
     legacy_suffix_handle,
@@ -1341,10 +1341,11 @@ def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: 
         )
     if os.environ.get("FNO_REGISTRY_ALLOW_ROW_LOSS") == "1":
         return
+    live = _OWNERSHIP_LIVE_STATUSES
     before = sum(
-        r.get("status") in _LIVE for r in (raw or {}).get("agents", []) if isinstance(r, dict)
+        r.get("status") in live for r in (raw or {}).get("agents", []) if isinstance(r, dict)
     )
-    after = sum(e.status in _LIVE for e in entries)
+    after = sum(e.status in live for e in entries)
     if before >= 2 and after * 2 < before:
         raise RegistryWriteRefused(
             f"refusing {target}: this write drops live registry rows from {before} to {after}; "
@@ -1592,7 +1593,7 @@ def live_row_holding_session_id(
         # Unreadable / wrong-schema / absent: cannot prove ownership either way.
         return None
     for entry in entries:
-        if entry.status not in _LIVE:
+        if entry.status not in _OWNERSHIP_LIVE_STATUSES:
             continue
         candidate = getattr(entry, "harness_session_id", None)
         if candidate and session_identity_key(candidate) == needle:
