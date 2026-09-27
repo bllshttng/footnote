@@ -34,7 +34,6 @@ from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
 from fno.agents.mux_spawn import MuxSpawnResult
-from tests.agents._fake_claude import stub_codex_sandbox_probe
 
 AGY_HARNESS = "agy"
 CODEX_HARNESS = "codex"
