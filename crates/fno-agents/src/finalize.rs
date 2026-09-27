@@ -2222,7 +2222,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
         },
     );
     match outcome {
-        Outcome::Armed { head } => {
+        Outcome::Armed { head, .. } => {
             eprintln!("finalize: auto-merge armed for PR at {head}");
             (true, None)
         }

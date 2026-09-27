@@ -671,3 +671,100 @@ fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
         assert!(v.reason.contains("ab-ac4two"), "{}", v.reason);
     }
 }
+
+// ── the head-scoped operator merge grant ──────────────────────────────────
+
+fn law_row(authority: &str, decision: Option<&str>) -> Value {
+    let mut row = json!({"authority_source": authority});
+    if let Some(d) = decision {
+        row["decision"] = json!(d);
+    }
+    row
+}
+
+fn decisions_payload(rows: Vec<Value>) -> Vec<u8> {
+    json!({ "decisions": rows }).to_string().into_bytes()
+}
+
+#[test]
+fn head_grant_subject_scopes_repo_pr_and_head() {
+    assert_eq!(
+        head_grant_subject("o/r", 42, "abc"),
+        "merge-grant:o/r#42@abc"
+    );
+}
+
+#[test]
+fn attended_grant_command_names_subject_decision_and_authority() {
+    let cmd = attended_grant_command("o/r", 42, "abc");
+    assert!(cmd.starts_with("fno backlog decide '"), "{cmd}");
+    assert!(cmd.contains("'merge-grant:o/r#42@abc'"), "{cmd}");
+    assert!(cmd.contains("'merge authorized for this head'"), "{cmd}");
+    assert!(cmd.ends_with("--authority operator"), "{cmd}");
+}
+
+#[test]
+fn one_affirmative_operator_row_reads_granted() {
+    let payload = decisions_payload(vec![law_row("operator", Some(MERGE_GRANT_DECISION))]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
+}
+
+#[test]
+fn identical_affirmative_rows_read_granted_once() {
+    let payload = decisions_payload(vec![
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Granted);
+}
+
+#[test]
+fn no_operator_rows_read_absent() {
+    let payload = decisions_payload(vec![]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
+}
+
+#[test]
+fn chat_attested_and_unattributed_rows_are_not_grants() {
+    // AC2-ERR: only a person at a terminal carries the grant. Rows recorded
+    // through the law door by a harness session (`chat_attested`) or without
+    // an authority read as no operator row at all: Absent, never granted.
+    let payload = decisions_payload(vec![
+        law_row("chat_attested", Some(MERGE_GRANT_DECISION)),
+        law_row("unknown", Some(MERGE_GRANT_DECISION)),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Absent);
+}
+
+#[test]
+fn a_differing_decision_reads_conflict() {
+    let payload = decisions_payload(vec![
+        law_row("operator", Some(MERGE_GRANT_DECISION)),
+        law_row("operator", Some("not this head")),
+    ]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
+}
+
+#[test]
+fn an_operator_row_without_a_readable_decision_reads_conflict() {
+    let payload = decisions_payload(vec![law_row("operator", None)]);
+    assert_eq!(head_grant_status(Some(&payload)), HeadGrant::Conflict);
+}
+
+#[test]
+fn a_missing_stdout_reads_unreadable_never_absent() {
+    // AC2-ERR fail-closed polarity: a dead probe is not "no grant".
+    assert_eq!(
+        head_grant_status(None),
+        HeadGrant::Unreadable("the decisions read did not answer".to_string())
+    );
+}
+
+#[test]
+fn a_payload_without_the_decisions_array_reads_unreadable() {
+    let payload = br#"{"error": "damaged index"}"#.to_vec();
+    assert_eq!(
+        head_grant_status(Some(&payload)),
+        HeadGrant::Unreadable("malformed decisions payload".to_string())
+    );
+}

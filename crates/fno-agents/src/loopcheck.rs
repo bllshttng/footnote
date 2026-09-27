@@ -125,7 +125,7 @@ mod budget;
 mod ci_checks;
 mod coverage;
 mod coverage_classify;
-mod coverage_status;
+pub(crate) mod coverage_status;
 mod findings;
 mod fire_history;
 mod gh_read;
