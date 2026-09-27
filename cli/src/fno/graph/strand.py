@@ -97,8 +97,8 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
 
 def birth_parent_refusal(entries: list[dict], node: dict, parent: str) -> Optional[str]:
     """Refusal line for a birth ``--parent`` that cannot hold the child, else None. A
-    closed parent refuses because the healers in this module clear that edge after birth
-    (x-1c7f); an unresolvable parent keeps the lenient birth pass-through."""
+    closed parent refuses because the healers in this module clear that edge after birth;
+    an unresolvable parent keeps the lenient birth pass-through."""
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
     from fno.graph._intake import _find_node, _would_exceed_epic_depth
     from fno.graph.rollup import CLOSED_STATUSES
