@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -337,25 +338,28 @@ def remaining_label(handle) -> Optional[str]:
 def bounce_reason(recipient) -> Optional[str]:
     """The busy-mode receipt a sender reads, or None when no hold is running.
 
-    A refusal that says nothing is the defect this replaces. A sender that gets
-    silence cannot tell a hold from a dead bus, so it re-sends, which is how one
-    held message becomes five. The generic ``bus-only`` receipt is no better
-    here: it promises the recipient's next turn boundary, and a busy-mode hold
-    exists precisely because that turn boundary is not coming.
-
-    So the reason names the recipient, the state, and when the message actually
-    lands. Returns None for a permanent hand-stamped policy, which really does
-    surface at a turn boundary and already has an accurate receipt.
+    One-call port of the receipt body to the Rust hold gate (``mail_hold.rs``
+    ``gate``, law d-b6cc1a2a): the gate owns the C16 receipt shapes - the
+    conversation receipt, the wall and grace "held until about HH:MM", and
+    the idle "or later" - in the recipient's local time. ``None`` keeps the
+    caller's existing text: a hand-stamped hold with no clock really does
+    surface at a turn boundary. Never raises.
     """
-    hold = read_any(recipient)
-    label = remaining_label(recipient)
-    if label is None or label == "held":
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
         return None
-    clock = clock_description(hold)
-    return (
-        f"held: {recipient} is in do-not-disturb, {clock}, lifts in "
-        f"{label.lstrip('~')} and delivers itself then"
-    )
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-hold", "--gate", "--session", str(recipient)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return json.loads(proc.stdout).get("receipt")
+    except Exception:  # noqa: BLE001 - a receipt read never breaks the send path
+        return None
 
 
 def clock_description(hold: Optional[Hold]) -> str:
