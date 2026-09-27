@@ -54,6 +54,7 @@ def test_discretionary_read_is_refused_at_floor_before_graphql(tmp_path):
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == _quota.REFUSED
     assert calls == [["/real/gh", "api", "rate_limit"]]
@@ -73,6 +74,7 @@ def test_coverage_can_consume_reserved_points(tmp_path):
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert calls == [
@@ -92,6 +94,7 @@ def test_coverage_publisher_label_read_can_consume_reserved_points(tmp_path):
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert calls[-1] == ["/real/gh", "pr", "view", "930", "--json", "labels"]
@@ -105,6 +108,7 @@ def test_unreadable_instrument_fails_closed_only_for_discretionary(tmp_path):
         runner=_runner(None, discretionary_calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert refused.returncode == _quota.REFUSED
     assert "instrument unavailable" in refused.stderr
@@ -117,6 +121,7 @@ def test_unreadable_instrument_fails_closed_only_for_discretionary(tmp_path):
         runner=_runner(None, coverage_calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert allowed.returncode == 0
     assert len(coverage_calls) == 2
@@ -130,6 +135,7 @@ def test_flag_first_argv_is_refused_without_touching_gh(tmp_path):
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 2
     assert "command words first" in result.stderr
@@ -145,6 +151,7 @@ def test_flag_first_argv_is_refused_for_coverage_too(tmp_path):
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 2
     assert "command words first" in result.stderr
@@ -161,6 +168,7 @@ def test_gh_global_flags_before_the_command_word_still_execute(tmp_path):
         runner=_runner(5000, calls, Result(0, "ok", "")),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert calls[-1] == ["/real/gh", *argv], "the exec must keep the full argv"
@@ -173,6 +181,7 @@ def test_gh_global_flags_before_the_command_word_still_execute(tmp_path):
         runner=_runner(5000, calls, Result(0, "ok", "")),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert calls[-1] == ["/real/gh", *attached]
@@ -186,6 +195,7 @@ def test_dangling_gh_global_flag_is_refused(tmp_path):
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 2
     assert "command words first" in result.stderr
@@ -200,6 +210,7 @@ def test_command_word_argv_still_reaches_the_runner(tmp_path):
         runner=_runner(5000, calls, Result(0, "bllshttng", "")),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert result.stdout == "bllshttng"
@@ -220,6 +231,7 @@ def test_coverage_purpose_rejects_arbitrary_graphql(tmp_path):
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 2
     assert "review-coverage reads only" in result.stderr
@@ -234,6 +246,7 @@ def test_only_coverage_spelling_can_claim_the_reserve(tmp_path):
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 2
     assert calls == []
@@ -251,6 +264,7 @@ def test_bare_gh_cannot_reenter_the_worker_proxy(tmp_path, monkeypatch):
         runner=_runner(5000, calls),
         real_gh="gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert calls == [
@@ -292,6 +306,7 @@ def test_preserved_wrapper_cannot_resolve_back_to_quota_proxy(tmp_path, monkeypa
         "discretionary",
         ["api", "graphql", "-f", "query={viewer{login}}"],
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0
     assert '"login":"ok"' in result.stdout
@@ -472,6 +487,7 @@ def test_the_round_budget_reviews_read_can_consume_reserved_points(tmp_path):
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0, result.stderr
     assert calls == [
@@ -534,6 +550,7 @@ def test_gh_global_flags_before_the_command_word_reach_the_coverage_reserve(
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 0, result.stderr
     # The full argv rides along, options included - normalization decides
@@ -611,6 +628,7 @@ def test_a_budget_refusal_stops_the_command_before_real_gh(tmp_path, monkeypatch
         runner=_runner(5000, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == _quota.REFUSED
     assert result.stdout == ""
@@ -630,6 +648,7 @@ def test_a_rate_limited_command_records_the_refusal_once(tmp_path, quiet_budget)
         ),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert result.returncode == 1
     assert len(quiet_budget) == 1
@@ -648,6 +667,7 @@ def test_a_drained_primary_bucket_records_nothing(tmp_path, quiet_budget):
         ),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert quiet_budget == []
 
@@ -659,6 +679,7 @@ def test_an_ordinary_failure_records_nothing(tmp_path, quiet_budget):
         runner=_runner(5000, [], Result(1, "", "HTTP 500: server error")),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
+        probe_cache=tmp_path / "quota-probe.json",
     )
     assert quiet_budget == []
 
