@@ -289,14 +289,23 @@ open PR); this is not a verdict about any PR.",
 /// The assembled pr_json every caller reads: the keys `run_status` read on
 /// the Python side, byte-shape-identical (docs/architecture/
 /// pr-status-verdict.md). `slug` is resolved once by the cache layer; the
-/// reader never runs git.
+/// reader never runs git. `known_pulls` is the payload the caller (the cache
+/// layer's head read) already fetched; Some reuses it, None reads live.
 pub(crate) fn read_pr<P: GhProbe>(
     probe: &P,
     cwd: &Path,
     slug: &str,
     pr: u64,
+    known_pulls: Option<&Value>,
 ) -> Result<Value, RestReason> {
-    let pulls = probe_json(probe, cwd, &format!("repos/{slug}/pulls/{pr}"))?;
+    let owned;
+    let pulls = match known_pulls {
+        Some(pulls) if pulls.is_object() => pulls,
+        _ => {
+            owned = probe_json(probe, cwd, &format!("repos/{slug}/pulls/{pr}"))?;
+            &owned
+        }
+    };
     let Some(sha) = pulls
         .pointer("/head/sha")
         .and_then(Value::as_str)
@@ -733,8 +742,10 @@ pub(crate) fn status_payload<P: GhProbe>(
     pr: u64,
     prior: Option<&Value>,
     slug: &str,
+    known_pulls: Option<&Value>,
+    hold_probe: Option<seams::HoldVerdict>,
 ) -> (i32, Value, Vec<String>) {
-    let pr_json = match read_pr(probe, cwd, slug, pr) {
+    let pr_json = match read_pr(probe, cwd, slug, pr, known_pulls) {
         Ok(pr_json) => pr_json,
         Err(reason) => return compose::error_payload(&pr.to_string(), &reason),
     };
@@ -797,7 +808,7 @@ pub(crate) fn status_payload<P: GhProbe>(
     // reads a closed PR can still burn. Skip all of them; the report prints
     // the no-pending answers rather than `unknown`, because nothing was
     // failed, it was deliberately not asked.
-    let (reviews_input, coverage, lane, hold, activity) = if is_terminal {
+    let (reviews_input, coverage, lane, hold, activity, hold_state) = if is_terminal {
         (
             json!({
                 "optional_reviews": [],
@@ -826,18 +837,25 @@ pub(crate) fn status_payload<P: GhProbe>(
                     "note": "not asked: PR is terminal",
                 },
             }),
+            None,
         )
     } else {
         let reviews_input = reviews::optional_reviews(cwd, pr);
         let lane = reviews::review_lane(cwd, pr);
         let coverage = reviews::read_review_coverage(cwd, pr, Some(&head_sha), lane, false);
-        let hold = json!(seams::hold_reason(cwd, pr));
+        // The cache layer passes the probe it already ran for the key
+        // material; a degraded path (no slug, no cache dir) probes here.
+        let hold_state = hold_probe.or_else(|| Some(seams::hold_verdict(cwd, pr)));
+        let hold = match hold_state.as_ref() {
+            Some(seams::HoldVerdict::Held(reason)) => json!(reason),
+            _ => Value::Null,
+        };
         let branch = pr_json
             .get("headRefName")
             .and_then(Value::as_str)
             .unwrap_or("");
         let activity = reviews::review_activity(cwd, branch, &head_sha);
-        (reviews_input, coverage, lane, hold, activity)
+        (reviews_input, coverage, lane, hold, activity, hold_state)
     };
 
     // GitHub's mergeStateStatus as named ready blockers; unasked on a
@@ -945,7 +963,7 @@ pub(crate) fn status_payload<P: GhProbe>(
         Some(r) => json!(r.get("recovered").and_then(Value::as_bool).unwrap_or(false)),
         None => Value::Null,
     };
-    let receipt_ask = json!({
+    let mut receipt_ask = json!({
         "cwd": cwd.to_string_lossy(),
         "pr": pr,
         "effect": "preview",
@@ -956,6 +974,13 @@ pub(crate) fn status_payload<P: GhProbe>(
         "github_blockers": github_merge.get("blockers").and_then(Value::as_array).cloned().unwrap_or_default(),
         "covered_head": head_sha,
     });
+    // This read already paid the hold-check probe above; the preview reuses
+    // the answer instead of spawning the verb a second time. The key is
+    // present only on a clean probe: a crashed or unasked probe must let the
+    // walk's own fail-closed probe run.
+    if let Some(seams::HoldVerdict::Clear | seams::HoldVerdict::Held(_)) = hold_state.as_ref() {
+        receipt_ask["dispatch_hold_reason"] = hold.clone();
+    }
     let mut receipt = crate::authorized_merge::preview_receipt_payload(&receipt_ask);
     if !receipt
         .get("blockers")
@@ -1047,7 +1072,7 @@ pub(crate) fn status_ci_rows<P: GhProbe>(
     pr: u64,
     drop_coverage: bool,
 ) -> Result<Vec<Value>, RestReason> {
-    let pr_json = read_pr(probe, cwd, slug, pr)?;
+    let pr_json = read_pr(probe, cwd, slug, pr, None)?;
     let rollup = pr_json
         .get("statusCheckRollup")
         .and_then(Value::as_array)
