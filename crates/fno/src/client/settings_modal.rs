@@ -249,7 +249,7 @@ pub(super) async fn run_toggle(
 mod tests {
     use super::*;
 
-    // x-b5b8: the settings modal sits on the theme ground (plain body).
+    // The settings modal sits on the theme ground (plain body).
     // The inverse body block under a named theme read as a white slab -
     // the keys-modal fix on a path it missed. Every tab paints, including
     // the Colors drill with its Rule rows.

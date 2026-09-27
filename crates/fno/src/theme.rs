@@ -384,8 +384,9 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 /// The Terminal 16 palette of the two footnote themes (the token tables in
 /// internal/fno/design/brand-telemetry-palette.md): the color a colors-tab
 /// swatch paints for ANSI slot `slot` under the active theme. `None` = the
-/// theme defines no terminal palette of its own; the swatch then rides
-/// `Indexed(slot)` (the emulator resolves it) and shows no hex.
+/// theme defines no terminal palette of its own, or `slot` sits outside the
+/// 16 ANSI slots; the swatch then rides `Indexed(slot)` (the emulator
+/// resolves it) and shows no hex.
 pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
     const DARK: [Color; 16] = [
         rgb(0x40, 0x40, 0x40), // black
@@ -423,9 +424,13 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
         rgb(0x06, 0x89, 0x80), // bright cyan (light_cyan)
         rgb(0x29, 0x29, 0x29), // bright white (light_white)
     ];
+    let i = slot as usize;
+    if i >= 16 {
+        return None;
+    }
     match theme.name {
-        "footnote-superscript" => Some(DARK[(slot % 16) as usize]),
-        "footnote-paper" => Some(LIGHT[(slot % 16) as usize]),
+        "footnote-superscript" => Some(DARK[i]),
+        "footnote-paper" => Some(LIGHT[i]),
         _ => None,
     }
 }

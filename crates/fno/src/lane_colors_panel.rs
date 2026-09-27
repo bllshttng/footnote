@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn lane_color_picker_lists_the_parser_vocabulary_and_marks_the_current() {
-        // x-b5b8 correction: the ANSI names STAY; each name gains a filled
+        // The ANSI names STAY; each name gains a filled
         // square painted in the active theme's Terminal 16 slot and the
         // resolved hex beside it. The pick still writes the name.
         let pal = lane_pal(&[("zai", "green")]);
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn picker_squares_repaint_when_the_theme_changes() {
-        // x-b5b8 correction: the squares paint the ACTIVE theme's slot - the
+        // The squares paint the ACTIVE theme's slot - the
         // same name resolves to a different square under the paper twin.
         let ui = LaneColorsUi {
             pick: Some(("route".into(), "zai".into())),
