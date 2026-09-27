@@ -339,7 +339,6 @@ def gate_answer_in_process(token: str) -> Optional[str]:
     """C15 own pass and lapsed-clock rule, for when no gate binary resolves."""
     from fno.agents import dispatch
     from fno.agents.self_stamp import resolve_self_session_id
-
     own = resolve_self_session_id()
     if (own and own.casefold() == token.casefold()) or lapsed(token):
         return None
