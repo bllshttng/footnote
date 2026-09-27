@@ -560,13 +560,8 @@ def run_king_wake(
         from fno.bus.log import iter_messages
 
         # One bus read per pass, not one per address: a crown has up to nine.
-        scanned, bus_cut = _setup_bounded(
-            None, lambda: list(iter_messages())
-        )
-        if bus_cut or scanned is None:
-            unread_fn = lambda address: []  # noqa: E731 - degraded: no mail signal
-        else:
-            unread_fn = partial(scan_unread, messages=scanned)
+        scanned, _bus_cut = _setup_bounded(None, lambda: list(iter_messages()))
+        unread_fn = partial(scan_unread, messages=scanned or [])
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
@@ -601,27 +596,22 @@ def run_king_wake(
         summary["budget_spent"] = True
         return summary
 
-    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
-    if court_cut or outcome is None:
-        return {
-            "armed": True,
-            "crowns": 0,
-            "woke": [],
-            "refused": [],
-            "truth_reads": 0,
-            "evaluated": 0,
-            "note": "court read did not complete in its slice bound; crowns wait for the next tick",
-        }
-    targets, note = outcome
     summary: dict[str, Any] = {
         "armed": True,
-        "crowns": len(targets),
+        "crowns": 0,
         "woke": [],
         "refused": [],
         "truth_reads": 0,
         "evaluated": 0,
-        "note": note,
+        "note": "",
     }
+    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
+    if court_cut or outcome is None:
+        summary["note"] = "court read did not complete in its slice bound"
+        return summary
+    targets, note = outcome
+    summary["crowns"] = len(targets)
+    summary["note"] = note
     _step("answers")
     # One question-journal read per tick, shared by every scope like `entries`.
     try:
