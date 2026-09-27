@@ -1012,6 +1012,13 @@ struct View {
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
+    /// The questions block's operator prefs (the toggle, the height, and
+    /// whether answered questions show), each persisted through the view
+    /// store. The block itself reads them at layout time.
+    questions_block: questions::BlockPrefs,
+    /// Pending escape bytes in questions-detail mode (the same split-arrow
+    /// safety as [`View::ans_esc`]).
+    question_esc: Vec<u8>,
     /// The questions block's refresh: the last kick and the in-flight flag
     /// (the feed fold's single-flight discipline), every 10 s.
     questions_kick_at: Option<Instant>,
@@ -1441,6 +1448,10 @@ mod feed_view;
 mod keys_modal;
 mod needs_view;
 mod questions;
+// The per-section view defaults (Expanded/LiveOnly/Collapsed), moved out of
+// this file (file budget); the elsewhere section now takes the Expanded-tier
+// default with the active squad.
+mod section_view;
 // The pane paint pass (blit, frames, dividers, indicator, reveal), moved out
 // of compose_at under the file-budget ratchet .
 mod pane_paint;
@@ -1558,6 +1569,9 @@ struct PeekView {
 struct KeysModal {
     popup: Popup,
     row_events: Vec<Option<Event>>,
+    /// The live `/` filter query. `None` = browsing; `Some` (possibly empty) =
+    /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
+    filter: Option<String>,
 }
 
 /// (US2) The right-click / `m` row context menu over a sideline agent
@@ -2151,6 +2165,8 @@ impl View {
             questions_fold: None,
             questions_degraded: false,
             question_detail: None,
+            question_esc: Vec::new(),
+            questions_block: questions::BlockPrefs::load(),
             questions_kick_at: None,
             questions_inflight: false,
             question_action: None,
@@ -4273,10 +4289,17 @@ impl View {
             return Some(hit);
         }
         // The questions block pins above the court block: a click on its
-        // rows opens the detail overlay on that question.
+        // rows opens the full questions view on that question; the `+N more`
+        // row opens the list. The header toggles nothing here (the key does).
         if col < panel_w {
-            if let Some(id) = questions::hit_at(self, self.term.0 as usize, row) {
-                return Some(ChromeHit::OpenQuestionDetail(id));
+            match questions::hit_at(self, self.term.0 as usize, row) {
+                Some(questions::QuestionHit::Row(id)) => {
+                    return Some(ChromeHit::OpenQuestionDetail(id));
+                }
+                Some(questions::QuestionHit::More) => {
+                    return Some(ChromeHit::OpenQuestionsList);
+                }
+                None => {}
             }
         }
         // Tab strip (row 0, scoped to the content columns since US1): it
@@ -4618,34 +4641,6 @@ impl View {
         }
     }
 
-    /// The `display_rows()` index a hover cell falls on in the sideline, or
-    /// `None` when the cell is not a sideline text cell - a pane, the divider
-    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
-    /// sideline geometry exactly so the highlight lands where a click would
-    ///.
-    fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
-        // The sideline owns row 0 in normal mode (the strip moved right of
-        // the divider), so display row `i` maps directly from `row`. A cell
-        // on the divider or in the strip's content columns returns None.
-        // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
-        let paint_w = self.sideline_paint_w();
-        if paint_w == 0 || col as usize >= paint_w - 1 {
-            return None;
-        }
-        // Full-screen sideline paints below the strip; invert the same
-        // offset the painter used.
-        let top = self.sideline_top();
-        if (row as usize) < top {
-            return None;
-        }
-        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
-            return None;
-        }
-        let i = row as usize - top + self.sideline_offset();
-        (i < self.painted_rows().len()).then_some(i)
-    }
-
     /// Fold one bare-motion (hover) report into the sideline highlight and the
     /// focus-follows-mouse debounce state. Does NOT fire focus - it only
     /// records which pane the pointer is settling on and when it first landed
@@ -4888,81 +4883,6 @@ impl View {
         // pending, the layout that just added the tab opens rename on it. Last
         // so `open_rename` clearing the selector/nav is never re-clobbered.
         self.maybe_prompt_new_tab_name();
-    }
-
-    /// A section's effective view, resolved live every frame. The one
-    /// authority behind both the caret glyph and the row filter, so they can
-    /// never disagree. Order:
-    ///   1. An explicit persisted operator choice wins verbatim - it survives a
-    ///      restart and outranks every computed default below (Locked 2, AC1-FR).
-    ///   2. Else a computed default, recomputed from the layout in hand:
-    ///      - the active squad opens `Expanded`, downgrading to
-    ///        `LiveOnly` when the section is majority-exited so the dead rows
-    ///        fold behind the header's `✗N` while the live agents stay up;
-    ///      - an inactive squad stays `Collapsed` - surfacing live rows across
-    ///        every idle workspace is the opposite of attention-focus;
-    ///      - the pull-section `~ elsewhere` defaults
-    ///        `Collapsed`, one click from their own header + rollup.
-    /// The active-squad default lives HERE, not in a map-seed: a seed is
-    /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
-    /// mid-session, and it pollutes the map that should hold only choices.
-    fn section_view(&self, key: &SectionKey) -> SectionView {
-        if let Some(chosen) = self.section_view.get(key).copied() {
-            return chosen;
-        }
-        match key {
-            SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
-            SectionKey::Squad(_) | SectionKey::Elsewhere => SectionView::Collapsed,
-        }
-    }
-
-    /// The Expanded-tier computed default: `Expanded`, or `LiveOnly` when the
-    /// section is majority-exited (its dead rows then fold behind the header's
-    /// `✗N` while the live rows stay). Only ever downgrades an Expanded default;
-    /// never upgrades a Collapsed inactive squad (Locked 3).
-    fn expanded_or_live_only(&self, key: &SectionKey) -> SectionView {
-        if self.majority_exited(key) {
-            SectionView::LiveOnly
-        } else {
-            SectionView::Expanded
-        }
-    }
-
-    /// Whether `key` names the currently active squad. Compared through
-    /// `squad_matches` (allocation-free) rather than minting a `SectionKey` for
-    /// the active id on every call - `section_view` is per-section-per-frame hot.
-    fn is_active_squad(&self, key: &SectionKey) -> bool {
-        self.layout
-            .squads
-            .iter()
-            .find(|s| s.id == self.layout.active_squad)
-            .is_some_and(|s| squad_matches(s, key))
-    }
-
-    /// Strict-majority-exited over the section's own rows (`exited * 2 > total`).
-    /// Zero rows is never a majority (an empty section keeps Expanded) and a
-    /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
-    /// Walks the same membership `section_dead_rows` does, live off the layout
-    /// and never cached, so it tracks agents exiting mid-session. Only the
-    /// Expanded-tier key (the active squad) reaches it; every other key has
-    /// no squad match and reads as "not a majority".
-    fn majority_exited(&self, key: &SectionKey) -> bool {
-        let Some(id) = self
-            .layout
-            .squads
-            .iter()
-            .find(|s| squad_matches(s, key))
-            .map(|s| s.id)
-        else {
-            return false;
-        };
-        let mut total = 0usize;
-        let mut exited = 0usize;
-        for a in self.layout.agents.iter().filter(|a| a.squad == Some(id)) {
-            total += 1;
-            exited += a.exited as usize;
-        }
-        exited * 2 > total
     }
 
     /// Advance a section one step through the view cycle: pure client
@@ -5323,18 +5243,6 @@ impl View {
         peek.last_fetch = Instant::now();
         peek.refresh_pending = true;
         Some((seq, peek.name.clone()))
-    }
-
-    /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since US1) minus the bottom chrome row,
-    /// minus the court block's rows at the bottom. The block is the
-    /// subtraction point's only second customer, so `clamp_sideline_scroll`
-    /// and `reveal_focus_row` inherit the shrunk window without a second
-    /// fix.
-    fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize)
-            .saturating_sub(self.bottom_row_is_chrome() as usize)
-            .saturating_sub(self.court_block_rows())
     }
 
     /// The sideline TableState's offset, read and written through the Cell
@@ -7094,6 +7002,8 @@ enum ChromeHit {
     /// Open the questions detail overlay on one block row. Carries the id,
     /// not the index: a fold between click and open must not retarget it.
     OpenQuestionDetail(String),
+    /// Open the questions view on the list (the `+N more` row's click).
+    OpenQuestionsList,
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
@@ -10665,6 +10575,9 @@ async fn dispatch_event(
         Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::FocusFeed => feed_view::focus(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
+        Event::ToggleQuestionsBlock => questions::toggle_block(view),
+        Event::ResizeQuestionsBlock(delta) => questions::resize_block(view, delta),
+        Event::ToggleQuestionsDone => questions::toggle_show_done(view),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Hiding the sideline never strands an open composer (it would
@@ -10965,6 +10878,7 @@ async fn apply_hit(
         ChromeHit::OpenFeedDetail(item) => view.feed_detail_of = Some(item),
         // The questions detail overlay: opens on the clicked question.
         ChromeHit::OpenQuestionDetail(id) => view.open_detail_on(&id),
+        ChromeHit::OpenQuestionsList => view.open_questions_list(),
     }
     Ok(())
 }
@@ -11057,123 +10971,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// Which-key modal keys (US3). Esc closes; arrows/pgup scroll+select;
-/// Enter/`click` run the selected row; a bound printable key runs immediately
-/// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
-/// is folded like every other overlay (carried across reads) so a split arrow
-/// sequence can never leak its tail into a pane (codex P2). No key ever reaches
-/// a pane.
-async fn keys_modal_keys(
-    view: &mut View,
-    scanner: &mut Scanner,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.keys_modal_esc);
-    let toks = fold_modal_keys(&mut esc, bytes);
-    view.keys_modal_esc = esc;
-    for tok in toks {
-        if view.keys_modal.is_none() {
-            break; // closed mid-chunk: swallow the rest, never forward
-        }
-        match tok {
-            ModalKey::Esc => view.keys_modal = None,
-            ModalKey::Up => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Up);
-                }
-                view.follow_modal_selection();
-            }
-            ModalKey::Down => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Down);
-                }
-                view.follow_modal_selection();
-            }
-            ModalKey::Left => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Left);
-                }
-            }
-            ModalKey::Right => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Right);
-                }
-            }
-            ModalKey::PageUp => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.scroll_by(-page);
-                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
-                }
-            }
-            ModalKey::PageDown => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.scroll_by(page);
-                    m.popup.clamp_sel_to_view(trows);
-                }
-            }
-            ModalKey::Enter => {
-                if matches!(
-                    keys_modal_execute_selected(view, scanner, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
-                }
-            }
-            ModalKey::Byte(b) => match resolve_chord(b) {
-                // Unbound key dismisses (AC2-EDGE): no action fires.
-                Event::Bell => view.keys_modal = None,
-                // Bound key runs immediately through the SAME dispatch a typed
-                // chord uses (Locked 3), then the modal closes.
-                ev => {
-                    view.keys_modal = None;
-                    // Parity with a typed chord: modal execution arms any
-                    // repeatable event too (the scanner never saw this byte).
-                    scanner.arm_if_repeat(&ev, Instant::now());
-                    if matches!(
-                        dispatch_event(view, ev, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-            },
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// Run the modal's selected row (Enter/click) through the shared dispatch, then
-/// close - a header/meta row with no chord BELs and stays open (nothing ran, so
-/// the "execute always closes" invariant is not tripped). Returns the dispatch
-/// flow so a detach chord (prefix+d) run from the modal actually detaches.
-async fn keys_modal_execute_selected(
-    view: &mut View,
-    scanner: &mut Scanner,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<DispatchFlow, String> {
-    let ev = view.keys_modal.as_ref().and_then(|m| {
-        m.popup
-            .selected()
-            .and_then(|(ri, _)| m.row_events.get(ri).cloned().flatten())
-    });
-    match ev {
-        Some(ev) => {
-            view.keys_modal = None;
-            // Parity with a typed chord: modal execution arms any repeatable
-            // event too (the scanner never saw a key here).
-            scanner.arm_if_repeat(&ev, Instant::now());
-            dispatch_event(view, ev, sock_w).await
-        }
-        None => {
-            let _ = raw_out(b"\x07");
-            Ok(DispatchFlow::Continue)
-        }
-    }
 }
 
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the

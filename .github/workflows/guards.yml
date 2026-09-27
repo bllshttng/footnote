@@ -137,7 +137,10 @@ jobs:
         working-directory: crates/fno-agents
         run: |
           cargo build --bin fno-agents
-          cp target/debug/fno-agents "$HOME/.cargo/bin/"
+          # Runner-only: replayed locally this overwrites the deployed binary
+          # in place and macOS SIGKILLs every launch. Pin a local build with
+          # FNO_AGENTS_FRONT instead.
+          if [ "$CI" = true ]; then cp target/debug/fno-agents "$HOME/.cargo/bin/"; fi
 
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}
@@ -417,6 +420,20 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/ci/check-identity-stamp-sites.sh
+
+      # A skipped test reads green while a failing one blocks the merge, so the
+      # cheapest way past a red test is to skip it. This ratchet refuses any
+      # pytest skip site the checked-in baseline does not name, until the PR
+      # that adds it records a line with a reason, or fixes the test.
+      - name: pytest skip-site ratchet
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-pytest-skips.sh
+
+      - name: pytest skip-site ratchet selftest
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_pytest_skips.sh
 
       # From plan-rung-authority.yml.
       - name: One readiness authority (Python table, shell verb, Rust delegation)

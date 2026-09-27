@@ -56,6 +56,7 @@ def _agy_only_run(monkeypatch, responder):
     monkeypatch.setattr(agy.subprocess, "run", _run)
 
 
+@pytest.mark.dev_build
 def test_mint_reads_the_conversation_id_and_pins_the_argv(monkeypatch, tmp_path, rust_door):
     seen: dict = {}
 
@@ -76,6 +77,7 @@ def test_mint_reads_the_conversation_id_and_pins_the_argv(monkeypatch, tmp_path,
     assert seen["cwd"] == str(tmp_path)
 
 
+@pytest.mark.dev_build
 def test_mint_carries_the_spawn_axes(monkeypatch, tmp_path, rust_door):
     """The mint turn launches on the spawn's selected model, effort and
     permission posture - not the harness defaults (the audit's A4: the first
@@ -110,6 +112,7 @@ def test_mint_carries_the_spawn_axes(monkeypatch, tmp_path, rust_door):
         ),
     ],
 )
+@pytest.mark.dev_build
 def test_every_unreadable_mint_refuses(monkeypatch, tmp_path, completed, fragment, rust_door):
     _agy_only_run(monkeypatch, lambda argv, kwargs: completed)
 
@@ -118,6 +121,7 @@ def test_every_unreadable_mint_refuses(monkeypatch, tmp_path, completed, fragmen
     assert fragment in str(caught.value)
 
 
+@pytest.mark.dev_build
 def test_a_timed_out_mint_refuses_rather_than_inventing_an_id(monkeypatch, tmp_path, rust_door):
     def responder(argv, kwargs):
         raise subprocess.TimeoutExpired(cmd="agy", timeout=1.0)

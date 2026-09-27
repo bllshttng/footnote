@@ -87,10 +87,9 @@ def test_thread_viewport_resolver_uses_thread_identity_not_pane_zero(monkeypatch
 
     assert retask.resolve_thread_viewport(_thread_row()) == ("main", 993)
     # The door keys on the row name (portal_reach row_answers_key); the
-    # fno_id rides the join below. A machine reach asks for a portal of its
-    # own (x-3ea6) so it never repoints the operator's seat.
+    # fno_id rides the join below. The reach carries no baked placement:
+    # no flag tunes the row's open portal, else portal 0 serves it.
     assert calls[0] == [
         "fno", "mux", "thread", "thread-worker", "--server", "main",
-        "--portal", "new", "--tab", "new",
     ]
     assert calls[1][:5] == ["fno", "mux", "pane", "ls", "--server"]

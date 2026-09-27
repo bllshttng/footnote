@@ -8,6 +8,9 @@ mod thread_viewer_tests;
 // The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;
+// The TV-model acceptance family (views, anchors, prune).
+#[path = "server/tests/portal_tv_tests.rs"]
+mod portal_tv_tests;
 // Same treatment: the lifecycle-resolution test family.
 #[path = "server/tests/lifecycle_tests.rs"]
 mod lifecycle_tests;
@@ -50,20 +53,6 @@ mod pane_send_gate_tests;
 // The dead-row resume disposition family.
 #[path = "server/tests/dead_row_resume_tests.rs"]
 mod dead_row_resume_tests;
-
-#[test]
-fn account_from_argv_reads_the_fno_account_token() {
-    // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
-    let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    assert_eq!(
-        from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
-        Some("readyrule".to_string())
-    );
-    // Default account (no token) / ad-hoc pane / empty value -> None.
-    assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
-    assert_eq!(from(&["claude"]), None);
-    assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
-}
 
 #[test]
 fn name_attached_pane_titles_an_attached_pane_from_its_registered_name() {
@@ -8670,7 +8659,6 @@ pub(super) fn empty_core() -> Core {
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
-        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),

@@ -160,7 +160,7 @@ pub(crate) fn merge_authority(cwd: &Path) -> Value {
 /// exit 0 clear (None), 3 held (the reason), anything else unreadable (None,
 /// like Python's fail-open hold read).
 pub(crate) fn hold_reason(cwd: &Path, pr: u64) -> Option<String> {
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(crate::scrape::fno_bin())
         .args(["do", "pr", "hold-check", &pr.to_string()])
         .current_dir(cwd)
         .output()

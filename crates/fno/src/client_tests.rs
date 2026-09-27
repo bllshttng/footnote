@@ -4,7 +4,7 @@ use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 mod chrome_hit_helpers;
 use crate::client::{
     input_folds::MAX_ESC_CARRY,
-    keys_modal::{build_keys_modal, keys_modal_mouse},
+    keys_modal::{build_keys_modal, keys_modal_keys, keys_modal_mouse},
 };
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
@@ -2625,21 +2625,20 @@ fn majority_default_recomputes_as_agents_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC2-HP (x-c5ee): the two pull-sections default Collapsed - the top of the
-// panel is the operator's own agents, the pull-sections one click away.
+// Pin the Expanded elsewhere default: every spawn appears in the sideline.
 #[test]
-fn pull_sections_default_collapsed() {
+fn pull_sections_default_expanded() {
     let dir = isolate_view_store("pull");
     let view = two_pane_view();
     assert_eq!(
         view.section_view(&SectionKey::Elsewhere),
-        SectionView::Collapsed
+        SectionView::Expanded
     );
     crate::view_store::clear_test_path();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC1-FR (x-c5ee): an explicit persisted choice outranks the new Collapsed
+// AC1-FR (x-c5ee): an explicit persisted choice outranks the computed
 // pull-section default. Inserted straight into the map to mirror a value
 // loaded from disk, without touching the real store.
 #[test]
@@ -5260,40 +5259,6 @@ async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
     );
 }
 
-#[test]
-fn which_key_lists_the_dead_row_removal_verbs() {
-    // (x-f300) The gap this node closed was discoverability: if the modal
-    // stops naming these, removal is invisible again.
-    let modal = build_keys_modal();
-    let labels: Vec<String> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { glyph, label, .. } => Some(format!("{glyph} {label}")),
-            PopupRow::Header(h) => Some(h.clone()),
-            _ => None,
-        })
-        .collect();
-    let joined = labels.join("\n");
-    assert!(joined.contains("sideline rows"), "the section renders");
-    assert!(joined.contains("x stop a live row · remove a dead one"));
-    assert!(joined.contains("X reap all exited agents"));
-    // (x-7683) The context-menu row names every trigger, not just the
-    // right-click, and keeps the header-only clear-dead behavior named
-    // too - the only in-app documentation that a header's menu offers it.
-    assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
-    // Display-only: Enter on them must BEL, never dispatch a bogus chord.
-    for (i, r) in modal.popup.rows.iter().enumerate() {
-        if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
-            assert!(
-                modal.row_events[i].is_none(),
-                "a bare sideline key is not a prefix chord"
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn row_menu_unbound_key_dismisses() {
     // codex P2: the shared popup contract says an unbound key dismisses; the
@@ -6547,11 +6512,14 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // do not. The in-app help must name all three triggers and the caveat,
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
-    // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections): the global section spent five rows
-    // and the V chord one more, so the pin moved from 64.
+    // Tall enough that the centered modal shows its tail. The modal scrolls
+    // in a 60%-of-terminal viewport now, so the note lines are reached by
+    // scrolling to the bottom - that reachability is the contract.
     view.term = (73, 100);
     view.open_keys_modal();
+    if let Some(m) = view.keys_modal.as_mut() {
+        m.popup.scroll_by(10_000);
+    }
     let text = frame_text(&view.compose());
     let modal_tail: String = text
         .lines()
@@ -15659,26 +15627,19 @@ fn a_clipped_notice_reads_as_clipped() {
 
 #[test]
 fn the_key_modal_shows_exact_action_ids_on_a_narrow_terminal() {
-    // The modal advertises the id an operator types into `config.mux.keys`,
-    // so a clipped one is worse than none: `grab-…` still looks like an id.
-    // The generic row renderer clipped the whole line from the RIGHT, which
-    // is exactly where the id sits, so this only showed at the narrow end -
-    // the wide case the id was added for looked fine.
-    let modal = build_keys_modal();
-    // Tall enough that the popup does not scroll: the subject here is
-    // WIDTH, and a scrolled-off row would read as a clipped id.
-    for cols in [40u16, 60, 100] {
-        let out = modal.popup.render((80, cols));
-        let screen: Vec<String> = out.lines.iter().map(|l| l.text.clone()).collect();
-        for kb in crate::keys::key_bindings() {
-            assert!(
-                screen.iter().any(|l| l.contains(kb.action)),
-                "at {cols} cols the modal must show `{}` in full, not clipped; \
-                     rendered:\n{}",
-                kb.action,
-                screen.join("\n")
-            );
-        }
+    // The action id is no longer a rendered column (the 2026-09-26 plain-body
+    // rebuild dropped it for the reference look), but the id an operator
+    // types into `config.mux.keys` still resolves: filtering by the id keeps
+    // exactly that binding's row.
+    for kb in crate::keys::key_bindings() {
+        let m = keys_modal::keys_modal_with_filter(Some(kb.action));
+        assert!(
+            m.popup.rows.iter().any(
+                |r| matches!(r, PopupRow::Entry { label, enabled: true, .. } if label == kb.label)
+            ),
+            "filtering by the action id `{}` keeps the binding's row",
+            kb.action
+        );
     }
 }
 

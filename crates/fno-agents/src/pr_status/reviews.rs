@@ -40,7 +40,7 @@ fn graphql_exec(cwd: &Path, args: &[String]) -> Option<String> {
         "--".to_string(),
     ];
     argv.extend_from_slice(args);
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(crate::scrape::fno_bin())
         .args(&argv)
         .current_dir(cwd)
         .output()

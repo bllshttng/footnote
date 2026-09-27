@@ -2802,16 +2802,6 @@ def cmd_spawn(
         sys.stdout.write(result.reply or "")
         sys.stdout.flush()
 
-    pane_view = (
-        defaulted and substrate == "bg" and spawn_succeeded
-        and result.kind == "created" and os.environ.get("FNO_PANE")
-    )
-    if pane_view:
-        # Post-receipt, best effort: a placement failure never recolors the verdict.
-        from fno.agents.spawn_defaults import place_default_view
-
-        place_default_view(result.name)
-
 
 #: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:
 #: Click already spends 2 on usage errors including "no such command", so a
@@ -3773,6 +3763,11 @@ def cmd_orphans(
 from fno.agents.pane_identity import cmd_pane_identity  # noqa: E402
 
 agents_app.command("pane-identity", hidden=True)(cmd_pane_identity)
+
+# The batch transcript-path answer lives in fno.agents.transcript_paths (file budget).
+from fno.agents.transcript_paths import cmd_transcript_paths  # noqa: E402
+
+agents_app.command("transcript-paths", hidden=True)(cmd_transcript_paths)
 
 
 
@@ -4933,8 +4928,7 @@ from fno.agents import (  # noqa: E402,F401
 def incident(ctx: typer.Context) -> None:
     """Durable fleet incident breaker.
 
-    stop --reason T [--by X] [--hold spawns,tests,merges] | clear --reason T [--by X] | status [--json] | check [--scope S].
-    No --hold holds all three scopes; status prints each scope as holds or admits.
+    stop --reason T [--by X] | clear --reason T [--by X] | status [--json] | check [--scope S].
     """
     import subprocess
 

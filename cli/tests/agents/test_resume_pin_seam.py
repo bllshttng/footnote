@@ -186,10 +186,7 @@ def test_ac6_edge_unavailable_owner_refuses_never_defaults(tmp_path, monkeypatch
     assert "unavailable" in str(excinfo.value)
 
 
-requires_rust = pytest.mark.skipif(
-    __import__("fno.rust_binary", fromlist=["find_dev_binary"]).find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 def _transcript(tmp_path: Path, uuid: str, model_id: str, marketing: str | None) -> None:

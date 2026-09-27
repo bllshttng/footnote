@@ -113,7 +113,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_LOOPCHECK_NO_COMMENT` | rs | unclear: crates/fno-agents/src/loopcheck.rs:3533 |
 | `FNO_LOOPCHECK_NO_NOTIFY` | rs | unclear: crates/fno-agents/src/loopcheck.rs:3514 |
 | `FNO_LOOPCHECK_READ_TIMEOUT_MS` | rs | unclear: crates/fno-agents/src/loopcheck.rs:7900 |
-| `FNO_LOOPS_MAIL_BIN` | rs | Overrides the binary `loops pause-all`/`resume-all` shells for the mail leg (`agents mail hold`); default `fno`. Lets a test point it at a stub. |
+| `FNO_LOOPS_MAIL_BIN` | rs | Overrides the mail-hold helper for `loops pause-all`/`resume-all`; status and arm default to `fno` beside the running binary, then PATH, while owner release uses the current `fno-agents` binary. Lets a test point it at a stub. |
 | `FNO_MCP_SIDECAR_LOG` | py | unclear: cli/src/fno/mcp/sidecar.py:646 |
 | `FNO_MUX_ADMISSION_NAMESPACE` | rs | unclear: crates/fno/src/process_admission.rs:733 |
 | `FNO_MUX_DIR` | rs | unclear: crates/fno/src/mux_cli.rs:1533 |
@@ -165,6 +165,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RUNTIME_STATE_PATH` | py+rs | Overrides the provider runtime-state file (quota locks, usage); the default is ~/.fno/runtime-state.json. |
 | `FNO_SERVER` | py | Names the target mux server. |
 | `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from. |
+| `FNO_SESSION_ID` | rs | Current session id. `fleet-incident` uses it for caller attribution; `loops pause-all` records a full UUID or `ses_` id as the mail-hold owner, falling back to `fno whoami --json` otherwise. |
 | `FNO_SESSION_HARNESS` | rs | The launcher-stamped harness half of the session-proof pair; a known name beside a live `FNO_SESSION_PID` answers the harness before the census walk (spawn_context.rs stamp_pair_harness). |
 | `FNO_SESSION_PID` | rs | The launcher-stamped pid half of the session-proof pair; must be a positive, live pid or the pair is ignored (spawn_context.rs stamp_pid_is_live). |
 | `FNO_SIDECAR_SOCKET` | py | unclear: cli/src/fno/mcp/sidecar.py:97 |
@@ -175,6 +176,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_SPAWN_ORIGIN` | py+rs | Explicit dispatch-origin JSON the spawn door validates onto the request; malformed refuses. |
 | `FNO_SPAWN_OWNER` | py+rs | Explicit dispatch-owner JSON the spawn door validates onto the request; must be exported together with FNO_SPAWN_ORIGIN. |
 | `FNO_SPAWN_TRIGGER` | py | unclear: cli/src/fno/agents/dispatch.py:860 |
+| `FNO_STATE_DIR` | py+rs | Pins fno's config state root: `state_dir` and `locks_dir` read it ahead of their config/`$HOME` defaults, and the Rust default graph path and the backlog porcelain reads serve from it ahead of config. `seal_state_root` sets it around a forwarded HOME so a spawned worker's graph, ledger, and locks stay on the parent's root. |
 | `FNO_STORE_KEEPER_DRIFT_CHECK_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:654 |
 | `FNO_STORE_KEEPER_IDLE_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:115 |
 | `FNO_STORE_KEEPER_RSS_KB` | py | Store keeper resident-memory bound in KiB for the watchdog's over-bound reap verdict; overrides the 2 GiB default. |

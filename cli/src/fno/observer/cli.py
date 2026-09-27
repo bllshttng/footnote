@@ -140,38 +140,6 @@ def _read_plan_text(item: dict, node: Optional[dict], gh_runner) -> Optional[str
     return None
 
 
-def _review_id_sets(pr_number: int, repo: Optional[str], gh_runner) -> Optional[dict]:
-    """Fetch the finding/addressed/skipped id sets for a review corpus item.
-
-    Returns None (-> exclude, coverage gap) when the correctness-bearing
-    resolved-thread state is unavailable (gh down / rate-limited), per AC1-ERR.
-    """
-    from fno.retro import harvest
-
-    threads, thread_unavail = harvest.fetch_review_thread_state(pr_number, repo=repo, gh_runner=gh_runner)
-    if thread_unavail:
-        return None
-    comments = harvest.fetch_review_comments(pr_number, repo=repo, gh_runner=gh_runner)
-    commit_dates, _ = harvest.fetch_pr_commit_dates(pr_number, repo=repo, gh_runner=gh_runner)
-    skipped_rows, _ = harvest.fetch_skipped_rows(pr_number, repo=repo, gh_runner=gh_runner)
-
-    # A finding = a top-level bot reviewer comment (the retro harvest's own
-    # candidate definition). Author/human replies and threaded replies are not
-    # findings.
-    all_finding_ids = {
-        c["id"] for c in comments if c.get("is_bot") and not c.get("in_reply_to_id") and c.get("id")
-    }
-    addressed = harvest.addressed_ids_from_threads(threads) | harvest.addressed_ids_from_comments(
-        comments, commit_dates
-    )
-    skipped = harvest.skipped_ids_from_rows(skipped_rows, threads)
-    return {
-        "all_finding_ids": all_finding_ids,
-        "addressed_ids": addressed,
-        "skipped_ids": skipped,
-    }
-
-
 def _default_gh(args: list[str]) -> "tuple[int, str, str]":
     try:
         p = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60)
@@ -210,18 +178,11 @@ def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Opt
         if skill == "blueprint":
             plan_text = _read_plan_text(item, node, gh_runner)
             return fold.score_blueprint_item(item, plan_text=plan_text)
-        # review
-        pr_number = (node or {}).get("pr_number")
-        if not pr_number:
-            return {"finding_precision": None}
-        ids = _review_id_sets(int(pr_number), _repo_from_pr_url((node or {}).get("pr_url")), gh_runner)
-        if ids is None:
-            return {"finding_precision": None}
-        return fold.score_review_item(**ids)
     except Exception as exc:  # any unforeseen I/O fault -> coverage gap, not crash
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
         dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
         return {d: None for d in dims}
+    return {"finding_precision": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -324,7 +285,8 @@ def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
         f"({summary['corpus_size']} attributable items)\n"
         f"verdicts: pass={summary['pass_count']} "
         f"degraded={summary['degraded_count']} fail={summary['fail_count']}\n"
-        f"{caveat}\n"
+        + (f"{summary['evidence_line']}\n" if summary.get("evidence_line") else "")
+        + f"{caveat}\n"
         f"## Failure ranking\n{ranking}\n",
         encoding="utf-8",
     )
@@ -396,8 +358,12 @@ def sweep(
 
     findings: list[tuple[str, str]] = []
     scored_count = 0
-    for item in items:
-        scores = _score_item(item, skill, by_id, gh_runner)
+    review_ev = _review_evidence(items, by_id) if skill == "review" else None
+    for n, item in enumerate(items):
+        if review_ev is not None:
+            scores = {"finding_precision": (review_ev["items"][n] or {}).get("finding_precision")}
+        else:
+            scores = _score_item(item, skill, by_id, gh_runner)
         item_scored = False
         for dimension, verdict in scores.items():
             if verdict is None:
@@ -442,6 +408,8 @@ def sweep(
             err=True,
         )
         raise typer.Exit(5)
+    if skill == "review" and review_ev is not None:
+        summary["evidence_line"] = review_ev.get("evidence_line", "")
     digest = _write_digest(summary, skill, mode="sweep")
 
     state = "ok" if scored_count == len(items) else "partial"
@@ -453,8 +421,9 @@ def sweep(
         f"  scored {scored_count}/{len(items)} attributable items "
         f"({summary['coverage_pct']}% coverage)\n"
         f"  verdicts: pass={summary['pass_count']} degraded={summary['degraded_count']} "
-        f"fail={summary['fail_count']}\n"
-        f"  digest: {digest}"
+        f"fail={summary['fail_count']}"
+        + (f"\n  {summary['evidence_line']}" if summary.get("evidence_line") else "")
+        + f"\n  digest: {digest}"
     )
 
 
@@ -472,23 +441,42 @@ def _arg_value(args: list[str], flag: str) -> Optional[str]:
     return args[i] if 0 <= i < len(args) else None
 
 
-def _judge_via_rust(argv: list[str]) -> Optional[dict]:
-    """One fno-agents judge round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
+def _review_evidence(items: list[dict], by_id: dict) -> dict:
+    """One review-summary --evidence round-trip; a fault leaves every item a gap, digest named."""
+    gap = {"items": [{} for _ in items],
+           "evidence_line": "evidence: unread (fno-agents review-summary --evidence failed)"}
+    payload = [{"node": n.get("id"), "pr_number": n.get("pr_number")}
+               for n in (by_id.get(i.get("graph_node_id")) or {} for i in items)]
+    out = _judge_via_rust(["--evidence"], verb="review-summary", stdin_payload=payload, timeout=120)
+    if isinstance(out, dict) and len(out.get("items", [])) == len(items):
+        return out
+    return gap
+
+
+def _judge_via_rust(
+    argv: list[str], *, verb: str = "judge", stdin_payload=None, timeout=None
+) -> Optional[dict]:
+    """One fno-agents verb round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
     # Labels mode caps at rows x dimensions x the spawn's own 600s bound.
-    timeout = 14400 if "--labels" in argv else 3600
+    if timeout is None:
+        timeout = 14400 if "--labels" in argv else 3600
     try:
-        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            [str(binary), verb, *argv],
+            input=json.dumps(stdin_payload) if stdin_payload is not None else None,
+            capture_output=True, text=True, timeout=timeout,
+        )
         out = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         detail = f"bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})" if isinstance(exc, ValueError) else str(exc)
-        typer.echo(f"judge fault: {detail}", err=True)
+        typer.echo(f"{verb} fault: {detail}", err=True)
         return None
     if isinstance(out, dict) and out.get("error"):
-        typer.echo(f"judge fault: {out['error']}", err=True)
+        typer.echo(f"{verb} fault: {out['error']}", err=True)
         return None
     return out
 
@@ -1041,7 +1029,7 @@ def _replay(
 
     # Pause gate at the corpus-item boundary (AC / Locked Decision 10).
     if loops_paused():
-        typer.echo("paused: loops pause-all sentinel in effect; stopping cleanly before replay.")
+        typer.echo("paused: loop halt in effect; stopping cleanly before replay.")
         raise typer.Exit(0)
 
     corpus, by_id = _load_corpus(skill, since)

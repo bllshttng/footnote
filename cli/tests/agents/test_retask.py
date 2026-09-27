@@ -493,7 +493,8 @@ def test_thread_viewport_reaches_by_registry_name_and_joins_the_opened_pane(
     monkeypatch.setattr(retask.subprocess, "run", run)
 
     assert retask.resolve_thread_viewport(entry) == ("main", 7)
+    # The reach carries no baked placement: no flag tunes the row's open
+    # portal, else the door's own portal 0 serves it.
     assert calls[0] == [
         "fno", "mux", "thread", "bp-x", "--server", "main",
-        "--portal", "new", "--tab", "new",
     ]

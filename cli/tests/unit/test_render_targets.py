@@ -16,16 +16,12 @@ from typing import Generator
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
 from fno.graph.store import commit_rows_via_store, render_canonical_views
 
 # Since the store port every mutation here rides the keeper, so the module
 # needs the compiled runtime and skips whole where the smoke harness deleted
 # the worker binary (the parity-test convention).
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
@@ -403,6 +399,35 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     # The mutation itself must not be wedged by the public refusal.
     row = _read_graph(graph)[0]
     assert row["priority"] == "p1"
+
+
+def test_leak_refusal_fires_the_render_alert(_isolate, tmp_path, monkeypatch):
+    # The push script's bare exit 1 was invisible under launchd and
+    # the live page sat stale. A refused render alerts through the same
+    # `fno inbox notify` lane the push script uses.
+    target = _isolate["target"]
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"',
+        tmp_path,
+        monkeypatch,
+    )
+    fired: list[tuple[str, str]] = []
+
+    def fake_notify(title: str, message: str, pointer: str = "") -> tuple[int, str | None]:
+        fired.append((title, message))
+        return 0, None
+
+    monkeypatch.setattr("fno.notify._impl.send_notification", fake_notify)
+
+    graph = _isolate["graph"]
+    _write_graph(graph, [_entry("ab-leakalt0", title="x-1234 leaks here")])
+    commit_rows_via_store(graph, lambda nodes: nodes)
+    render_canonical_views()
+
+    assert not target.exists(), "the target must still be refused"
+    assert fired, "a refused render must alert"
+    assert fired[0][0] == "roadmap render refused"
+    assert "node-id" in fired[0][1] and "ab-leakalt0" in fired[0][1]
 
 
 def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):

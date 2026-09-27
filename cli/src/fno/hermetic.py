@@ -243,6 +243,14 @@ _RUNNER_PASSTHROUGH = (
     # opt-in live agy journey. Real HOME is restored because agy's credential,
     # its conversation store and its Stop hooks.json all live there.
     "FNO_AGY_LIVE",
+    # opt-in live codex journey (cli/tests/agents/test_codex_thread_effort_journey.py).
+    # Without this keep the FNO_* prefix sweep clears the flag before the module
+    # reads it, so the journey skips for someone who set it - an acceptance
+    # nobody can run. It spends real tokens only when the flag is set.
+    "FNO_CODEX_LIVE",
+    # opt-in live relay journey (cli/tests/relay/test_roundtrip.py): drives the
+    # live daemon RPC substrate, same skip-for-someone-who-set-it trap.
+    "FNO_LIVE_RELAY",
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which

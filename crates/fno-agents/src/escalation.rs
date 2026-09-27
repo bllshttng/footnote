@@ -170,7 +170,10 @@ pub fn parse(text: &str) -> Escalation {
     esc.reversible = section(SECTION_REVERSIBLE);
     esc.cost_if_wrong = section(SECTION_COST_IF_WRONG);
     esc.meanwhile = section(SECTION_MEANWHILE);
-    esc.why_user = section(SECTION_WHY_USER);
+    let why_user = section(SECTION_WHY_USER);
+    if !why_user.is_empty() {
+        esc.why_user = why_user;
+    }
     esc
 }
 
@@ -179,6 +182,23 @@ fn is_numbered(line: &str) -> bool {
     chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false)
         && chars.next() == Some('.')
         && chars.next() == Some(' ')
+}
+
+/// The reasons only a user can answer, shared by the ask gate and the
+/// question sweep: a question carrying one of these in why_user survives
+/// its node closing, whatever the ask gate decided.
+pub fn why_user_is_user_only(why: &str) -> bool {
+    let why = why.to_ascii_lowercase();
+    [
+        "irreversible",
+        "money",
+        "credential",
+        "outside",
+        "product",
+        "taste",
+    ]
+    .iter()
+    .any(|k| why.contains(k))
 }
 
 fn parse_options(body: &str) -> Vec<EscalationOption> {
@@ -432,6 +452,22 @@ The king waits. A force push cannot be undone.
             "{body}"
         );
         assert!(!body.contains("x-aaaa"), "no id in the body: {body}");
+    }
+
+    #[test]
+    fn frontmatter_why_user_survives_an_absent_why_user_section() {
+        // The frontmatter key must not be overwritten by an absent section;
+        // a present section wins.
+        let frontmatter_only = format!(
+            "---\nclass: product\nstatus: open\nnode: x-aaaa\nraised_by: k\nraised_at: 2026-09-15T09:00:00Z\ndeadline: 2026-09-16T09:00:00Z\nrecommend: 1\non_silence: wait\nwhy_user: a product or taste call\n---\n# t\n\n## What is being decided\nd\n\n## Why it matters now\nw\n\n## Options\n1. A. What happens next: n.\n2. B. What happens next: m.\n\n## Recommendation\nr\n\n## If no answer by the deadline\nx\n"
+        );
+        assert_eq!(parse(&frontmatter_only).why_user, "a product or taste call");
+
+        let with_section = frontmatter_only.replace(
+            "## If no answer by the deadline",
+            "## Why user\nirreversible\n\n## If no answer by the deadline",
+        );
+        assert_eq!(parse(&with_section).why_user, "irreversible");
     }
 
     #[test]

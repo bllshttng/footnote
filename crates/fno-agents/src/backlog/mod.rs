@@ -27,6 +27,7 @@ pub mod note_stale;
 pub mod orphan_plans;
 pub mod patch;
 pub mod pull_requests;
+pub mod rank_cli;
 pub mod receipt;
 pub mod relations;
 pub mod render;
@@ -34,6 +35,7 @@ pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod title_gate;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};

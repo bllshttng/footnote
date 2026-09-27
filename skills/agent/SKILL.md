@@ -76,6 +76,8 @@ truth. For the full subcommand map - which are human-facing vs
 machine-internal vs exploratory channel infra - see
 [references/fno-agents-subcommands.md](references/fno-agents-subcommands.md).
 
+Machine and targeted loop halts use existing `fno agents incident stop|clear` commands. Matching sessions refuse watchdog resumes and PR nudges until clear or expiry.
+
 Route on the verb, then run the matching section below.
 
 ---
@@ -409,7 +411,8 @@ normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
 only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
 thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
 one-shot `claude -p` / `codex --exec` / `agy -p`);
-an empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam; pass `--portal N` to open the view with the spawn.
+
+An empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam. A spawn with no placement flag opens no view. A default never creates one. When the work needs a screen, the mux thread door tunes one.
 Pass `--node` whenever `node` is non-empty. The spawn derives the verb from the node, so a build message need not name one; a typed `/fno:target` or `/fno:blueprint` that disagrees with the node's verb is refused. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 

@@ -17,10 +17,12 @@ use crate::paths::AgentsHome;
 use crate::state;
 use crate::truth_probe::{family1_truth_probe_many, TruthProbe};
 
-/// Refusal exit: the session's node or PR now has a different live holder.
+/// Refusal exit: a different live holder or a loop pause blocks the resume.
 /// 17 is unused in the resume family (16 belongs to resume_wake and
 /// pane_relaunch).
 pub const RESUME_REASSIGNED_EXIT: i32 = 17;
+/// Refusal exit: a fleet-breaker loop halt is still active for this subject.
+pub const RESUME_PAUSED_EXIT: i32 = 19;
 
 /// The revival window a node reservation holds: long enough to relaunch, and
 /// freed early by pid death (the claim is pid-liveness anchored).
@@ -224,6 +226,97 @@ read it with fno agents truth {who}.",
     Some(RESUME_REASSIGNED_EXIT)
 }
 
+fn subject_for_entry<'a>(
+    entry: &Value,
+    session_id: &str,
+    cwd: &'a std::path::Path,
+) -> crate::fleet_incident::Subject<'a> {
+    let mut session_ids = Vec::new();
+    for id in [
+        Some(session_id),
+        entry.get("session_id").and_then(Value::as_str),
+        entry.get("harness_session_id").and_then(Value::as_str),
+        entry.get("codex_session_id").and_then(Value::as_str),
+        entry.get("claude_session_uuid").and_then(Value::as_str),
+        entry.get("claude_session_id").and_then(Value::as_str),
+        entry.get("codex_thread_id").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !id.is_empty() && !session_ids.iter().any(|existing| existing == id) {
+            session_ids.push(id.to_string());
+        }
+    }
+    crate::fleet_incident::Subject {
+        session_ids,
+        node: entry
+            .get("node")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        territory: entry
+            .get("territory")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cwd,
+    }
+}
+
+pub(crate) fn loop_pause_hold(
+    home: &AgentsHome,
+    subject: &crate::fleet_incident::Subject<'_>,
+) -> bool {
+    !matches!(
+        crate::fleet_incident::verdict_for_subject_at(home, "loops", subject),
+        crate::fleet_incident::Verdict::Clear(_)
+    )
+}
+
+/// Refuse every wake route while the subject's loop door is held. The
+/// watchdog and PR nudge both enter through `fno agents resume`.
+pub(crate) fn pause_refusal_for_entry(
+    home: &AgentsHome,
+    row_name: &str,
+    session_id: &str,
+    entry: &Value,
+    cwd: &str,
+) -> Option<i32> {
+    let cwd = std::path::Path::new(cwd);
+    let subject = subject_for_entry(entry, session_id, cwd);
+    match crate::fleet_incident::verdict_for_subject_at(home, "loops", &subject) {
+        crate::fleet_incident::Verdict::Clear(_) => None,
+        crate::fleet_incident::Verdict::Stopped(record) => {
+            let clear = match record
+                .target
+                .as_deref()
+                .and_then(|target| target.split_once(':'))
+            {
+                Some(("session", id)) => {
+                    format!("fno agents incident clear --session {id} --reason '<why>'")
+                }
+                Some(("territory", scope)) => {
+                    format!("fno agents incident clear --territory {scope} --reason '<why>'")
+                }
+                _ => "fno agents incident clear --reason '<why>'".to_string(),
+            };
+            eprintln!(
+                "fno agents resume: refused: {row_name} is paused by {} at generation {}: {}. \
+                 Clear the matching halt with {clear}.",
+                record.target.as_deref().unwrap_or("machine"),
+                record.generation,
+                record.reason
+            );
+            Some(RESUME_PAUSED_EXIT)
+        }
+        crate::fleet_incident::Verdict::Unavailable(detail) => {
+            eprintln!(
+                "fno agents resume: refused: cannot verify the loop pause for {row_name}: {detail}"
+            );
+            Some(RESUME_PAUSED_EXIT)
+        }
+    }
+}
+
 /// Gate plus atomic reservation. A dispatch racing this resume is decided by
 /// the claim file itself: the reserve acquires `node:<id>` under the
 /// resuming session's own holder, and same-holder acquire is idempotent, so
@@ -372,6 +465,86 @@ mod tests {
             "status": "in_progress",
             "sessions": [{"phase": "execute", "session_id": session_id}],
         })
+    }
+
+    fn write_session_pause(home: &AgentsHome, session_id: &str) {
+        let dir = home.root().join("fleet-stop.d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("session-{session_id}.json")),
+            json!({
+                "version": 1,
+                "state": "stopped",
+                "generation": 1,
+                "changed_at": "2026-06-05T00:00:00Z",
+                "changed_by": "operator",
+                "reason": "targeted pause",
+                "holds": ["loops"],
+                "target": format!("session:{session_id}"),
+                "expires_at": "2099-12-31T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn loop_pause_refuses_only_its_targeted_resume_subject() {
+        let (home, dir) = registry_home("loop-pause");
+        let session_id = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        write_session_pause(&home, session_id);
+        let entry = json!({
+            "node": "x-child",
+            "session_id": session_id,
+            "harness_session_id": session_id,
+        });
+        let other = json!({
+            "node": "x-other",
+            "session_id": "11111111-2222-3333-4444-555555555555",
+        });
+
+        assert_eq!(
+            pause_refusal_for_entry(&home, "worker", session_id, &entry, "/tmp"),
+            Some(RESUME_PAUSED_EXIT)
+        );
+        assert_eq!(
+            pause_refusal_for_entry(
+                &home,
+                "other",
+                "11111111-2222-3333-4444-555555555555",
+                &other,
+                "/tmp"
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loop_pause_ignores_a_machine_record_holding_only_spawns() {
+        let (home, dir) = registry_home("loop-spawns-only");
+        std::fs::write(
+            home.fleet_stop_json(),
+            json!({
+                "version": 1,
+                "state": "stopped",
+                "generation": 1,
+                "changed_at": "2026-06-05T00:00:00Z",
+                "changed_by": "operator",
+                "reason": "spawns only",
+                "holds": ["spawns"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let session_id = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let entry = json!({"node": "x-child", "session_id": session_id});
+
+        assert_eq!(
+            pause_refusal_for_entry(&home, "worker", session_id, &entry, "/tmp"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // AC3-HP, the 2026-09-18 shape: the session's node free, the new node

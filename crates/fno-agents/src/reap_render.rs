@@ -160,6 +160,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, detail)| json!({"id": id, "detail": detail}))
             .collect();
+        let live_claim: Vec<Value> = summary
+            .kept_live_claim
+            .iter()
+            .map(|(id, detail)| json!({"id": id, "detail": detail}))
+            .collect();
         let pair = |rows: &Vec<(String, String)>| -> Vec<Value> {
             rows.iter()
                 .map(|(id, reason)| json!({"id": id, "reason": reason}))
@@ -232,6 +237,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_planning_unclosed": planning_unclosed,
                 "kept_active": active,
                 "kept_probe_unread": probe_unread,
+                "kept_live_claim": live_claim,
                 "kept_transcript_unresolved": summary.kept_transcript_unresolved,
                 "kept_graph_unreadable": summary.kept_graph_unreadable,
                 "kept_dirty": pathed(&summary.kept_dirty),
@@ -379,6 +385,12 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     for (id, age_s) in &summary.kept_active {
         out.push_str(&format!(
             "  kept {id} (active: transcript written {age_s}s ago)\n"
+        ));
+    }
+    for (id, detail) in &summary.kept_live_claim {
+        out.push_str(&format!(
+            "  kept {id} (live claim held: {detail}){}\n",
+            hold_line(summary, id)
         ));
     }
     for (id, detail) in &summary.kept_probe_unread {

@@ -9,7 +9,6 @@ without a second lookup, light enough not to denormalize the flat store.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -22,15 +21,13 @@ from fno.graph.store import (
     read_graph_strict,
     _read_json,
 )
+from tests.fixtures.graph_seed import seed_graph
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
 # worker binary (the parity-test convention). The skip keeps the import-time
 # canonical_field_order() read below from ever running without a worker.
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
@@ -43,7 +40,7 @@ CANONICAL_FIELD_ORDER = canonical_field_order() if find_dev_binary() else []
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(p, {"entries": entries})
     return p
 
 

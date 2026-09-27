@@ -2211,3 +2211,79 @@ def test_refresh_force_bounce_reregisters_an_unchanged_plist(
     )
 
     assert rc == 0 and len(bounces) == 1
+
+
+# ---------------------------------------------------------------------------
+# An arm the tick cuts must read unhealthy, not healthy.
+# ---------------------------------------------------------------------------
+
+_MERGE_CUT_ROW = {
+    "ts": "2026-06-14T01:00:00Z",
+    "skip_reason": "timeout",
+    "detail": "deadline exceeded in phase merge at 240s at merge:execute",
+    "acted": 0,
+}
+
+
+def test_liveness_merge_arm_cut_reads_unhealthy():
+    """The 04:30Z specimen: a fresh tick, a merge arm timing out at
+    merge:execute, and a status that still read healthy."""
+    now = _install()._parse_ts(_MERGE_CUT_ROW["ts"])
+    report = _live(now=now, arm_rows={"pr_watch_merge": dict(_MERGE_CUT_ROW)})
+    assert report["verdict"] == "unhealthy", report
+    assert "pr_watch_merge" in report["detail"], report
+    assert "merge:execute" in report["detail"], report
+
+
+def test_liveness_any_cut_arm_reads_unhealthy():
+    """Every arm the tick cuts shows, not only merge (king ruling)."""
+    now = _install()._parse_ts(_MERGE_CUT_ROW["ts"])
+    row = dict(_MERGE_CUT_ROW, detail="deadline exceeded before phase notify_watch")
+    report = _live(now=now, arm_rows={"notify_watch": row})
+    assert report["verdict"] == "unhealthy", report
+    assert "notify_watch" in report["detail"], report
+
+
+def test_liveness_old_cut_stops_reading_unhealthy():
+    """A cut past its window is history; the arm recovered since."""
+    row = dict(_MERGE_CUT_ROW, ts="2026-06-13T20:00:00Z")
+    now = _install()._parse_ts("2026-06-14T01:00:00Z")
+    report = _live(now=now, arm_rows={"pr_watch_merge": row})
+    assert report["verdict"] == "healthy", report
+
+
+def test_liveness_off_cadence_row_is_not_a_cut():
+    """A cadence arm resting its slot never reads unhealthy by design."""
+    now = _install()._parse_ts(_MERGE_CUT_ROW["ts"])
+    row = dict(_MERGE_CUT_ROW, skip_reason="off_cadence",
+               detail="fleet-tail cadence 3: next tick 42")
+    report = _live(now=now, arm_rows={"recovery": row})
+    assert report["verdict"] == "healthy", report
+
+
+def test_liveness_unreadable_arm_row_never_flips_the_verdict():
+    now = _install()._parse_ts(_MERGE_CUT_ROW["ts"])
+    row = {"ts": None, "skip_reason": "timeout", "detail": "x", "acted": 0}
+    report = _live(now=now, arm_rows={"pr_watch_merge": row})
+    assert report["verdict"] == "healthy", report
+
+
+def test_tick_watermarks_collect_arm_rows(tmp_path):
+    """The same single pass that reads the watermarks picks up the latest
+    row per arm, so status never re-scans the log to name a failing arm."""
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        json.dumps({"ts": "2026-06-14T00:58:00Z", "type": "control_plane_tick",
+                    "source": "pr-watch",
+                    "data": {"arm": "pr_watch_merge", "acted": 0,
+                             "skip_reason": "timeout",
+                             "detail": ("deadline exceeded in phase merge "
+                                        "at 240s at merge:execute")}}) + "\n"
+        + json.dumps({"ts": "2026-06-14T01:00:00Z", "type": "pr_watch_tick",
+                      "data": {}}) + "\n"
+    )
+    marks = _install()._tick_watermarks(events)
+    row = (marks.get("arm_rows") or {}).get("pr_watch_merge")
+    assert row, marks
+    assert row["skip_reason"] == "timeout"
+    assert "merge:execute" in row["detail"]

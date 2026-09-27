@@ -32,10 +32,7 @@ from fno.agents.harness_map import (
 )
 from fno.rust_binary import find_dev_binary
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 # Captured at import time, before the autouse ``_hermetic_loop_gate``
 # conftest fixture stubs the module attribute: the door test re-binds the

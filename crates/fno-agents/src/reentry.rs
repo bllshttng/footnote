@@ -155,7 +155,7 @@ pub type AccountBinding = dyn Fn(&str) -> Result<Option<String>, String>;
 /// truth (the Python store) and parses its secret-free `--print-binding`
 /// projection. Same rule as the loop's picker: never reimplement the store.
 pub fn shell_account_binding(account_id: &str) -> Result<Option<String>, String> {
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(crate::scrape::fno_bin())
         .args(["config", "accounts", "show", account_id, "--print-binding"])
         .output()
         .map_err(|e| format!("could not run `fno config accounts show`: {e}"))?;

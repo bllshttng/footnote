@@ -94,6 +94,12 @@ pub struct CapSnapshot {
     pub lanes: Vec<CapLane>,
     pub measured_at: String,
     pub measured_at_epoch: i64,
+    /// Why the claude transcript bridge failed this sweep, when it did. A
+    /// member then reads its own named unknown; this names the sweep-wide
+    /// cause so a broken resolver is visible in the readout and the tick row,
+    /// never a silent hold.
+    #[serde(default)]
+    pub resolver_unavailable: Option<String>,
 }
 
 impl CapSnapshot {
@@ -567,6 +573,11 @@ pub fn settings_candidates(cwd: &Path) -> Vec<PathBuf> {
 // Snapshot
 // ---------------------------------------------------------------------------
 
+/// The claude transcript bridge: one answer for every non-codex row, keyed by
+/// the row's own id (full uuid or 8-hex short id), through the Python
+/// resolver `fno agents peek` reads transcripts with.
+pub type ClaudePaths = Box<dyn Fn(&[String]) -> Result<BTreeMap<String, String>, String>>;
+
 /// One scan's resolved inputs. The env-resolving wrapper builds this; tests
 /// and the verbs pass paths directly, so nothing under test reads env vars.
 pub struct CapScan {
@@ -578,8 +589,10 @@ pub struct CapScan {
     pub compaction_home: std::path::PathBuf,
     /// HOME-style root whose claude sessions dir (via
     /// [`crate::claude_ask::ClaudeHome::sessions_dir`]) maps a thread row's
-    /// 8-hex short_id to its full session uuid.
+    /// 8-hex short_id to its full session uuid, for the compaction stamp key.
     pub claude_home: std::path::PathBuf,
+    /// The claude transcript locations, from the shared resolver.
+    pub claude_paths: ClaudePaths,
     /// `reset_timezone` zones read from config.toml `[[accounts.records]]`,
     /// keyed by record id and by route provider prefix.
     pub record_zones: BTreeMap<String, String>,
@@ -588,18 +601,57 @@ pub struct CapScan {
     pub codex_sessions_dir: Option<std::path::PathBuf>,
 }
 
+/// The production bridge: one `fno agents transcript-paths` child answers
+/// every id through the Python resolver. A child that fails or times out
+/// answers Err; the snapshot then reads the named unknown, never a false
+/// "fine".
+pub fn python_transcript_paths(projects_root: std::path::PathBuf) -> ClaudePaths {
+    Box::new(move |ids: &[String]| {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let payload = json!({
+            "ids": ids,
+            "projects_root": projects_root.to_string_lossy(),
+        })
+        .to_string();
+        let args: Vec<&str> = vec!["agents", "transcript-paths"];
+        let answer = crate::provider_cap_verbs::run_fno_output_env(
+            &args,
+            None,
+            std::time::Duration::from_secs(60),
+            &[("FNO_AGENTS_RUNTIME", "python")],
+            Some(payload.as_str()),
+        )
+        .ok_or_else(|| "transcript-paths child failed".to_string())?;
+        let v: Value = serde_json::from_str(&answer)
+            .map_err(|e| format!("transcript-paths answer unparseable: {e}"))?;
+        let mut out = BTreeMap::new();
+        if let Some(map) = v.as_object() {
+            for (k, val) in map {
+                if let Some(p) = val.as_str() {
+                    out.insert(k.clone(), p.to_string());
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// The env-resolved scan, built once and shared by the status verb and the
 /// armed arm so the two cannot resolve different inputs.
 pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
+    let projects_dir = crate::claude_drive::claude_projects_dir();
     CapScan {
         registry: home.registry_json(),
-        projects_dir: crate::claude_drive::claude_projects_dir(),
+        projects_dir: projects_dir.clone(),
         runtime_state: runtime_state_path(cwd),
         settings_candidates: settings_candidates(cwd),
         compaction_home: home.root().to_path_buf(),
         claude_home: crate::claude_ask::ClaudeHome::from_env()
             .home()
             .to_path_buf(),
+        claude_paths: python_transcript_paths(projects_dir),
         record_zones: record_reset_timezones(cwd),
         codex_sessions_dir: None,
     }
@@ -623,7 +675,9 @@ pub fn snapshot_with(
     let timezones = account_reset_timezones(&scan.settings_candidates);
     let now_f = now_epoch as f64;
     // One walk of claude's sessions dir serves every thread row: resolving
-    // per row re-reads the same directory once per row on every tick.
+    // per row re-reads the same directory once per row on every tick. The
+    // resolved uuid keys the COMPACTION stamp; the transcript location is the
+    // shared resolver's answer below, keyed by the row's own id.
     let thread_ids: Vec<&str> = rows
         .iter()
         .filter_map(|row| {
@@ -637,6 +691,24 @@ pub fn snapshot_with(
         &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
         &thread_ids,
     );
+    // One bridge call for the sweep. A codex row resolves its own rollout;
+    // every other row's transcript is answered here, keyed by the id the row
+    // itself carries.
+    let bridge_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| {
+            if s_field(row, "harness").unwrap_or("") == "codex" {
+                return None;
+            }
+            s_field(row, "session_id")
+                .or_else(|| s_field(row, "short_id"))
+                .map(String::from)
+        })
+        .collect();
+    let (claude_paths, bridge_error) = match (scan.claude_paths)(&bridge_ids) {
+        Ok(m) => (m, None),
+        Err(reason) => (BTreeMap::new(), Some(reason)),
+    };
     // The codex store listing, walked at most once per snapshot and only when
     // some codex row needs the fallback past its log_path.
     let mut codex_files: Option<Vec<crate::codex_store::CodexSessionFile>> = None;
@@ -669,23 +741,40 @@ pub fn snapshot_with(
             held: None,
             excerpt: None,
         };
-        // A thread row (the daemon's bg lane) carries only the 8-hex
-        // short_id; resolve the full session uuid through claude's sessions
-        // dir so the transcript is reachable (the d8996f9b specimen read
-        // transcript-not-found through this hole while its lane walled).
-        let lookup_id = session_id
+        // The compaction stamp keeps the sessions-dir key (a stamp is written
+        // by the PreCompact hook with the full uuid); the transcript
+        // location comes from the bridge keyed by the row's own id.
+        let bridge_key = session_id
             .clone()
-            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()));
+            .or_else(|| s_field(row, "short_id").map(String::from));
         // A codex row never resolves in the claude projects dir (its registry
         // row carries session_id = short_id = null), so its rollout resolves
         // from log_path, else from the codex sessions store by thread id.
         let transcript = if harness == "codex" {
             codex_rollout_path(row, scan, &mut codex_files)
         } else {
-            lookup_id
-                .as_deref()
-                .and_then(|sid| crate::claude_drive::find_transcript_in(&scan.projects_dir, sid))
+            claude_paths
+                .get(bridge_key.as_deref().unwrap_or(""))
+                .map(PathBuf::from)
         };
+        // The compaction stamp keeps the sessions-dir key (a stamp is written
+        // by the PreCompact hook with the full uuid). When the sessions-dir
+        // hop misses - the exact rows the bridge now reaches - the resolved
+        // transcript's stem names the full uuid the short id prefixes, so the
+        // stamp is still probed and a compacting capped worker reads held.
+        let compaction_id = session_id
+            .clone()
+            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()))
+            .or_else(|| {
+                s_field(row, "short_id").and_then(|jid| {
+                    transcript
+                        .as_ref()
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .filter(|stem| stem.starts_with(jid))
+                        .map(String::from)
+                })
+            });
         member.transcript = transcript.as_ref().map(|p| p.to_string_lossy().to_string());
         if let Some(t) = &transcript {
             let (ts, excerpt, unknown) = if harness == "codex" {
@@ -702,13 +791,17 @@ pub fn snapshot_with(
             let cs = crate::compaction::compaction_state(
                 &crate::paths::AgentsHome::at(scan.compaction_home.clone()),
                 &harness,
-                lookup_id.as_deref().unwrap_or(""),
+                compaction_id.as_deref().unwrap_or(""),
                 Some(t),
                 now_epoch,
             );
             if cs.possibly_compacting() {
                 member.held = Some("compacting".to_string());
             }
+        } else if bridge_key.is_none() {
+            member.cap_unknown = Some("transcript-not-found".to_string());
+        } else if let Some(reason) = &bridge_error {
+            member.cap_unknown = Some(format!("transcript-resolver-unavailable: {reason}"));
         } else {
             member.cap_unknown = Some("transcript-not-found".to_string());
         }
@@ -787,6 +880,7 @@ pub fn snapshot_with(
         lanes: out,
         measured_at: epoch_to_rfc3339(now_epoch),
         measured_at_epoch: now_epoch,
+        resolver_unavailable: bridge_error,
     })
 }
 
@@ -859,6 +953,7 @@ pub fn persist_snapshot(home: &AgentsHome, snap: &CapSnapshot) {
         "lanes": snap.lanes,
         "measured_at": snap.measured_at,
         "measured_at_epoch": snap.measured_at_epoch,
+        "resolver_unavailable": snap.resolver_unavailable,
     });
     let tmp = dir.join(format!(".snapshot.tmp-{}", std::process::id()));
     if std::fs::write(&tmp, body.to_string()).is_ok() {
@@ -873,6 +968,10 @@ pub fn read_persisted_snapshot(home: &AgentsHome) -> Option<CapSnapshot> {
         lanes: serde_json::from_value(v.get("lanes")?.clone()).ok()?,
         measured_at: v.get("measured_at")?.as_str()?.to_string(),
         measured_at_epoch: v.get("measured_at_epoch")?.as_i64()?,
+        resolver_unavailable: v
+            .get("resolver_unavailable")
+            .and_then(|r| r.as_str())
+            .map(String::from),
     })
 }
 
@@ -1936,6 +2035,11 @@ mod tests {
     }
 
     fn scan(registry: PathBuf, projects: PathBuf, state: PathBuf, home: PathBuf) -> CapScan {
+        // The default fixture bridge answers a planted `<projects>/*/<id>.jsonl`
+        // by exact name: the ANSWER SHAPE the snapshot consumes, not the
+        // resolver's logic - prefix, ambiguity and artifact rules live in the
+        // resolver's own tests and the bridge journey test.
+        let projects_root = projects.clone();
         CapScan {
             registry,
             projects_dir: projects,
@@ -1943,9 +2047,43 @@ mod tests {
             settings_candidates: vec![],
             compaction_home: home.clone(),
             claude_home: home,
+            claude_paths: Box::new(move |ids: &[String]| {
+                let mut out = BTreeMap::new();
+                for id in ids {
+                    let direct = projects_root.join(format!("{id}.jsonl"));
+                    if direct.is_file() {
+                        out.insert(id.clone(), direct.to_string_lossy().to_string());
+                        continue;
+                    }
+                    if let Ok(rd) = std::fs::read_dir(&projects_root) {
+                        for e in rd.flatten() {
+                            let p = e.path().join(format!("{id}.jsonl"));
+                            if p.is_file() {
+                                out.insert(id.clone(), p.to_string_lossy().to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(out)
+            }),
             record_zones: BTreeMap::new(),
             codex_sessions_dir: None,
         }
+    }
+
+    /// A bridge stub answering only the ids it is given, so a row keyed by any
+    /// other id reads unresolved. A `None` path answers "the resolver looked
+    /// and found nothing", which the map omits.
+    fn answered(pairs: Vec<(String, Option<String>)>) -> ClaudePaths {
+        let map: BTreeMap<String, Option<String>> = pairs.into_iter().collect();
+        Box::new(move |ids: &[String]| {
+            Ok(map
+                .iter()
+                .filter(|(k, _)| ids.contains(k))
+                .filter_map(|(k, v)| v.as_ref().map(|p| (k.clone(), p.clone())))
+                .collect())
+        })
     }
 
     #[test]
@@ -2018,10 +2156,12 @@ mod tests {
         assert_eq!(glm[0].reset_epoch, Some(9_999_999_999));
     }
 
-    /// AC1-HP: a thread row (short_id only, no session_id, no observed_model)
-    /// resolves its transcript through the jobId and reads capped in its lane.
+    /// A thread row (short_id only, no session_id) resolves its transcript
+    /// through the shared resolver keyed by its own id and reads capped in its
+    /// lane. No sessions-dir record is planted: the transcript location never
+    /// depended on one.
     #[test]
-    fn ac1_hp_thread_row_resolves_through_its_job_id() {
+    fn ac1_hp_thread_row_resolves_through_the_shared_resolver() {
         let root = std::env::temp_dir().join(format!("pc-ac1-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let claude_home = root.join("home");
@@ -2032,20 +2172,19 @@ mod tests {
             r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
         );
         write(
-            &crate::claude_ask::ClaudeHome::at(claude_home.clone())
-                .sessions_dir()
-                .join("1.json"),
-            &format!(
-                r#"{{"jobId":"d8996f9b","kind":"bg","messagingSocketPath":null,"sessionId":"{uuid}","cwd":"/tmp"}}"#
-            ),
-        );
-        write(
             &projects.join(format!("{uuid}.jsonl")),
             &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
         );
         let scan = CapScan {
-            claude_home: claude_home.clone(),
-            record_zones: BTreeMap::new(),
+            claude_paths: answered(vec![(
+                "d8996f9b".to_string(),
+                Some(
+                    projects
+                        .join(format!("{uuid}.jsonl"))
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            )]),
             ..scan(
                 claude_home.join("registry.json"),
                 projects.parent().unwrap().to_path_buf(),
@@ -2063,10 +2202,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// AC2-ERR: the same thread row with no sessions file stays
-    /// transcript-not-found and the lane stays closed.
+    /// The bridge answered and found nothing for the row's id: the member
+    /// stays transcript-not-found and the lane stays unmeasured.
     #[test]
-    fn ac2_err_thread_row_without_sessions_file_stays_unknown() {
+    fn ac2_err_thread_row_the_resolver_found_nothing_stays_unknown() {
         let root = std::env::temp_dir().join(format!("pc-ac2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let claude_home = root.join("home");
@@ -2081,8 +2220,9 @@ mod tests {
             &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
         );
         let scan = CapScan {
-            claude_home: claude_home.clone(),
-            record_zones: BTreeMap::new(),
+            // The stub answers only "d8996f9b" is capped-eligible: an empty
+            // answer means the resolver looked and found no transcript.
+            claude_paths: answered(vec![("d8996f9b".to_string(), None)]),
             ..scan(
                 claude_home.join("registry.json"),
                 projects.parent().unwrap().to_path_buf(),
@@ -2102,6 +2242,51 @@ mod tests {
             Some("transcript-not-found")
         );
         assert_eq!(lane.state, "unmeasured");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bridge that fails (child missing, timeout, unparseable answer) reads
+    /// a NAMED unknown on every unmeasured row, never a false "fine".
+    #[test]
+    fn ac_err_a_failing_bridge_reads_a_named_unknown() {
+        let root = std::env::temp_dir().join(format!("pc-ac2b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
+        );
+        let scan = CapScan {
+            claude_paths: Box::new(|_| Err("transcript-paths child failed".to_string())),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "zai:default")
+            .expect("zai:default lane");
+        assert!(!lane.members[0].capped);
+        assert!(
+            lane.members[0]
+                .cap_unknown
+                .as_deref()
+                .is_some_and(|u| u.starts_with("transcript-resolver-unavailable")),
+            "{:?}",
+            lane.members[0]
+        );
+        assert_eq!(lane.state, "unmeasured");
+        assert_eq!(
+            snap.resolver_unavailable.as_deref(),
+            Some("transcript-paths child failed"),
+            "the sweep names its broken resolver, never a silent hold"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2126,6 +2311,7 @@ mod tests {
                 lanes: vec![lane("main", "closed"), lane("backup", "unmeasured")],
                 measured_at: epoch_to_rfc3339(100),
                 measured_at_epoch: 100,
+                resolver_unavailable: None,
             },
         );
 
@@ -2693,6 +2879,51 @@ mod tests {
         let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
         assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
     }
+
+    /// A thread row whose sessions-dir record is missing still reads held
+    /// while compacting: the bridge-resolved transcript's stem names the full
+    /// uuid, so the compaction stamp is probed by the right key.
+    #[test]
+    fn ac2_compact_thread_row_without_sessions_record_is_held_through_the_bridge() {
+        let root = std::env::temp_dir().join(format!("pc-cm2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let state_path = root.join("runtime-state.json");
+        let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"z","launch_account":"default","state":"working"}]}"#,
+        );
+        write(
+            &projects.join(format!("{uuid}.jsonl")),
+            &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
+        );
+        let now = now_epoch_secs();
+        crate::compaction::mark(&AgentsHome::at(claude_home.clone()), uuid, now).unwrap();
+
+        let scan = CapScan {
+            claude_paths: answered(vec![(
+                "d8996f9b".to_string(),
+                Some(
+                    projects
+                        .join(format!("{uuid}.jsonl"))
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            )]),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path,
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, now, &cfg(99)).unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "z").unwrap();
+        assert_eq!(lane.members[0].held.as_deref(), Some("compacting"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn ac2_arm_config_defaults_off_and_reads_overrides() {
         // FNO_CONFIG, when set, is the ONLY config candidate; hold the env
@@ -2838,6 +3069,7 @@ mod tests {
                 settings_candidates: vec![root.join("settings.yaml")],
                 compaction_home: root.clone(),
                 claude_home: root.clone(),
+                claude_paths: Box::new(|_| Ok(BTreeMap::new())),
                 record_zones: BTreeMap::new(),
                 codex_sessions_dir: None,
             },
@@ -2931,7 +3163,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(home.root());
         let lane = lane_fixture(Some(now_epoch_secs() + 3 * 3600), None);
         let cfg = ProviderCapConfig {
-            sleep_hours: "00:00-23:59".into(),
+            // 24:00, not 23:59: the window is end-exclusive, so 23:59 is
+            // awake for one minute a day and this CI test ran inside it
+            // (2026-09-26 23:59 UTC). The test wants "asleep now", always.
+            sleep_hours: "00:00-24:00".into(),
             sleep_timezone: String::new(),
             ..Default::default()
         };
@@ -3245,6 +3480,7 @@ mod tests {
             lanes: vec![lane],
             measured_at: epoch_to_rfc3339(base),
             measured_at_epoch: base,
+            resolver_unavailable: None,
         };
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);

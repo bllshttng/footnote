@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.rust_binary import find_dev_binary as _find_dev_binary
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -370,12 +369,13 @@ def test_ac2_hp_revive_restores_the_recorded_route(tmp_path, monkeypatch) -> Non
 
 def test_ac3_err_revive_refuses_when_the_route_file_is_gone(tmp_path, monkeypatch) -> None:
     """AC3-ERR: refuse non-zero, name the route, start nothing."""
-    from fno.agents.dispatch import DispatchAskError, restore_route_for_relaunch
+    from fno.agents.dispatch import restore_route_for_relaunch
+    from fno.agents.dispatch_errors import RouteRestoreRefused
     from fno.agents.registry import load_registry
 
     path = _routed_claude_row(tmp_path, monkeypatch)
     Path(path).unlink()
-    with pytest.raises(DispatchAskError) as exc:
+    with pytest.raises(RouteRestoreRefused) as exc:
         restore_route_for_relaunch(load_registry()[0])
     assert path in str(exc.value)
     assert exc.value.exit_code == 2
@@ -401,10 +401,7 @@ def test_ac5_hp_a_never_routed_row_restores_nothing(tmp_path, monkeypatch) -> No
     assert restore_route_for_relaunch(row) is None
 
 
-requires_rust = pytest.mark.skipif(
-    _find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 @requires_rust

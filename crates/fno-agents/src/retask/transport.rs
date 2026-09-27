@@ -31,7 +31,7 @@ const RESTAMP_SLEEP_MS: u64 = 250;
 const TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
 
 fn fno_bin() -> String {
-    std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+    crate::scrape::fno_bin().to_string_lossy().into_owned()
 }
 
 fn timeout_reason(argv: &[String]) -> String {

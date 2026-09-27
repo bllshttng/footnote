@@ -6,7 +6,7 @@
 //! returns, and relays here. The paths reduce to unique live journals (the
 //! `.ephemeral` siblings never carry durable rows, and a `.1` generation is
 //! the same journal its live path names); each live journal's `events.db`
-//! store is synced FIRST (`events_store::sync`, which ingests the rotated
+//! store is synced FIRST (`event_store::sync`, which ingests the rotated
 //! generation and then the live file), and the read is an indexed
 //! `(scope, type, ts_ms)` select instead of a scan of every row ever
 //! journaled. Selection is EXACT `data.scope` equality via the store's
@@ -125,7 +125,7 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
         if name.contains(crate::events::EPHEMERAL_SUFFIX) {
             continue;
         }
-        let live = crate::events_store::live_journal(path);
+        let live = crate::event_store::live_journal(path);
         if !lives.contains(&live) {
             lives.push(live);
         }
@@ -189,6 +189,11 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
             "scanned": scanned,
             "matched": matched,
             "rejected": rejected,
+            "coverage": coverage_json(&crate::event_store::coverage(
+                live,
+                None,
+                &[REIGN_CHECKIN.to_string()],
+            )),
         }));
         payload["scanned"] = json!(payload["scanned"].as_u64().unwrap_or(0) + scanned);
         payload["rejected"] = json!(payload["rejected"].as_u64().unwrap_or(0) + rejected);
@@ -213,7 +218,45 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
     payload["journals"] = Value::Array(journals);
     payload["duplicates"] = json!(duplicates);
     payload["matched"] = json!(payload["events"].as_array().map(|a| a.len()).unwrap_or(0));
+    payload["complete_since"] = complete_since_json(&payload["journals"]);
     Ok(payload)
+}
+
+/// The serialized store coverage receipt a history payload embeds.
+fn coverage_json(cov: &crate::event_store::Coverage) -> Value {
+    json!({
+        "status": cov.status,
+        "complete_since": cov.complete_since_ms.map(ms_to_rfc3339),
+        "observed_first": cov.observed_first_ms.map(ms_to_rfc3339),
+        "observed_last": cov.observed_last_ms.map(ms_to_rfc3339),
+        "reason": cov.reason,
+    })
+}
+
+fn ms_to_rfc3339(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| ms.to_string())
+}
+
+/// The latest proven start across a payload's journals; `null` when any
+/// store is unknown or unreadable, so a partial read never claims a horizon.
+fn complete_since_json(journals: &Value) -> Value {
+    let receipts = journals.as_array().cloned().unwrap_or_default();
+    let any_unproven = receipts.iter().any(|j| {
+        j["coverage"]["status"]
+            .as_str()
+            .is_none_or(|s| s != "complete" && s != "partial")
+    });
+    if any_unproven {
+        return Value::Null;
+    }
+    receipts
+        .iter()
+        .filter_map(|j| j["coverage"]["complete_since"].as_str())
+        .max()
+        .map(|s| json!(s))
+        .unwrap_or(Value::Null)
 }
 
 pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
@@ -254,6 +297,13 @@ fn render(payload: &Value) -> String {
         payload["ingested"],
         payload["rejected"]
     ));
+    if let Some(since) = payload["complete_since"].as_str() {
+        lines.push(format!("complete since {since}; earlier unknown"));
+    } else {
+        lines.push(
+            "coverage unknown: a store predates the coverage epoch or cannot be read".to_string(),
+        );
+    }
     if payload["duplicates"].as_u64().unwrap_or(0) > 0 {
         lines.push(format!(
             "  ({} duplicate mirror row(s) collapsed)",
@@ -364,6 +414,9 @@ const KING_CONTEXT_NUDGE: &str = "king_context_nudge";
 pub(crate) enum BoundState {
     Exceeded,
     Within,
+    /// The count is a lower bound: the crown predates the store's coverage
+    /// epoch, so an under-ceiling value is unproven, never a quiet within.
+    Unmeasured,
     Absent,
 }
 
@@ -413,6 +466,10 @@ pub(crate) struct VerdictReadings {
     pub terminations: Vec<(String, u64)>,
     pub inherited_undelivered: u64,
     pub inherited_closed_in_window: u64,
+    /// True when the crown began before the stores' coverage epoch: every
+    /// count read is a lower bound, and an under-ceiling bound reads
+    /// unmeasured instead of within.
+    pub lifetime_partial: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -518,6 +575,23 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
             },
         },
     ];
+    // Under partial lifetime the counts are lower bounds: a bound under its
+    // ceiling is unproven, never quiet. Exceeded stays proven (a lower bound
+    // over a ceiling is proof enough); the block cap is a recording, not a
+    // count over history, so coverage does not touch it.
+    let bounds = if r.lifetime_partial {
+        bounds
+            .into_iter()
+            .map(|mut b| {
+                if b.name != "block_cap" && b.state == BoundState::Within {
+                    b.state = BoundState::Unmeasured;
+                }
+                b
+            })
+            .collect()
+    } else {
+        bounds
+    };
     let degraded = bounds.iter().any(|b| b.state == BoundState::Exceeded);
     let v = if degraded {
         Verdict::Degraded
@@ -768,6 +842,9 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         from_session: inputs.crown_from_session.clone(),
     };
     let crown_start = manifest.created_at.clone().unwrap_or_default();
+    let crown_start_ms: Option<i64> = chrono::DateTime::parse_from_rfc3339(&crown_start)
+        .ok()
+        .map(|dt| dt.timestamp_millis());
     let (mut readings, scanned, duplicates, journals) = match scan_readings(
         &events_paths,
         &manifest.fno_id,
@@ -781,6 +858,30 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             return 1;
         }
     };
+    // Coverage across the verdict's stores: the row kinds the verdict
+    // counts. A store with no epoch (or an unreadable one) leaves the
+    // horizon unproven, which reads as partial lifetime - the conservative
+    // direction for an alarm.
+    let cov_types: Vec<String> = READING_TYPES.iter().map(|s| s.to_string()).collect();
+    let mut complete_since_ms: Option<i64> = None;
+    let mut cov_status = "complete";
+    for path in &events_paths {
+        let cov = crate::event_store::coverage(path, None, &cov_types);
+        cov_status = cov.status;
+        if cov.status != "complete" && cov.status != "partial" {
+            complete_since_ms = None;
+            break;
+        }
+        complete_since_ms = Some(match complete_since_ms {
+            Some(cur) => cur.max(cov.complete_since_ms.unwrap_or(0)),
+            None => cov.complete_since_ms.unwrap_or(0),
+        });
+    }
+    let lifetime_partial = match (complete_since_ms, crown_start_ms) {
+        (Some(proven), Some(started)) => started < proven,
+        _ => true,
+    };
+    readings.lifetime_partial = lifetime_partial;
     readings.max_iterations = manifest.max_iterations;
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
@@ -829,6 +930,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "verdict": v,
         "summary": summary,
         "bounds": bounds,
+        "lifetime": if lifetime_partial { "partial" } else { "measured" },
+        "coverage": json!({
+            "status": cov_status,
+            "complete_since": complete_since_ms.map(ms_to_rfc3339),
+        }),
         "inherited_undelivered": inputs.inherited_undelivered,
         "filed_undelivered": inputs.filed_undelivered,
         "inherited_closed_in_window": inputs.inherited_closed_in_window,
@@ -899,9 +1005,17 @@ pub(crate) fn bound_summary(v: Verdict, bounds: &[BoundRow]) -> String {
         .filter(|b| b.state == BoundState::Absent)
         .map(|b| b.name)
         .collect();
+    let unmeasured: Vec<&str> = bounds
+        .iter()
+        .filter(|b| b.state == BoundState::Unmeasured)
+        .map(|b| b.name)
+        .collect();
     let mut parts: Vec<String> = Vec::new();
     if !exceeded.is_empty() {
         parts.push(format!("exceeded: {}", exceeded.join(", ")));
+    }
+    if !unmeasured.is_empty() {
+        parts.push(format!("unmeasured: {}", unmeasured.join(", ")));
     }
     if !absent.is_empty() {
         parts.push(format!("absent: {}", absent.join(", ")));
@@ -1082,6 +1196,14 @@ fn render_verdict(payload: &Value) -> String {
         payload["scanned"],
         payload["journals"].as_array().map(|a| a.len()).unwrap_or(0),
     ));
+    if payload["lifetime"] == "partial" {
+        lines.push(format!(
+            "lifetime partial: complete since {}",
+            payload["coverage"]["complete_since"]
+                .as_str()
+                .unwrap_or("?")
+        ));
+    }
     if let Some(error) = payload["compactions_error"].as_str() {
         lines.push(format!("compactions read: {error}"));
     }
@@ -1216,6 +1338,7 @@ mod verdict_tests {
             terminations: Vec::new(),
             inherited_undelivered: 0,
             inherited_closed_in_window: 0,
+            lifetime_partial: false,
         }
     }
 
@@ -2249,5 +2372,52 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("transcript over cap"));
+    }
+
+    #[test]
+    fn partial_lifetime_reads_unmeasured_never_within() {
+        // The crown predates the epoch: an under-ceiling fire count is a
+        // lower bound, so the iterations bound reads unmeasured, never
+        // within. A lower bound over the ceiling is still exceeded.
+        let mut r = VerdictReadings {
+            max_iterations: 40,
+            respawn_ceiling: 4,
+            compaction_ceiling: Some(3),
+            ..Default::default()
+        };
+        r.lifetime_partial = true;
+        r.fires = 2;
+        let (v, bounds) = verdict(&r);
+        assert_ne!(v, Verdict::Degraded);
+        let iterations = bounds.iter().find(|b| b.name == "iterations").unwrap();
+        assert_eq!(iterations.state, BoundState::Unmeasured);
+        r.fires = 87;
+        let (v, bounds) = verdict(&r);
+        assert_eq!(v, Verdict::Degraded);
+        let iterations = bounds.iter().find(|b| b.name == "iterations").unwrap();
+        assert_eq!(iterations.state, BoundState::Exceeded);
+    }
+
+    #[test]
+    fn scoped_checkin_survives_vanished_live_journal() {
+        // The durable-history acceptance: the check-in lives in the store,
+        // so a vanished live journal (the rotation-era failure mode) never
+        // blanks the reign history.
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("events.jsonl");
+        let checkin = json!({
+            "ts": "2026-09-10T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "loop",
+            "data": {"scope": "x-bbbb", "change": "tenure"}
+        });
+        std::fs::write(&live, format!("{checkin}\n")).unwrap();
+        crate::event_store::sync(&live).unwrap();
+        // The live journal leaves its path: the row survives in the SQL
+        // store. Removal, not a rename, so only the store can serve the row.
+        std::fs::remove_file(&live).unwrap();
+        let payload = scan(&[live], "x-bbbb").unwrap();
+        assert_eq!(payload["matched"], 1, "{payload}");
+        assert_eq!(payload["complete_since"].as_str().is_some(), true);
     }
 }

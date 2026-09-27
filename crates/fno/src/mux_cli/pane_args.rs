@@ -61,6 +61,61 @@ fn sargs_of(args: &[OsString]) -> Result<Vec<String>, String> {
         .ok_or_else(|| "non-UTF-8 argument".to_string())
 }
 
+/// FNO_PANE as the calling pane's id (trimmed, `%N` stripped), or None when
+/// the caller has no pane of its own.
+pub(crate) fn pane_from_env() -> Option<u64> {
+    std::env::var("FNO_PANE")
+        .ok()
+        .map(|s| s.trim().trim_start_matches('%').to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// The line a split with no anchor refuses with when the caller has no pane.
+pub(crate) const SPLIT_ANCHOR_HELP: &str = "a --split needs an anchor: pass \
+--from <portal N|worker name|current> to name the cell it halves";
+
+/// The dispatch-side application of the split default to a parsed pane
+/// command: a split with no anchor halves the caller's own pane, and a
+/// pane-less caller is refused with `--from` named. Dispatch-time, after
+/// the fit refusal has had its say. Lives beside the rule it applies; the
+/// doors call this instead of re-deriving it.
+pub(crate) fn apply_split_anchor_default(parsed: &mut ParsedPane) -> Result<(), String> {
+    let PaneCmd::Run { placement, .. } = &mut parsed.cmd else {
+        return Ok(());
+    };
+    match anchor_or_refuse(
+        placement.split.is_some(),
+        placement.at,
+        placement.from.as_deref(),
+        pane_from_env(),
+    )? {
+        Some(anchor) => placement.at = Some(anchor),
+        None => {}
+    }
+    Ok(())
+}
+
+/// The split default: a split with no anchor halves the caller's own pane,
+/// as tmux splits the current pane. A caller with no pane of its own names
+/// `--from` or is refused with the flag named. Returns the pane to anchor
+/// on (Some only when the default fired); pure over the FNO_PANE read so
+/// tests pass the value.
+pub(crate) fn anchor_or_refuse(
+    split: bool,
+    at: Option<u64>,
+    from: Option<&str>,
+    fno_pane: Option<u64>,
+) -> Result<Option<u64>, String> {
+    if !split || at.is_some() || from.is_some_and(|f| !f.trim().is_empty()) {
+        return Ok(None);
+    }
+    match fno_pane {
+        Some(pane) => Ok(Some(pane)),
+        None => Err(SPLIT_ANCHOR_HELP.to_string()),
+    }
+}
+
 pub fn parse_pane_args(
     op: &crate::cli_args::PaneOp,
     args: &[OsString],
@@ -106,6 +161,7 @@ pub fn parse_pane_args(
         let mut split = None;
         let mut tab = None;
         let mut at = None;
+        let mut from: Option<String> = None;
         let mut at_current = false;
         let mut max_panes = None;
         // run keeps the common flags as loop arms, not a fence-less
@@ -199,6 +255,21 @@ pub fn parse_pane_args(
                     }
                     i += 1;
                 }
+                // The named cell a split halves: `portal N`, a worker
+                // name, or `current` (resolved here from FNO_PANE, the
+                // way --at current is). Resolved server-side to the pane
+                // the named cell's screen runs.
+                "--from" | "from" => {
+                    let Some(v) = sargs.get(i + 1) else {
+                        return Err("--from needs a value".into());
+                    };
+                    if v == "current" {
+                        at_current = true;
+                    } else {
+                        from = Some(v.to_string());
+                    }
+                    i += 1;
+                }
                 "--max-panes" => {
                     let Some(value) = sargs.get(i + 1) else {
                         return Err("--max-panes needs a value".into());
@@ -250,6 +321,7 @@ pub fn parse_pane_args(
             split,
             tab,
             at,
+            from,
             fallback,
             max_panes,
             fit,

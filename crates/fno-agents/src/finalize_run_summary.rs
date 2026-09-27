@@ -159,9 +159,10 @@ pub(crate) fn emit_run_summary(
 /// push-parent`) rather than reimplementing registry lookup + mail in Rust.
 /// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
 /// events.jsonl line already landed independently (AC1-FR). `fno` (not a bare
-/// interpreter) is safe to shell - a PATH miss just skips.
+/// interpreter) is safe to shell - it resolves through `loopcheck_fno_bin`, and
+/// a PATH miss just skips.
 pub(crate) fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
-    let mut cmd = Command::new("fno");
+    let mut cmd = Command::new(crate::loopcheck::loopcheck_fno_bin());
     cmd.args([
         "doctor",
         "event",

@@ -118,7 +118,7 @@ fn probe_all(roots: &[PathBuf]) -> Vec<PathBuf> {
 
 /// One anchored probe: the plans dir the real resolver names for `root`.
 fn probe(root: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("fno")
+    let output = std::process::Command::new(crate::scrape::fno_bin())
         .args(["do", "plan", "path", "--slug", "_plans_dir_probe"])
         .current_dir(root)
         .output()
@@ -242,6 +242,7 @@ mod tests {
     struct EnvGuard {
         saved_config: Option<std::ffi::OsString>,
         saved_path: Option<std::ffi::OsString>,
+        saved_bin: Option<std::ffi::OsString>,
         saved_cache: Option<std::ffi::OsString>,
     }
 
@@ -249,6 +250,7 @@ mod tests {
         fn new(config: &Path, fake_bin: &Path, cache: &Path) -> Self {
             let saved_config = std::env::var_os("FNO_CONFIG");
             let saved_path = std::env::var_os("PATH");
+            let saved_bin = std::env::var_os("FNO_BIN");
             let saved_cache = std::env::var_os("FNO_PLANS_DIRS_CACHE_DIR");
             std::env::set_var("FNO_CONFIG", config);
             std::env::set_var(
@@ -259,10 +261,14 @@ mod tests {
                     saved_path.as_deref().unwrap_or_default().to_string_lossy()
                 ),
             );
+            // The probe execs through scrape::fno_bin, which under cfg!(test)
+            // answers only a declared FNO_BIN: pin the same stub PATH pins.
+            std::env::set_var("FNO_BIN", fake_bin.join("fno"));
             std::env::set_var("FNO_PLANS_DIRS_CACHE_DIR", cache);
             Self {
                 saved_config,
                 saved_path,
+                saved_bin,
                 saved_cache,
             }
         }
@@ -277,6 +283,10 @@ mod tests {
             match &self.saved_path {
                 Some(v) => std::env::set_var("PATH", v),
                 None => std::env::remove_var("PATH"),
+            }
+            match &self.saved_bin {
+                Some(v) => std::env::set_var("FNO_BIN", v),
+                None => std::env::remove_var("FNO_BIN"),
             }
             match &self.saved_cache {
                 Some(v) => std::env::set_var("FNO_PLANS_DIRS_CACHE_DIR", v),
