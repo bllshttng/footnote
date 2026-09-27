@@ -244,7 +244,9 @@ impl View {
         // menu/add-workspace footer pins directly above the questions block
         // and the widget area gives up its last row, so the footer is never
         // covered and the rows scroll to their true end above it. A region
-        // down to one row keeps that row as list, never as footer.
+        // down to one row keeps that row as list, never as footer. The pinned
+        // copy yields while the in-list NewSquad row is inside the visible
+        // window - one instance of the label in every scroll state.
         let sticky_footer = table_rows_n > 1 && display.len() > table_rows_n;
         let table_h = table_rows_n.saturating_sub(sticky_footer as usize);
         // The widget renders into a standalone Buffer (no terminal, no
@@ -358,9 +360,10 @@ impl View {
                     header_band_flags(false),
                 )),
                 DisplayRow::Sub(sub) => Some((format!("    {sub}"), cell_flags::DIM)),
-                DisplayRow::CardDetail(a) => {
-                    Some((self.card_detail_text(a, now, text_w), cell_flags::DIM))
-                }
+                DisplayRow::CardDetail(a, cwd) => Some((
+                    self.card_detail_text(a, cwd.as_deref(), now, text_w),
+                    cell_flags::DIM,
+                )),
                 DisplayRow::TableEmpty => Some(("  no agents".to_string(), cell_flags::DIM)),
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
@@ -376,7 +379,7 @@ impl View {
             };
             if let Some((text, flags)) = legacy {
                 paint_legacy_row(cells, r, cols, text_w, &text, flags);
-                if matches!(drow, DisplayRow::CardDetail(_)) {
+                if matches!(drow, DisplayRow::CardDetail(..)) {
                     // Card line 2 on a light terminal: DIM washes the default
                     // fg toward a light background until it vanishes. The
                     // palette's own dim gray (index 8) dims a dark scheme and
@@ -404,9 +407,9 @@ impl View {
                 highlit = self.card_pair_highlit(&display, i, highlit);
             }
             let card_pair =
-                card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(_));
+                card && matches!(drow, DisplayRow::Agent(_) | DisplayRow::CardDetail(..));
             let card_chosen = card_pair
-                && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a)
+                && matches!(drow, DisplayRow::Agent(a) | DisplayRow::CardDetail(a, _)
                     if a.pane_id == Some(self.layout.focus) && !a.exited);
             if card_chosen {
                 // The chosen card paints its color across BOTH lines, full
@@ -419,12 +422,33 @@ impl View {
                 // to contrast with it, never per-span inversion, so a span's
                 // own color cannot patch the highlight and the band reads the
                 // same on a dark and a light terminal.
-                let (fg, bg, flags) =
-                    crate::theme::band_style(card_chosen || (!card && chosen), &self.theme);
+                let (fg, bg, flags) = crate::theme::band_style(&self.theme);
                 for cell in &mut cells[r * cols..r * cols + text_w] {
                     cell.bg = bg;
                     cell.fg = fg;
                     cell.flags = flags;
+                }
+                // The state accent survives the band on the glyph and the
+                // state word only (the operator's color ruling); the band
+                // owns the remaining cells. A row with no colored state
+                // (Default) keeps the band's own explicit pair everywhere.
+                if let DisplayRow::Agent(a) = drow {
+                    let lat = agent_lattice_state(a);
+                    let style = lattice_style(lat, self.theme.needs_you);
+                    let accent = if a.pane_id == Some(self.layout.focus) && a.exited {
+                        self.theme.brand
+                    } else {
+                        agent_lane_fg(a, lat, style.fg)
+                    };
+                    if accent != Color::Default {
+                        let word_rect = if card { Some(rects[2]) } else { None };
+                        for rect in std::iter::once(rects[0]).chain(word_rect) {
+                            let end = rect.x.saturating_add(rect.width).min(text_w as u16);
+                            for col in rect.x..end {
+                                cells[r * cols + col as usize].fg = accent;
+                            }
+                        }
+                    }
                 }
             }
             let row_stamp = self.row_stamp_for(drow);
@@ -470,8 +494,15 @@ impl View {
         // The questions block just above the court block: the row list
         // stopped above both; the open rows render normal, the not-ready and
         // answered rows DIM. The sticky menu footer rides directly above the
-        // block when the rows overflow (h).
-        if sticky_footer {
+        // block when the rows overflow (h). The pinned copy yields while the
+        // in-list NewSquad row is inside the visible window: one instance of
+        // the label in every scroll state.
+        let new_squad_visible = display
+            .iter()
+            .skip(off)
+            .take(table_h)
+            .any(|d| matches!(d, DisplayRow::NewSquad));
+        if sticky_footer && !new_squad_visible {
             self.paint_new_squad_footer(cells, list_rows - 1, cols, text_w, panel_w);
         }
         questions::paint_block(q_lines, cells, list_rows, rows, cols, text_w);
@@ -530,7 +561,7 @@ impl View {
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
             | DisplayRow::TableEmpty
-            | DisplayRow::CardDetail(_)
+            | DisplayRow::CardDetail(..)
             | DisplayRow::IdleFold { .. } => {
                 (vec![rt_cell(String::new(), Color::Default, 0, false); 5], 0)
             }
@@ -542,16 +573,19 @@ impl View {
                     flags |= cell_flags::DIM;
                 }
                 let status_fg = agent_lane_fg(a, lat, style.fg);
-                // An EXITED focus row is legibly dead: DIM accent on the
-                // cells, and the overlay gives it no band. A live focus
-                // row's band is the overlay's accent highlight; the cells
-                // stay ordinary.
+                // An EXITED focus row is legibly dead: DIM accent, and the
+                // overlay gives it no band. A live focus row's band is the
+                // overlay's highlight; the cells stay ordinary. The
+                // state/lane accent rides the glyph and the state word only
+                // (the operator's color ruling) - the remaining cells read
+                // default.
                 let focus_bit = if focus_exited { cell_flags::DIM } else { 0 };
                 let cell_fg = if focus_exited {
                     self.theme.brand
                 } else {
                     status_fg
                 };
+                let body_fg = Color::Default;
                 let cell_flags_v = flags | focus_bit;
                 // The name cell keeps the compact row's identity vocabulary:
                 // recruit mark, DND, deviation token, portal index, tab
@@ -656,19 +690,19 @@ impl View {
                             cell_flags_v,
                             true,
                         ),
-                        rt_cell(fit_name(&name, name_w), cell_fg, cell_flags_v, false),
+                        rt_cell(fit_name(&name, name_w), body_fg, cell_flags_v, false),
                         rt_cell(
                             if card {
                                 status_word(lat).to_string()
                             } else {
                                 tail
                             },
-                            cell_fg,
+                            if card { cell_fg } else { body_fg },
                             quiet | focus_bit,
                             false,
                         ),
-                        rt_cell(pr_cell, cell_fg, quiet | focus_bit, true),
-                        rt_cell(age_cell, cell_fg, quiet | focus_bit, true),
+                        rt_cell(pr_cell, body_fg, quiet | focus_bit, true),
+                        rt_cell(age_cell, body_fg, quiet | focus_bit, true),
                     ],
                     0,
                 )
@@ -737,11 +771,12 @@ impl View {
 
     /// The card expansion of the display enumeration. `List` returns the
     /// input unchanged (byte-identical to the pre-card rows). `Card` gives
-    /// each `Agent` a two-line card - `Blank, Agent, CardDetail` - with the
-    /// `Sub` lines that follow it inside the card, one blank of padding
-    /// above and below, adjacent cards sharing one blank, and an existing
-    /// spacer counting as the bottom padding. Every agent depth is forced to
-    /// 0: the king shows on line 2, not as an indent.
+    /// each `Agent` a two-line card - `Blank, Agent, CardDetail` - with one
+    /// blank of padding above and below, adjacent cards sharing one blank,
+    /// and an existing spacer counting as the bottom padding. Every agent
+    /// depth is forced to 0: the king shows on line 2, not as an indent. A
+    /// foreign-cwd `Sub` row folds into the card's detail line, so a card
+    /// never grows a third painted row.
     pub(super) fn card_rows<'a>(
         &self,
         rows: Vec<DisplayRow<'a>>,
@@ -753,7 +788,8 @@ impl View {
         let mut out_rows: Vec<DisplayRow<'_>> = Vec::with_capacity(rows.len() * 2);
         let mut out_depths: Vec<usize> = Vec::with_capacity(rows.len() * 2);
         let mut in_card = false;
-        for (row, depth) in rows.into_iter().zip(depths) {
+        let mut iter = rows.into_iter().zip(depths).peekable();
+        while let Some((row, depth)) = iter.next() {
             match row {
                 DisplayRow::Agent(a) => {
                     if in_card {
@@ -767,13 +803,16 @@ impl View {
                     }
                     out_rows.push(DisplayRow::Agent(a));
                     out_depths.push(0);
-                    out_rows.push(DisplayRow::CardDetail(a));
+                    let cwd = match iter.peek() {
+                        Some((DisplayRow::Sub(_), _)) => match iter.next() {
+                            Some((DisplayRow::Sub(cwd), _)) => Some(cwd),
+                            _ => unreachable!("peeked a Sub"),
+                        },
+                        _ => None,
+                    };
+                    out_rows.push(DisplayRow::CardDetail(a, cwd));
                     out_depths.push(0);
                     in_card = true;
-                }
-                sub @ DisplayRow::Sub(_) if in_card => {
-                    out_rows.push(sub);
-                    out_depths.push(0);
                 }
                 row => {
                     if in_card && !matches!(row, DisplayRow::Blank) {
@@ -870,11 +909,17 @@ impl View {
         }
     }
 
-    /// Line 2 of a card: two spaces, then `harness · king · message`, with
-    /// the age right-aligned to the panel edge. Segments that are `None`
-    /// drop out of the join; a worker with no harness, king or message
-    /// paints just its age.
-    pub(super) fn card_detail_text(&self, a: &AgentRow, now: u64, text_w: usize) -> String {
+    /// Line 2 of a card: two spaces, then `harness · king · message · cwd`,
+    /// with the age right-aligned to the panel edge. Segments that are `None`
+    /// drop out of the join; a worker with no harness, king, message or
+    /// foreign cwd paints just its age.
+    pub(super) fn card_detail_text(
+        &self,
+        a: &AgentRow,
+        cwd: Option<&str>,
+        now: u64,
+        text_w: usize,
+    ) -> String {
         let mut segments: Vec<String> = Vec::new();
         if let Some(h) = a.harness.as_deref() {
             segments.push(h.to_string());
@@ -885,6 +930,9 @@ impl View {
         let msg = row_message_text(a);
         if let Some(msg) = msg {
             segments.push(msg);
+        }
+        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
+            segments.push(cwd.to_string());
         }
         let mut text = String::from("  ");
         if !segments.is_empty() {
@@ -926,14 +974,14 @@ impl View {
         base: bool,
     ) -> bool {
         match display.get(i) {
-            Some(DisplayRow::CardDetail(_)) => {
+            Some(DisplayRow::CardDetail(..)) => {
                 base || self.selector == Some(i)
                     || self.hover_row == Some(i)
                     || self.selector == Some(i.saturating_sub(1))
                     || self.hover_row == Some(i.saturating_sub(1))
             }
             Some(DisplayRow::Agent(_)) => {
-                base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(_)))
+                base || matches!(display.get(i + 1), Some(DisplayRow::CardDetail(..)))
                     && (self.selector == Some(i + 1) || self.hover_row == Some(i + 1))
             }
             _ => base,
