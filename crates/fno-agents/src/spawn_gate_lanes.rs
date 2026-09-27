@@ -2258,7 +2258,7 @@ mod tests {
             ("anthropic".to_string(), Some(3)),
         ]);
         let readings = vendor_lane_readings_from_caps(&caps, |provider| match provider {
-            "zai" => Ok(1),
+            "zai" => Ok(2),
             "anthropic" => Err("registry unreadable".to_string()),
             _ => unreachable!("uncapped provider must not be counted"),
         });
@@ -2267,7 +2267,7 @@ mod tests {
             readings["vendor_caps"],
             serde_json::json!({"zai": 2, "anthropic": 3})
         );
-        assert_eq!(readings["vendor_counts"], serde_json::json!({"zai": 1}));
+        assert_eq!(readings["vendor_counts"], serde_json::json!({"zai": 2}));
         assert_eq!(
             readings["vendor_count_errors"],
             serde_json::json!({"anthropic": "registry unreadable"})
