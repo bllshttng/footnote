@@ -255,6 +255,7 @@ pub fn project_graph_nodes(
             };
             p = PathBuf::from(root).join(p);
         }
+        p = codec::resolve_plan_path(&p);
         if !p.is_file() {
             continue;
         }
@@ -437,6 +438,7 @@ fn doc_stem_for_id(
             } else {
                 PathBuf::from(root?).join(path)
             };
+            let path = codec::resolve_plan_path(&path);
             if !path.is_file() {
                 return None;
             }
@@ -573,6 +575,20 @@ mod tests {
             list(&f, "related"),
             &["manual".to_string(), "note".to_string()]
         );
+    }
+
+    #[test]
+    fn projects_group_fragment_paths_through_base_files() {
+        let dir = tmp_dir("group-fragment-links");
+        write_plan(&dir, "parent.md", &child_doc("x-parent"));
+        let child = write_plan(&dir, "child.md", &child_doc("x-child"));
+        let entries = vec![
+            json!({"id": "x-parent", "slug": "parent", "plan_path": "parent.md#group-parent", "status": "ready", "type": "feature"}),
+            json!({"id": "x-child", "slug": "child", "plan_path": "child.md#group-child", "parent": "x-parent", "status": "ready", "type": "feature"}),
+        ];
+
+        assert_eq!(project(entries, &["x-child"], &dir), 1);
+        assert_eq!(s(&fields_of(&child), "parent_link"), "[[parent|x-parent]]");
     }
 
     #[test]
