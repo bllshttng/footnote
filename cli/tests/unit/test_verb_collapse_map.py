@@ -261,6 +261,9 @@ def test_map_covers_current_surface_once():
     # `agents backlog-notes` and `agents graph-get` no longer resolve on the
     # live surface; their stale rows freed five: 609 -> 604.
     # The update cut-over retires the `backlog update` KEEP row: 604 -> 603.
+    # The `backlog rank` T1 row stays: the mux menu binds the leaf and
+    # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
+    # is required even though the python leg is gone.
     assert len(mapped) == 603, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
