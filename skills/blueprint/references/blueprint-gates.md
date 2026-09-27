@@ -142,7 +142,9 @@ Start the row's Action cell with one of three words:
 
 - `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
 - `Delete` - the row removes Python and adds none.
-- `Grant d-XXXXXXXX +N` - the superuser ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`, and the row declares the added lines it spends as `+N`. The rows are summed against `config.blueprint.python_repair_added_lines` (default 30). A Grant with no `+N` is a finding.
+- `Grant d-XXXXXXXX +N` - cite the live ruling that approves this change: its subject is the plan's node, or its decision text names this row's path. A general law, including the Python repair law, approves no change by itself; a row may cite that law beside the approval. The gate reads every cited id. The row declares added lines as `+N`; Grant rows are summed against `config.blueprint.python_repair_added_lines` (default 30). A Grant with no `+N` is a finding.
+
+Before writing a Grant row, run `fno backlog decisions <node>` and find the approval. If none exists, ask the king with `fno inbox outstanding ask "<question>" --node <node>` and stop before validation. The scope gate warns on plans created on or before its gate date.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
