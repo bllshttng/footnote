@@ -263,7 +263,21 @@ pub fn ensure_named_crown(
         return Ok(false);
     }
     let label = rec.name.to_ascii_lowercase();
-    crate::state::rename_agent(registry_path, &crown.holder, &label, None)
+    // A succession the predecessor survived leaves the carried label parked
+    // on its still-live row. A row holding no live crown keeps nothing: the
+    // label and alias move off it in the SAME transaction that names the new
+    // holder, so the label never resolves to two rows.
+    let displaceable = |row: &crate::state::RegistryEntry| {
+        row.harness_session_id.as_deref().is_some_and(|sid| {
+            live.values()
+                .all(|c| c.holder_session.as_deref() != Some(sid))
+                && store
+                    .crowns
+                    .values()
+                    .all(|r| r.holder_session.as_deref() != Some(sid))
+        })
+    };
+    crate::state::rename_agent_displacing(registry_path, &crown.holder, &label, None, displaceable)
         .map_err(|e| format!("rename crowned holder: {e}"))?;
     Ok(true)
 }
@@ -493,6 +507,76 @@ mod tests {
         );
         let registry = crate::state::load_registry(&registry).unwrap();
         assert_eq!(registry.entries[0].name, "barnaby");
+    }
+
+    /// A succession the predecessor survived leaves the carried
+    /// label on its still-live row. ensure_named_crown moves the label and
+    /// alias off the crownless row in the same transaction that renames the
+    /// heir, instead of refusing.
+    #[test]
+    fn a_live_heir_takes_the_carried_label_off_a_crownless_predecessor_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The heir holds the live crown; the predecessor row is alive but
+        // crownless, and still carries the label "folio" as its name.
+        write_registry(
+            tmp.path(),
+            json!([
+                crown_row("vellum", "fno", 1, "sess-heir"),
+                json!({
+                    "name": "folio", "status": "live", "cwd": "/repo",
+                    "harness": "claude", "harness_session_id": "sess-old",
+                    "short_id": "oldrow21",
+                    "created_at": "2026-09-23T20:00:00Z",
+                }),
+            ]),
+        );
+        let store = store_path(tmp.path());
+        let registry = registry_path(tmp.path());
+        // The carried record: name folio, regnal 2, unbound until the heir's
+        // first beat binds it - carry_succession's shape.
+        write(
+            &store,
+            &Store {
+                version: 1,
+                crowns: BTreeMap::from([(
+                    "fno".into(),
+                    CrownNameRecord {
+                        name: "Folio".into(),
+                        regnal: 2,
+                        holder_session: None,
+                        nodes: Vec::new(),
+                        updated_at: now_stamp(),
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+
+        ensure_named_crown(&store, &registry, "fno").unwrap();
+
+        let rows = crate::state::load_registry(&registry).unwrap();
+        let heir = rows
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-heir"))
+            .unwrap();
+        let old = rows
+            .entries
+            .iter()
+            .find(|e| e.harness_session_id.as_deref() == Some("sess-old"))
+            .unwrap();
+        assert_eq!(heir.name, "folio");
+        assert!(heir.aliases.iter().any(|a| a == "vellum"));
+        assert_ne!(old.name, "folio");
+        assert!(!old.aliases.iter().any(|a| a == "folio"));
+        assert!(crate::state::is_valid_registry_label(&old.name));
+        // The label answers for exactly one row again.
+        let label_holders = rows
+            .entries
+            .iter()
+            .filter(|e| e.name == "folio" || e.aliases.iter().any(|a| a == "folio"))
+            .count();
+        assert_eq!(label_holders, 1);
     }
 
     #[test]
