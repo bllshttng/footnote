@@ -899,6 +899,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         "last_end": None,
         "completed_tick": None,
         "recent_ends": [],
+        "arm_rows": {},
     }
     if events_path is None:
         try:
@@ -986,6 +987,20 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
                 del recent[:-_RECENT_ENDS_KEEP]
+            elif etype == "control_plane_tick":
+                # Latest row per arm rides the same pass: status
+                # names a failing arm from the marks it already read instead
+                # of re-scanning the log. Rows are append-ordered, so the
+                # newest overwrites.
+                data = ev.get("data")
+                if not isinstance(data, dict) or not isinstance(data.get("arm"), str):
+                    continue
+                marks["arm_rows"][data["arm"]] = {
+                    "ts": ev.get("ts"),
+                    "skip_reason": data.get("skip_reason"),
+                    "detail": str(data.get("detail") or "")[:200],
+                    "acted": data.get("acted"),
+                }
     except Exception:
         pass
     return marks
@@ -1157,6 +1172,38 @@ def _broken_streak(ends: Optional[list]) -> int:
     return streak
 
 
+#: An arm row reading skip=timeout counts as a live cut for this long after
+#: its ts. Windows follow the tick's own arm intervals (king_wake 900,
+#: notify_watch 300, others the tick interval): two intervals for straight
+#: arms, three for the cadence trio that runs one tick in three by design.
+#: An off_cadence row is never a cut.
+_ARM_CUT_WINDOW_S = {"king_wake": 1800, "notify_watch": 600}
+_ARM_CADENCE_ARMS = ("stranded", "recovery", "watchdog")
+
+
+def _cut_arm_rows(
+    arm_rows: Optional[dict], now: float, interval_seconds: int
+) -> list[str]:
+    """Arms whose latest row is a fresh tick cut (skip_reason=timeout)."""
+    if not arm_rows:
+        return []
+    base = max(interval_seconds, 1)
+    cuts: list[str] = []
+    for arm, row in arm_rows.items():
+        if not isinstance(row, dict) or row.get("skip_reason") != "timeout":
+            continue
+        row_epoch = _parse_ts(row.get("ts"))
+        if row_epoch is None:
+            continue
+        age = now - row_epoch
+        window = _ARM_CUT_WINDOW_S.get(
+            arm, base * (3 if arm in _ARM_CADENCE_ARMS else 2)
+        )
+        if 0 <= age <= window:
+            cuts.append(arm)
+    return cuts
+
+
 def liveness_report(
     *,
     enabled: bool,
@@ -1169,11 +1216,12 @@ def liveness_report(
     last_end: Optional[dict] = None,
     recent_ends: Optional[list] = None,
     wedged_after_ticks: int = 3,
+    arm_rows: Optional[dict] = None,
 ) -> dict:
     """Pure verdict: is an enabled pr-watch actually running?  (fully injectable)
 
     ``verdict`` is one of ``disabled | healthy | healthy-pending | wedged |
-    dead``.  Derives from tick recency (ground truth), not config alone
+    dead | unhealthy``.  Derives from tick recency (ground truth), not config alone
     (locked decision #4).  A freshly-installed agent with no tick yet reads
     ``healthy-pending``, not ``dead`` (AC1-UI boundary); enabled-but-not-
     loaded, or a stale/absent tick past 2x the interval, reads ``dead`` with
@@ -1187,6 +1235,11 @@ def liveness_report(
     reads ``wedged``, not ``healthy``: the process is up and completing its
     sweeps, so recency alone cannot see that every tick still fails; the fix
     re-renders the plist onto the current binary.
+    ``unhealthy`` covers the fourth shape recency cannot see: the
+    tick completes and the watermark stays fresh while one of its arms is
+    being cut - ``arm_rows`` carries the latest tick row per arm, and a
+    fresh ``skip_reason=timeout`` row reads unhealthy naming the arm, so a
+    merge arm timing out at merge:execute can never ride a healthy verdict.
     """
     threshold = 2 * max(interval_seconds, 1)
 
@@ -1223,6 +1276,7 @@ def liveness_report(
             "last_tick": last_tick_ts,
             "interval_seconds": interval_seconds,
             "bounce_pending": bounce_pending,
+            "arms": arm_rows or {},
         }
 
     if not enabled:
@@ -1304,6 +1358,14 @@ def liveness_report(
             "delivering nothing",
             "fno do pr watch refresh",
         )
+    cuts = _cut_arm_rows(arm_rows, now, interval_seconds)
+    if cuts:
+        named = "; ".join(
+            f"{arm} cut: "
+            f"{str((arm_rows or {}).get(arm, {}).get('detail') or 'no detail')[:120]}"
+            for arm in cuts
+        )
+        return verdict("unhealthy", named, "fno agents status")
     return verdict("healthy", f"last tick {int(age)}s ago")
 
 
@@ -1341,6 +1403,7 @@ def liveness_report_live(
         last_end=marks.get("last_end"),
         recent_ends=marks.get("recent_ends"),
         wedged_after_ticks=cfg.wedged_after_ticks,
+        arm_rows=marks.get("arm_rows"),
     )
     # The last completed grant scan rides the same report the liveness verdict
     # uses: a done-probe can then assert "a healthy watcher completed a scan
