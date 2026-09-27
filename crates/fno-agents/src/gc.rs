@@ -107,11 +107,6 @@ pub struct GcRow {
     /// change 6): the status field can lag the merge by minutes when
     /// reconcile is slow. Recorded evidence outranks the lagging status.
     pub node_merged: bool,
-    /// The row's own pid answered ESRCH (change 8): a provably dead
-    /// process. Death overrides transcript recency - a dead process writes
-    /// nothing, so a fresh mtime without a living writer is an artifact -
-    /// but an absent or unanswerable pid never does: only ESRCH is death.
-    pub pid_gone: bool,
     /// The claude roster row exists, is non-terminal by state, and carries
     /// no pid in a listing that carries pids (change 9): a stale
     /// pre-death row. State alone reads live and lies; the hosted process
@@ -154,6 +149,11 @@ pub struct GcRow {
     /// from `agents.reap.open_work_retire_s`, defaulting well above the
     /// ordinary grace.
     pub open_work_retire_s: i64,
+    /// A live or suspect work-claim names this session as its holder
+    /// (x-3bf4): the claim's holder process answered the pid probe. The
+    /// row is never reaped as unattended while it holds one. `None` when
+    /// the pass read no such claim (or the claims root read empty).
+    pub live_claim: Option<String>,
 }
 
 impl GcRow {
@@ -238,9 +238,10 @@ pub enum KeepReason {
     /// stale node pinning it, so an operator can act on the node.
     OpenWorkStale { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
-    /// live in the only sense the law allows. A terminal harness state
-    /// overrides it (the roster's `done` is not a turn boundary), and so
-    /// does a dead pid.
+    /// live in the only sense the law allows (x-3bf4). A terminal roster
+    /// state and a dead pid no longer revoke recency - the 2026-09-25
+    /// sweeps retired thread workers seconds after their transcripts moved
+    /// on exactly this override, and one lost its claim mid-node.
     Active { age_s: i64 },
     /// The transcript could not be resolved. Absence is not quiet.
     TranscriptUnresolved,
@@ -261,6 +262,11 @@ pub enum KeepReason {
     /// stranded). The keep holds the row so the nudge ladder's Resume rung
     /// can run `fno agents resume` on it.
     DeadOpenWork { node: String },
+    /// A live or suspect work-claim names this session as its holder
+    /// (x-3bf4): the claim's holder process answered the pid probe, the
+    /// strongest liveness fact the machine holds. The row is never reaped
+    /// as unattended while it holds one.
+    LiveClaim { detail: String },
 }
 
 impl KeepReason {
@@ -288,6 +294,7 @@ impl KeepReason {
             KeepReason::OpenDoRow { .. } => "open do row on done node",
             KeepReason::OpenPr { .. } => "open pr",
             KeepReason::DeadOpenWork { .. } => "dead open work",
+            KeepReason::LiveClaim { .. } => "live claim held",
         }
     }
 }
@@ -492,20 +499,29 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 /// The transcript gates shared by every retire-eligible arm: an unresolved
 /// transcript and a transcript inside the grace window both keep the row.
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
+    // x-3bf4: a live work-claim outranks every transcript reading. The
+    // holder process answered the pid probe, so the session is mid-work
+    // whatever the transcript or the roster claims.
+    if let Some(detail) = &row.live_claim {
+        return (
+            GcAction::Keep,
+            Some(KeepReason::LiveClaim {
+                detail: detail.clone(),
+            }),
+        );
+    }
     match row.transcript_age_s {
         // the release lifts this one gate for this one row. Every
         // other path reads absence as unresolved, never as quiet.
         None if row.release_quiet => (GcAction::Retire, None),
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-        // change 8: a provably dead pid (ESRCH) overrides recency.
-        // Recency without a living writer is not liveness; only ESRCH
-        // revokes it, never an absent or unanswerable pid.
-        // a terminal harness state overrides recency too. The
-        // live roster shows a between-turns session as working/idle, never
-        // done - `done` is not a turn boundary, it is the finish line.
-        Some(age) if age <= grace_secs && !row.pid_gone && row.session_terminal.is_none() => {
-            (GcAction::Keep, Some(KeepReason::Active { age_s: age }))
-        }
+        // x-3bf4: recency outranks every death reading now - a terminal
+        // roster state and an ESRCH pid included. The 2026-09-25 sweeps
+        // retired t-x-d83b-glm and t-x-e65e-glm inside the grace window on
+        // exactly this override, and one lost its claim mid-node. A fresh
+        // timestamped entry has a writer seconds behind it; the row
+        // retires when the writing stops, never while it moves.
+        Some(age) if age <= grace_secs => (GcAction::Keep, Some(KeepReason::Active { age_s: age })),
         Some(_) => (GcAction::Retire, None),
     }
 }
@@ -2432,7 +2448,6 @@ mod tests {
             session_terminal: None,
             superseded_by_live_peer: None,
             node_merged: false,
-            pid_gone: false,
             process_gone: false,
             release_quiet: false,
             open_pr: None,
@@ -2441,6 +2456,7 @@ mod tests {
             origin_corpse: false,
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
+            live_claim: None,
         }
     }
 
@@ -3416,10 +3432,11 @@ mod tests {
         }
     }
 
-    /// Change 1: the harness publishing a terminal state overrides the
-    /// open-work keep. The grace gate still rules on the OTHER guards: a
-    /// non-terminal state keeps under open work, and a terminal state with
-    /// an unresolved transcript keeps under transcript unresolved.
+    /// Change 1, amended by x-3bf4: the harness publishing a terminal state
+    /// releases the open-work keep only past the grace window. Inside it the
+    /// transcript outranks the state: a between-turns session reads
+    /// working/idle, never done, and the 2026-09-25 reaps prove the state
+    /// itself can lie.
     #[test]
     fn terminal_session_state_releases_the_open_work_keep() {
         let mut row = open_row("in_review");
@@ -3429,33 +3446,38 @@ mod tests {
         row.transcript_age_s = Some(10);
         assert_eq!(
             gc_decide(&row, GRACE),
-            (GcAction::Retire, None),
-            "the roster measurement: `done` is a finish line, not a turn \
-             boundary - a between-turns session reads working/idle, never done"
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 })),
+            "a transcript that moved 10s ago has a writer behind it; the \
+             terminal reading does not retire it",
         );
         // A non-terminal state never reaches this field: the population
         // site filters through is_terminal_roster_state, covered at sweep
         // level by x2774_terminal_harness_state_releases_an_open_work_row.
     }
 
-    /// recency yields to a terminal harness state. An AllDone row
-    /// inside the grace window retires when its roster state reads done and
-    /// names the early fire when `working` or `blocked` - not terminal -
-    /// keeps it under active, exactly as today.
+    /// x-3bf4, amending change 1: recency outranks a terminal harness
+    /// state inside the grace window. Past it, the terminal state still
+    /// retires the row - a `done` reading with a quiet transcript is a
+    /// finish line. An unreadable transcript is never quiet either way.
     #[test]
-    fn a_terminal_harness_state_overrides_recency() {
+    fn a_terminal_harness_state_yields_to_recency() {
         let mut retiring_row = retiring();
         retiring_row.transcript_age_s = Some(274);
         retiring_row.session_terminal = Some("done".into());
-        assert_eq!(gc_decide(&retiring_row, GRACE), (GcAction::Retire, None));
-
-        let mut working = retiring();
-        working.transcript_age_s = Some(274);
-        working.session_terminal = None;
         assert_eq!(
-            gc_decide(&working, GRACE),
+            gc_decide(&retiring_row, GRACE),
             (GcAction::Keep, Some(KeepReason::Active { age_s: 274 })),
-            "no terminal fact, no override"
+            "the transcript moved 274s ago: a writer exists, so the row \
+             keeps whatever the roster says",
+        );
+
+        let mut aged_out = retiring();
+        aged_out.transcript_age_s = Some(GRACE + 1);
+        aged_out.session_terminal = Some("done".into());
+        assert_eq!(
+            gc_decide(&aged_out, GRACE),
+            (GcAction::Retire, None),
+            "quiet past the grace, the terminal state still retires",
         );
 
         let mut unresolved = retiring();
@@ -3465,6 +3487,52 @@ mod tests {
             gc_decide(&unresolved, GRACE),
             (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
             "a terminal state never makes an unreadable transcript quiet"
+        );
+    }
+
+    /// x-3bf4: recency is never reaped as unattended. The 2026-09-25 daemon
+    /// sweeps retired t-x-d83b-glm and t-x-e65e-glm INSIDE the grace window:
+    /// a terminal roster reading overrode a transcript that had moved
+    /// seconds earlier, and one worker lost its claim mid-node. A fresh
+    /// timestamped entry has a writer seconds behind it; the row retires
+    /// when the writing stops, never while it moves.
+    #[test]
+    fn a_recent_transcript_is_never_reaped_as_unattended() {
+        let mut row = open_row("in_progress");
+        row.transcript_age_s = Some(30);
+        row.session_terminal = Some("failed".into());
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 30 })),
+            "a terminal roster state does not revoke transcript recency",
+        );
+
+        let mut done_row = retiring();
+        done_row.transcript_age_s = Some(30);
+        done_row.session_terminal = Some("failed".into());
+        assert_eq!(
+            gc_decide(&done_row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 30 })),
+            "the same on an AllDone row: the grace gate rules, not the state",
+        );
+    }
+
+    /// x-3bf4: a live work-claim names this session as its holder and the
+    /// claim's holder process answered the pid probe. That is the strongest
+    /// liveness fact the machine holds, so the row keeps past quiet
+    /// whatever the work verdict says.
+    #[test]
+    fn a_live_claim_holds_the_row_past_quiet() {
+        let mut row = retiring();
+        row.live_claim = Some("node:x-3bf4 (holder spawn-handover:t-x-3bf4-glm)".into());
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::LiveClaim {
+                    detail: "node:x-3bf4 (holder spawn-handover:t-x-3bf4-glm)".into()
+                })
+            ),
         );
     }
 
@@ -3569,27 +3637,22 @@ mod tests {
         );
     }
 
-    /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,
-    /// but never transcript UNRESOLVED - absence is not quiet even for a
-    /// dead pid, because a dead pid says nothing about the transcript.
+    /// Change 8 is retired by x-3bf4: recency outranks every death
+    /// reading inside the grace window, so a pid answer no longer rides
+    /// the row. What survives is the unresolved half: absence is not
+    /// quiet, whatever any process probe says.
     #[test]
-    fn a_dead_pid_overrides_recency_but_not_unresolved() {
-        let mut row = retiring();
-        row.transcript_age_s = Some(100);
-        assert_eq!(
-            gc_decide(&row, GRACE),
-            (GcAction::Keep, Some(KeepReason::Active { age_s: 100 })),
-        );
-        row.pid_gone = true;
-        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
-
-        let mut unresolved = retiring();
-        unresolved.transcript_age_s = None;
-        unresolved.pid_gone = true;
+    fn an_unreadable_transcript_stays_unquiet_whatever_the_probe_says() {
+        let row = retiring();
+        let mut unresolved = GcRow {
+            transcript_age_s: None,
+            ..row
+        };
+        unresolved.live_claim = None;
         assert_eq!(
             gc_decide(&unresolved, GRACE),
             (GcAction::Keep, Some(KeepReason::TranscriptUnresolved),),
-            "dead pid does not make an unreadable transcript quiet"
+            "absence is not quiet: no probe makes it so"
         );
     }
 
@@ -3706,7 +3769,6 @@ mod tests {
             session_terminal: None,
             superseded_by_live_peer: None,
             node_merged: false,
-            pid_gone: false,
             process_gone: false,
             release_quiet: false,
             open_pr: None,
@@ -3715,6 +3777,7 @@ mod tests {
             origin_corpse: false,
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
+            live_claim: None,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -3742,7 +3805,6 @@ mod tests {
             session_terminal: None,
             superseded_by_live_peer: None,
             node_merged: false,
-            pid_gone: false,
             process_gone: false,
             release_quiet: false,
             open_pr: Some((node.into(), pr)),
@@ -3751,6 +3813,7 @@ mod tests {
             origin_corpse: false,
             registry_terminal: false,
             open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
+            live_claim: None,
         }
     }
 

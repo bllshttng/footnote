@@ -141,6 +141,10 @@ pub struct GcSummary {
     /// the node. Counted in `kept_total`; projected into `holds` so the
     /// hold has a clock like every other keep.
     pub kept_open_pr: Vec<(String, String)>,
+    /// `(id, claim detail)`: a live or suspect work-claim names the row's
+    /// session as its holder (x-3bf4). The holder process answered the pid
+    /// probe, so the session is mid-work whatever the transcript claims.
+    pub kept_live_claim: Vec<(String, String)>,
     /// `(id, node)` for the rows the open-PR keep named, and the nudge
     /// ladder's DRY-RUN plan: `would nudge <id> (<action>)`, no effect and
     /// no state. Empty on a real run: the ladder fires on the daemon arm
@@ -321,6 +325,7 @@ impl GcSummary {
             + self.kept_graph_unreadable.len()
             + self.kept_open_do_row.len()
             + self.kept_open_pr.len()
+            + self.kept_live_claim.len()
             + self.kept_dirty.len()
             + self.kept_unmerged.len()
             + self.kept_unprobed.len()
@@ -1655,6 +1660,25 @@ pub(crate) fn run_with_release(
     }
     let graph = read_graph(home);
     let now = crate::daemon::now_epoch_secs();
+    // x-3bf4: one claims read per sweep. A live or suspect record names its
+    // holder session; any row carrying that session never retires as
+    // unattended, because the claim's holder process answered the pid
+    // probe. Keyed by lowercase session id, joined through the record's
+    // `session_id` stamp (the holder string is a credential, never parsed
+    // for identity). An unreadable claims root reads as no facts - the
+    // transcript gates still stand - never as evidence of anything.
+    let claims_by_session: std::collections::HashMap<String, String> =
+        crate::claims::list(None, None, false)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|rec| {
+                let sid = rec.session_id.as_deref()?.trim().to_ascii_lowercase();
+                if sid.is_empty() {
+                    return None;
+                }
+                Some((sid, format!("{} (holder {})", rec.key, rec.holder)))
+            })
+            .collect();
     // One ledger parse per sweep: every receipt's enrichment reads these rows.
     let ledger = ledger_rows(&default_ledger_path());
     let mut receipts: std::collections::BTreeMap<String, ReapReceipt> =
@@ -2130,7 +2154,11 @@ pub(crate) fn run_with_release(
             session_terminal,
             superseded_by_live_peer,
             node_merged,
-            pid_gone,
+            // x-3bf4: the claim fact rides the row, so the grace gate -
+            // the one gate every retire-eligible arm passes - rules on it.
+            live_claim: claims_by_session
+                .get(sid.to_ascii_lowercase().as_str())
+                .cloned(),
             process_gone,
             release_quiet: release_quiet_row,
             open_pr,
@@ -2259,6 +2287,23 @@ pub(crate) fn run_with_release(
                         .push((id, node, status, reader))
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
+                Some(KeepReason::LiveClaim { detail }) => {
+                    summary.kept_live_claim.push((id.clone(), detail.clone()));
+                    // The hold rides the projection like every other keep,
+                    // so the hold has a clock and the release verb can
+                    // answer it.
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::LiveClaim {
+                            detail: detail.clone(),
+                        }
+                        .as_str(),
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
                 Some(KeepReason::TranscriptUnresolved) => {
                     // Main's bucket carries the clock the TU line
                     // renders; the holds projection stays the one answer for
@@ -2721,7 +2766,7 @@ pub(crate) fn run_with_release(
             .route
             .source
             .unwrap_or(node_route::NodeSource::Sessions);
-        let basis = match &probed.work {
+        let mut basis = match &probed.work {
             WorkState::AllDone { nodes } => {
                 let named = format!("every named node done: {}", nodes.join(", "));
                 let mut note = format!("via {}", via.as_str());
@@ -2782,38 +2827,6 @@ pub(crate) fn run_with_release(
             }
             _ => "done".to_string(), // unreachable: only AllDone and the released Open arms retire
         };
-        // change 8: name the early fire in the audit line. A basis
-        // that reads "quiet past grace" when the transcript was actually
-        // inside grace misreports why the row went; the pid evidence is the
-        // reason it went when it did.
-        // d-81c6da7e: a planner row's quiet clock is 1200 s, so the pid
-        // suffix names an early fire against the planner grace, not the
-        // default one.
-        let quiet_gate = if probed.planning.is_some() {
-            crate::gc::PLANNING_IDLE_RETIRE_SECS
-        } else {
-            grace_secs
-        };
-        let mut basis =
-            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= quiet_gate) {
-                format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
-            } else {
-                basis
-            };
-        // name the early fire for a terminal state the way the pid
-        // evidence names its own. An AllDone row retiring INSIDE the grace
-        // window went because the harness says the session finished, not
-        // because the transcript aged out; the Open basis already names the
-        // state in its own arm.
-        if matches!(probed.work, WorkState::AllDone { .. })
-            && probed.session_terminal.is_some()
-            && probed.transcript_age_s.is_some_and(|age| age <= grace_secs)
-        {
-            basis = format!(
-                "{basis}; session terminal: harness state {}",
-                probed.session_terminal.clone().unwrap_or_default()
-            );
-        }
         // The release rides the audit line: what was ruled, how old
         // the hold was, and an unconfirmed stop named as such.
         if let Some(note) = &release_note {

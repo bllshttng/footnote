@@ -440,8 +440,10 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     dry_unverified.sort_unstable();
     assert_eq!(
         dry_unverified,
-        vec!["t-donefresh", "t-term"],
-        "positive stop evidence advances to the unevaluated active-surface gate"
+        vec!["t-term"],
+        "positive stop evidence advances to the unevaluated active-surface \
+         gate; t-donefresh keeps under active since x-3bf4 - recency inside \
+         the grace outranks the terminal state, so it never reaches a gate"
     );
     assert!(
         dry.dry_run_unverified
@@ -466,18 +468,13 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     acting_ids.sort_unstable();
     assert_eq!(
         acting_ids,
-        vec!["t-done", "t-donefresh", "t-nostop", "t-term"],
+        vec!["t-done", "t-nostop", "t-term"],
         "apply records the effect outcome: every row whose gates confirmed \
-         retired"
+         retired; t-donefresh keeps under active since x-3bf4"
     );
-    // x-b7f8 change 1: the early fire is named (apply's basis; the dry run
-    // carries the gate name instead of a basis).
     assert!(
-        acting
-            .retired
-            .iter()
-            .any(|(id, basis)| id == "t-donefresh" && basis.contains("session terminal")),
-        "{:?}",
+        acting.retired.iter().all(|(id, _)| id != "t-donefresh"),
+        "a fresh transcript is never reaped as unattended: {:?}",
         acting.retired
     );
     assert_eq!(
@@ -496,11 +493,12 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// x-b7f8 change 3: for a terminal row the apply-window re-check asks one
-/// question - did the session write since classification. A DECREASING
-/// fresh age is a new write: the row keeps and the stop never fires. (The
-/// 274-to-275 case - age equal or older, retire - is covered by the
-/// dry/acting agreement extension above.)
+/// x-b7f8 change 3, amended by x-3bf4: a terminal row whose transcript is
+/// inside the grace keeps AT CLASSIFICATION - the terminal state no longer
+/// overrides recency, so the apply-window re-check never sees the row. The
+/// decreasing age seam still answers, and the row keeps with the
+/// classification age. (Past the grace the terminal state retires; that is
+/// x2774_terminal_harness_state_releases_an_open_work_row.)
 #[test]
 fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
     let (dir, home) = staged_graph_home();
@@ -562,8 +560,8 @@ fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
     );
     assert_eq!(
         summary.kept_active,
-        vec![("t-wrote".to_string(), 3)],
-        "the decreasing re-read keeps: {summary:?}"
+        vec![("t-wrote".to_string(), 274)],
+        "recency keeps at classification: {summary:?}"
     );
     std::fs::remove_dir_all(home.root()).ok();
 }

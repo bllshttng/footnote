@@ -91,7 +91,7 @@ These five move or remove state around sessions. None stops or removes a session
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
 8. policy `gc_decide`, open node: planning lane, then the open-PR and dead-worker keeps, then the four releases, then the open-work window
-9. the grace gate: an unresolved transcript keeps, a fresh transcript keeps unless terminal or the pid is gone
+9. the grace gate: an unresolved transcript keeps, and a transcript written inside the grace window keeps - recency outranks a terminal harness state and a dead pid (x-3bf4), and a live work-claim outranks both
 10. live descendant: `kept {id} (live descendant: {child})`, skipped for a terminal row
 11. apply freshness re-check: `kept {id} (active: ...)` or `kept {id} (probe unread: ...)`
 12. the stop gate and receipt stage: `held {id} (needs live stop: {reason})`, `kept {id} (stop refused: {reason})`, `kept {id} (no resumable receipt: {reason})`
@@ -260,7 +260,11 @@ The asymmetry matters (`gc.rs` `gc_decide`). A recorded status that is not `merg
 
 ### active
 
-The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs` `DEFAULT_RETIRE_GRACE_SECS`, `gc.rs` `grace_gate`). The session is live in the only sense the law allows. Wait past the window. Two facts override it early: a terminal harness state (`done`, `stopped`, `failed`) and a provably dead pid (ESRCH). If `claude agents` reads the session `done` while the reaper prints this line, that combination is a defect, not a wait.
+The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs` `DEFAULT_RETIRE_GRACE_SECS`, `gc.rs` `grace_gate`). The session is live in the only sense the law allows. Wait past the window. Since x-3bf4 nothing overrides recency inside the window - not a terminal harness state, not a dead pid. On 2026-09-25 the daemon sweeps retired thread workers (`t-x-d83b-glm`, `t-x-e65e-glm`) seconds after their transcripts moved, on a terminal roster reading the transcript proved wrong, and one worker lost its claim mid-node. A fresh timestamped entry has a writer seconds behind it; the row retires when the writing stops.
+
+### live claim
+
+The line reads `kept {id} (live claim held: {detail})`, where detail is `{claim key} (holder {holder})`. A live or suspect work-claim names this session as its holder (`claims.rs` `list`, joined through the record's `session_id` stamp). The claim's holder process answered the pid probe, which is the strongest liveness fact the machine holds, so the row keeps past quiet whatever the work verdict says (x-3bf4). The remedy for a stuck claim is `fno agents claim release`, never a reap.
 
 ### probe unread
 
@@ -337,6 +341,7 @@ Every top-level key of `fno agents reap --json`, one row each. The dry run rende
 | `kept_open_pr` | `kept {id} (open pr: {node} {detail})` | [open pr](#open-pr) |
 | `kept_planning_unclosed` | `kept {id} (planning assignment not finished by this session: {node})` | [planning assignment not finished by this session](#planning-assignment-not-finished-by-this-session) |
 | `kept_active` | `kept {id} (active: transcript written {age}s ago)` | [active](#active) |
+| `kept_live_claim` | `kept {id} (live claim held: {detail})` | [live claim](#live-claim) |
 | `kept_probe_unread` | `kept {id} (probe unread: {detail})` | [probe unread](#probe-unread) |
 | `kept_transcript_unresolved` | `kept {id} (transcript unresolved for {age}: absence is not quiet)` | [transcript unresolved](#transcript-unresolved) |
 | `kept_graph_unreadable` | `kept {id} (graph unreadable: never a retirement on a failed read)` | [graph unreadable](#graph-unreadable) |
@@ -379,7 +384,8 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (open do row on done node: {node}: {detail})` | Wait. A real run settles it. Never close the node. | Run `fno backlog get <node>` and read `status`. |
 | `kept {id} (planning assignment not finished by this session: {node})` | Wait up to 20 quiet minutes, or rule with `fno agents reap --release <row>` once escalated. | The line names the node and the hold age. |
 | `kept {id} (live descendant: {child})` | Wait for the live CHILD row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. A handoff row (`sob-t-`, `ac-t-`) never holds its spawner. | The same report carries the child line. |
-| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early, unless the row keeps for an open PR. | Run the dry run again. Read the new age. |
+| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. Nothing retires the row early inside it. | Run the dry run again. Read the new age. |
+| `kept {id} (live claim held: {detail})` | The claim's holder process is live. Release the claim if it is stuck: `fno agents claim release`. | Run `fno agents claim status <key>`, with the key from `{detail}`. |
 | `kept {id} (probe unread: {detail})` | Wait for the next sweep. The probe usually answers then. A moved seq means a new turn: the keep is real. | Run the dry run again. Read the detail. |
 | `kept {id} (transcript unresolved for {age}: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |
 | `kept {id} (no provenance: ...)` | Restore one resolvable source for the row. | Run `fno-agents node-route --names <name> --json`. |
