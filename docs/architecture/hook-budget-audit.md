@@ -138,4 +138,4 @@ Other configured commands do not emit a per-invocation marker that can serve as 
 
 ## Timing
 
-Before and after timings for one representative Bash PreToolUse payload are recorded here after the same local replay method runs against each registration shape. The native harness's exact dispatch overhead cannot be measured from the repository event journal.
+CI runs `hook_budget_bash_pretooluse_dispatch` through the existing hook-latency harness. The artifact records each elapsed time, and the job prints p90, maximum, and captured execs. The measured result is added here after CI completes. The native event journal cannot measure harness dispatch overhead.

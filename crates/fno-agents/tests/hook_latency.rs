@@ -1144,6 +1144,55 @@ fn latency_guard_court_plan_allow() {
     );
 }
 
+/// One Bash PreToolUse round trip through the six-guard dispatcher. The name
+/// does not use the quarantined `latency_` prefix, so CI samples this row.
+#[test]
+#[ignore]
+fn hook_budget_bash_pretooluse_dispatch() {
+    run_fixture(
+        "hook_budget_bash_pretooluse_dispatch",
+        "hooks/pretooluse-bash-dispatch.sh",
+        &FixtureSpec {
+            payload: guard_payload(
+                VISITOR_SID,
+                "Bash",
+                json!({"command": "rg --files | head -4"}),
+            ),
+            manifest: "",
+            claims: &[],
+            extra_env: &[],
+            budget_p90_ms: 1000.0,
+            ceiling_ms: 2500.0,
+            allowed_execs: &[
+                "bash",
+                "cat",
+                "dirname",
+                "fno-agents",
+                "git",
+                "jq",
+                "mktemp",
+                "python3",
+                "pwd",
+                "rm",
+            ],
+            max_git: Some(5),
+        },
+        |code, stdout, stderr| {
+            assert_eq!(code, 0, "{stderr}");
+            let response: Value = serde_json::from_str(stdout.trim())
+                .unwrap_or_else(|error| panic!("{stdout:?} is not JSON: {error}"));
+            assert_eq!(
+                response["hookSpecificOutput"]["permissionDecision"], "deny",
+                "the pipe guard must still refuse: {stdout} {stderr}"
+            );
+            assert!(response["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[fno pipe guard]"));
+        },
+    );
+}
+
 /// AC12-HP: the per-turn hot path stays small. Ceilings freeze this branch's
 /// measured floors so the wrappers, the native handlers, and the decision
 /// core cannot quietly regrow. Physical counts for the wrappers and
