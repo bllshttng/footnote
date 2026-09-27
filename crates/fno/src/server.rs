@@ -57,6 +57,8 @@ use crate::spawn_journal::{
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::{SquadSnapshot, StoredTabTree};
+
+use self::slot_capture::SlotCapture;
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
@@ -81,6 +83,7 @@ mod retire_session;
 mod row_set;
 mod session_guard;
 mod shutdown_capture;
+mod slot_capture;
 mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
@@ -1127,6 +1130,12 @@ struct PaneEntry {
     /// bare shell `cmd: Some`; the portal doors read
     /// [`Core::portal_seat_is_viewer`], never `cmd` alone.
     portal_hold: Option<String>,
+    /// True when this pane is a TRANSIENT machine view (`FNO_VIEW_TRANSIENT`
+    /// in its own argv, re-derived at keeper re-adoption): a screen a side
+    /// effect opened. It is never a portal (no `portals` entry), never
+    /// captured as anything but an ordinal shell slot, and the restore
+    /// prune reaps it instead of tabbing it.
+    transient_view: bool,
     /// True when this pane was adopted at a fresh id because the pane key its
     /// keeper socket carries could not be reused (zero, or already live). Set
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
@@ -1678,37 +1687,24 @@ pub(crate) struct Core {
     /// glance, and one operator wanting two at once is the case to hear about
     /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
-    /// The open PORTALS: the panes dedicated to
-    /// thread-substrate rows, keyed by the operator-facing index. A portal is
-    /// the thing you go through to reach a live harness thread, so several
-    /// threads can each hold one and the existing Join actions tile them side
-    /// by side.
+    /// The open PORTALS under the TV model: index -> entry (channel,
+    /// screen pane, tab). A portal is never a pane and never a tab: it is
+    /// the index plus the placement (which tab, which leaf) plus the
+    /// channel it is tuned to. The screen pane is what the portal plays
+    /// now: a live viewer, a parked screen, or (after an operator close)
+    /// nothing, and the entry always names the live screen.
     ///
-    /// This is deliberately NOT the singleton contract `diff_pane` above
-    /// keeps. A diff is a glance and one at a time is its design; a portal is
-    /// a window onto a running thread and the cap of one was the defect
-    /// (lifted it). Substrate semantics are untouched either way: a
-    /// thread still hosts no pane until one is created.
+    /// Reaching the SAME channel is a focus; reaching a different one
+    /// swaps the screen in place (spawn-first, `tree::replace_leaf`,
+    /// reap-last). Only an explicit gesture creates or closes: an
+    /// operator's sideline +, the composer, an explicit `--portal`, or an
+    /// operator close. Side-effect doors (a bare spawn, retask's plain
+    /// reach, the owned command view) never add to this map; a machine
+    /// view that must exist is a transient pane with no entry, never
+    /// restored.
     ///
-    /// Per index, the mechanics are exactly the old single slot's. Re-reaching
-    /// the SAME row is a no-op focus ("show me"), never a close - closing is
-    /// the ordinary close-pane gesture. A repoint to a different row reuses
-    /// the open-here mechanic (spawn-first, `tree::replace_leaf`, reap-last)
-    /// so the geometry never moves, and it touches only its own index. NEVER
-    /// persisted and NEVER rebuilt by restore: a pane binds a session to
-    /// geometry, a thread binds a session to a row, and persisting a portal
-    /// would re-bind a thread to a rectangle across a restart. `BTreeMap`
-    /// rather than `HashMap` so iteration is index-ordered and the sideline's
-    /// portal column cannot reshuffle between frames.
-    ///
-    /// After a viewer's child dies, the seat keeps the tab alive as
-    /// an idle-shell stand-in and the entry names the STAND-IN, so the next
-    /// reach repoints the seat in the same tab instead of minting a second
-    /// portal tab. That swap now fires only for the LAST open portal: it
-    /// exists so a dying viewer never deletes the only window onto the fleet,
-    /// and with another portal open that premise is false. The seat pane is a
-    /// live viewer iff `panes[seat].cmd` is `Some` (shells carry no argv
-    /// provenance); the same-row focus arm requires it.
+    /// `BTreeMap` rather than `HashMap` so iteration is index-ordered and
+    /// the sideline's portal column cannot reshuffle between frames.
     portals: BTreeMap<u8, Portal>,
     /// One-shot latch for the discoverability notice: the first
     /// thread row to appear with no portal open tells the operator the reach
@@ -1865,143 +1861,6 @@ fn wheel_gate(
             });
             true
         }
-    }
-}
-
-/// Capture-side pane -> slot naming. Slot names are decided at
-/// CAPTURE, never at restore, so two snapshots of one session agree on which
-/// pane is which: a pane with an fno id names its slot that id and binds
-/// `Fno(id)` (restore re-attaches it); a pane without one names itself
-/// `p<ordinal>` and binds `Shell`. A duplicate attach id (the mirroring-ready
-/// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
-struct SlotCapture<'a> {
-    pane_owner: &'a HashMap<u64, &'a str>,
-    /// Each pane's live cwd, read once before the tab loop.
-    pane_cwd: &'a HashMap<u64, String>,
-    /// Every live portal seat -> (index, row_key), read once before
-    /// the tab loop. A seated leaf names its slot after the portal instead of
-    /// an ordinal, so the capture keeps what restore needs to hold it again.
-    portal_seats: &'a HashMap<u64, (u8, String)>,
-    /// The live portals map and the registry snapshot, read once: a seated
-    /// leaf's `PortalSlot` carries the row's harness and FULL session id (the
-    /// fill guard) resolved through the same join the reach uses.
-    portals: &'a BTreeMap<u8, Portal>,
-    agents: &'a [crate::agents_view::RegistryAgent],
-    slots: Vec<LayoutSlot>,
-    by_pane: HashMap<u64, String>,
-    ordinal: usize,
-}
-
-impl<'a> SlotCapture<'a> {
-    fn new(
-        pane_owner: &'a HashMap<u64, &str>,
-        pane_cwd: &'a HashMap<u64, String>,
-        portal_seats: &'a HashMap<u64, (u8, String)>,
-        portals: &'a BTreeMap<u8, Portal>,
-        agents: &'a [crate::agents_view::RegistryAgent],
-    ) -> Self {
-        SlotCapture {
-            pane_owner,
-            pane_cwd,
-            portal_seats,
-            portals,
-            agents,
-            slots: Vec::new(),
-            by_pane: HashMap::new(),
-            ordinal: 0,
-        }
-    }
-
-    /// The live tree -> the persisted spec. Weights are renormalized on the
-    /// way out rather than trusted: `tree::check_invariants` requires branch
-    /// ratios summing to 1.0, but a stored document is untrusted input and
-    /// geometry divides by the sum.
-    fn node_to_spec(&mut self, node: &Node) -> LayoutTreeSpec {
-        match node {
-            Node::Leaf(p) => LayoutTreeSpec::Slot(self.name_leaf(*p)),
-            Node::Branch { axis, children } => {
-                let weights: Vec<f32> = children.iter().map(|(w, _)| w.max(0.0)).collect();
-                let sum: f32 = weights.iter().sum();
-                let even = 1.0 / children.len() as f32;
-                let children = children
-                    .iter()
-                    .zip(weights)
-                    .map(|((_, n), w)| LayoutTreeChild {
-                        weight: if sum > 0.0 { w / sum } else { even },
-                        tree: self.node_to_spec(n),
-                    })
-                    .collect();
-                LayoutTreeSpec::Split {
-                    axis: *axis,
-                    children,
-                }
-            }
-        }
-    }
-
-    fn name_leaf(&mut self, pane: u64) -> String {
-        // Order is portal, owner, ordinal. A portal seat that is
-        // also an attach pane (a LIVE viewer is: the reach inserts the
-        // mapping) captures as the portal slot, never as `Fno(attach_id)` -
-        // an attach binding would re-bind the thread to the rectangle at
-        // restore, the exact thing never-persist rule exists for.
-        // The slot pair is the durable record; the viewer process is not.
-        let base = match self.portal_seats.get(&pane) {
-            Some((index, _)) => format!("portal{index}"),
-            None => match self.pane_owner.get(&pane) {
-                Some(id) => id.to_string(),
-                None => {
-                    self.ordinal += 1;
-                    format!("p{}", self.ordinal)
-                }
-            },
-        };
-        let mut name = base.clone();
-        let mut n = 2;
-        while self.slots.iter().any(|s| s.name == name) {
-            name = format!("{base}#{n}");
-            n += 1;
-        }
-        let binding = if self.portal_seats.contains_key(&pane) {
-            LayoutBinding::Shell
-        } else {
-            match self.pane_owner.get(&pane) {
-                Some(id) => LayoutBinding::Fno(id.to_string()),
-                None => LayoutBinding::Shell,
-            }
-        };
-        let portal = self.portal_seats.get(&pane).map(|(index, row)| {
-            // The row facts the fill guard reads back after a restart:
-            // harness + FULL session id of the row the seat showed at
-            // capture, resolved through the same agents snapshot the reach
-            // itself used. A row that no longer resolves captures as None
-            // and fills unguarded.
-            let row_facts = crate::thread_viewer::row_for_pane(self.portals, pane, self.agents)
-                .map(|agent| (agent.harness.clone(), agent.harness_session_id.clone()))
-                .unwrap_or((None, None));
-            PortalSlot {
-                index: *index,
-                row: row.clone(),
-                harness: row_facts.0,
-                session_id: row_facts.1,
-            }
-        });
-        self.slots.push(LayoutSlot {
-            name: name.clone(),
-            binding,
-            cwd: self.pane_cwd.get(&pane).cloned(),
-            portal,
-            // The restart join: the leaf remembers the pane id that lived
-            // here, so restore can bind its re-adopted keeper twin.
-            pane_id: Some(pane),
-        });
-        self.by_pane.insert(pane, name.clone());
-        name
-    }
-
-    /// The slot name capture gave `pane` (for the persisted focus marker).
-    fn slot_of(&self, pane: u64) -> Option<String> {
-        self.by_pane.get(&pane).cloned()
     }
 }
 
@@ -2644,6 +2503,7 @@ impl Core {
             None,
             None,
             None,
+            false,
         )?;
         Ok(id)
     }
@@ -2780,6 +2640,7 @@ impl Core {
             resume_target,
             refused_worker_from_argv(argv),
             portal_hold_from_argv(argv),
+            transient_view_from_argv(argv),
         )?;
         if let Some(keeper_err) = fell_back {
             if let Some(entry) = self.panes.get_mut(&id) {
@@ -2875,6 +2736,7 @@ impl Core {
         resume_target: Option<String>,
         refused_worker: Option<String>,
         portal_hold: Option<String>,
+        transient_view: bool,
     ) -> Result<(), String> {
         let Some(child_pid) = pty.child_pid() else {
             pty.kill();
@@ -2906,6 +2768,7 @@ impl Core {
                 resume_target,
                 refused_worker,
                 portal_hold,
+                transient_view,
                 unreconciled: false,
                 unkept: false,
                 last_output: Instant::now(),
@@ -6249,11 +6112,28 @@ impl Core {
             .iter()
             .map(|(idx, p)| (p.seat, (*idx, p.row_key.clone())))
             .collect();
+        // A view pane is never a slot of its own kind: the capture reads
+        // the marker set once.
+        let transient_views: HashMap<u64, ()> = self
+            .panes
+            .iter()
+            .filter(|(_, e)| e.transient_view)
+            .map(|(pid, _)| (*pid, ()))
+            .collect();
         // Filled per tab below.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         for (i, t) in sq.tabs.iter().enumerate() {
+            let leaves = tree::leaves(&t.root);
+            // A tab whose every leaf is a transient view is never stored:
+            // nothing in it is the operator's to restore.
+            if !leaves.is_empty() && leaves.iter().all(|p| transient_views.contains_key(p)) {
+                if i == sq.active_tab {
+                    active_tab = usize::MAX;
+                }
+                continue;
+            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
@@ -6270,6 +6150,7 @@ impl Core {
                 &portal_seats,
                 &self.portals,
                 &self.agents,
+                &transient_views,
             );
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
@@ -6910,8 +6791,10 @@ impl Core {
         // attach path and refreshes this via `ExternalLifecycleSync`.
         self.external_lifecycle = loaded.external_lifecycle;
         if loaded.squads.is_empty() {
-            // No stored workspace: adopted panes get their own tabs in home
-            // rather than dangling unplaced.
+            // No stored workspace: the stand-in prune runs first, then
+            // adopted panes get their own tabs in home rather than
+            // dangling unplaced.
+            self.prune_portal_standins();
             self.place_adopted_leftovers(home_sid);
             self.restored = true;
             return;
@@ -7834,6 +7717,11 @@ impl Core {
                 "restore: kept {kept_unknown_members} member(s) with no death evidence; they re-decide on the next restore"
             ));
         }
+        // The one-time stand-in prune, after every squad's portal slots
+        // bound (a portal's screen is never a candidate) and before the
+        // leftovers place. The shapes no code mints anymore close here,
+        // operator-shaped, with no parked screen minted.
+        self.prune_portal_standins();
         // policy = resume: the walk deliberately left every member
         // idle; the bulk driver now brings each back through its own
         // harness's declared form. The reply end is dropped on purpose - at
@@ -10374,6 +10262,12 @@ impl Core {
                 // decision moved into the reach: a repoint keeps owning its
                 // geometry (ignored, visibly), a fresh open honors the
                 // caller's placement. This edge only resolves WHICH index.
+                if placement.view {
+                    // The transient machine view: never a portal, never an
+                    // entry in the map, never restored. A side effect's
+                    // screen; see `open_transient_view`.
+                    return self.open_transient_view(client_id, view, vp, &id, &placement);
+                }
                 if placement.wants_portal() {
                     // An explicit index wins over "any". `portal_new` names no
                     // index BECAUSE the caller must not choose one: allocating

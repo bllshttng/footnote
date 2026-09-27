@@ -104,6 +104,7 @@ impl Core {
                         None,
                         None,
                         None,
+                        false,
                     )?;
                     if !ring.is_empty() {
                         if let Some(entry) = self.panes.get_mut(&id) {
@@ -233,6 +234,7 @@ impl Core {
                         resume_target_from_argv(&argv),
                         refused_worker_from_argv(&argv),
                         portal_hold_from_argv(&argv),
+                        transient_view_from_argv(&argv),
                     ) {
                         self.notice_all(format!(
                             "keeper readopt: {} refused registration ({e}); child was not adopted",
@@ -348,6 +350,106 @@ impl Core {
         Some(a.pane)
     }
 
+    /// The one-time stand-in prune, run at restore after the portal slots
+    /// bind and before the leftovers place. A pane an OLDER server minted
+    /// as a stand-in closes here, operator-shaped, with no parked screen:
+    /// the shapes no code mints anymore. A pane is a candidate only when
+    /// its child runs no child process of its own and no portal's screen
+    /// names it, and one of:
+    /// - its name matches `^portal[0-9]+$` (the old restore naming);
+    /// - its argv carried `FNO_PORTAL_HELD=` but no portal entry claims it;
+    /// - its argv carried `FNO_VIEW_TRANSIENT=` (a killed caller's view);
+    /// - it wears a worker name whose registry row is gone or hosts no
+    ///   pane (a thread row's shell stand-in - the row's resume door is
+    ///   `fno agents resume`, never the shell);
+    /// and a pane-substrate worker hold (its row hosts a pane) is kept on
+    /// purpose: it is that worker's resume door, not a portal. Unknown
+    /// process state never prunes.
+    pub(super) fn prune_portal_standins(&mut self) {
+        let screens: std::collections::HashSet<u64> =
+            self.portals.values().map(|p| p.seat).collect();
+        let candidates: Vec<u64> = self
+            .panes
+            .iter()
+            .filter(|(pid, _)| !screens.contains(pid))
+            .map(|(pid, _)| *pid)
+            .collect();
+        let mut pruned = 0;
+        for pid in candidates {
+            let child = match self.panes.get(&pid).and_then(|e| e.pty.child_pid()) {
+                Some(child) => child,
+                None => continue,
+            };
+            match crate::process_admission::pid_has_child(child) {
+                Some(false) => {}
+                _ => continue,
+            }
+            // A close that would empty the session shuts the server down
+            // mid-restore; the prune never takes the last pane.
+            if self.panes.len() <= 1 {
+                break;
+            }
+            let entry = match self.panes.get(&pid) {
+                Some(entry) => entry,
+                None => continue,
+            };
+            // This server's own held worker placeholders are resume doors
+            // recorded in `held_workers`: never candidates, whatever the
+            // registry snapshot says (at startup it may not have landed
+            // yet). Only an OLDER server's adopted stand-in (never held by
+            // this one) can prune on the name arm.
+            if self.held_workers.contains_key(&pid) {
+                continue;
+            }
+            let name = entry.name.as_deref();
+            let portal_number = name
+                .filter(|n| {
+                    n.starts_with("portal")
+                        && n.len() > "portal".len()
+                        && n["portal".len()..].bytes().all(|b| b.is_ascii_digit())
+                })
+                .is_some();
+            let orphan_hold = entry.portal_hold.is_some();
+            let transient = entry.transient_view;
+            // The name arm reads the registry the restore walk reads, fresh
+            // from the file: the off-loop snapshot is empty at startup, and
+            // an empty read must mean "unknown", never "gone" (it would eat
+            // every held worker's placeholder). `None` (unreadable) is
+            // unknown too.
+            let registry = crate::restore_gate::restore_registry_rows();
+            let named_row_gone = entry.name.as_deref().is_some_and(|n| {
+                registry.as_deref().is_some_and(|rows| {
+                    rows.iter()
+                        .find(|a| a.name == n)
+                        .is_none_or(|row| row.mux.is_none())
+                })
+            });
+            if !(portal_number || orphan_hold || transient || named_row_gone) {
+                continue;
+            }
+            let why = if portal_number {
+                "portalN stand-in shell"
+            } else if orphan_hold {
+                "held screen with no portal entry"
+            } else if transient {
+                "leftover transient view"
+            } else {
+                "shell stand-in for a paneless row"
+            };
+            let label = entry.name.clone().unwrap_or_else(|| "pane".into());
+            self.notice_all(format!(
+                "restore: pruned {why} (pane {pid}, {label}); it is no portal and nothing is lost"
+            ));
+            pruned += 1;
+            self.close_by_operator(pid);
+        }
+        if pruned > 0 {
+            self.notice_all(format!(
+                "restore: pruned {pruned} stand-in pane(s) an older server left"
+            ));
+        }
+    }
+
     /// Place any adopted pane restore's member walk did not bind (its stored
     /// member is gone, or the store held no squads at all). A live pane must
     /// never be left dangling without a tab: one tab each, named from the
@@ -360,6 +462,38 @@ impl Core {
             .cloned()
             .collect();
         for a in unplaced {
+            // A portal remnant is never tabbed: a viewer (an attach argv),
+            // a parked screen or a transient view is reaped here, named in
+            // the notice. Every other leftover keeps today's own-tab
+            // placement.
+            let remnant = match self.panes.get(&a.pane) {
+                Some(entry)
+                    if entry.portal_hold.is_some()
+                        || entry.transient_view
+                        || (cmd_from_argv(&a.argv).as_deref() == Some("claude")
+                            && a.argv.get(1).map(String::as_str) == Some("attach")) =>
+                {
+                    Some(if entry.portal_hold.is_some() {
+                        "parked screen"
+                    } else if entry.transient_view {
+                        "transient view"
+                    } else {
+                        "viewer"
+                    })
+                }
+                _ => None,
+            };
+            if let Some(kind) = remnant {
+                self.notice_all(format!(
+                    "keeper readopt: pane {} was a portal remnant ({kind}); reaped, not tabbed",
+                    a.pane
+                ));
+                if let Some(entry) = self.keeper_adopted.iter_mut().find(|x| x.pane == a.pane) {
+                    entry.placed = true;
+                }
+                self.reap_pane(a.pane);
+                continue;
+            }
             let owner = self
                 .session
                 .squads

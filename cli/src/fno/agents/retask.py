@@ -98,11 +98,10 @@ def resolve_thread_viewport(
             raise RetaskTransportError("thread_view_open_timeout") from exc
 
     # The door answers the row NAME, not the session uuid; fno_id guards the
-    # join. A machine reach asks for a portal of its own in a new tab: with
-    # no --portal the server serves portal 0, and the reach would repoint the
-    # operator's own seat and leave the view under their keys.
+    # join. The reach carries no baked placement: no flag tunes the row's
+    # open portal, else the door's own portal 0 opens for it.
     door = invoke(
-        ["mux", "thread", entry.name, "--server", session, "--portal", "new", "--tab", "new"],
+        ["mux", "thread", entry.name, "--server", session],
         30,
     )
     if door.returncode:

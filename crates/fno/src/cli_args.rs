@@ -659,13 +659,13 @@ pub fn pane_group_help() -> String {
 /// error); `render_path_help(["mux", "thread"])` reads it.
 pub fn thread_group_help() -> String {
     "\
-The addressing door onto a live thread row: show it through a portal (or focus the portal it already has), and never create, resume, or duplicate a worker. The key matches one live row exactly, not by the prefix or substring tiers `fno mux view` uses; zero matches, or several rows answering the same key, refuse and spawn no worker.
+The addressing door onto a live thread row. An explicit placement flag creates a portal from any verb, human or agent: `--portal new`, or `--portal N` when N is not open, and a `--split DIR` halves the caller's own pane unless `--from portal N|worker|current` names another cell. No flag tunes: the reach focuses the row's open portal, and with none open the door's own portal 0 opens for it. A default never creates: a bare `fno agents spawn` is a paneless thread. The key matches one live row exactly, not by the prefix or substring tiers `fno mux view` uses; zero matches, or several rows answering the same key, refuse and spawn no worker.
 
   fno mux thread w2
-  fno mux thread 3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90
+  fno mux thread w2 --portal new --split right --from portal 0
   fno agents whoami prints both values: `name` for either harness, the full `session` id for Codex, and the `short_id` job id for Claude - a full Claude transcript UUID is not accepted here.
 
-Move a live pane-hosted worker into a portal seat, keeping its terminal:
+Move a live pane-hosted worker into a portal, keeping its terminal:
   fno mux thread reseat <name> --portal N"
         .to_string()
 }
@@ -1221,15 +1221,15 @@ mod tests {
     #[test]
     fn thread_group_help_renders_the_addressing_contract() {
         // The help body is the contract the two portal documents quote:
-        // both address forms, the discovery verb, the exact-match boundary,
+        // the TV rule (explicit placement creates, a default never does),
+        // the split-from form, the discovery verb, the exact-match boundary,
         // and the no-spawn refusal. `attach_id` stays internal; the help
         // teaches `name`, `session` and `short_id` (the whoami fields).
         let help = render_path_help(&["mux", "thread"]);
         assert!(help.contains("fno mux thread w2"), "{help}");
-        assert!(
-            help.contains("3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90"),
-            "{help}"
-        );
+        assert!(help.contains("explicit placement flag creates"), "{help}");
+        assert!(help.contains("No flag tunes"), "{help}");
+        assert!(help.contains("halves the caller's own pane"), "{help}");
         assert!(help.contains("fno agents whoami"), "{help}");
         assert!(help.contains("exact"), "{help}");
         assert!(help.contains("refuse and spawn no worker"), "{help}");
@@ -1450,6 +1450,9 @@ pub struct ThreadArgs {
     /// Anchor pane id for a fresh open
     #[arg(long)]
     pub at: Option<String>,
+    /// The named cell a split halves: `portal N`, a worker name, or `current`
+    #[arg(long)]
+    pub from: Option<String>,
     /// The agent name or attach id
     pub name: Option<String>,
 }

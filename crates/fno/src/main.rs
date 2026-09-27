@@ -780,7 +780,7 @@ mod tests {
         );
         for needle in [
             "fno agents whoami",
-            "3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90",
+            "explicit placement flag creates",
             "Claude",
             "exact",
             "refuse",

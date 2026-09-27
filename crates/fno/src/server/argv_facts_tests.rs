@@ -54,3 +54,17 @@ fn portal_hold_from_argv_reads_the_held_row_past_the_env_wrapper() {
         .collect();
     assert_eq!(portal_hold_from_argv(&mention), None);
 }
+
+#[test]
+fn account_from_argv_reads_the_fno_account_token() {
+    // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
+    let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(
+        from(&["env", "FNO_NODE=x-1", "FNO_ACCOUNT=readyrule", "claude"]),
+        Some("readyrule".to_string())
+    );
+    // Default account (no token) / ad-hoc pane / empty value -> None.
+    assert_eq!(from(&["env", "FNO_NODE=x-1", "claude"]), None);
+    assert_eq!(from(&["claude"]), None);
+    assert_eq!(from(&["env", "FNO_ACCOUNT=", "claude"]), None);
+}
