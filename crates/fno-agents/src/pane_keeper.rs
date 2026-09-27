@@ -651,9 +651,23 @@ fn serve_client(
                             // the child handle stays owned by the waiter.
                             let pid = keeper.child_pid.load(Ordering::SeqCst);
                             if pid > 0 {
-                                // SAFETY: kill with a valid pid and SIGKILL
-                                // is the deliberate-close contract.
-                                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                                // SIGTERM first, then SIGKILL only past the
+                                // grace: a killed-mid-write claude leaves an
+                                // orphaned .claude.json.tmp in the config dir
+                                // (x-2bda). The endpoint is unchanged for a
+                                // worker that ignores SIGTERM.
+                                // SAFETY: kill with a valid pid and SIGTERM,
+                                // then SIGKILL after the confirmed grace.
+                                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                                for _ in 0..50 {
+                                    if !crate::claude_config_tmp::pid_alive(pid) {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                                if crate::claude_config_tmp::pid_alive(pid) {
+                                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                                }
                             }
                         }
                         Frame::Identify => {
