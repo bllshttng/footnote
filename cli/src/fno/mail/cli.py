@@ -3007,11 +3007,35 @@ def _raw_send(
     from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
 
     if _delivery_policy_refusal(entry, stripped) == BUS_ONLY_POLICY:
-        _refused(
-            f"{name!r} is DND (delivery-policy bus-only): prompt-line injection is "
-            "forbidden for this recipient. Send wrapped mail instead - it "
-            "queues durable and surfaces at their turn boundary"
-        )
+        # C15: a raw send to a held session parks instead of refusing - the
+        # payload waits in the hold store and runs through this same raw door
+        # when the hold ends (the Rust runner, mail_hold.rs --run-parked).
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+        if binary is None:
+            _refused(
+                f"{name!r} is DND (delivery-policy bus-only): prompt-line injection is "
+                "forbidden for this recipient. Send wrapped mail instead - it "
+                "queues durable and surfaces at their turn boundary"
+            )
+        try:
+            proc = subprocess.run(
+                [str(binary), "mail-hold", "--park", "--session", session_id],
+                input=stripped,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            receipt = (proc.stdout or "").strip().splitlines()
+            print(receipt[-1] if receipt else "parked; it runs when the hold ends")
+            return
+        except Exception:  # noqa: BLE001 - a park failure refuses loud, never silently
+            _refused(
+                f"{name!r} is DND (delivery-policy bus-only): the payload could not be "
+                "parked. Send wrapped mail instead - it queues durable and surfaces "
+                "at their turn boundary"
+            )
 
     # Derive provenance before routing: daemon review/start returns before the
     # keystroke transports below, but its unwrapped invocation needs the same
