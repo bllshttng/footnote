@@ -327,6 +327,19 @@ fn f_key_toggles_full_screen() {
     );
 }
 
+// The docked board's column owns no agents rows. A press anywhere in it
+// resolves no sideline row, no drag source, and no chrome hit - the board is
+// keyboard-driven, and a click must never act on a phantom agent row.
+#[test]
+fn board_column_resolves_no_agents_rows_or_chrome_hits() {
+    let v = sideline_backlog_view();
+    // A cell well inside the board column (panel 28 wide), below the strip.
+    assert_eq!(v.sideline_row_at(10, 14), None);
+    assert!(v.row_drag_source_at(10, 14).is_none());
+    assert!(v.press_hold_row_at(10, 14).is_none());
+    assert!(v.chrome_hit(10, 14).is_none());
+}
+
 // x-1a50: the board is a modal like the composer - prefix chords still
 // resolve while it holds the keyboard (which-key parity). Before the fix the
 // prefix byte fell into the board's byte catch-all: `^B C` toggled nothing

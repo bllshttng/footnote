@@ -4329,7 +4329,13 @@ impl View {
             return None;
         }
         // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
+        // in full-screen mode). Off/narrow => no panel. Under the docked
+        // board the column is the board's own surface: no agents rows, no
+        // footer, no density button - a click must resolve nothing here or
+        // it acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
         let paint_w = self.sideline_paint_w();
         if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
