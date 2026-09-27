@@ -1558,6 +1558,9 @@ struct PeekView {
 struct KeysModal {
     popup: Popup,
     row_events: Vec<Option<Event>>,
+    /// The live `/` filter query. `None` = browsing; `Some` (possibly empty) =
+    /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
+    filter: Option<String>,
 }
 
 /// (US2) The right-click / `m` row context menu over a sideline agent
@@ -11124,24 +11127,69 @@ async fn keys_modal_keys(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            ModalKey::Byte(b) => match resolve_chord(b) {
-                // Unbound key dismisses (AC2-EDGE): no action fires.
-                Event::Bell => view.keys_modal = None,
-                // Bound key runs immediately through the SAME dispatch a typed
-                // chord uses (Locked 3), then the modal closes.
-                ev => {
-                    view.keys_modal = None;
-                    // Parity with a typed chord: modal execution arms any
-                    // repeatable event too (the scanner never saw this byte).
-                    scanner.arm_if_repeat(&ev, Instant::now());
-                    if matches!(
-                        dispatch_event(view, ev, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
+            ModalKey::Byte(b) => {
+                let filtering = view.keys_modal.as_ref().is_some_and(|m| m.filter.is_some());
+                if filtering {
+                    // Filter input: printable bytes edit the query, backspace
+                    // pops it (an empty backspace exits the filter), anything
+                    // else is inert. A changed query rebuilds the rows.
+                    let mut edited = false;
+                    if let Some(m) = view.keys_modal.as_mut() {
+                        match b {
+                            0x7f | 0x08 => {
+                                let q = m.filter.as_mut().expect("filtering");
+                                if q.pop().is_none() {
+                                    m.filter = None;
+                                }
+                                edited = true;
+                            }
+                            _ if b.is_ascii_graphic() || b == b' ' => {
+                                m.filter.as_mut().expect("filtering").push(b as char);
+                                edited = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if edited {
+                        view.keys_modal = Some(keys_modal::keys_modal_with_filter(
+                            view.keys_modal.as_ref().and_then(|m| m.filter.as_deref()),
+                        ));
+                    }
+                } else {
+                    match b {
+                        // The search key: enter filter mode (empty query).
+                        b'/' => {
+                            view.keys_modal = Some(keys_modal::keys_modal_with_filter(Some("")));
+                        }
+                        // The modal's scroll keys (the footer names them).
+                        b'j' | b'k' => {
+                            if let Some(m) = view.keys_modal.as_mut() {
+                                m.popup
+                                    .nav(if b == b'j' { NavDir::Down } else { NavDir::Up });
+                            }
+                            view.follow_modal_selection();
+                        }
+                        _ => match resolve_chord(b) {
+                            // Unbound key dismisses (AC2-EDGE): no action fires.
+                            Event::Bell => view.keys_modal = None,
+                            // Bound key runs immediately through the SAME dispatch
+                            // a typed chord uses (Locked 3), then the modal closes.
+                            ev => {
+                                view.keys_modal = None;
+                                // Parity with a typed chord: modal execution arms any
+                                // repeatable event too (the scanner never saw this byte).
+                                scanner.arm_if_repeat(&ev, Instant::now());
+                                if matches!(
+                                    dispatch_event(view, ev, sock_w).await?,
+                                    DispatchFlow::Detach
+                                ) {
+                                    return Ok(StdinFlow::Detach);
+                                }
+                            }
+                        },
                     }
                 }
-            },
+            }
         }
     }
     Ok(StdinFlow::Continue)
