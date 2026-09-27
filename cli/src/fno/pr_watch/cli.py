@@ -193,12 +193,15 @@ def _run_notify_watch_phase(
     roots: "Optional[list[Path]]" = None,
     *,
     timeout_s: Optional[float] = None,
+    interval_s: int = 300,
 ) -> None:
     """Run the Rust notify_watch arm and turn its receipt into the tick row.
 
     The arm lives in fno-agents (``notify-watch``); the sampler, the signal
     store and the ``[notify]`` config are all read in Rust, so this phase is
-    only spawn, parse and emit. The subprocess runs inside the first catch-up
+    only spawn, parse and emit. ``interval_s`` rides the tick's own bucket:
+    the row claims the cadence it really runs at, so the reader's stale bound
+    is honest. The subprocess runs inside the first catch-up
     root: launchd starts this daemon in ``/``, where a board read would read
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
@@ -221,7 +224,7 @@ def _run_notify_watch_phase(
 
         binary = resolve_binary()
         if binary is None:
-            _emit_tick_row("notify_watch", interval_s=300,
+            _emit_tick_row("notify_watch", interval_s=interval_s,
                            skip_reason="notify_failed", detail="rust binary absent")
             return
         set_tick_phase("notify_watch:arm")
@@ -236,13 +239,13 @@ def _run_notify_watch_phase(
             cwd=str(roots[0]) if roots else None,
         )
         payload = json.loads(proc.stdout or "{}")
-        _emit_tick_row("notify_watch", interval_s=300,
+        _emit_tick_row("notify_watch", interval_s=interval_s,
                        acted=int(payload.get("acted") or 0),
                        skip_reason=payload.get("skip_reason"),
                        detail=(payload.get("detail") or "")[:200])
     except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
         log.warning("pr-watch: notify_watch phase failed: %s", exc)
-        _emit_tick_row("notify_watch", interval_s=300,
+        _emit_tick_row("notify_watch", interval_s=interval_s,
                        skip_reason="notify_failed", detail=str(exc)[:200])
 
 
@@ -421,7 +424,13 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
     "king_wake": 45,
-    "notify_watch": 10,
+    # The notify phase pays the arm subprocess over every catch-up root
+    # (idle: 2.03s roots scan over 12 roots + 0.13s subprocess). The old
+    # 10s cap fired on a loaded machine and paged a healthy arm (the
+    # 12:35Z specimen read "phase slice 10s spent"). 15s is the largest value
+    # the caps-fit invariant allows: sum(caps) + fleet max + the 150s
+    # merge floor must stay inside the 480s deadline (test_phase_caps_fit).
+    "notify_watch": 15,
     "heal": 10,
     "evals": 10,
 }
@@ -1288,7 +1297,13 @@ def tick() -> None:
         # Rust arm answers notify_off itself when the [notify] signals list
         # is empty, so the readout shows the arm whether or not it is armed.
         def _phase_notify(slice_s: float) -> None:
-            _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0))
+            # The row carries the arm's real cadence - one run per launchd
+            # bucket, not the 300s literal - so the reader's stale bound is
+            # honest about a healthy rotation.
+            nw_interval = (int(getattr(cfg, "interval_seconds", 600))
+                           if cfg is not None else 600)
+            _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0),
+                                    interval_s=nw_interval)
 
         # The heal drive loop: nothing called the healer on a timer, so every
         # red open PR waited for a hand. The loop lives in Rust; this phase is
