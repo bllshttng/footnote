@@ -39,6 +39,12 @@ if [[ -z "$ROWS_BIN" ]]; then
 fi
 [[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
 
+# The marker commit inside _append_bounded_event resolves its binary the same
+# way. Pin it here so a guard run under a faked PATH (the plan-location block
+# case stubs `fno` to answer plan path) still commits its row through the real
+# binary instead of losing it to the stub.
+[[ -n "$ROWS_BIN" ]] && export FNO_BIN="$ROWS_BIN"
+
 committed_rows() {
     # The store commit is the write boundary: the pinned journal keeps no
     # byte trace, so rows read through the verb and jq -r unwraps the
