@@ -314,10 +314,21 @@ impl ArmOutcome {
 /// conversation rules never overwrite it. Silent: no stdout, no stderr, so
 /// the hook entries can call it mid-render.
 pub(crate) fn arm_conversation(session_id: &str) -> (ArmOutcome, Option<String>) {
-    let Some((matched, policy)) = lookup_row(session_id) else {
-        return (ArmOutcome::NoRow, None);
-    };
-    let handle = identity_key(&matched);
+    match lookup_row(session_id) {
+        Some((matched, policy)) => arm_row(&matched, policy, session_id),
+        None => (ArmOutcome::NoRow, None),
+    }
+}
+
+/// The conversation arm over an already-resolved registry row, so a caller
+/// that read the row for its own decision (the prompt hook's since_ms) arms
+/// without a second registry read. `session_id` stays the stamp key.
+fn arm_row(
+    matched: &str,
+    policy: Option<String>,
+    session_id: &str,
+) -> (ArmOutcome, Option<String>) {
+    let handle = identity_key(matched);
     let now = chrono::Utc::now();
     let clock = read_clock(&handle);
     let live = clock.as_ref().map(|c| c.live(now)).unwrap_or(false);
@@ -368,7 +379,7 @@ pub(crate) fn conversation_prompt(session_id: &str, prompt: &str) {
     if !is_real_message(prompt) {
         return;
     }
-    let Some((matched, _)) = lookup_row(session_id) else {
+    let Some((matched, policy)) = lookup_row(session_id) else {
         return;
     };
     let handle = identity_key(&matched);
@@ -382,7 +393,9 @@ pub(crate) fn conversation_prompt(session_id: &str, prompt: &str) {
     };
     let journal = crate::paths::AgentsHome::from_env().events_jsonl();
     if crate::operator_witness::submitted_since(&journal, session_id, since_ms, now_ms) {
-        let _ = arm_conversation(session_id);
+        // The row is already resolved; the arm runs on it directly instead
+        // of looking it up a second time.
+        arm_row(&matched, policy, session_id);
     }
 }
 
