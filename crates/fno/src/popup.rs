@@ -13,7 +13,7 @@
 //! The selected target renders as a normal-video cut-out in the inverse block.
 
 use crate::chrome::{self, BodyLine, Chrome, FramedLine, Scroll};
-use crate::proto::Cell;
+use crate::proto::{Cell, Color};
 use crate::theme::{Role, Theme};
 
 /// Popup content never renders wider than this (fixed max width); longer
@@ -59,6 +59,17 @@ pub enum PopupRow {
     FullWidth(String),
     /// A row of selectable grid cells (the 2x2 split block = two Grid rows).
     Grid(Vec<GridCell>),
+    /// A selectable entry with a literal-color swatch beside the label (the
+    /// settings Colors tab). The color is content, not chrome: it paints
+    /// through `Role::Swatch` and never shifts with the theme.
+    SwatchEntry {
+        glyph: String,
+        label: String,
+        hint: String,
+        /// Same contract as `Entry::enabled`.
+        enabled: bool,
+        color: Color,
+    },
 }
 
 impl PopupRow {
@@ -71,8 +82,9 @@ impl PopupRow {
             // hit span so a click resolves to no target (then swallowed by
             // Rendered::contains rather than dismissing the menu). All three
             // reachable paths, not one.
-            PopupRow::Entry { enabled: false, .. } => 0,
-            PopupRow::Entry { .. } | PopupRow::FullWidth(_) => 1,
+            PopupRow::Entry { enabled: false, .. }
+            | PopupRow::SwatchEntry { enabled: false, .. } => 0,
+            PopupRow::Entry { .. } | PopupRow::SwatchEntry { .. } | PopupRow::FullWidth(_) => 1,
             PopupRow::Header(_) | PopupRow::Rule => 0,
         }
     }
@@ -88,7 +100,7 @@ pub fn menu_glyph_is_bmp(glyph: &str) -> bool {
 fn validate_menu_glyphs(rows: &[PopupRow]) {
     for row in rows {
         match row {
-            PopupRow::Entry { glyph, .. } => assert!(
+            PopupRow::Entry { glyph, .. } | PopupRow::SwatchEntry { glyph, .. } => assert!(
                 menu_glyph_is_bmp(glyph),
                 "menu glyph must be a non-empty BMP string: {glyph:?}"
             ),
@@ -324,7 +336,9 @@ impl Popup {
         self.rows
             .iter()
             .filter_map(|r| match r {
-                PopupRow::Entry { glyph, .. } => Some(chrome::str_cols(glyph)),
+                PopupRow::Entry { glyph, .. } | PopupRow::SwatchEntry { glyph, .. } => {
+                    Some(chrome::str_cols(glyph))
+                }
                 _ => None,
             })
             .max()
@@ -463,6 +477,17 @@ impl Popup {
                     }
                 }
                 PopupRow::Grid(cells) => self.grid_cell_w() * cells.len(),
+                PopupRow::SwatchEntry {
+                    glyph, label, hint, ..
+                } => {
+                    let _ = hint;
+                    if self.plain_body {
+                        // Two-column shape + the two swatch cells.
+                        1 + kw + 1 + 2 + 1 + chrome::str_cols(label) + 2
+                    } else {
+                        chrome::str_cols(glyph) + 1 + chrome::str_cols(label) + 2 + 2 + 2
+                    }
+                }
             })
             .max()
             .unwrap_or(0)
@@ -528,7 +553,11 @@ impl Popup {
                     hits: vec![],
                     roles: vec![],
                     segs: vec![],
-                    pad_role: Role::Body,
+                    pad_role: if self.plain_body {
+                        Role::PanelMeta
+                    } else {
+                        Role::Body
+                    },
                 },
                 PopupRow::FullWidth(s) => {
                     let ti = target_idx;
@@ -541,7 +570,11 @@ impl Popup {
                         hits: vec![(ti, 0, width)],
                         roles: vec![],
                         segs: vec![],
-                        pad_role: Role::Body,
+                        pad_role: if self.plain_body {
+                            Role::PanelBody
+                        } else {
+                            Role::Body
+                        },
                     }
                 }
                 PopupRow::Entry {
@@ -646,6 +679,77 @@ impl Popup {
                         pad_role,
                     }
                 }
+                PopupRow::SwatchEntry {
+                    glyph,
+                    label,
+                    hint,
+                    enabled,
+                    color,
+                } => {
+                    let disabled = !*enabled;
+                    let selected = !disabled && sel == Some((ri, 0));
+                    // The plain-body two-column shape with a two-cell swatch
+                    // between the key column and the label; the swatch paints
+                    // through Role::Swatch, so the color is content. The
+                    // cursor row keeps the swatch cells literal by splitting
+                    // its cursor seg around them.
+                    let swatch_start = 1 + kw + 1;
+                    let text = if self.plain_body {
+                        pad(
+                            &format!(" {} {} {}", pad(glyph, kw), "\u{2588}\u{2588}", label),
+                            width,
+                        )
+                    } else {
+                        // Defensive: no non-plain surface builds this row
+                        // today; render it as a plain entry with no swatch.
+                        let room = width.saturating_sub(chrome::str_cols(hint) + 2);
+                        pad(
+                            &format!("{} {hint} ", pad(&format!(" {glyph} {label}"), room)),
+                            width,
+                        )
+                    };
+                    let chars = text.chars().count();
+                    let mut segs = Vec::new();
+                    if !disabled && self.plain_body {
+                        if selected {
+                            let tail = chars.saturating_sub(swatch_start + 2);
+                            segs.push((0usize, swatch_start, Role::BodyCursor));
+                            segs.push((swatch_start, 2usize, Role::Swatch(*color)));
+                            segs.push((swatch_start + 2, tail, Role::BodyCursor));
+                        } else {
+                            // The accent marks the CHOSEN row only: the
+                            // builder's `●` glyph. Unchosen radios read as
+                            // ordinary text, never a wall of brand marks.
+                            if glyph == "\u{25cf}" {
+                                segs.push((1usize, kw, Role::BodyAccent));
+                            }
+                            segs.push((swatch_start, 2usize, Role::Swatch(*color)));
+                        }
+                    }
+                    let hits = if disabled {
+                        Vec::new()
+                    } else {
+                        let ti = target_idx;
+                        target_idx += 1;
+                        vec![(ti, 0, width)]
+                    };
+                    RenderedLine {
+                        text,
+                        header: false,
+                        disabled,
+                        sel_span: None,
+                        hits,
+                        roles: vec![],
+                        segs,
+                        pad_role: if selected && self.plain_body {
+                            Role::BodyCursor
+                        } else if self.plain_body {
+                            Role::PanelBody
+                        } else {
+                            Role::Body
+                        },
+                    }
+                }
                 PopupRow::Grid(cells) => {
                     let mut text = String::new();
                     let mut hits = Vec::new();
@@ -669,7 +773,11 @@ impl Popup {
                         hits,
                         roles: vec![],
                         segs: vec![],
-                        pad_role: Role::Body,
+                        pad_role: if self.plain_body {
+                            Role::PanelBody
+                        } else {
+                            Role::Body
+                        },
                     }
                 }
             };

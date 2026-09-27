@@ -3907,7 +3907,7 @@ impl View {
             }
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank
-            | DisplayRow::CardDetail(_)
+            | DisplayRow::CardDetail(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
         }
@@ -4413,7 +4413,7 @@ impl View {
             // A card's lower half acts on the card: the exact hit of the
             // Agent row painted above it. Inert for the selector, clickable
             // here - the same split a Header has.
-            DisplayRow::CardDetail(_) => self.row_action(i.checked_sub(1)?),
+            DisplayRow::CardDetail(..) => self.row_action(i.checked_sub(1)?),
             // Inert rows (subline, spacer, table column header) resolve to no
             // action.
             DisplayRow::Sub(_)
@@ -5967,6 +5967,18 @@ impl View {
     /// and `chrome_hit` walk, so a click always lands on the glyph under it.
     fn tab_bar_spans(&self) -> Vec<TabSpan> {
         let mut spans = Vec::new();
+        // The brand mark is pinned at the tab bar's top-left in EVERY
+        // workspace, before tab 1 (user ruling, 2026-09-27): `Ｆ` bold,
+        // `[no]` the reverse-video stamp (draw_tab_bar splits the two
+        // tones). It rides ahead of the workspace label, whatever it is.
+        let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
+        spans.push(TabSpan {
+            text: format!(" {text} "),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            role: SpanRole::Squad,
+        });
         let Some(s) = self
             .layout
             .squads
@@ -5975,27 +5987,13 @@ impl View {
         else {
             return spans;
         };
-        // The home workspace wears the Ｆ[no] brand mark in place of its name:
-        // `Ｆ` bold, `[no]` the reverse-video stamp (draw_tab_bar splits the
-        // two tones).
-        if s.name == "fno" {
-            let text: String = wordmark::one_row().iter().map(|(s, _)| *s).collect();
-            spans.push(TabSpan {
-                text: format!(" {text} "),
-                flags: cell_flags::BOLD,
-                fg: Color::Default,
-                hit: None,
-                role: SpanRole::Squad,
-            });
-        } else {
-            spans.push(TabSpan {
-                text: format!(" {} ", brand_label(&s.name)),
-                flags: cell_flags::BOLD,
-                fg: Color::Default,
-                hit: None,
-                role: SpanRole::Squad,
-            });
-        }
+        spans.push(TabSpan {
+            text: format!(" {} ", brand_label(&s.name)),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            role: SpanRole::Squad,
+        });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
             // US4: a leading max-severity rollup glyph so a background
@@ -6631,8 +6629,10 @@ enum DisplayRow<'a> {
     /// "card"`): harness, king, message and age in a DIM legacy row. Inert
     /// like `Sub` - every painted line stays one display row (the
     /// single-enumeration invariant) - and a click on it acts on the `Agent`
-    /// row above it via [`View::row_action`]'s index shift.
-    CardDetail(&'a AgentRow),
+    /// row above it via [`View::row_action`]'s index shift. A foreign-cwd
+    /// card folds the subline's cwd in here, so the card stays two painted
+    /// rows.
+    CardDetail(&'a AgentRow, Option<String>),
     /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
@@ -6758,7 +6758,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
         DisplayRow::Header { .. }
             | DisplayRow::Sub(_)
             | DisplayRow::Blank
-            | DisplayRow::CardDetail(_)
+            | DisplayRow::CardDetail(..)
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )

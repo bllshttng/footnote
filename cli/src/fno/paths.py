@@ -21,6 +21,7 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1182,63 +1183,42 @@ def bus_dir() -> Path:
     return state_dir() / "bus"
 
 
-def plans_dir(project_root: Optional[Path] = None) -> Path:
-    """Return the plans directory: ``<space>/plans/`` by default. An explicit
-    config value (usually a vault template) resolves as before."""
-    settings = _settings()
-    raw = settings.plans_dir
-    if raw == ".fno/plans/":
-        space = space_dir(project_root) / "plans"
-        migrate_from_checkout((project_root or resolve_repo_root()) / ".fno" / "plans", space)
-        return space
-    root = project_root or resolve_repo_root()
+def _plan_path_door(args: list[str]) -> str:
+    """One pydoor hop to the Rust plans-chain resolver (``plans_path.rs``).
 
-    # Detect whether the raw value is a "plain relative" path:
-    # - does not start with /, ~, $
-    # - does not contain { } template variables (no {vault}, {project}, etc.)
-    # For such paths, bypass _resolve() entirely and anchor directly to root.
-    # _resolve() internally calls Path(...).resolve() which uses CWD, ignoring project_root.
-    leading = raw.lstrip()
-    has_templates = "{" in raw
-    is_plain_relative = leading and not (
-        leading.startswith("/")
-        or leading.startswith("~")
-        or "$" in raw  # env vars anywhere, not just at start
-        or has_templates
-    )
+    argv[0] is the resolved binary path, so the pydoor rule stays satisfied.
+    A missing binary or a failing chain raises; callers surface the error
+    rather than silently resolving a wrong dir.
+    """
+    import subprocess
 
-    if is_plain_relative:
-        return (root / raw).resolve()
+    from fno.rust_binary import resolve_binary
 
-    # For template-containing or absolute paths, use _resolve (which handles {vault}, {project})
-    return _resolve(raw, project_root=root)
+    binary = resolve_binary()
+    if binary is None:
+        raise RuntimeError(
+            "the fno-agents binary was not found; reinstall footnote "
+            "or set FNO_AGENTS_BIN"
+        )
+    proc = subprocess.run([str(binary), *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or "plan-path verb failed").strip()
+        raise RuntimeError(detail)
+    return proc.stdout.strip()
 
 
 def plans_content_dir(project_root: Optional[Path] = None) -> Path:
     """Resolve where plan DOCS actually live.
 
-    Same lookup ``/blueprint`` and interactive ``/think`` use (mirrors the
-    ``scripts/lib/config.sh`` resolution order):
+    The ``plansDirectory -> config.plans_dir`` chain answers from Rust
+    (``plans_path.rs``, the chain's single owner); this door exists so the
+    Python callers keep their import. Same tiers as ever:
       1. ``.claude/settings.local.json`` -> ``plansDirectory`` (per-machine).
       2. ``.claude/settings.json`` -> ``plansDirectory`` (project-level, committed).
-      3. ``config.plans_dir`` (settings.yaml) via :func:`plans_dir`.
-
-    Distinct from :func:`plans_dir`, which returns only the settings.yaml
-    default and does not read the ``.claude`` override the docs vault uses.
+      3. ``config.plans_dir`` (the ``.fno/plans/`` sentinel -> ``<space>/plans``).
     """
-    import json
-
     root = project_root or resolve_repo_root()
-    for name in ("settings.local.json", "settings.json"):
-        try:
-            data = json.loads((root / ".claude" / name).read_text())
-            raw = data.get("plansDirectory")
-            if raw:
-                p = Path(raw)
-                return p if p.is_absolute() else (root / p).resolve()
-        except (OSError, ValueError):
-            continue  # missing/unreadable -> try the next tier
-    return plans_dir(root)
+    return Path(_plan_path_door(["state", "plan-dir", str(root)]))
 
 
 _NODE_PREFIX = r"[a-z]" + r"[a-z0-9]{0,7}"
@@ -1260,45 +1240,26 @@ def plan_filename_node_id(path: str | os.PathLike[str], prefixes: set[str] | Non
     return f"{prefix}-{match.group('hex')}"
 
 
-def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -> str:
-    """Render ``config.plans_filename`` (strftime codes + {slug}/{node}).
-
-    An empty slug or node collapses its dangling separator, so the default
-    template degrades cleanly: no node -> ``20260711-slug.md``, no slug ->
-    ``20260711-x-aaaa.md``, never ``--`` or ``-.md``.
-    """
-    import datetime as _dt
-    import re as _re
-
-    stamp = now if isinstance(now, _dt.datetime) else _dt.datetime.now()
-    name = stamp.strftime(_settings().plans_filename).format(slug=slug, node=node)
-    name = _re.sub(r"-{2,}", "-", name)
-    if name.endswith("-.md"):
-        name = name[: -len("-.md")] + ".md"
-    name = name.lstrip("-")
-    if node and _NODE_ID_RE.fullmatch(node):
-        rendered_node = plan_filename_node_id(name, prefixes={node.split("-", 1)[0]})
-        if rendered_node != node:
-            raise ValueError(
-                f"plan filename {name!r} names {rendered_node or 'no node id'}, "
-                f"but requested node {node!r}"
-            )
-    return name
-
-
 def plan_doc_path(
     slug: str,
     node: str = "",
     project_root: Optional[Path] = None,
-    now: Optional[object] = None,
+    now: Optional[datetime | int | float] = None,
 ) -> Path:
     """The save path for a NEW plan/design doc: resolved plans dir + filename.
 
-    ``now`` (default today) sources the filename's date. Threading it lets a
-    recompute from a durable timestamp (e.g. a node's ``created_at``) mint the
-    same path on a later day instead of a fresh-dated duplicate.
+    Resolution and rendering are the Rust chain's (``plans_path.rs``); the
+    door forwards. ``now`` (datetime or epoch seconds, default today) sources
+    the filename's date. Threading it lets a recompute from a durable
+    timestamp (e.g. a node's ``created_at``) mint the same path on a later
+    day instead of a fresh-dated duplicate.
     """
-    return plans_content_dir(project_root) / plan_doc_filename(slug, node, now)
+    root = project_root or resolve_repo_root()
+    args = ["state", "plan-path", "--slug", slug, "--node", node]
+    if now is not None:
+        epoch = now.timestamp() if isinstance(now, datetime) else now
+        args += ["--now", str(int(epoch))]
+    return Path(_plan_path_door([*args, str(root)]))
 
 
 def handoffs_dir(project_root: Optional[Path] = None) -> Path:
