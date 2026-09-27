@@ -88,10 +88,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # storage_only: 64 -> 66. v36 added node_reason (why the row works no
     # node when the spawn NAMED one), storage_only: 66 -> 67, and it joined
     # the required list: 45 -> 46. v37 added pending_session_row (the spawn
-    # park the deferred sessions-row open consumes), storage_only: 67 -> 68.
-    assert payload["declared_count"] == 68
+    # park the deferred sessions-row open consumes), storage_only: 67 -> 68,
+    # then the SessionStart facts the daemon's session-report ingest stamps
+    # (transcript_path, start_source), storage_only: 68 -> 70.
+    assert payload["declared_count"] == 70
     assert payload["required_count"] == 46
-    assert payload["accounted_count"] == 68
+    assert payload["accounted_count"] == 70
     assert payload["known_gaps"] == {}
 
 

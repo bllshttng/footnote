@@ -2624,6 +2624,41 @@ event_types:
         seq:
           type: integer
 
+  - name: session_report_stored
+    description: "A harness hook's raw SessionStart report was stamped onto the matching registry row (id additive, transcript path and start source recorded)."
+    sources: [daemon]
+    data:
+      required: [harness, session_id, related_filled]
+      properties:
+        name:
+          type: [string, "null"]
+        harness:
+          type: string
+        session_id:
+          type: string
+        related_filled:
+          type: boolean
+        source:
+          type: [string, "null"]
+
+  - name: session_report_dropped
+    description: "A SessionStart report was dropped without storing it (unknown session, or a third distinct id hit the row's cap)."
+    sources: [daemon]
+    data:
+      required: [harness, session_id, reason]
+      properties:
+        harness:
+          type: string
+        session_id:
+          type: string
+        reason:
+          type: string
+          enum: [unknown_session, id_cap]
+        recorded:
+          type: array
+          items:
+            type: string
+
   - name: codex_thread_inside_leg
     description: "Driver-sourced thread-row status : the codex thread actor's turn phases landed on the row's inside_leg through the shared seq gate; one event per accepted write."
     sources: [daemon]

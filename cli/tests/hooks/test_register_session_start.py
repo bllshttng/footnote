@@ -185,15 +185,17 @@ def test_spawned_worker_restamps_without_consulting_the_optin_knob(tmp_path: Pat
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    capture = tmp_path / "uv-argv"
+    capture = tmp_path / "agents-argv"
     knob_read = tmp_path / "knob-read"
-    uv = bin_dir / "uv"
-    uv.write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$UV_CAPTURE\"\n", encoding="utf-8"
+    # The worker restamp is the thin binary report: a mock fno-agents (pinned
+    # through the resolver's env override) records the args it received.
+    agents = bin_dir / "fno-agents"
+    agents.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$AGENTS_CAPTURE"\n', encoding="utf-8"
     )
-    uv.chmod(0o755)
+    agents.chmod(0o755)
     # A mock `fno` that records any call and answers the knob with `false`: if
-    # the restamp were gated on it, the hook would exit before reaching uv.
+    # the restamp were gated on it, the hook would exit before reporting.
     fno = bin_dir / "fno"
     fno.write_text(
         '#!/usr/bin/env bash\ntouch "$KNOB_READ"\necho false\nexit 0\n', encoding="utf-8"
@@ -211,7 +213,8 @@ def test_spawned_worker_restamps_without_consulting_the_optin_knob(tmp_path: Pat
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_CODE_SESSION_ID": "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e",
         "FNO_AGENT_SELF": "target-x-f0c2",
-        "UV_CAPTURE": str(capture),
+        "FNO_AGENTS_BIN": str(agents),
+        "AGENTS_CAPTURE": str(capture),
         "KNOB_READ": str(knob_read),
     }
     subprocess.run(["bash", str(HOOK)], check=True, env=env)

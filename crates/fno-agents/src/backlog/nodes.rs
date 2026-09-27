@@ -595,6 +595,18 @@ pub(crate) fn project_claim_value(row: &mut Value, claim: NodeClaim) {
 /// child aggregates (sessions, comments, encounters, pull requests,
 /// relations) are the caller's job through their own modules.
 pub fn save(connection: &Connection, node: &Node) -> Result<(), String> {
+    // The claim store is the holder of record: a load attaches the live claim
+    // to the model for serving, so re-persisting that model would mint the
+    // retired mirror. Lock fields always serialize as explicit nulls, and an
+    // open row's session_id (which the projection derives from the holder)
+    // nulls with them; a completed row keeps the finisher session the caller
+    // supplied.
+    let mut persisted = node.clone();
+    persisted.claim = NodeClaim::default();
+    if persisted.completed_at.is_none() {
+        persisted.session_id = None;
+    }
+    let node = &persisted;
     // The extras column holds node.extras, then the residual aggregates with
     // no v2 table (extras wins on the in-practice-disjoint collision), the
     // supersession's unknown keys, and the child-list presence marker.
