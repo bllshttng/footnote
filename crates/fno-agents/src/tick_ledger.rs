@@ -83,6 +83,24 @@ pub fn upstream_of(arm: &str) -> Option<&'static str> {
         .and_then(|s| s.upstream)
 }
 
+/// The fleet-tail arms run one real run every [`FLEET_TAIL_CADENCE`]
+/// interval buckets (cli.py `_run_phase(..., cadence=3, slot=k)`): a healthy
+/// rotation spans three intervals, with an `off_cadence` rest row in the
+/// buckets between. The stale bound rides the rotation, not one bucket, so
+/// a healthy rest tick never reads STALE.
+const FLEET_TAIL_CADENCE: u64 = 3;
+
+/// The interval multiplier a row's staleness is judged against: 3 for the
+/// fleet-tail arms (`stranded`, `recovery`, `watchdog`), 1 for every other
+/// arm. One table, every reader: `arm_watch::overdue_arms`, the king
+/// check-in and the status readout all fold rows through [`arm_status`].
+fn cadence_of(arm: &str) -> u64 {
+    match arm {
+        "stranded" | "recovery" | "watchdog" => FLEET_TAIL_CADENCE,
+        _ => 1,
+    }
+}
+
 /// Every arm the readout shows, whether or not it has ever ticked.
 pub const KNOWN_ARMS: &[ArmSpec] = &[
     ArmSpec {
@@ -673,8 +691,8 @@ fn collect_tick_history(rows: Vec<Value>, history: &mut HashMap<String, Vec<(u64
         };
         // A "starved" skip is the producer saying its budget cut the pass:
         // it explains nothing about the arm's input, so it counts toward
-        // starvation like a silent no-op would (a cut
-        // every tick must read starved, never ok-quiet).
+        // starvation like a silent no-op would (a cut every tick must read
+        // starved, never ok-quiet).
         let skip = data.get("skip_reason").and_then(Value::as_str);
         let skip_explains = match skip {
             None | Some("starved") => false,
@@ -728,7 +746,9 @@ fn arm_status(
         .and_then(Value::as_u64)
         .unwrap_or(default_interval_s);
     let age_s = now_unix.saturating_sub(tick.ts_unix);
-    let stale = interval_s > 0 && age_s > interval_s * 2;
+    // The grace doubles the arm's own cadence, not the bare interval: a
+    // fleet-tail arm legitimately spans three buckets between real runs.
+    let stale = interval_s > 0 && age_s > interval_s * cadence_of(spec) * 2;
     let skip_reason = str_field(&tick.data, "skip_reason");
     let failing = skip_reason
         .as_deref()
@@ -2161,24 +2181,26 @@ mod tests {
     fn stale_at_twice_the_interval_and_on_row_interval_override() {
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
-        // watchdog's table default is 600s, so 700s alone would read fresh.
-        // The row claims interval 300, and 700 > 2x300 flips it stale: the
-        // row's own interval, not the table default, drives the verdict.
+        // pr_watch_merge's table default is 600s, so 700s alone would read
+        // fresh. The row claims interval 300, and 700 > 2x300 flips it
+        // stale: the row's own interval, not the table default, drives the
+        // verdict. (The arm was watchdog before the fleet-tail cadence gave
+        // that name a 3-bucket stale bound.)
         write_rows(
             &journal,
             &[tick_envelope(
                 "2026-09-04T10:00:00Z",
-                "watchdog",
-                SCHED_DAEMON,
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
                 0,
-                json!("watchdog_off"),
+                json!("disabled"),
                 300,
             )],
         );
         let now = parse_rfc3339_unix("2026-09-04T10:11:40Z").unwrap(); // 700s later
         let rows = read_arms(&[journal.clone()], now);
-        let wd = rows.iter().find(|r| r.arm == "watchdog").unwrap();
-        assert_eq!(wd.skip_reason.as_deref(), Some("watchdog_off"));
+        let wd = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert_eq!(wd.skip_reason.as_deref(), Some("disabled"));
         assert_eq!(wd.producer_evidence, ProducerEvidence::Observed);
         assert!(
             wd.stale,
@@ -2188,8 +2210,72 @@ mod tests {
         // 599s against the same row: under 2x300, fresh.
         let now_earlier = parse_rfc3339_unix("2026-09-04T10:09:59Z").unwrap();
         let rows = read_arms(&[journal], now_earlier);
-        let wd = rows.iter().find(|r| r.arm == "watchdog").unwrap();
+        let wd = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
         assert!(!wd.stale);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fleet-tail arm runs one real run every three buckets, so mid-rotation
+    /// silence up to three intervals is its rest tick, not staleness. The old
+    /// one-bucket bound (2 x interval) called exactly this shape STALE and the
+    /// king check-in paged a healthy rotation.
+    #[test]
+    fn a_one_in_three_arm_on_its_rest_tick_is_not_stale() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-27T08:00:00Z",
+                "watchdog",
+                SCHED_LAUNCHD,
+                0,
+                json!("off_cadence"),
+                600,
+            )],
+        );
+        // 1700s later: past the old 2 x 600 bound, inside the 3-bucket
+        // rotation (real runs every 1800s; grace rides the rotation).
+        let now = parse_rfc3339_unix("2026-09-27T08:28:20Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let wd = rows.iter().find(|r| r.arm == "watchdog").unwrap();
+        assert!(
+            !wd.stale,
+            "a one-in-three arm on its rest tick is fresh: {}",
+            wd.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// notify_watch is checked against the same reader rule: cadence 1, so it
+    /// goes stale past its own carried interval and never rides the fleet-tail
+    /// grace. Its rows carry the pr-watch bucket (600s), so a healthy
+    /// sub-bucket age reads fresh while a missed bucket reads STALE.
+    #[test]
+    fn notify_watch_is_judged_on_its_own_interval_not_the_fleet_tail() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-27T08:00:00Z",
+                "notify_watch",
+                SCHED_LAUNCHD,
+                0,
+                json!("notify_off"),
+                600,
+            )],
+        );
+        // 960s: the worst healthy slip under the 600s bucket, fresh.
+        let now = parse_rfc3339_unix("2026-09-27T08:16:00Z").unwrap();
+        let rows = read_arms(&[journal.clone()], now);
+        let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
+        assert!(!nw.stale, "healthy sub-bucket age is fresh: {}", nw.line);
+        // 1900s: three buckets silent, past its own interval's grace - stale.
+        let now_late = parse_rfc3339_unix("2026-09-27T08:31:40Z").unwrap();
+        let rows = read_arms(&[journal], now_late);
+        let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
+        assert!(nw.stale, "three silent buckets is stale: {}", nw.line);
         std::fs::remove_dir_all(&dir).ok();
     }
 
