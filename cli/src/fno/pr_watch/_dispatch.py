@@ -532,34 +532,19 @@ def _ritual_timeout() -> float:
 #: starving every arm after merge.
 _GH_BUDGET_HOLD_SKIP_S = 10.0
 
-#: The ledger crates/fno-agents/src/gh_budget.rs owns; read-only from here.
-_GH_BUDGET_LEDGER_NAME = "github-request-budget.json"
 
+def _gh_budget_backoff_left() -> float:
+    """Seconds left on the fleet gh budget's local backoff; 0.0 when free.
 
-def _gh_budget_backoff_left(
-    path: Optional[Path] = None, *, now_s: Optional[float] = None
-) -> float:
-    """Seconds until the fleet gh budget's backoff lifts; 0.0 when free.
-
-    Read-only mirror of gh_budget.rs's ledger at
-    ``locks_dir()/github-request-budget.json``. Fails open on anything
-    unreadable, matching the Rust reader: the budget protects the fleet,
-    it is not a stop.
+    The same status op pr/_quota reads. The budget protects the fleet, it
+    is not a stop, so an unreadable answer fail-opens to free.
     """
     try:
-        if path is None:
-            from fno.paths import locks_dir
+        from fno.rust_binary import verb_call
 
-            path = locks_dir() / _GH_BUDGET_LEDGER_NAME
-        import time as _wall_time
-
-        now_ms = int(
-            (now_s if now_s is not None else _wall_time.time()) * 1000
-        )
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        left_ms = int(raw.get("backoff_until_ms") or 0) - now_ms
-        return max(0.0, left_ms / 1000.0)
-    except (OSError, ValueError, TypeError):
+        answer = verb_call("fleet-incident", {"op": "status"}, timeout=5)
+        return max(0.0, float((answer or {}).get("backoff_remaining_s") or 0))
+    except Exception:  # noqa: BLE001 - a dead budget reader never blocks a merge
         return 0.0
 
 

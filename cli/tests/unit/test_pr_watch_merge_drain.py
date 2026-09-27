@@ -364,16 +364,24 @@ def test_a_short_gh_budget_backoff_still_attempts_the_merge(
     assert calls, "a short backoff belongs inside the merge call"
 
 
-def test_gh_budget_backoff_left_reads_the_shared_ledger(tmp_path):
-    """The reader mirrors gh_budget.rs: future backoff wins, anything
-    unreadable fail-opens to free."""
+def test_gh_budget_backoff_left_reads_the_status_verb(monkeypatch):
+    """The reader mirrors the fleet-incident status snapshot and fail-opens
+    to free on anything unreadable."""
+    import fno.rust_binary as rust_binary
     from fno.pr_watch._dispatch import _gh_budget_backoff_left
 
-    ledger = tmp_path / "github-request-budget.json"
-    ledger.write_text('{"backoff_until_ms": 90000, "stamps": []}')
-    assert _gh_budget_backoff_left(path=ledger, now_s=30.0) == 60.0
-    assert _gh_budget_backoff_left(path=ledger, now_s=120.0) == 0.0
-    missing = tmp_path / "absent.json"
-    assert _gh_budget_backoff_left(path=missing, now_s=30.0) == 0.0
-    ledger.write_text("not json at all")
-    assert _gh_budget_backoff_left(path=ledger, now_s=30.0) == 0.0
+    monkeypatch.setattr(
+        rust_binary, "verb_call",
+        lambda verb, payload, timeout=5: {"backoff_remaining_s": 42})
+    assert _gh_budget_backoff_left() == 42.0
+
+    monkeypatch.setattr(
+        rust_binary, "verb_call",
+        lambda verb, payload, timeout=5: {"backoff_remaining_s": -3})
+    assert _gh_budget_backoff_left() == 0.0
+
+    def _dead(verb, payload, timeout=5):
+        raise rust_binary.VerbUnavailable("no binary")
+
+    monkeypatch.setattr(rust_binary, "verb_call", _dead)
+    assert _gh_budget_backoff_left() == 0.0
