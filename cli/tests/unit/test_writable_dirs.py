@@ -164,7 +164,7 @@ def one_grant(monkeypatch: pytest.MonkeyPatch) -> str:
     return token
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex", "agy"])
+@pytest.mark.parametrize("provider", ["claude", "agy"])
 def test_pane_lane_carries_the_grant(
     provider: str, one_grant: str, tmp_path: Path
 ) -> None:
@@ -179,17 +179,34 @@ def test_pane_lane_carries_the_grant(
     assert ("--add-dir", one_grant) in pairs
 
 
+def test_codex_pane_lane_drops_the_grant_on_the_remote_launch(
+    one_grant: str, tmp_path: Path
+) -> None:
+    """codex >= 0.156.1 refuses `--add-dir` paired with `--remote`, so riding
+    the grant killed the pane before it painted (x-0a75). The codex pane is
+    the one pane arm whose launch is remote today, so its grant rides out with
+    the strip; claude and agy keep carrying theirs."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    argv = build_pane_argv("codex", "t", tmp_path, False, None)
+    assert "--remote" in argv
+    assert ("--add-dir", one_grant) not in [
+        (argv[i], argv[i + 1]) for i, tok in enumerate(argv) if tok == "--add-dir"
+    ]
+
+
 def test_codex_pane_grant_leaves_the_sandbox_flag_alone(
     one_grant: str, tmp_path: Path
 ) -> None:
-    """The grant is additive. Widening the default posture to a bypass to make
-    the claim write work was explicitly refused; the two bypass postures are
-    opt-in on purpose."""
+    """The posture stays bounded. Widening the default posture to a bypass to
+    make the claim write work was explicitly refused; the two bypass postures
+    are opt-in on purpose. The grant itself is now daemon-side on this launch
+    form (see the remote-drop test), which is the accepted trade."""
     from fno.agents.mux_spawn import build_pane_argv
 
     argv = build_pane_argv("codex", "t", tmp_path, False, None)
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert one_grant in argv
+    assert one_grant not in argv
 
 
 def test_claude_bg_lane_carries_the_grant(one_grant: str, tmp_path: Path) -> None:
