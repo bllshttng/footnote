@@ -357,6 +357,7 @@ pub fn parse_pane_args(
     let mut guarded = false;
     let mut submit = false;
     let mut raw = false;
+    let mut hold_pass = false;
     let mut style_exception: Option<String> = None;
     let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
@@ -426,6 +427,9 @@ pub fn parse_pane_args(
             "--guarded" => guarded = true,
             "--submit" => submit = true,
             "--raw" => raw = true,
+            // (v94) Hidden: exists for the Rust hold gate's transport arms
+            // (own send, control mail, parked replay), never interactive use.
+            "--hold-pass" => hold_pass = true,
             "--style-exception" => style_exception = Some(value_of!()),
             "--source" => provenance = Some(value_of!()),
             "--quiet-ms" => {
@@ -529,6 +533,7 @@ pub fn parse_pane_args(
                 expected_identity: fno_id,
                 style_exception,
                 provenance,
+                hold_pass,
             }
         }
         crate::cli_args::PaneOp::Wait(_) => PaneCmd::Wait {
@@ -567,4 +572,109 @@ pub fn parse_pane_args(
         session = selector_session;
     }
     Ok(ParsedPane { session, json, cmd })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn op_of(word: &str) -> crate::cli_args::PaneOp {
+        use crate::cli_args::{MuxTail, PaneOp};
+        let t = || MuxTail { tail: Vec::new() };
+        match word {
+            "send" => PaneOp::Send(t()),
+            "read" => PaneOp::Read(t()),
+            _ => panic!("no test op mapping for {word}"),
+        }
+    }
+
+    /// Moved from mux_cli.rs beside the `--hold-pass` flag (this file owns
+    /// the send grammar; the test travels with it). The hold-pass assertion
+    /// pins the v94 transport flag: hidden, opt-in, default off.
+    #[test]
+    fn mux_pane_parse_send_source_is_text_xor_stdin() {
+        assert_eq!(
+            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi\r"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("hi\r".into()),
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: None,
+                style_exception: None,
+                provenance: None,
+                hold_pass: false,
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Stdin,
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: None,
+                style_exception: None,
+                provenance: None,
+                hold_pass: false,
+            }
+        );
+        assert_eq!(
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "1", "--raw", "--submit"])
+            )
+            .unwrap()
+            .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("1".into()),
+                guarded: false,
+                submit: true,
+                raw: true,
+                expected_identity: None,
+                style_exception: None,
+                provenance: None,
+                hold_pass: false,
+            }
+        );
+        // --hold-pass rides beside --raw: the gate-passed delivery's flag.
+        assert_eq!(
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--stdin", "--raw", "--hold-pass"])
+            )
+            .unwrap()
+            .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Stdin,
+                guarded: false,
+                submit: false,
+                raw: true,
+                expected_identity: None,
+                style_exception: None,
+                provenance: None,
+                hold_pass: true,
+            }
+        );
+        // Every other source-less form is still a usage error.
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--raw"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--submit"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "x", "--stdin"])).is_err());
+        // --raw pairs only with send.
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--raw"])).is_err());
+    }
 }

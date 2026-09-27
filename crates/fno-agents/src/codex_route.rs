@@ -9,7 +9,7 @@
 //! TODAY's config through this module, so the two moments cannot disagree and
 //! no secret is ever at rest.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -173,11 +173,12 @@ pub fn resolve_codex_route(
         )));
     }
     let key_env = field("api_key_env").unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_string());
-    let key = resolve_key(&key_env, field("api_key_file").as_deref()).ok_or_else(|| {
-        CodexRouteError::Refused(format!(
-            "provider {provider:?} has no API key under {key_env:?} (env or api_key_file)"
-        ))
-    })?;
+    let key = crate::provider_key::resolve_key(&key_env, field("api_key_file").as_deref())
+        .ok_or_else(|| {
+            CodexRouteError::Refused(format!(
+                "provider {provider:?} has no API key under {key_env:?} (env or api_key_file)"
+            ))
+        })?;
     let wire_api = field("wire_api").unwrap_or_else(|| DEFAULT_WIRE_API.to_string());
     // Every embedded value becomes a TOML literal string (single-quoted, no
     // escapes); a single quote or a control char would break the literal or
@@ -282,74 +283,10 @@ pub fn resume_verdict(
     }
 }
 
-/// Key precedence (twin of `_resolve_key`, `model_routing.py`): the env var
-/// named by `api_key_env` wins over the same name read from the
-/// `api_key_file` dotenv file. Never returns the empty string.
-fn resolve_key(key_env: &str, api_key_file: Option<&str>) -> Option<String> {
-    if key_env.is_empty() {
-        return None;
-    }
-    if let Ok(from_env) = std::env::var(key_env) {
-        if !from_env.is_empty() {
-            return Some(from_env);
-        }
-    }
-    api_key_file.and_then(|file| read_var_from_env_file(file, key_env))
-}
-
-/// Port of Python's `read_var_from_env_file` (`cli/src/fno/env_file.py`):
-/// skip `#` lines, allow an `export ` prefix, trim, strip the quotes Python's
-/// `str.strip` would strip. A missing file or key is None, never fatal.
-fn read_var_from_env_file(path_str: &str, key_name: &str) -> Option<String> {
-    let path = expand_tilde(path_str)?;
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim();
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        if name.trim() == key_name {
-            let v = py_strip(value.trim(), '"');
-            let v = py_strip(v, '\'');
-            return if v.is_empty() {
-                None
-            } else {
-                Some(v.to_string())
-            };
-        }
-    }
-    None
-}
-
-/// `str.strip(char)`: repeatedly drop the quote from both ends.
-fn py_strip(s: &str, quote: char) -> &str {
-    let mut s = s;
-    while let Some(rest) = s.strip_prefix(quote) {
-        s = rest;
-    }
-    while let Some(rest) = s.strip_suffix(quote) {
-        s = rest;
-    }
-    s
-}
-
-fn expand_tilde(path_str: &str) -> Option<PathBuf> {
-    if path_str == "~" {
-        return std::env::var_os("HOME").map(PathBuf::from);
-    }
-    match path_str.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(|home| Path::new(&home).join(rest)),
-        None => Some(PathBuf::from(path_str)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// A hermetic config anchor: `<dir>/.fno/config.toml` is the
     /// highest-priority candidate, so a fixture there outranks the operator's
@@ -364,12 +301,6 @@ mod tests {
             let f = self.dir.join(".fno/config.toml");
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
             std::fs::write(&f, toml_body).unwrap();
-        }
-
-        fn env_file(&self, body: &str) -> PathBuf {
-            let p = self.dir.join("keys.env");
-            std::fs::write(&p, body).unwrap();
-            p
         }
 
         fn cwd(&self) -> &Path {
@@ -428,7 +359,8 @@ api_key_env = "FNO_TEST_ZAI_KEY"
     fn key_precedence_env_beats_file() {
         let fx = fixture();
         fx.write(PROVIDER);
-        let file = fx.env_file("FNO_TEST_ZAI_KEY=from-file\n");
+        let file = fx.dir.join("keys.env");
+        std::fs::write(&file, "FNO_TEST_ZAI_KEY=from-file\n").unwrap();
         let body = PROVIDER.replace(
             "api_key_env = \"FNO_TEST_ZAI_KEY\"",
             &format!(
@@ -451,26 +383,6 @@ api_key_env = "FNO_TEST_ZAI_KEY"
             .1
             .clone();
         assert_eq!(from_env, "from-env");
-        std::env::remove_var("FNO_TEST_ZAI_KEY");
-        let _ = std::fs::remove_dir_all(&fx.dir);
-    }
-
-    #[test]
-    fn env_file_reader_matches_python() {
-        let fx = fixture();
-        let f = fx.env_file("# comment\nexport K1 = 'v one'\nK2=\"v2\"\nK3=\nK1=overwritten-later-line-wins-no-first-wins\n");
-        // First match wins, like Python's line loop.
-        assert_eq!(
-            read_var_from_env_file(f.to_str().unwrap(), "K1"),
-            Some("v one".to_string())
-        );
-        assert_eq!(
-            read_var_from_env_file(f.to_str().unwrap(), "K2"),
-            Some("v2".to_string())
-        );
-        assert_eq!(read_var_from_env_file(f.to_str().unwrap(), "K3"), None);
-        assert_eq!(read_var_from_env_file(f.to_str().unwrap(), "K4"), None);
-        assert_eq!(read_var_from_env_file("/nonexistent/env", "K1"), None);
         std::env::remove_var("FNO_TEST_ZAI_KEY");
         let _ = std::fs::remove_dir_all(&fx.dir);
     }

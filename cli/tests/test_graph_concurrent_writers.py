@@ -9,13 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
 from fno.graph.store import read_graph_strict
 
-pytestmark = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary is required",
-)
+pytestmark = pytest.mark.dev_build
 
 
 def _write_notes(

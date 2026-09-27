@@ -108,6 +108,13 @@ pub fn run(args: &[String]) -> i32 {
         std::fs::canonicalize(&payload_cwd).unwrap_or(PathBuf::from(&payload_cwd))
     };
 
+    // Every Stop fire is a turn end, whatever the ownership verdict: a live
+    // conversation clock is shortened to its grace (C3). Silent, and it
+    // never creates a file.
+    if !session_id.is_empty() {
+        crate::mail_hold::conversation_turn_end(&session_id);
+    }
+
     let fire = collect_fire(
         &session_id,
         &transcript_path,
@@ -1713,5 +1720,33 @@ mod tests {
             Some(manifest),
             "the row's cwd keeps precedence over the payload fallback"
         );
+    }
+
+    /// Every Stop fire is a turn end (C3): a live conversation clock is
+    /// shortened to at most one grace. Drives the same env-pinned harness
+    /// the mail-hold tests use.
+    #[test]
+    fn a_stop_fire_ends_a_live_conversation_clock_at_the_grace() {
+        const SID: &str = "cccccccc-1111-2222-3333-444455556666";
+        crate::mail_hold::tests::with_hold_env(|dir| {
+            crate::mail_hold::tests::write_registry(
+                dir,
+                serde_json::json!([crate::mail_hold::tests::registry_row("worker", SID)]),
+            );
+            let (outcome, _) = crate::mail_hold::arm_conversation(SID);
+            assert!(matches!(outcome, crate::mail_hold::ArmOutcome::Armed));
+            crate::mail_hold::conversation_turn_end(SID);
+            let raw =
+                std::fs::read_to_string(dir.join("mail-hold").join(format!("{SID}.json"))).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let until = chrono::DateTime::parse_from_rfc3339(v["until"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let left = (until - chrono::Utc::now()).num_seconds();
+            assert!(
+                (1..=crate::mail_hold::GRACE_S).contains(&left),
+                "the turn end left {left}s on the clock, at most one grace"
+            );
+        });
     }
 }

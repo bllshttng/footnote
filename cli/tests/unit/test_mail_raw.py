@@ -1255,7 +1255,7 @@ def test_mail_inject_codex_preserves_rust_refusal_reason(monkeypatch):
     monkeypatch.setattr(
         "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
     )
-    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda _thread: None)
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda *_a: None)
     monkeypatch.setattr(
         dispatch.subprocess,
         "run",

@@ -465,7 +465,7 @@ fn multiclient_mux_ls_reports_live_counts_and_stale_without_unlinking() {
     assert!(out.status.success(), "ls exits 0: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("main: 1 clients, 1 squads, 1 panes"),
+        stdout.contains("main: 1 clients, 1 workspaces, 1 panes"),
         "live row with counts; got: {stdout}"
     );
     assert!(stdout.contains("dead: stale"), "stale row; got: {stdout}");
@@ -900,12 +900,14 @@ fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     let strip = |s: &str| s.lines().next().unwrap_or("").to_string();
-    let a_row = a.wait_screen(15, |s| strip(s).contains(" 3]"));
+    // The padded active tab reads `[ ? 3 ]` (one cell of padding inside each
+    // bracket), so the ordinal markers carry the trailing space.
+    let a_row = a.wait_screen(15, |s| strip(s).contains(" 3 ]"));
     assert!(
-        a_row.contains(" 3]"),
+        a_row.contains(" 3 ]"),
         "a shows three tabs before the close; strip: {a_row:?}"
     );
-    b.wait_screen(15, |s| strip(s).contains(" 3]"));
+    b.wait_screen(15, |s| strip(s).contains(" 3 ]"));
 
     let out = scratch
         .command()
@@ -920,12 +922,12 @@ fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
 
     // The marker: the client that issued nothing repaints the strip with the
     // closed tab's ordinal gone (every later tab renumbers down).
-    let b_row = b.wait_screen(15, |s| !strip(s).contains(" 3]"));
+    let b_row = b.wait_screen(15, |s| !strip(s).contains(" 3 ]"));
     assert!(
-        b_row.contains(" 2]"),
+        b_row.contains(" 2 ]"),
         "the renumbered strip still names ordinal 2: {b_row:?}"
     );
-    a.wait_screen(15, |s| !strip(s).contains(" 3]"));
+    a.wait_screen(15, |s| !strip(s).contains(" 3 ]"));
 }
 
 #[test]

@@ -696,11 +696,28 @@ fn warn_no_symbol(out: &mut String, answers: &[&WalkAnswerer]) {
 
 // ── symbol extraction ────────────────────────────────────────────────────────
 
-/// The second `at:` token when it is a bare identifier:
-/// `path[:lines] symbol (note)`.
+/// The second `at:` token when it is a bare identifier the walk greps
+/// (`keeps_symbol`): `path[:lines] symbol (note)`.
 fn ident_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
+}
+
+/// A name the walk greps: 6+ chars once edge underscores are trimmed, and a
+/// word break a prose word never has: an underscore, a lower-to-upper step,
+/// or an acronym run into a word.
+fn keeps_symbol(name: &str) -> bool {
+    let t = name.trim_matches('_');
+    let b = t.as_bytes();
+    t.chars().count() >= 6
+        && (t.contains('_')
+            || b.windows(2).any(|w| {
+                (w[0].is_ascii_lowercase() || w[0].is_ascii_digit()) && w[1].is_ascii_uppercase()
+            })
+            // an acronym run into a word: `URLParser`, `HTTPServer`
+            || b.windows(3).any(|w| {
+                w[0].is_ascii_uppercase() && w[1].is_ascii_uppercase() && w[2].is_ascii_lowercase()
+            }))
 }
 
 fn at_symbol(at_text: &str) -> Option<String> {
@@ -710,8 +727,7 @@ fn at_symbol(at_text: &str) -> Option<String> {
     }
     // The same keep-rule every symbol source obeys: a prose word from a
     // wordy `at:` note (`run and collect`) must not become a grep target.
-    let trimmed = second.trim_matches('_');
-    if trimmed.chars().count() >= 6 && trimmed.contains('_') {
+    if keeps_symbol(second) {
         Some(second.to_string())
     } else {
         None
@@ -726,8 +742,7 @@ fn at_head(at: &str) -> &str {
 /// Every free `name(` in `reads:`. There is no space before the parenthesis
 /// (`provider_cap (file.py:1767)` is a line citation, not a call), a receiver
 /// call (`path.is_file(`) is skipped, and a `::` path still counts. A name
-/// survives only with >= 6 chars and an underscore once edge underscores are
-/// trimmed.
+/// survives only when `keeps_symbol` holds.
 fn call_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\(").unwrap())
@@ -746,8 +761,7 @@ fn reads_calls(reads: &str) -> Vec<String> {
                 continue;
             }
         }
-        let trimmed = name.trim_matches('_');
-        if trimmed.chars().count() >= 6 && trimmed.contains('_') {
+        if keeps_symbol(name) {
             out.push(name.to_string());
         }
     }
@@ -1293,6 +1307,39 @@ mod tests {
     }
 
     #[test]
+    fn ts_answerer_camel_case_symbol_walks_into_python() {
+        let repo = walk_repo(
+            "walkts",
+            &[
+                (
+                    "src/tool.ts",
+                    "export function createTaskTool() {\n  return null;\n}\n",
+                ),
+                ("src/caller.py", "createTaskTool(deps)\n"),
+            ],
+        );
+        let fm = surface_block(
+            "Which code builds the task tool?",
+            "  answerers:\n    - at: src/tool.ts:1 createTaskTool\n      disposition: \
+             dual-logic\n      reads: \"createTaskTool(deps)\"\n      emits: \"tool per \
+             res\"\n",
+            1,
+            1,
+        );
+        let plan = write_plan(&repo, &fm, "p.md");
+        let out = run_walk(&plan, &repo);
+        assert!(
+            out.contains(
+                "X\t`createTaskTool` is read in python at 1 file(s) no answerer names: \
+                 src/caller.py"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("names no symbol"), "{out}");
+        assert!(out.contains("ts 1"), "{out}");
+    }
+
+    #[test]
     fn out_of_scope_answerer_covers_the_file_and_receipt_names_both_trees() {
         let repo = walk_repo("walkc", &[]);
         let fm = surface_block(
@@ -1531,7 +1578,26 @@ mod tests {
         assert_eq!(calls, vec!["row_ref_valid".to_string()]);
         assert!(reads_calls("path.is_file(").is_empty());
         assert!(reads_calls("_private(").is_empty());
-        assert!(reads_calls("getCount(").is_empty());
+        assert_eq!(reads_calls("getCount("), vec!["getCount".to_string()]);
+        // Single-hump, all-caps, and short names stay indistinguishable from prose.
+        assert!(reads_calls("Plugin(").is_empty());
+        assert!(reads_calls("render(").is_empty());
+        assert!(reads_calls("getX(").is_empty());
+        assert!(reads_calls("README(").is_empty());
+    }
+
+    #[test]
+    fn camel_case_names_are_kept() {
+        assert_eq!(
+            at_symbol("src/tool.ts:1 createTaskTool"),
+            Some("createTaskTool".into())
+        );
+        assert_eq!(
+            reads_calls("extractAssistantText(res)"),
+            vec!["extractAssistantText".to_string()]
+        );
+        assert!(at_symbol("x.rs:1 WalkAnswerer").is_some());
+        assert_eq!(reads_calls("URLParser(u)"), vec!["URLParser".to_string()]);
     }
 
     #[test]
@@ -1545,6 +1611,7 @@ mod tests {
         // Prose words from a wordy at: note never become grep targets.
         assert_eq!(at_symbol("src/reader.py:1 run and collect"), None);
         assert_eq!(at_symbol("src/reader.py:1 and"), None);
+        assert_eq!(at_symbol("src/a.ts:1 Collect"), None);
     }
 
     #[test]

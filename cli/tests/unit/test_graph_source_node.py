@@ -91,32 +91,6 @@ def test_ac1_err_unresolvable_source_node_refuses_and_writes_nothing(tmp_graph):
     assert len(_entries(tmp_graph)) == before
 
 
-def test_ac2_err_update_rejects_a_self_reference(tmp_graph):
-    """AC2-ERR: a node cannot be its own origin; the field is left untouched."""
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--source-node", "x-aaaa"]
-    )
-    assert result.exit_code != 0
-    assert "x-aaaa" in result.output
-    assert _by_id(tmp_graph, "x-aaaa").get("source_node_id") is None
-
-
-def test_update_sets_and_clears_the_origin(tmp_graph):
-    """--source-node on update sets it; 'null' clears it, matching the flag idiom."""
-    created = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
-    new_id = json.loads(created.stdout)["id"]
-
-    assert runner.invoke(
-        app, ["backlog", "update", new_id, "--source-node", "x-aaaa"]
-    ).exit_code == 0
-    assert _by_id(tmp_graph, new_id)["source_node_id"] == "x-aaaa"
-
-    assert runner.invoke(
-        app, ["backlog", "update", new_id, "--source-node", "null"]
-    ).exit_code == 0
-    assert _by_id(tmp_graph, new_id)["source_node_id"] is None
-
-
 def test_ac3_edge_stale_env_origin_degrades_through_the_real_filing_path(
     tmp_graph, monkeypatch
 ):

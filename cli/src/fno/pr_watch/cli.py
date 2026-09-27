@@ -193,12 +193,15 @@ def _run_notify_watch_phase(
     roots: "Optional[list[Path]]" = None,
     *,
     timeout_s: Optional[float] = None,
+    interval_s: int = 300,
 ) -> None:
     """Run the Rust notify_watch arm and turn its receipt into the tick row.
 
     The arm lives in fno-agents (``notify-watch``); the sampler, the signal
     store and the ``[notify]`` config are all read in Rust, so this phase is
-    only spawn, parse and emit. The subprocess runs inside the first catch-up
+    only spawn, parse and emit. ``interval_s`` rides the tick's own bucket:
+    the row claims the cadence it really runs at, so the reader's stale bound
+    is honest. The subprocess runs inside the first catch-up
     root: launchd starts this daemon in ``/``, where a board read would read
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
@@ -221,7 +224,7 @@ def _run_notify_watch_phase(
 
         binary = resolve_binary()
         if binary is None:
-            _emit_tick_row("notify_watch", interval_s=300,
+            _emit_tick_row("notify_watch", interval_s=interval_s,
                            skip_reason="notify_failed", detail="rust binary absent")
             return
         set_tick_phase("notify_watch:arm")
@@ -236,13 +239,18 @@ def _run_notify_watch_phase(
             cwd=str(roots[0]) if roots else None,
         )
         payload = json.loads(proc.stdout or "{}")
-        _emit_tick_row("notify_watch", interval_s=300,
+        _emit_tick_row("notify_watch", interval_s=interval_s,
                        acted=int(payload.get("acted") or 0),
                        skip_reason=payload.get("skip_reason"),
                        detail=(payload.get("detail") or "")[:200])
+    except subprocess.TimeoutExpired as exc:
+        # A bound overrun is a budget cut; "notify_failed" would read FAIL.
+        _emit_tick_row("notify_watch", interval_s=interval_s,
+                       skip_reason="starved",
+                       detail=f"arm pass exceeded its {exc.timeout:.0f}s bound"[:200])
     except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
         log.warning("pr-watch: notify_watch phase failed: %s", exc)
-        _emit_tick_row("notify_watch", interval_s=300,
+        _emit_tick_row("notify_watch", interval_s=interval_s,
                        skip_reason="notify_failed", detail=str(exc)[:200])
 
 
@@ -421,7 +429,10 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
     "king_wake": 45,
-    "notify_watch": 10,
+    # The notify phase pays the arm subprocess over every catch-up root
+    # (armed pass: 23.1s measured over 12 roots 2026-09-27). 15s still cut
+    # it mid-arm; 30s fits at the 0.85x deadline.
+    "notify_watch": 30,
     "heal": 10,
     "evals": 10,
 }
@@ -449,7 +460,7 @@ def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signat
 
 
 def _resolve_tick_deadline(cfg) -> int:
-    """Env seam first, then config, then 0.8x the interval (min 60s).
+    """Env seam first, then config, then 0.85x the interval (min 60s).
 
     Config and derived values are clamped BELOW interval_seconds: launchd
     never runs a StartInterval job concurrently, so a deadline at or above
@@ -463,7 +474,7 @@ def _resolve_tick_deadline(cfg) -> int:
     ceiling = max(1, int(cfg.interval_seconds) - 5)
     if cfg.tick_timeout_seconds:
         return min(int(cfg.tick_timeout_seconds), ceiling)
-    derived = max(60, int(cfg.interval_seconds * 0.8))
+    derived = max(60, int(cfg.interval_seconds * 0.85))
     return min(derived, ceiling)
 
 
@@ -623,8 +634,9 @@ def tick() -> None:
                 cut.append(name)
                 phase_s[name] = 0.0
                 if arm is not None:
+                    # starved, not broken: timeout is a FAILURE_SKIPS token.
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"deadline exceeded before phase {name}")
                 return False
             if ceiling_box["v"] is None:
@@ -665,8 +677,9 @@ def tick() -> None:
                             f"{int(slice_s)}s" if wall_limited else
                             f"phase slice {int(slice_s)}s spent") + at
                     note = progress.get(name) or sweep_progress.get(name) or ""
+                    # The slice was the binding budget: starved, not FAIL.
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"{base} {note}" if note else base)
             finally:
                 if alarm_ok:
@@ -1288,7 +1301,13 @@ def tick() -> None:
         # Rust arm answers notify_off itself when the [notify] signals list
         # is empty, so the readout shows the arm whether or not it is armed.
         def _phase_notify(slice_s: float) -> None:
-            _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0))
+            # The row carries the arm's real cadence - one run per launchd
+            # bucket, not the 300s literal - so the reader's stale bound is
+            # honest about a healthy rotation.
+            nw_interval = (int(getattr(cfg, "interval_seconds", 600))
+                           if cfg is not None else 600)
+            _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0),
+                                    interval_s=nw_interval)
 
         # The heal drive loop: nothing called the healer on a timer, so every
         # red open PR waited for a hand. The loop lives in Rust; this phase is

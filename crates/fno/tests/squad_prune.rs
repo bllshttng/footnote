@@ -449,8 +449,8 @@ fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
         "doctor exited non-zero (a warn stays 0): {stderr}\n{stdout}"
     );
     assert!(
-        stdout.contains("squad store"),
-        "doctor runs the squad-store check: {stdout}"
+        stdout.contains("workspace store"),
+        "doctor runs the workspace-store check: {stdout}"
     );
     assert!(
         stdout.contains("orphaned"),

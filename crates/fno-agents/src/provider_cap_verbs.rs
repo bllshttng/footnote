@@ -48,6 +48,7 @@ fn cap_status(args: &[String]) -> i32 {
                 "measured_at": snap.measured_at,
                 "fresh": true,
                 "source": "daemon-tick",
+                "resolver_unavailable": snap.resolver_unavailable,
             });
             emit_status(&v, json);
             return 0;
@@ -62,6 +63,7 @@ fn cap_status(args: &[String]) -> i32 {
                 "measured_at": snap.measured_at,
                 "fresh": true,
                 "source": "on-demand",
+                "resolver_unavailable": snap.resolver_unavailable,
             });
             emit_status(&v, json);
             0
@@ -92,6 +94,9 @@ fn render_text_snapshot(v: &Value) -> String {
         " source={}",
         v.get("source").and_then(Value::as_str).unwrap_or("?")
     ));
+    if let Some(reason) = v.get("resolver_unavailable").and_then(Value::as_str) {
+        out.push_str(&format!(" resolver_unavailable={reason}"));
+    }
     for lane in v.get("lanes").and_then(Value::as_array).unwrap_or(&vec![]) {
         let lane_name = lane.get("lane").and_then(Value::as_str).unwrap_or("?");
         let state = lane.get("state").and_then(Value::as_str).unwrap_or("?");
@@ -239,6 +244,11 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
         let (skip, detail) = match snapshot(&home, &config_cwd, now, &cfg) {
             Ok(snap) => {
                 crate::provider_cap::persist_snapshot(&home, &snap);
+                let resolver = snap
+                    .resolver_unavailable
+                    .as_deref()
+                    .map(|r| format!("resolver_unavailable={r}; "))
+                    .unwrap_or_default();
                 if cfg.enabled {
                     let d = run_armed(
                         &home,
@@ -247,11 +257,11 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
                         &cfg,
                         now,
                     );
-                    (None, d)
+                    (None, format!("{resolver}{d}"))
                 } else {
                     (
                         Some("provider_cap_off"),
-                        format!("open_lanes={}", open_lane_count(&snap)),
+                        format!("{resolver}open_lanes={}", open_lane_count(&snap)),
                     )
                 }
             }
@@ -297,17 +307,39 @@ pub(crate) fn run_fno_output(
     cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Option<String> {
-    use std::io::Read;
+    run_fno_output_env(args, cwd, timeout, &[], None)
+}
+
+/// [`run_fno_output`] with env set on the child: the transcript bridge must
+/// reach the python runtime even where agents verbs default to the Rust one,
+/// the same pin `family1_truth_command` rides. A stdin payload rides the
+/// piped stdin, written before the wait (the payload is far below the pipe
+/// buffer, so the write cannot block on the child's reads).
+pub(crate) fn run_fno_output_env(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+    envs: &[(&str, &str)],
+    stdin_payload: Option<&str>,
+) -> Option<String> {
+    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     let fno = crate::scrape::fno_bin();
     let mut cmd = Command::new(&fno);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let stdin_writer = if stdin_payload.is_some() {
+        cmd.stdin(Stdio::piped());
+        true
+    } else {
+        cmd.stdin(Stdio::null());
+        false
+    };
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
     // A reader thread owns the pipe so a chatty child can never fill the OS
     // buffer and deadlock the wait, and nothing read from it is discarded.
@@ -319,6 +351,22 @@ pub(crate) fn run_fno_output(
             buf
         })
     };
+    if let (true, Some(payload)) = (stdin_writer, stdin_payload) {
+        if let Some(mut pin) = child.stdin.take() {
+            let wrote = pin.write_all(payload.as_bytes()).is_ok();
+            // Dropping closes the pipe: the child's stdin read sees EOF.
+            drop(pin);
+            if !wrote {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        } else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
     let deadline = std::time::Instant::now() + timeout;
     let ok = loop {
         match child.try_wait() {

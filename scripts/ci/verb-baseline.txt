@@ -56,7 +56,6 @@ backlog get
 backlog next
 backlog queued
 backlog reconcile
-backlog update !--model-tier !--tag !--untag
 bundle
 carveout
 claim
@@ -71,7 +70,6 @@ cost
 decide
 decide list
 decide reindex
-decide retract !--origin
 delivery
 do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host

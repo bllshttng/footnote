@@ -86,6 +86,7 @@ mod shutdown_capture;
 mod slot_capture;
 mod squad_persistence;
 mod squad_sync;
+mod thread_workspace;
 mod truth_probe;
 mod workspace_restore;
 use self::session_guard::{ConnAlive, SocketGuard};
@@ -519,21 +520,6 @@ fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'
     }
 }
 
-/// True only when the current session/pane join names a LIVE row that
-/// explicitly declared the bus-only delivery policy. DND is presence, never
-/// liveness, but an exited row is skipped (matching [`rerun_allowed`]): a hold
-/// stamped on a reaped agent must not veto the shell or successor that
-/// inherited the pane and can never lift it.
-fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
-    agents.iter().any(|a| {
-        !a.exited
-            && a.dnd
-            && a.mux
-                .as_ref()
-                .is_some_and(|(s, p)| s == session && *p == pane)
-    })
-}
-
 /// Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -808,6 +794,10 @@ pub(crate) enum CoreMsg {
         bytes: Vec<u8>,
         guarded: bool,
         expected_identity: Option<String>,
+        /// A send the Rust hold gate already passed (`own`, `control:` or a
+        /// parked-mail replay): the pane's DND refusal stands down for this
+        /// write. Every other guard stays.
+        hold_pass: bool,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `Err` carries the refusal reason: either the read
         /// failed or the registry carries a row whose pane cannot be read
@@ -1623,9 +1613,6 @@ pub(crate) struct Core {
     /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
     /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
-    /// Per-pane last attended-hold arm time: a keystroke past the window
-    /// since the last arm re-arms the pane session's mail hold.
-    hold_arm_last: HashMap<u64, Instant>,
     /// Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane PTY; purged with the pane
     /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
@@ -2960,7 +2947,7 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err("squad name cannot be blank".into());
+                    return Err("workspace name cannot be blank".into());
                 }
                 let cwds: Vec<String> = self
                     .session
@@ -2978,15 +2965,15 @@ impl Core {
                     .map(|(s, _)| s);
                 match (hits.next(), hits.next()) {
                     (Some(s), None) => Ok(Some(s.id)),
-                    (Some(_), Some(_)) => Err(format!("ambiguous squad name: {n}")),
-                    (None, _) => Err(format!("no such squad: {n}")),
+                    (Some(_), Some(_)) => Err(format!("ambiguous workspace name: {n}")),
+                    (None, _) => Err(format!("no such workspace: {n}")),
                 }
             }
             PaneTarget::SquadId(id) => self
                 .session
                 .squad(*id)
                 .map(|s| Some(s.id))
-                .ok_or_else(|| format!("no such squad id: {id}")),
+                .ok_or_else(|| format!("no such workspace id: {id}")),
         }
     }
 
@@ -3026,7 +3013,7 @@ impl Core {
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err("selected squad vanished".into());
+            return Err("selected workspace vanished".into());
         };
         let new_tab = |this: &mut Self, si: usize| {
             let tid = this.session.mint_tab_id();
@@ -3126,13 +3113,16 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err((err_code::BAD_REQUEST, "squad name cannot be blank".into()));
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        "workspace name cannot be blank".into(),
+                    ));
                 }
                 match self.resolve_placement_target(&placement.target, None) {
                     Ok(d) => (d, None),
                     // Coupled to resolve_placement_target's error text: a name matching NO squad is
                     // creatable; an ambiguous name (2+ matches) still errors - never silently pick one.
-                    Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
+                    Err(e) if e.starts_with("no such workspace") => (None, Some(n.to_string())),
                     Err(e) => return Err((err_code::BAD_REQUEST, e)),
                 }
             }
@@ -3225,9 +3215,9 @@ impl Core {
         let sq = self
             .session
             .squad(sid)
-            .ok_or_else(|| format!("no such squad id: {sid}"))?;
+            .ok_or_else(|| format!("no such workspace id: {sid}"))?;
         if sq.tabs.is_empty() {
-            return Err(format!("squad {sid} has no tabs"));
+            return Err(format!("workspace {sid} has no tabs"));
         }
         sq.resolve_tab(sel)
     }
@@ -3265,12 +3255,12 @@ impl Core {
             self.reap_pane(pid);
             return Err((
                 err_code::BAD_REQUEST,
-                "a --tab/--at placement needs a resolved squad".into(),
+                "a --tab/--at placement needs a resolved workspace".into(),
             ));
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         // An explicit `New` tab ignores any anchor - it is born with this pane.
         if matches!(placement.tab, Some(TabSel::New)) {
@@ -3526,10 +3516,10 @@ impl Core {
     /// List a squad's tabs for [`ControlVerb::TabLs`].
     fn tab_ls(&self, squad: &PaneTarget) -> Result<Vec<TabInfo>, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
-        let sq = self
-            .session
-            .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+        let sq = self.session.squad(sid).ok_or((
+            err_code::BAD_REQUEST,
+            format!("no such workspace id: {sid}"),
+        ))?;
         let active_ti = sq.active_tab.min(sq.tabs.len().saturating_sub(1));
         Ok(sq
             .tabs
@@ -3562,7 +3552,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -3590,7 +3580,7 @@ impl Core {
         let sq = self
             .session
             .squad_mut(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?;
         let tid = sq.tabs[ti].id;
         sq.tabs[ti].name = clean;
         // A template tab's stored spec is keyed by tab name; a rename
@@ -3649,7 +3639,7 @@ impl Core {
         let tid = self
             .session
             .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?
             .tabs[from]
             .id;
         if self.reorder_tab(sid, tid, (dest as i64 - from as i64) as i32) {
@@ -3799,10 +3789,10 @@ impl Core {
                 .collect()),
             LayoutScope::Squad(t) => {
                 let sid = self.resolve_squad(t)?;
-                let sq = self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+                let sq = self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?;
                 Ok(vec![self.squad_layout(sq, agents)])
             }
             LayoutScope::Tab { squad, tab } => {
@@ -4219,10 +4209,10 @@ impl Core {
             PaneTarget::CurrentRoute => self.session.squads.iter().collect(),
             t => {
                 let sid = self.resolve_squad(t)?;
-                vec![self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?]
+                vec![self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?]
             }
         };
         // Resolve one dictionary form across the candidates. An absent form
@@ -4574,7 +4564,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -5213,7 +5203,7 @@ impl Core {
     fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
         self.resolve_placement_target(target, self.session.active_squad)
             .map_err(|e| (err_code::BAD_REQUEST, e))?
-            .ok_or((err_code::BAD_REQUEST, "no target squad".into()))
+            .ok_or((err_code::BAD_REQUEST, "no target workspace".into()))
     }
 
     /// A one-line refusal/notice to ONE client (BEL + transient message on
@@ -5670,20 +5660,41 @@ impl Core {
         if dry_run {
             return ResumeOutcome::Planned;
         }
-        let sid = self
-            .squad_members
-            .iter()
-            .find(|(_, members)| {
-                members.iter().any(|member| {
-                    stored_member
-                        .as_ref()
-                        .is_some_and(|stored| stored == member)
-                        || member.worker.as_deref() == Some(name)
-                })
-            })
-            .map(|(sid, _)| *sid)
-            .or_else(|| self.session.find_by_cwd(&facts.cwd))
-            .unwrap_or(view.0);
+        // The resumed pane lands where the row renders: a registry row asks
+        // the one thread-workspace resolver (member, then spawner, then
+        // cwd); the loose stored-member rung answers only for a receipt-only
+        // row with no registry entry, because it matches ANY member named
+        // `name` across workspaces, where the resolver would refuse the
+        // ambiguity - running it first would split a dangling dead row from
+        // its own resume. The row join repeats the selection above: the
+        // member-identity match when a stored member names the row, else the
+        // display name. A name-only find could pick a DIFFERENT row sharing
+        // the display name and place the resume in its workspace.
+        let sid = {
+            let registry_row = self.agents.iter().find(|a| match stored_member.as_ref() {
+                Some(member) => worker_registry_match(member, a, name),
+                None => a.name == name,
+            });
+            match registry_row {
+                Some(row) => self
+                    .thread_workspace(row)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+                None => self
+                    .squad_members
+                    .iter()
+                    .find(|(_, members)| {
+                        members.iter().any(|member| {
+                            stored_member
+                                .as_ref()
+                                .is_some_and(|stored| stored == member)
+                                || member.worker.as_deref() == Some(name)
+                        })
+                    })
+                    .map(|(sid, _)| *sid)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+            }
+        }
+        .unwrap_or(view.0);
         // A claude row's resume runs the canonical re-entry
         // plan; the `None` arm fires the off-loop resolution and the
         // gesture replays with the verdict staged. A receipt-only row
@@ -6508,47 +6519,6 @@ impl Core {
             .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
     }
 
-    fn member_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
-        let exact: Vec<u64> = match (agent.harness.as_deref(), agent_harness_session_id(agent)) {
-            (Some(harness), Some(session_id)) => self
-                .squad_members
-                .iter()
-                .filter_map(|(sid, members)| {
-                    members
-                        .iter()
-                        .any(|member| {
-                            member.worker.as_deref() == Some(agent.name.as_str())
-                                && member.harness.as_deref() == Some(harness)
-                                && member.harness_session_id.as_deref() == Some(session_id)
-                        })
-                        .then_some(*sid)
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        if exact.len() == 1 {
-            return exact.first().copied();
-        }
-        if exact.len() > 1 {
-            return None;
-        }
-        let legacy: Vec<u64> = self
-            .squad_members
-            .iter()
-            .filter_map(|(sid, members)| {
-                members
-                    .iter()
-                    .any(|member| {
-                        member.worker.as_deref() == Some(agent.name.as_str())
-                            && member.harness.is_none()
-                            && member.harness_session_id.is_none()
-                    })
-                    .then_some(*sid)
-            })
-            .collect();
-        (legacy.len() == 1).then(|| legacy[0])
-    }
-
     fn unique_worker_pane_by_name(&self, name: &str) -> Result<Option<u64>, ()> {
         match self.worker_pane.get(name) {
             None => Ok(None),
@@ -6730,7 +6700,7 @@ impl Core {
         match outcome {
             Ok((outcome, batch)) => {
                 if !self.persist_result(Ok(batch)) {
-                    self.notice(client_id, "sweep skipped: squad store changed");
+                    self.notice(client_id, "sweep skipped: workspace store changed");
                     return;
                 }
                 self.reload_members_from_store();
@@ -6777,7 +6747,7 @@ impl Core {
         // prune-shaped; a write error degrades to a notice, never refuses
         // (AC2-FR / AC-ERR1).
         if let Err(e) = crate::squad_store::collapse_duplicate_squads() {
-            self.notice_all(format!("squad collapse at restore skipped: {e}"));
+            self.notice_all(format!("workspace collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
         self.store_generations = loaded.generations;
@@ -6824,7 +6794,7 @@ impl Core {
                 ) {
                     Ok(batch) => self.store_generations.extend(batch.generations),
                     Err(e) => {
-                        self.notice_all(format!("squad prune at restore skipped: {e}"));
+                        self.notice_all(format!("workspace prune at restore skipped: {e}"));
                     }
                 }
                 continue;
@@ -9351,6 +9321,7 @@ impl Core {
         guarded: bool,
         expected_identity: Option<&str>,
         agents: Result<Vec<RegistryAgent>, &'static str>,
+        hold_pass: bool,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
@@ -9431,9 +9402,10 @@ impl Core {
                 };
             }
         }
-        if agents
-            .as_deref()
-            .is_ok_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+        if !hold_pass
+            && agents
+                .as_deref()
+                .is_ok_and(|rows| agent_rows_join::pane_is_dnd(rows, &self.session_name, pane))
         {
             return ServerMsg::Err {
                 code: err_code::TARGET_DND,
@@ -10104,7 +10076,7 @@ impl Core {
                     // A stale id (squad died racing the selector) is refused
                     // fail-closed; the client re-anchors off the next Layout
                     // it already received.
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -10499,17 +10471,26 @@ impl Core {
                 // origin-less named target still starts claude in the agent's
                 // dir. Captured before target resolution because owner routing
                 // and the spawn cwd both derive from this one row.
-                let row_cwd = self
+                let matched_row = self
                     .agents
                     .iter()
                     .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))
+                    .cloned();
+                let row_cwd = matched_row
+                    .as_ref()
                     .map(|a| a.cwd.clone())
                     .unwrap_or_default();
-                // Resolve the OWNING squad (Locked 2) as the CurrentRoute
-                // default: the squad whose `owns_path` matches the row cwd, so
-                // the attach lands where the agent lives, not the viewer's
-                // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self.session.find_by_cwd(&row_cwd).unwrap_or(view.0);
+                // Resolve the OWNING workspace (Locked 2) as the CurrentRoute
+                // default through the one thread-workspace resolver (member,
+                // then spawner, then the row's cwd), so the attach lands where
+                // the agent lives, not the viewer's workspace; fall back to the
+                // project default for a rowless attach id, and to the viewed
+                // workspace for an orphan (AC1-EDGE).
+                let owner = matched_row
+                    .as_ref()
+                    .and_then(|row| self.thread_workspace(row))
+                    .or_else(|| self.session.find_by_cwd(&row_cwd))
+                    .unwrap_or(view.0);
                 // (G3) An anchored drop ("attach beside THIS pane") names a
                 // concrete pane the operator can see, which overrides owner
                 // routing: the pane lands in the anchor's OWN tab, resolved from
@@ -10852,7 +10833,7 @@ impl Core {
                             }
                         }
                     }
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -10861,7 +10842,7 @@ impl Core {
                 // its tabs, drop the squad, re-anchor views. Destructiveness is
                 // gated client-side by a confirm; the server just executes.
                 let Some(pos) = self.session.squads.iter().position(|s| s.id == id) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 // De-persist the whole squad up front (user dismissed it - it
@@ -10907,7 +10888,7 @@ impl Core {
                 // to the list bounds; an already-at-edge move is a silent no-op
                 // (holding a reorder key at the top must not bell).
                 let Some(idx) = self.session.squads.iter().position(|s| s.id == squad) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 let len = self.session.squads.len() as i64;
@@ -12006,11 +11987,18 @@ impl Core {
                 bytes,
                 guarded,
                 expected_identity,
+                hold_pass,
                 agents,
                 reply,
             } => {
-                let msg =
-                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
+                let msg = self.pane_send(
+                    pane,
+                    &bytes,
+                    guarded,
+                    expected_identity.as_deref(),
+                    agents,
+                    hold_pass,
+                );
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -12780,7 +12768,6 @@ async fn serve(
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
-        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
@@ -13648,6 +13635,7 @@ async fn handle_control(
             bytes,
             guarded,
             expected_identity,
+            hold_pass,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -13672,6 +13660,7 @@ async fn handle_control(
                     bytes,
                     guarded,
                     expected_identity,
+                    hold_pass,
                     agents,
                     reply: reply_tx,
                 })

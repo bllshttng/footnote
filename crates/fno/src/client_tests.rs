@@ -4,7 +4,7 @@ use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 mod chrome_hit_helpers;
 use crate::client::{
     input_folds::MAX_ESC_CARRY,
-    keys_modal::{build_keys_modal, keys_modal_mouse},
+    keys_modal::{build_keys_modal, keys_modal_keys, keys_modal_mouse},
 };
 use crate::vt::frame_text;
 use chrome_hit_helpers::{chrome_hit_label, cmds};
@@ -313,69 +313,6 @@ fn new_tab_prompt_arms_rename_on_the_materialized_tab() {
     );
 }
 
-#[test]
-fn tab_bar_spans_label_named_tabs_and_collapse_bare_digits() {
-    // x-0f9d US2 (supersedes x-c150 Locked 5): an UNNAMED tab renders
-    // today's ordinal span byte-identically; a CHOSEN name renders ALONE,
-    // no forced ordinal, truncated to TAB_LABEL_W.
-    let mut view = two_pane_view();
-    let spans = view.tab_bar_spans();
-    assert_eq!(
-        spans[1].text, " 1 ",
-        "unnamed digit collapse: zero regression"
-    );
-    assert_eq!(spans[2].text, "[2]");
-    view.layout.squads[0].tabs[0].name = "x-abcd".into();
-    view.layout.squads[0].tabs[0].named = true;
-    view.layout.squads[0].tabs[1].name = "a-very-long-worktree-name".into();
-    view.layout.squads[0].tabs[1].named = true;
-    let spans = view.tab_bar_spans();
-    assert_eq!(spans[1].text, " x-abcd ", "chosen name renders alone");
-    assert_eq!(
-        spans[2].text, "[a-very-long-wo]",
-        "name alone truncates to 14"
-    );
-}
-
-#[test]
-fn tab_label_text_collapses_only_the_exact_ordinal() {
-    // Collapse (x-0f9d AC7): a name equal to its own ordinal is the bare
-    // digit whether chosen or not - byte-identical to the unnamed render.
-    assert_eq!(tab_label_text("1", 0, false), "1");
-    assert_eq!(
-        tab_label_text("1", 0, true),
-        "1",
-        "chosen name == ordinal collapses"
-    );
-    assert_eq!(
-        tab_label_text("2", 1, true),
-        "2",
-        "AC7: tab@2 renamed '2' is bare digit"
-    );
-    // A non-ordinal name: unnamed/derived keeps `{ordinal}:{label}`, a
-    // chosen name (US2) renders alone.
-    assert_eq!(
-        tab_label_text("2", 0, false),
-        "1:2",
-        "unnamed digit off-position"
-    );
-    assert_eq!(
-        tab_label_text("2", 0, true),
-        "2",
-        "chosen '2' at ordinal 1 renders alone"
-    );
-    assert_eq!(
-        tab_label_text("debug", 2, false),
-        "3:debug",
-        "derived keeps ordinal"
-    );
-    assert_eq!(
-        tab_label_text("debug", 2, true),
-        "debug",
-        "chosen renders alone"
-    );
-}
-
 // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
 fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
     AgentRow {
@@ -429,137 +366,6 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
             None
         },
     }
-}
-
-#[test]
-fn tab_rollup_folds_worst_live_state_ignoring_exited() {
-    // Empty tab -> no rollup (AC2-EDGE).
-    assert_eq!(tab_rollup_state(&[], 1, 0), None);
-    // Live-idle -> the outline `○`: the tab state machine distinguishes a
-    // live-idle tab from a dead one (only "no live panes" omits the glyph).
-    assert_eq!(
-        tab_rollup_state(&[tab_agent(Some(0), None, false)], 1, 0),
-        Some(LatticeState::Idle)
-    );
-    // All-exited -> no rollup: exited panes are filtered before the fold,
-    // leaving no live panes, so the tab renders stateless (AC2-EDGE).
-    assert_eq!(
-        tab_rollup_state(&[tab_agent(Some(0), Some(AgentBadge::Blocked), true)], 1, 0),
-        None
-    );
-    // Worst-first: a blocked pane beats a working one in the same tab.
-    assert_eq!(
-        tab_rollup_state(
-            &[
-                tab_agent(Some(0), Some(AgentBadge::Working), false),
-                tab_agent(Some(0), Some(AgentBadge::Blocked), false),
-            ],
-            1,
-            0
-        ),
-        Some(LatticeState::Blocked)
-    );
-    // A pane in a DIFFERENT tab never leaks into this tab's rollup.
-    assert_eq!(
-        tab_rollup_state(
-            &[tab_agent(Some(1), Some(AgentBadge::Blocked), false)],
-            1,
-            0
-        ),
-        None
-    );
-}
-
-#[test]
-fn tab_strip_rollup_surfaces_hidden_attention_with_accent() {
-    // AC2-HP: a background (inactive) tab whose only pane is Blocked shows a
-    // leading `▲` in the accent color at the strip, without opening it.
-    let mut view = two_pane_view();
-    view.layout
-        .agents
-        .push(tab_agent(Some(0), Some(AgentBadge::Blocked), false));
-    let spans = view.tab_bar_spans();
-    // spans[0] = squad name, [1] = tab 0 (blocked, inactive), [2] = tab 1 (no live panes).
-    assert_eq!(spans[1].text, " ▲ 1 ", "blocked tab: label preceded by ▲");
-    assert_eq!(
-        spans[1].fg, LATTICE_ACCENT,
-        "blocked rollup carries the accent"
-    );
-    assert_eq!(
-        spans[1].flags & cell_flags::BOLD,
-        cell_flags::BOLD,
-        "blocked rollup carries BOLD"
-    );
-    // AC2-EDGE: a tab with no live panes shows no rollup glyph and no accent -
-    // byte-identical to a pre-feature stateless tab.
-    assert_eq!(spans[2].text, "[2]");
-    assert_eq!(spans[2].fg, Color::Default);
-}
-
-#[test]
-fn tab_strip_renders_the_fno_brand_bracketed() {
-    // US4/AC3-HP: the mux's home workspace surfaces the bare brand in the
-    // tab strip's leading label - render `f[no]`, not `fno`. Other names
-    // pass through untouched.
-    assert_eq!(brand_label("fno"), "f[no]");
-    assert_eq!(brand_label("footnote"), "footnote");
-    let mut view = two_pane_view();
-    let active = view.layout.active_squad;
-    view.layout
-        .squads
-        .iter_mut()
-        .find(|s| s.id == active)
-        .expect("active squad")
-        .name = "fno".into();
-    let spans = view.tab_bar_spans();
-    assert_eq!(
-        spans[0].text, " f[no] ",
-        "the leading brand label is bracketed"
-    );
-}
-
-#[test]
-fn active_blocked_tab_keeps_accent_and_inverse_in_composed_cells() {
-    // Domain pitfall + AC2-HP under selection: the ACTIVE (INVERSE) tab whose
-    // pane is Blocked must keep the amber fg on every composed cell, so the
-    // accent survives the fg/bg swap rather than washing out. tab 1 is the
-    // active tab in two_pane_view's squad 1.
-    let mut view = two_pane_view();
-    view.layout
-        .agents
-        .push(tab_agent(Some(1), Some(AgentBadge::Blocked), false));
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    // The tab strip lives on row 0, right of the sideline. Scope the search
-    // to the strip columns (>= panel_w): the sideline's own header band now
-    // carries `▲N` rollup counts (x-6851 US2), so an unscoped row-0 scan
-    // would hit the band glyph first.
-    let panel_w = view.panel_w() as usize;
-    let glyph_col = (panel_w..cols)
-        .find(|&c| frame.cells[c].c == '\u{25b2}')
-        .expect("active blocked tab renders ▲ on the strip");
-    let glyph = frame.cells[glyph_col];
-    assert_eq!(
-        glyph.fg, LATTICE_ACCENT,
-        "active-blocked ▲: amber under INVERSE"
-    );
-    assert_eq!(
-        glyph.flags & cell_flags::INVERSE,
-        cell_flags::INVERSE,
-        "active tab keeps INVERSE"
-    );
-    assert_eq!(
-        glyph.flags & cell_flags::BOLD,
-        cell_flags::BOLD,
-        "blocked rollup keeps BOLD"
-    );
-    // The label cells inside the same `[...]` span carry the accent too
-    // (whole-span amber, deliberate): the cell just after `▲ ` is the label.
-    let label_cell = frame.cells[glyph_col + 2];
-    assert_eq!(
-        label_cell.fg, LATTICE_ACCENT,
-        "the blocked active tab's label shares the accent span"
-    );
 }
 
 fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
@@ -623,8 +429,15 @@ pub(super) fn two_pane_view() -> View {
     // card default (ambient config or no config at all) inserts a detail
     // line per agent and moves every row index.
     view.sideline_layout = sideline_color::SidelineLayout::List;
+    // Pin the no-op theme: these tests assert the terminal theme's literal
+    // accent (`Indexed(3)`), which is the theme whose byte-identity the
+    // lattice structure protects.
+    view.theme = crate::theme::Theme::from_name("terminal").0;
     view
 }
+
+#[path = "client_tests/tab_strip_tests.rs"]
+mod tab_strip_tests;
 
 #[path = "client_tests/pane_id_reveal_tests.rs"]
 mod pane_id_reveal_tests;
@@ -2316,11 +2129,11 @@ fn layout_push_clears_stale_hover_row() {
 fn chrome_hit_tab_bar_routes_tabs_and_new_tab() {
     let view = two_pane_view(); // active squad 1 "footnote", tabs 0 & 1, +.
                                 // (x-cd67 US1) The strip is scoped to the content area (origin
-                                // panel_w=28): " footnote "=28..37, " 1 "=38..40, "[2]"=41..43,
-                                // " + "=44..46.
+                                // panel_w=28): " footnote "=28..37, " 1 "=38..40, the padded
+                                // "[ 2 ]"=41..45, " + "=46..48.
     assert_eq!(cmds(view.chrome_hit(0, 39)), vec![Command::SelectTab(0)]);
     assert_eq!(cmds(view.chrome_hit(0, 42)), vec![Command::SelectTab(1)]);
-    assert_eq!(cmds(view.chrome_hit(0, 45)), vec![Command::NewTab]);
+    assert_eq!(cmds(view.chrome_hit(0, 47)), vec![Command::NewTab]);
     // The squad-name label is inert.
     assert!(view.chrome_hit(0, 33).is_none());
 }
@@ -2625,21 +2438,20 @@ fn majority_default_recomputes_as_agents_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC2-HP (x-c5ee): the two pull-sections default Collapsed - the top of the
-// panel is the operator's own agents, the pull-sections one click away.
+// Pin the Expanded elsewhere default: every spawn appears in the sideline.
 #[test]
-fn pull_sections_default_collapsed() {
+fn pull_sections_default_expanded() {
     let dir = isolate_view_store("pull");
     let view = two_pane_view();
     assert_eq!(
         view.section_view(&SectionKey::Elsewhere),
-        SectionView::Collapsed
+        SectionView::Expanded
     );
     crate::view_store::clear_test_path();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// AC1-FR (x-c5ee): an explicit persisted choice outranks the new Collapsed
+// AC1-FR (x-c5ee): an explicit persisted choice outranks the computed
 // pull-section default. Inserted straight into the map to mirror a value
 // loaded from disk, without touching the real store.
 #[test]
@@ -5260,40 +5072,6 @@ async fn clear_dead_caps_the_fan_out_and_says_what_is_left() {
     );
 }
 
-#[test]
-fn which_key_lists_the_dead_row_removal_verbs() {
-    // (x-f300) The gap this node closed was discoverability: if the modal
-    // stops naming these, removal is invisible again.
-    let modal = build_keys_modal();
-    let labels: Vec<String> = modal
-        .popup
-        .rows
-        .iter()
-        .filter_map(|r| match r {
-            PopupRow::Entry { glyph, label, .. } => Some(format!("{glyph} {label}")),
-            PopupRow::Header(h) => Some(h.clone()),
-            _ => None,
-        })
-        .collect();
-    let joined = labels.join("\n");
-    assert!(joined.contains("sideline rows"), "the section renders");
-    assert!(joined.contains("x stop a live row · remove a dead one"));
-    assert!(joined.contains("X reap all exited agents"));
-    // (x-7683) The context-menu row names every trigger, not just the
-    // right-click, and keeps the header-only clear-dead behavior named
-    // too - the only in-app documentation that a header's menu offers it.
-    assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
-    // Display-only: Enter on them must BEL, never dispatch a bogus chord.
-    for (i, r) in modal.popup.rows.iter().enumerate() {
-        if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
-            assert!(
-                modal.row_events[i].is_none(),
-                "a bare sideline key is not a prefix chord"
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn row_menu_unbound_key_dismisses() {
     // codex P2: the shared popup contract says an unbound key dismisses; the
@@ -6547,11 +6325,14 @@ fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
     // do not. The in-app help must name all three triggers and the caveat,
     // so a swallowed right-click never reads as a dead feature.
     let mut view = two_pane_view();
-    // Tall enough that the centered modal shows its tail (the note lines
-    // ride below the binding sections): the global section spent five rows
-    // and the V chord one more, so the pin moved from 64.
+    // Tall enough that the centered modal shows its tail. The modal scrolls
+    // in a 60%-of-terminal viewport now, so the note lines are reached by
+    // scrolling to the bottom - that reachability is the contract.
     view.term = (73, 100);
     view.open_keys_modal();
+    if let Some(m) = view.keys_modal.as_mut() {
+        m.popup.scroll_by(10_000);
+    }
     let text = frame_text(&view.compose());
     let modal_tail: String = text
         .lines()
@@ -15659,26 +15440,19 @@ fn a_clipped_notice_reads_as_clipped() {
 
 #[test]
 fn the_key_modal_shows_exact_action_ids_on_a_narrow_terminal() {
-    // The modal advertises the id an operator types into `config.mux.keys`,
-    // so a clipped one is worse than none: `grab-…` still looks like an id.
-    // The generic row renderer clipped the whole line from the RIGHT, which
-    // is exactly where the id sits, so this only showed at the narrow end -
-    // the wide case the id was added for looked fine.
-    let modal = build_keys_modal();
-    // Tall enough that the popup does not scroll: the subject here is
-    // WIDTH, and a scrolled-off row would read as a clipped id.
-    for cols in [40u16, 60, 100] {
-        let out = modal.popup.render((80, cols));
-        let screen: Vec<String> = out.lines.iter().map(|l| l.text.clone()).collect();
-        for kb in crate::keys::key_bindings() {
-            assert!(
-                screen.iter().any(|l| l.contains(kb.action)),
-                "at {cols} cols the modal must show `{}` in full, not clipped; \
-                     rendered:\n{}",
-                kb.action,
-                screen.join("\n")
-            );
-        }
+    // The action id is no longer a rendered column (the 2026-09-26 plain-body
+    // rebuild dropped it for the reference look), but the id an operator
+    // types into `config.mux.keys` still resolves: filtering by the id keeps
+    // exactly that binding's row.
+    for kb in crate::keys::key_bindings() {
+        let m = keys_modal::keys_modal_with_filter(Some(kb.action));
+        assert!(
+            m.popup.rows.iter().any(
+                |r| matches!(r, PopupRow::Entry { label, enabled: true, .. } if label == kb.label)
+            ),
+            "filtering by the action id `{}` keeps the binding's row",
+            kb.action
+        );
     }
 }
 
@@ -16042,6 +15816,9 @@ fn ux_shot_rename_prompt_is_legible() {
         vec![named_meta(1, "footnote", &["main", "review"], 0)],
         vec![],
     );
+    // The stripe-not-block geometry under test is the terminal theme's (a
+    // named theme's modal body IS an inverse block by design).
+    view.theme = crate::theme::Theme::from_name("terminal").0;
     view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
     let (frame, row) = modal_at(&view);
     let cols = frame.cols as usize;
@@ -16145,14 +15922,16 @@ fn ux_shot_rename_prompt_is_legible() {
     write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
 }
 
-/// Chrome never hardcodes a colour.
+/// The `terminal` theme paints in the reader's colours, not ours.
 ///
 /// The mux paints into the user's terminal, and terminal themes are a
-/// solved, user-owned space with thousands of options. So chrome uses
-/// `Color::Default` plus attributes, or at most an `Indexed` palette slot,
-/// which is still the reader's colour - `Indexed(3)` means "whatever your
-/// scheme calls yellow", not a yellow we picked. `Color::Rgb` would be us
-/// overriding a choice that is not ours to make.
+/// solved, user-owned space with thousands of options. The `terminal` theme
+/// uses `Color::Default` plus attributes, or at most an `Indexed` palette
+/// slot, which is still the reader's colour - `Indexed(3)` means "whatever
+/// your scheme calls yellow", not a yellow we picked. Named themes
+/// (`footnote-superscript` since x-8c5a, `catppuccin` and friends) are the
+/// deliberate exception: the operator opted into a palette, fixed RGB and
+/// all, and the contrast tests hold those pairs to their floors.
 ///
 /// This is the rule the name-entry modal broke and had to be walked back:
 /// it named an explicit pair, and on the reporter's own scheme that measured
@@ -16166,6 +15945,7 @@ fn chrome_paints_in_the_readers_colours_not_ours() {
         vec![named_meta(1, "footnote", &["main", "review"], 0)],
         vec![shot_agent(1, "reviewer", Some(AgentBadge::Blocked))],
     );
+    view.theme = crate::theme::Theme::from_name("terminal").0;
     view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
     let frame = view.compose();
     for (i, cell) in frame.cells.iter().enumerate() {

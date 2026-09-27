@@ -44,14 +44,15 @@ crossing	crates/fno-agents/src/loopcheck/args.rs	let mut fno_bin = super::loopch
 crossing	crates/fno-agents/src/loopcheck/block_reason.rs	&super::loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck/review_coverage_verb.rs	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/machine_mail.rs	let mut command = Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/mail_inject.rs	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/operator_notice.rs	let fno = crate::scrape::fno_bin();
 crossing	crates/fno-agents/src/pane_stop.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pane_stop.rs	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/plans_dirs.rs	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/pr_status/reviews.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/pr_status/seams.rs	let out = std::process::Command::new(crate::scrape::fno_bin())
-crossing	crates/fno-agents/src/pr_status_facts.rs	let hold_word = Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/pr_status/seams.rs	let out = match std::process::Command::new(crate::scrape::fno_bin())
+crossing	crates/fno-agents/src/pr_status_facts.rs	None => Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/prove_it_verdicts.rs	let mut cmd = Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/provider.rs	let out = match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/provider_cap_verbs.rs	let fno = crate::scrape::fno_bin();

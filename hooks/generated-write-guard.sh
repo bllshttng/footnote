@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# generated-write-guard.sh - PreToolUse hook: refuse Edit and Write (and codex
-# apply_patch) on generated copies, because the next regeneration silently
-# wipes the edit. The refusal names the canonical source and the regen command.
+# generated-write-guard.sh - PreToolUse hook: refuse Edit, Write, Bash writes,
+# and codex apply_patch on generated copies, because the next regeneration
+# silently wipes the edit. The refusal names the canonical source and the regen
+# command.
 #
 # A path is generated when:
-#   - it sits under an installed plugin copy (`/plugin-stage/fno/`), which
-#     `fno doctor update` restages from the source checkout;
+#   - it sits under an installed plugin copy (`/plugin-stage/fno/` or a
+#     `plugins/cache/footnote*/fno/` harness cache), which `fno doctor update`
+#     restages from the source checkout;
 #   - it matches a row of `generated-artifacts.tsv` at the repo root; or
 #   - it is a bundle destination in `skill-bundles.yaml` at the repo root.
 #
@@ -117,8 +119,12 @@ for t in "${TARGETS[@]}"; do
     esac
 
     abs="$(_physical "$abs")"
-    if [[ "$abs" == */plugin-stage/fno/* ]]; then
-        inner="${abs#*/plugin-stage/fno/}"
+    inner=""
+    case "$abs" in
+        */plugin-stage/fno/*)            inner="${abs#*/plugin-stage/fno/}" ;;
+        */plugins/cache/footnote*/fno/*) inner="${abs#*/plugins/cache/footnote*/fno/}" ;;
+    esac
+    if [[ -n "$inner" ]]; then
         _block "$abs is the installed plugin copy. \`fno doctor update\` restages it from the footnote source checkout and discards this edit. Edit $inner in a feature worktree of the source checkout, then run \`fno doctor update\`."
     fi
 

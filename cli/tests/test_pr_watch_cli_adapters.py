@@ -20,6 +20,15 @@ import pytest
 pytestmark = pytest.mark.usefixtures("_no_global_tick_events")
 
 
+@pytest.fixture(autouse=True)
+def _free_gh_budget(monkeypatch):
+    """The drain's fleet-budget read must never answer from the real ledger
+    inside a test."""
+    import fno.pr_watch._dispatch as _dispatch_mod
+
+    monkeypatch.setattr(_dispatch_mod, "_gh_budget_backoff_left", lambda: 0.0)
+
+
 # ---------------------------------------------------------------------------
 # AC1-HP: _emit_event writes a valid canonical event to events.jsonl
 # ---------------------------------------------------------------------------
@@ -723,7 +732,7 @@ def test_derived_deadline_stays_below_the_interval(monkeypatch):
     def cfg(interval):
         return SimpleNamespace(tick_timeout_seconds=None, interval_seconds=interval)
 
-    assert _resolve_tick_deadline(cfg(600)) == 480
+    assert _resolve_tick_deadline(cfg(600)) == 510
     assert _resolve_tick_deadline(cfg(60)) == 55
     assert _resolve_tick_deadline(cfg(30)) == 25
     # An explicit config value is clamped too: 3600 over a 600s interval
@@ -948,7 +957,7 @@ def test_armed_breaker_completes_the_tick(monkeypatch, _no_global_tick_events, t
         lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
@@ -1005,7 +1014,7 @@ def test_armed_breaker_leaves_the_report_legs_alone(
         lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda _cfg, **_kw: 3)
     monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_kw: ([], 0))
@@ -1063,7 +1072,10 @@ def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events)
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows, "a cut sweep must mint its arm row"
-    assert rows[0]["skip_reason"] == "timeout"
+    # A slice cut is starvation of the phase's budget, not an arm failure:
+    # "timeout" rides FAILURE_SKIPS and would render a healthy loop as FAIL
+    # (notify_watch read FAIL for 43 minutes while only its slice was short).
+    assert rows[0]["skip_reason"] == "starved"
     # The sweep cap is below the remaining wall, so the slice wording fires;
     # the load-bearing half is the handed-back scan counter.
     assert "phase slice" in rows[0]["detail"]
@@ -1137,7 +1149,7 @@ def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_e
         "fno.pr_watch._king_wake.run_king_wake", _saturate, raising=True,
     )
     monkeypatch.setattr(prcli, "_run_notify_watch_phase",
-                        lambda _roots=None, timeout_s=None: None, raising=True)
+                        lambda _roots=None, timeout_s=None, **_kw: None, raising=True)
     monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
     monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)

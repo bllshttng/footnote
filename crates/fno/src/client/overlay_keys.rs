@@ -4,11 +4,11 @@
 //! ESC carry to the overlay on top.
 
 use super::backlog_board;
+use super::keys_modal::keys_modal_keys;
 use super::{
     answer_keys, attach_place_keys, confirm_keys, connections_keys, create_keys, is_sideline_verb,
-    keys_modal_keys, move_pick_keys, move_to_keys, nav_keys, peek_keys, portal_pick_keys,
-    recruit_keys, rename_keys, row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow,
-    View,
+    move_pick_keys, move_to_keys, nav_keys, peek_keys, portal_pick_keys, recruit_keys, rename_keys,
+    row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow, View,
 };
 use super::{aux_keys, questions, sideline};
 
@@ -50,11 +50,6 @@ pub(super) async fn route(
     if view.aux.is_some() {
         // US4/US5: the MENU popup / settings modal consumes keys.
         return Some(aux_keys(view, bytes, sock_w).await);
-    }
-    if view.backlog_board.is_some() {
-        // the experimental backlog board consumes keys while open; its
-        // inputs, pickers, and facets ride inside it.
-        return Some(backlog_board::board_keys(view, bytes, sock_w).await);
     }
     if view.connections.is_some() {
         // the Connections modal consumes all keys while open (Tab
@@ -159,7 +154,44 @@ pub(super) async fn route(
         }
         return Some(sideline::route_launcher_keys(view, scanner, bytes, sock_w).await);
     }
+    if view.backlog_board.is_some() {
+        // the experimental backlog board consumes keys while open; its
+        // inputs, pickers, and facets ride inside it. Prefix chords still
+        // resolve first (which-key parity): the board's folder sees
+        // only the plain-byte chunks. The board sits BELOW every other
+        // modal: a chord can open one over it (composer, selector,
+        // answers, yard, connections, ...), and a visible child modal owns
+        // the keyboard - or its keys would die in the board's folder
+        // behind it.
+        return Some(backlog_board::route_board_keys(view, scanner, bytes, sock_w).await);
+    }
     None
+}
+
+/// A chord candidate the quiet window releases while an overlay holds the
+/// keyboard: a flushed plain chunk feeds the OWNING overlay's folder (the
+/// composer's, the board's), never a pane that may not even be
+/// painted; the overlay's own chord events dispatch through the shared path.
+/// No overlay: the released event is the pane's.
+pub(super) async fn flush_released_chord(
+    view: &mut View,
+    event: crate::keys::Event,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    if view.launcher.is_some() {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return super::agent_launcher::launcher_keys(view, chunk, sock_w)
+                .await
+                .map(|_| ());
+        }
+    } else if view.backlog_board.is_some() {
+        if let crate::keys::Event::Forward(chunk) = &event {
+            return backlog_board::board_keys(view, chunk, sock_w)
+                .await
+                .map(|_| ());
+        }
+    }
+    super::dispatch_event(view, event, sock_w).await.map(|_| ())
 }
 
 /// The quiet window elapsed while a raw-fed overlay may hold a lone ESC in

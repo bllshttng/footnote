@@ -150,6 +150,11 @@ pub fn run(args: &[String]) -> i32 {
         "update" if leads_with_engine_door(resolved.tail) => {
             super::patch::run_update(resolved.tail)
         }
+        // The legacy field-flag surface: native when every flag in the tail
+        // is one the port owns, else the compat forward with the original
+        // argv, so the not-yet-ported flags keep their Python answers until
+        // their wave lands.
+        "update" => super::update_cli::run(resolved.tail),
         // The folded batch read: the engine contract is a leading or
         // trailing `--graph`, several ids without the single-id render
         // flags, or the stdin tracker door (zero positionals: the engine's
@@ -164,6 +169,14 @@ pub fn run(args: &[String]) -> i32 {
         // The lane pin is native: id gate, operator fence, lane/epic scoping
         // and midpoint arithmetic over the single-row write seam.
         "rank" => super::rank_cli::run(resolved.tail),
+        // The retraction door is native: every lane through the same door
+        // `fno inbox law retract` uses, laws still operator-only. The
+        // Python twin this arm replaces is deleted in the same change
+        // (d-e11b2b3e). A help tail keeps the Python surface, whose parser
+        // renders the argument and option help the door's usage line does
+        // not (the same split the `get` arm makes).
+        "decide-retract" if carries(resolved.tail, &["--help", "-h"]) => forward_python(&resolved),
+        "decide-retract" => crate::law_match::run_backlog_retract(resolved.tail),
         _ => forward_python(&resolved),
     }
 }

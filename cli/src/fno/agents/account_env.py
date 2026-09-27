@@ -134,7 +134,10 @@ def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
     The remaining honest limit: the ``FNO_HOME``-anchored sidecars and any
     root without a carrier still follow the moved HOME; the three pins cover
     the registry, the claims tree, the locks and the config state root.
-    Prefer the argv carrier over this seal wherever a launch has one.
+    A pin is only as good as the child binary: the sealing side confirms the
+    carrier with the binary's ``state-root`` door and refuses a stale binary
+    rather than let its reads strand under the moved HOME. Prefer the argv
+    carrier over this seal wherever a launch has one.
 
     Never mutates the input.
     """

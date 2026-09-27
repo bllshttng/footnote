@@ -485,7 +485,7 @@ def test_a_non_mail_payload_reaches_the_pane_verbatim(monkeypatch):
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
     _detector(monkeypatch, [])
     monkeypatch.setattr(
-        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+        dispatch, "_delivery_policy_refusal", lambda *_a: None, raising=False
     )
 
     # The return value does NOT discriminate: the enveloped bug also reported
@@ -518,7 +518,7 @@ def test_a_non_mail_payload_is_verbatim_but_still_gated(monkeypatch, capsys):
         monkeypatch, [], {"matched": True, "state": "blocked", "rule_id": "auth_wall"}
     )
     monkeypatch.setattr(
-        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+        dispatch, "_delivery_policy_refusal", lambda *_a: None, raising=False
     )
 
     assert dispatch._deliver_live(_entry(), "run the ritual", "fno") is False
@@ -566,7 +566,7 @@ def test_a_failed_pane_send_plus_a_rebound_thread_delivers_over_the_daemon(
         lambda session, text, **k: daemon_calls.append((session, text, k)) or True,
     )
     monkeypatch.setattr(
-        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+        dispatch, "_delivery_policy_refusal", lambda *_a: None, raising=False
     )
     assert dispatch._deliver_live(entry, "hello WRAPPED-BODY", "fno") is True
     assert pane_calls
@@ -574,3 +574,52 @@ def test_a_failed_pane_send_plus_a_rebound_thread_delivers_over_the_daemon(
     session, text, _kwargs = daemon_calls[0]
     assert session == entry.harness_session_id
     assert text == "hello WRAPPED-BODY"
+
+
+def test_wrapped_confirm_mail_rides_the_rust_pane_lane(monkeypatch):
+    """AC17 (x-9008 PR two): wrapped mail with a confirm rides the Rust
+    ``mail-inject --harness pane`` lane; the raw branch keeps the Python
+    path and builds no mail-inject argv.
+    """
+    calls: list[dict] = []
+    entry = _entry()
+    real_run = dispatch.subprocess.run
+
+    def run(argv, **kwargs):
+        calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if argv[1:2] == ["mail-inject"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"delivered": true, "reason": "delivered"}',
+                stderr="",
+            )
+        if argv[1:2] == ["mail-hold"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"verdict": "deliver", "pass": null, "receipt": null, "until": null}',
+                stderr="",
+            )
+        if "mail-envelope" in argv:
+            # The wrap render is NOT faked (see _runner).
+            return real_run(argv, **kwargs)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
+
+    sent = dispatch._mux_pane_send(entry, "status?", guarded=False, confirm=True)
+    assert sent is True, f"pane lane did not deliver; calls: {calls}"
+    inject_calls = [c for c in calls if c["argv"][1:2] == ["mail-inject"]]
+    assert inject_calls, f"wrapped mail rides the pane lane; calls: {calls}"
+    argv = inject_calls[0]["argv"]
+    assert argv[argv.index("--harness") + 1] == "pane"
+    assert argv[argv.index("--pane") + 1] == "main:7"
+    assert argv[argv.index("--session") + 1] == "worker-session"
+
+    # The raw branch keeps the Python path: no mail-inject argv at all.
+    calls.clear()
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
+    assert dispatch._mux_pane_send(entry, "1", guarded=False, raw=True) is True
+    assert not [c for c in calls if c["argv"][1:2] == ["mail-inject"]]

@@ -161,7 +161,7 @@ pub(super) fn build_sweep_modal(c: &SweepCounts) -> AuxPopup {
             AuxAction::SweepNamed,
         ),
         (
-            format!("+ stale squad rows ({})", c.squads),
+            format!("+ stale workspace rows ({})", c.squads),
             format!("remove them plus the {tabs} surplus tabs and {dead} dead agents"),
             c.squads > 0,
             AuxAction::SweepSquads,

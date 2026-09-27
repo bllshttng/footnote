@@ -268,6 +268,12 @@ pub struct Request {
     /// GitHub's own merge-hold words, as status computed them (`github_blocked`,
     /// `github_behind`, ...). Absent: the walk derives them from `checks_read`.
     pub supplied_github_blockers: Option<Vec<String>>,
+    /// The dispatch-hold answer the caller (the status read) already probed.
+    /// `Some(None)` = probed clear; `Some(Some(reason))` = held; `None` = not
+    /// supplied (the walk probes, and a real merge NEVER sees a supplied
+    /// value: only the preview walk reads this, decide's own chain always
+    /// probes live).
+    pub supplied_dispatch_hold: Option<Option<String>>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -762,8 +768,15 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
 
-    // (4) holds, in decide's order.
-    if let Some(reason) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
+    // (4) holds, in decide's order. A preview ask may carry the dispatch-hold
+    // answer its caller already probed; the supplied value rides only the
+    // preview (advisory) walk, never decide's own merge chain.
+    let dispatch_hold_outcome = match &request.supplied_dispatch_hold {
+        Some(None) => ProbeOutcome::Clear,
+        Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
+        None => probes.dispatch_hold(cwd, facts.number),
+    };
+    if let Some(reason) = dispatch_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("dispatch_hold", reason));
     }
     if let Some(reason) = probes.review_hold(cwd, facts.number).fail_closed() {
@@ -2285,6 +2298,13 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
                     .map(str::to_owned)
                     .collect()
             }),
+        // Present-but-null is a probed CLEAR, so a held answer must stay a
+        // string and an unprobed or malformed ask omits the key entirely.
+        supplied_dispatch_hold: payload.get("dispatch_hold_reason").map(|v| match v {
+            Value::String(reason) => Some(reason.to_owned()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        }),
     })
 }
 
@@ -2520,6 +2540,7 @@ mod tests {
             supplied_rerun_recovered: None,
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
+            supplied_dispatch_hold: None,
         }
     }
 
@@ -3781,6 +3802,31 @@ mod tests {
             PreviewVerdict::Go { .. } => Vec::new(),
             PreviewVerdict::Blocked(rows) => rows,
         }
+    }
+
+    #[test]
+    fn a_supplied_dispatch_hold_answer_rides_the_preview_without_a_probe() {
+        // Held: the supplied reason becomes the blocker, no probe runs.
+        let held = Request {
+            supplied_dispatch_hold: Some(Some("held by the crown".to_string())),
+            ..preview_request(8)
+        };
+        let codes: Vec<String> = preview_blockers(&clean(), &held)
+            .into_iter()
+            .map(|b| b.code.to_string())
+            .collect();
+        assert!(
+            codes.iter().any(|c| c == "dispatch_hold"),
+            "the supplied held answer must block"
+        );
+        // Clear: no dispatch_hold blocker either way.
+        let clear = Request {
+            supplied_dispatch_hold: Some(None),
+            ..preview_request(8)
+        };
+        assert!(!preview_blockers(&clean(), &clear)
+            .iter()
+            .any(|b| b.code == "dispatch_hold"));
     }
 
     #[test]

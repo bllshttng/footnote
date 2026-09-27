@@ -80,6 +80,7 @@ def rust_door(monkeypatch):
     monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
 
 
+@pytest.mark.dev_build
 def test_agy_pane_default_keeps_bypass(rust_door, capsys):
     argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, None)
     assert "--dangerously-skip-permissions" in argv
@@ -88,12 +89,14 @@ def test_agy_pane_default_keeps_bypass(rust_door, capsys):
     assert "agy posture: bypass (lane-default)" in captured
 
 
+@pytest.mark.dev_build
 def test_agy_pane_mode_replaces_bypass(rust_door):
     argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, "plan")
     assert "--mode" in argv and "plan" in argv
     assert "--dangerously-skip-permissions" not in argv
 
 
+@pytest.mark.dev_build
 def test_agy_pane_yolo_plus_mode_refuses(rust_door):
     # AC13-ERR flavor: one knob at a time, before any spawn.
     with pytest.raises(DispatchAskError):

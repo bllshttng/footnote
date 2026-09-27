@@ -597,6 +597,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
  * and its stdin-read bound. Mirrors the matchers in hooks/hooks.json. */
 const PROTECTION_SCRIPTS: Array<{ script: string; tools: string[]; timeoutMs: number }> = [
   { script: "graph-write-protect.sh", tools: ["edit", "write", "bash"], timeoutMs: 10_000 },
+  { script: "generated-write-guard.sh", tools: ["edit", "write", "bash"], timeoutMs: 10_000 },
   { script: "plan-location-guard.sh", tools: ["write"], timeoutMs: 10_000 },
   { script: "git-protection.py", tools: ["bash"], timeoutMs: 10_000 },
   { script: "pipe-guard.sh", tools: ["bash"], timeoutMs: 10_000 },

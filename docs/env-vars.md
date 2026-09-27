@@ -30,6 +30,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CODEX_PLUGIN_ROOT` | py | unclear: cli/src/fno/agent/state.py:143 |
 | `CODEX_SESSION_ID` | py+rs | unclear: cli/src/fno/adapters/hermes.py:142 |
 | `CODEX_THREAD_ID` | py+rs | The codex thread id: codex sets it per thread in child tool env (the root session keeps CODEX_SESSION_ID), never in its own process env. The rollout witness matches it against a daemon row at this cwd to complete a name_only pane's own identity. |
+| `COLORFGBG` | rs | The rxvt-style `fg;bg` terminal color report; a background field of 7 or 15 reads as a light terminal, which picks the `footnote-paper` mux theme default, and anything else keeps `footnote-superscript`. |
 | `COLORTERM` | rs | unclear: crates/fno/src/mux_cli.rs:1508 |
 | `CRON_JOB` | py | unclear: cli/src/fno/agents/context.py:94 |
 | `DATABASE_URL` | py | unclear: cli/src/fno/codemap_cli/db-schema.py:208 |
@@ -56,6 +57,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENT_SESSION` | py | unclear: cli/src/fno/agents/context.py:237 |
 | `FNO_ATTEST_BRANCH` | py | Overrides the attested row's branch field with the caller-resolved PR branch (the shell producer's upstream rewrite); hold join/release keep the cwd-resolved local name. Set by skills/review/scripts/emit-attestation.sh, read in cli/src/fno/review/cli.py `_attest_from_record`. |
 | `FNO_AUTO_MEMORY_DIR` | py | unclear: cli/src/fno/inbox/drain.py:407 |
+| `FNO_BACKLOG_FORWARD` | py | Sentinel the decide-retract compatibility leaf mints before it execs the fno-agents dispatcher; a second pass reading the same value refuses with the update remedy instead of exec-spinning through an older binary. |
 | `FNO_BG` | py | unclear: cli/src/fno/target/orient.py:254 |
 | `FNO_BIN` | py+rs | Overrides the Python fno porcelain path at the Rust/Python seam. |
 | `FNO_BOARD_SCOPE` | rs | unclear: crates/fno/src/backlog_view.rs:333 |
@@ -98,6 +100,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_GRAPH_JSON` | rs | Names the stable graph store anchor; the SQLite store is the `.db` sibling. |
 | `FNO_GUARD_TRACE` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:25 |
 | `FNO_HARNESS` | py+rs | unclear: cli/src/fno/king/state.py:268 |
+| `FNO_HARNESS_NAME` | rs | The caller's harness name in the canonical identity stamp; the hold gate's direct read pairs it with FNO_HARNESS_SESSION_ID to answer whether the caller is the recipient. |
 | `FNO_HARNESS_SESSION_ID` | rs | The normalized full harness session id; native context hooks use it when the provider-specific id is absent. |
 | `FNO_HEALTH_HISTORY` | py | unclear: cli/src/fno/graph/triage.py:2038 |
 | `FNO_HOME` | py+rs | Relocates fno's config-free sidecars (plugin-root pointer, push-stamps, corrections log, decision index) and the Rust defaults when no config sets state_dir. Does not move state_dir or the backlog; a store write under FNO_HOME that targets the default store ($HOME/.fno) is refused. Sandbox with FNO_CONFIG (docs/path-config.md). |
@@ -165,8 +168,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RUNTIME_STATE_PATH` | py+rs | Overrides the provider runtime-state file (quota locks, usage); the default is ~/.fno/runtime-state.json. |
 | `FNO_SERVER` | py | Names the target mux server. |
 | `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from. |
-| `FNO_SESSION_ID` | rs | Current session id. `fleet-incident` uses it for caller attribution; `loops pause-all` records a full UUID or `ses_` id as the mail-hold owner, falling back to `fno whoami --json` otherwise. |
 | `FNO_SESSION_HARNESS` | rs | The launcher-stamped harness half of the session-proof pair; a known name beside a live `FNO_SESSION_PID` answers the harness before the census walk (spawn_context.rs stamp_pair_harness). |
+| `FNO_SESSION_ID` | rs | Current session id. `fleet-incident` uses it for caller attribution; `loops pause-all` records a full UUID or `ses_` id as the mail-hold owner, falling back to `fno whoami --json` otherwise. |
 | `FNO_SESSION_PID` | rs | The launcher-stamped pid half of the session-proof pair; must be a positive, live pid or the pair is ignored (spawn_context.rs stamp_pid_is_live). |
 | `FNO_SIDECAR_SOCKET` | py | unclear: cli/src/fno/mcp/sidecar.py:97 |
 | `FNO_SKIP_MIGRATION` | py | unclear: cli/src/fno/cli.py:402 |
@@ -234,6 +237,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `PWD` | py+rs | unclear: cli/src/fno/adapters/providers/cli.py:54 |
 | `PYTEST_CURRENT_TEST` | py | unclear: cli/src/fno/cli.py:404 |
 | `PYTHONPATH` | rs | unclear: crates/fno-agents/src/finalize.rs:1090 |
+| `REDUCED_MOTION` | rs | A reduced-motion request (`1`/`true`/`yes`/`on`); the mux launch splash then prints its last frame only, once, instead of animating. |
 | `SHELL` | py+rs | The user's login shell. |
 | `SMOKE_CHANGED_RECEIPT` | py | unclear: cli/src/fno/test_cmd.py:1726 |
 | `SMOKE_FAILURE_RECORD` | py | unclear: cli/src/fno/test_cmd.py:2066 |

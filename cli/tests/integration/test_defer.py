@@ -53,6 +53,33 @@ def _invoke(*args, input=None):
     return runner.invoke(app, argv, input=input, catch_exceptions=False)
 
 
+def _native_update(g: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def _read_entries(g: Path) -> list[dict]:
     # The store owns state; graph.json is a frozen export, so post-command
     # assertions read store rows, not the file.
@@ -117,7 +144,7 @@ def test_deferred_overrides_blocked(tmp_graph, tmp_path):
 def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     """Done wins over deferred. A completed node stays done."""
     node_id = _seed_with_plan(tmp_path, "Plan Done")
-    _invoke("backlog", "update", node_id, "--completion-note", "done-beats-deferred fixture")
+    _native_update(tmp_graph, node_id, "--completion-note", "done-beats-deferred fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
@@ -213,7 +240,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
     the patch door exists to close.
     """
     node_id = _seed_with_plan(tmp_path, "Plan Done Then Defer")
-    _invoke("backlog", "update", node_id, "--completion-note", "done-door fixture")
+    _native_update(tmp_graph, node_id, "--completion-note", "done-door fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     entries = _read_entries(tmp_graph)
@@ -233,7 +260,7 @@ def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
 def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     """Triage apply lands the same done -> deferred transition cleanly."""
     node_id = _seed_with_plan(tmp_path, "Plan Triage Done Then Defer")
-    _invoke("backlog", "update", node_id, "--completion-note", "triage defer fixture")
+    _native_update(tmp_graph, node_id, "--completion-note", "triage defer fixture")
     _invoke("backlog", "done", node_id, "--skip-stamp")
 
     proposal = tmp_path / "p.json"
@@ -562,7 +589,7 @@ def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path)
     """x-665f: the door refuses leaving done, so a batch naming a done node
     (first) refuses before the other ids are written."""
     done_node = _seed_with_plan(tmp_path, "Batch Done")
-    _invoke("backlog", "update", done_node, "--completion-note", "batch defer fixture")
+    _native_update(tmp_graph, done_node, "--completion-note", "batch defer fixture")
     _invoke("backlog", "done", done_node, "--skip-stamp")
     idea_node = _seed_idea("Batch Idea")
 

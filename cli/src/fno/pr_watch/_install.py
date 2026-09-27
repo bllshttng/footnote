@@ -986,6 +986,11 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
                 del recent[:-_RECENT_ENDS_KEEP]
+            elif (etype == "control_plane_tick" and isinstance(ev.get("data"), dict)
+                    and isinstance(ev["data"].get("arm"), str)):
+                marks.setdefault("arm_rows", {})[ev["data"]["arm"]] = {
+                    "ts": ev.get("ts"), "skip_reason": ev["data"].get("skip_reason"),
+                    "detail": str(ev["data"].get("detail") or "")[:200]}
     except Exception:
         pass
     return marks
@@ -1169,6 +1174,7 @@ def liveness_report(
     last_end: Optional[dict] = None,
     recent_ends: Optional[list] = None,
     wedged_after_ticks: int = 3,
+    arm_rows: Optional[dict] = None,
 ) -> dict:
     """Pure verdict: is an enabled pr-watch actually running?  (fully injectable)
 
@@ -1304,6 +1310,13 @@ def liveness_report(
             "delivering nothing",
             "fno do pr watch refresh",
         )
+    if cuts := [
+        a for a, r in (arm_rows or {}).items()
+        if isinstance(r, dict) and r.get("skip_reason") in ("timeout", "starved")
+        and 0 <= now - (_parse_ts(r.get("ts")) or now + 1) <= 2 * max(interval_seconds, 1)]:
+        named = "; ".join(
+            f"{a} cut: {(arm_rows or {}).get(a, {}).get('detail') or 'none'}" for a in cuts)
+        return verdict("unhealthy", named[:400], "fno agents status")
     return verdict("healthy", f"last tick {int(age)}s ago")
 
 
@@ -1341,6 +1354,7 @@ def liveness_report_live(
         last_end=marks.get("last_end"),
         recent_ends=marks.get("recent_ends"),
         wedged_after_ticks=cfg.wedged_after_ticks,
+        arm_rows=marks.get("arm_rows"),
     )
     # The last completed grant scan rides the same report the liveness verdict
     # uses: a done-probe can then assert "a healthy watcher completed a scan

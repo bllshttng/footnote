@@ -33,8 +33,12 @@ pub(super) fn quiet_transcript(
 
 /// The test age seam (x-54cf): the sweep reads ages through the injected
 /// batch seam, and the fixtures answer from the SAME staged transcript files
-/// the old stat read - the seam is what changed, not the fixture ages.
-pub(super) fn staged_ages(
+/// the old stat read - the seam is what changed, not the fixture ages. `now`
+/// is injected so a dry pass and its acting pass judge one clock and their
+/// ages agree byte for byte; wall-clock call sites pass
+/// `crate::daemon::now_epoch_secs()`.
+pub(super) fn staged_ages_at(
+    now: i64,
     transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
 ) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> + '_ {
     move |entries| {
@@ -51,13 +55,7 @@ pub(super) fn staged_ages(
                 });
                 (
                     crate::gc::row_handle(e),
-                    age.map(|newest| {
-                        (std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64)
-                            .saturating_sub(newest)
-                    }),
+                    age.map(|newest| now.saturating_sub(newest)),
                 )
             })
             .collect()
@@ -140,7 +138,7 @@ fn retire_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -168,7 +166,7 @@ fn staged_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -3522,7 +3520,7 @@ fn settle_then_run(
                 gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &[]))
             },
             transcripts,
-            &staged_ages(transcripts),
+            &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -3548,7 +3546,7 @@ fn settle_then_run(
             7,
             &gc_sweep::read_graph_entries,
             transcripts,
-            &staged_ages(transcripts),
+            &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -4440,7 +4438,7 @@ pub(super) fn evidence_sweep(
         7,
         &move |_| graph.clone(),
         transcripts,
-        &staged_ages(transcripts),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), transcripts),
         stop,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -4623,7 +4621,7 @@ fn dry_run_promises_only_provable_rows() {
         7,
         &gc_sweep::read_graph_entries,
         &picks,
-        &staged_ages(&picks),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &picks),
         &move |_| {
             stops_seam.set(stops_seam.get() + 1);
             true
@@ -4874,6 +4872,108 @@ fn a_sweep_receipt_names_its_writer_and_trigger() {
         receipt["removal_trigger"], "unattended",
         "a sweep nobody asked for: {receipt}"
     );
+}
+
+// ── the live-claim keep ──────────────────────────────────────
+
+/// A live claim naming the session keeps a quiet, done-node row the sweep
+/// would otherwise retire. The 2026-09-25 registry sweeps retired thread
+/// workers whose claims were live; the claim fact now rides the row and
+/// the grace gate keeps it past quiet.
+#[test]
+fn a_live_claim_keeps_a_quiet_row_the_sweep_would_retire() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    // Force-pin: the sweep's claims read must see THIS test's root, not a
+    // root an earlier test's set-if-unset pin left behind. The guard
+    // unsets the pin on scope exit, panic included, so an assert failure
+    // never leaks it into a concurrently running test.
+    struct ClaimsRootGuard;
+    impl Drop for ClaimsRootGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_CLAIMS_ROOT");
+        }
+    }
+    std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
+    let _claims_root_guard = ClaimsRootGuard;
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "q.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = ask_row("row-claim", None);
+        row.short_id = "t-claim".into();
+        row.harness = Some("claude".into());
+        row.harness_session_id = Some("s-done".into());
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    // A PID-liveness claim naming s-done: the holder pid is this test
+    // process, so classification reads Live through the same claims
+    // `list` the production sweep calls. The lockfile lives at
+    // `<root>/.fno/claims/`, the layout `list` scans.
+    let claims_root = dir.path().join(".fno").join("claims");
+    std::fs::create_dir_all(&claims_root).unwrap();
+    let rec = crate::claims::ClaimRecord {
+        schema_version: crate::claims::SCHEMA_VERSION,
+        key: "node:x-dddd".into(),
+        holder: "spawn-handover:t-x-dddd-glm".into(),
+        acquired_at: crate::claims::now_ms(),
+        pid: Some(std::process::id() as i32),
+        host: crate::claims::hostname(),
+        pid_unavailable: false,
+        expires_at: None,
+        reason: None,
+        harness: Some("claude".into()),
+        session_id: Some("s-done".into()),
+        pid_provenance: Some("session-prover".into()),
+        machine_id: None,
+        metadata: Default::default(),
+    };
+    std::fs::write(
+        claims_root.join("node:x-dddd.lock"),
+        crate::claims::serialize_claim(&rec).unwrap(),
+    )
+    .unwrap();
+
+    let graph = graph_read(&[("s-done", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &|e| match e.harness_session_id.as_deref() {
+            Some("s-done") => Some(vec![quiet.clone()]),
+            _ => None,
+        },
+        &staged_ages_at(
+            crate::daemon::now_epoch_secs(),
+            &|e| match e.harness_session_id.as_deref() {
+                Some("s-done") => Some(vec![quiet.clone()]),
+                _ => None,
+            },
+        ),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+    assert!(summary.retired.is_empty(), "{summary:?}");
+    assert_eq!(
+        summary.kept_live_claim,
+        vec![(
+            "t-claim".to_string(),
+            "node:x-dddd (holder spawn-handover:t-x-dddd-glm)".to_string()
+        )],
+        "{summary:?}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 /// The blueprint retirement families, split by the file budget; the

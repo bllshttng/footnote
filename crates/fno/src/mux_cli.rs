@@ -411,7 +411,7 @@ pub fn ls(json: bool) -> i32 {
                 } else {
                     ""
                 };
-                println!("{name}: {clients} clients, {squads} squads, {panes} panes{tail}")
+                println!("{name}: {clients} clients, {squads} workspaces, {panes} panes{tail}")
             }
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
             Probe::Wedged => {
@@ -640,7 +640,7 @@ fn render_picker(p: &Picker) -> String {
                 squads,
                 panes,
             } => format!(
-                "{}  ({clients} clients, {squads} squads, {panes} panes)",
+                "{}  ({clients} clients, {squads} workspaces, {panes} panes)",
                 row.name
             ),
             Probe::Unqueryable => format!("{}  (alive, unqueryable)", row.name),
@@ -1383,23 +1383,23 @@ const PRUNE_REMEDY: &str = "fno mux workspace prune";
 fn squad_store_verdict(total: usize, orphan: usize) -> Check {
     if total == 0 {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Na,
-            detail: "no squads persisted".into(),
+            detail: "no workspaces persisted".into(),
             remedy: None,
         }
     } else if orphan == 0 {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Ok,
-            detail: format!("{total} squad(s), none orphaned"),
+            detail: format!("{total} workspace(s), none orphaned"),
             remedy: None,
         }
     } else {
         Check {
-            name: "squad store".into(),
+            name: "workspace store (squads.json)".into(),
             verdict: Verdict::Warn,
-            detail: format!("{orphan} orphaned squad(s) (no surviving origin, no live member)"),
+            detail: format!("{orphan} orphaned workspace(s) (no surviving origin, no live member)"),
             remedy: Some(PRUNE_REMEDY.into()),
         }
     }
@@ -1705,7 +1705,7 @@ fn sweep_scope(answered: usize, unreachable: &[String]) -> SweepScope {
 /// zero.
 fn unreachable_notice(unreachable: &[String]) -> String {
     format!(
-        "server liveness incomplete for session(s) {}; no squad records changed",
+        "server liveness incomplete for session(s) {}; no workspace records changed",
         unreachable.join(", ")
     )
 }
@@ -2260,6 +2260,11 @@ pub enum PaneCmd {
         /// `--raw` carries both a wrapped mail body and an operator's
         /// verbatim keystrokes, which no byte inspection can tell apart.
         provenance: Option<String>,
+        /// (v94) `--hold-pass`: the caller's send already passed the Rust
+        /// hold gate (own send, `control:` mail), so the pane's DND refusal
+        /// stands down for this write. Hidden: it exists for the two
+        /// transport arms above it, never for interactive typing.
+        hold_pass: bool,
     },
     Wait {
         pane: u64,
@@ -3972,6 +3977,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
             expected_identity,
             style_exception,
             provenance,
+            hold_pass,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4079,6 +4085,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
                     bytes,
                     guarded,
                     expected_identity,
+                    hold_pass,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -5165,6 +5172,7 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             bytes,
             guarded: !parsed.force,
             expected_identity: None,
+            hold_pass: false,
         },
     ) {
         Ok(ServerMsg::Ok) => {}
@@ -5590,6 +5598,7 @@ mod tests {
                 guarded: false,
                 submit: false,
                 raw: false,
+                hold_pass: false,
                 expected_identity: None,
                 style_exception: None,
                 provenance: None,
@@ -6016,7 +6025,7 @@ mod tests {
     fn mux_render_picker_marks_cursor_and_dims_stale() {
         let mut p = Picker::new(vec![live("work"), stale("dead")]);
         let out = render_picker(&p);
-        assert!(out.contains("work  (1 clients, 2 squads, 3 panes)"));
+        assert!(out.contains("work  (1 clients, 2 workspaces, 3 panes)"));
         assert!(out.contains("dead  (stale)"));
         assert!(out.contains("\x1b[2m"), "stale row dimmed");
         assert!(out.contains("\x1b[7m"), "live cursor row reversed");
@@ -6538,139 +6547,6 @@ mod tests {
     }
 
     #[test]
-    fn mux_pane_parse_send_source_is_text_xor_stdin() {
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi\r"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi\r".into()),
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Stdin,
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // --guarded opts the send into the server-side turn-taken interlock.
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--stdin", "--guarded"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Stdin,
-                guarded: true,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi", "--submit"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi".into()),
-                guarded: false,
-                submit: true,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // --raw opts OUT of the envelope (node). Default false is the
-        // load-bearing half: an opt-in flag would leave every existing caller
-        // unattributed and fix nothing.
-        assert_eq!(
-            parse_pane_args(
-                &op_of("send"),
-                &os(&["2", "--text", "1", "--raw", "--submit"])
-            )
-            .unwrap()
-            .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("1".into()),
-                guarded: false,
-                submit: true,
-                raw: true,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(
-                &op_of("send"),
-                &os(&["2", "--text", "hi", "--fno-id", "addressed"])
-            )
-            .unwrap()
-            .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi".into()),
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: Some("addressed".into()),
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // The bare-submit keystroke the attribution refusal promises:
-        // `--raw --submit` with no payload parses as an EMPTY raw text, never
-        // the arity error that used to make the refusal's advice false.
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--raw", "--submit"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text(String::new()),
-                guarded: false,
-                submit: true,
-                raw: true,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // Every other source-less form is still a usage error: `--raw` or
-        // `--submit` alone names no operation, and a plain source-less send
-        // never worked.
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--raw"])).is_err());
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--submit"])).is_err());
-        // Neither / both are usage errors.
-        assert!(parse_pane_args(&op_of("send"), &os(&["2"])).is_err());
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "x", "--stdin"])).is_err());
-        // --raw pairs only with send: on any other verb it is a usage error, not
-        // a silently ignored flag that reads as "the envelope was skipped".
-        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--raw"])).is_err());
-    }
-
-    #[test]
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
         assert_eq!(
@@ -6689,6 +6565,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: Some("quoted".into()),
                 provenance: None,
+                hold_pass: false,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -6762,6 +6639,7 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
+            hold_pass: false,
         };
 
         std::env::set_var("FNO_BIN", &script);
@@ -6850,6 +6728,7 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
+            hold_pass: false,
         };
 
         let over = dispatch("t", &sock, false, send_cmd(big));
@@ -7079,7 +6958,7 @@ mod tests {
     fn squad_store_verdict_empty_is_na() {
         let c = squad_store_verdict(0, 0);
         assert_eq!(c.verdict, Verdict::Na);
-        assert_eq!(c.name, "squad store");
+        assert_eq!(c.name, "workspace store (squads.json)");
         assert!(c.remedy.is_none());
     }
 
@@ -7087,7 +6966,7 @@ mod tests {
     fn squad_store_verdict_clean_is_ok() {
         let c = squad_store_verdict(7, 0);
         assert_eq!(c.verdict, Verdict::Ok);
-        assert!(c.detail.contains("7 squad(s), none orphaned"));
+        assert!(c.detail.contains("7 workspace(s), none orphaned"));
     }
 
     #[test]

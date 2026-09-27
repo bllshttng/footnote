@@ -81,8 +81,8 @@ pub fn enforce(pre: &[Value], post: &[Value]) -> Result<(), String> {
              pr_number, pr_url or additional_prs, no completion_note and no \
              artifact_url. Nothing was written. Close it with one of: \
              fno backlog done {id} --pr-number <n>, --note \"<why it is done>\", \
-             or --link <artifact url>. For a forced close, write the note first: \
-             fno backlog update {id} --completion-note \"<why>\"."
+             or --link <artifact url>. To stamp the note before a bare close, use \
+             the native door: fno-agents backlog update {id} --completion-note \"<why>\"."
         ));
     }
     Ok(())
@@ -113,6 +113,10 @@ mod tests {
         for flag in ["--pr-number", "--note", "--link", "--completion-note"] {
             assert!(error.contains(flag), "{flag} must appear: {error}");
         }
+        // The remedy must name the door every caller can run: the typer
+        // surface retired `backlog update --completion-note`, so naming bare
+        // `fno` there sends a Python-CLI user to a refused command.
+        assert!(error.contains("fno-agents backlog update"), "{error}");
     }
 
     #[test]

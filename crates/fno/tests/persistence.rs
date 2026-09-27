@@ -119,6 +119,7 @@ fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
                 bytes: bytes.to_vec(),
                 guarded: false,
                 expected_identity: None,
+                hold_pass: false,
             },
         },
     )
@@ -596,7 +597,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("main: 0 clients, 1 squads, 1 panes"),
+        stdout.contains("main: 0 clients, 1 workspaces, 1 panes"),
         "zero-client persistence must be listable; got: {stdout}"
     );
 

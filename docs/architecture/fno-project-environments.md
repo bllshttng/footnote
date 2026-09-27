@@ -17,12 +17,12 @@ Most people asking for "a clean instance" want the slice. The graph is one store
 | Value | Board shows |
 |---|---|
 | `repo` (default) | this checkout's `project.id`, plus unscoped cards |
-| `workspace:<name>` | every project `work.workspaces.<name>` declares, plus unscoped |
+| `workspace:<name>` | every project the `work.workspaces.<name>` project group declares, plus unscoped |
 | `all` | every project (the historical board) |
 
 `repo` needs no configuration. `project.id` resolves through git, so every worktree layout of a checkout answers with the same project.
 
-`workspace:<name>` reuses the project set you already declared. A workspace named `main` holding `web`, `backend` and `marketing` scopes the board to those three:
+`workspace:<name>` reuses the project set you already declared. The `work.workspaces.<name>` key is a project group: a named set of repos this board value scopes to. It is not the mux workspace object that houses threads. That ruling lives in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md). A project group named `main` holding `web`, `backend` and `marketing` scopes the board to those three:
 
 ```toml
 [[work.workspaces.main.projects]]

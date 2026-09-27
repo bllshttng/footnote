@@ -135,6 +135,16 @@
 #      NAMES the default jobs dir in help text (the remedy-string category:
 #      model_routing.py et al). Footnote stores nothing under the harness
 #      dir in either file.
+#      claude_config_tmp.rs is the orphaned-tmp sweep: its whole
+#      subject is Claude Code's OWN `.claude.json.tmp.*` litter at the top
+#      level of each config dir (CLAUDE_CONFIG_DIR, else ~/.claude, plus the
+#      roster's isolated account roots). It removes only dead-pid temp files
+#      Claude Code itself created; footnote stores nothing there.
+#      claude-config-write-guard.sh is the PreToolUse write guard for the
+#      same dir: the config dir IS the thing being guarded, so every token
+#      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
+#      arms) names its subject on purpose. Comparison only; it writes
+#      nothing there.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -298,6 +308,7 @@ cli/src/fno/worktree_paths.py
 cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
+crates/fno-agents/src/claude_config_tmp.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/law_match.rs
@@ -329,6 +340,7 @@ crates/fno/src/connections_view.rs
 crates/fno/src/transcript_tail.rs
 hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
+hooks/claude-config-write-guard.sh
 hooks/corrections-git-postcommit.sh
 hooks/king-delegation-guard.sh
 hooks/session-start.sh

@@ -687,6 +687,7 @@ fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
         false,
         Some("target-id"),
         Ok(vec![addressed]),
+        false,
     ) {
         ServerMsg::Err { msg, .. } => {
             assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
@@ -713,6 +714,7 @@ fn pane_send_deduplicates_equivalent_registry_occupants() {
             false,
             Some("target-id"),
             Ok(vec![first, duplicate]),
+            false,
         ),
         ServerMsg::Ok
     ));
@@ -729,7 +731,7 @@ fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
     core.session_name = "sess".into();
     let raw = r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
     let reason = classify_guard_registry(raw, 0).unwrap_err();
-    match core.pane_send(pane, b"payload", true, None, Err(reason)) {
+    match core.pane_send(pane, b"payload", true, None, Err(reason), false) {
         ServerMsg::Err { code, msg } => {
             assert_eq!(code, err_code::TARGET_NOT_IDLE);
             assert!(
@@ -749,7 +751,14 @@ fn pane_send_identity_check_carries_the_registry_refusal_reason() {
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
     let reason = classify_guard_registry("not json", 0).unwrap_err();
-    match core.pane_send(pane, b"payload", false, Some("target-id"), Err(reason)) {
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("target-id"),
+        Err(reason),
+        false,
+    ) {
         ServerMsg::Err { code, msg } => {
             assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
             assert!(
@@ -770,7 +779,7 @@ fn pane_send_on_an_empty_registry_proceeds_like_a_shell() {
     let (mut core, pane) = template_core();
     core.session_name = "sess".into();
     assert!(matches!(
-        core.pane_send(pane, b"payload", true, None, Ok(Vec::new())),
+        core.pane_send(pane, b"payload", true, None, Ok(Vec::new()), false),
         ServerMsg::Ok
     ));
 }
@@ -5351,10 +5360,10 @@ fn fresh_attach_unknown_target_fails_closed_before_spawn() {
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
         if let ServerMsg::Notice { text } = msg {
-            saw |= text.contains("no such squad");
+            saw |= text.contains("no such workspace");
         }
     }
-    assert!(saw, "the refusal names the missing squad");
+    assert!(saw, "the refusal names the missing workspace");
 }
 
 // -- x-9f75 open-here (PanePlacement.here) ---------------------------
@@ -8421,21 +8430,6 @@ fn rerun_guard_is_scoped_to_the_current_session() {
     assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
 }
 
-#[test]
-fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
-    let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
-    let raw = format!(
-        r#"{{"agents":[{{"name":"held","cwd":"/w","status":"live",
-                "delivery_policy":"bus-only",
-                "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
-    );
-    let rows = agents_view::derive_rows(&raw, 0).unwrap();
-    match core.pane_send(p1, b"must-not-land", false, None, Ok(rows)) {
-        ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
-        other => panic!("expected DND refusal, got {other:?}"),
-    }
-}
-
 // -- x-9454 wheel-passthrough rate gate --------------------------------
 
 // AC1-HP / AC2-HP: a 30-tick same-direction flood inside one window
@@ -8659,7 +8653,6 @@ pub(super) fn empty_core() -> Core {
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
-        hold_arm_last: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
         started_at: crate::server_stats::stamp_now(),
