@@ -6,24 +6,25 @@
 use super::*;
 
 /// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
-/// [--workspace NAME] [--at PANE]` (hidden): the outside-the-TUI
+/// [--from CELL] [--workspace NAME] [--at PANE]` (hidden): the outside-the-TUI
 /// reach behind `fno agents attach <name>`. Sends the ThreadPane control verb,
 /// which runs the exact command a TUI reach runs, and prints where it landed.
 /// A missing server is its own exit code so the CLI caller can fall through to
 /// the inline attach instead of reading a generic failure as one.
 ///
-/// `--portal N` names which portal to reach through; omitted is
-/// portal 0. This is the addressing door: two calls naming 0 and 1 put two
-/// threads in two panes, which the tab menu's Join actions then tile.
-///
-/// `--portal new` asks the server for a portal of its own in a new
-/// tab: a MACHINE reach (retask, mail force) must never repoint a seat a
-/// person is using, and portal 0 is usually the operator's own.
+/// An explicit placement flag CREATES a portal, human or agent:
+/// `--portal new`, or `--portal N` when N is not open. No flag tunes: the
+/// reach focuses the row's open portal, and with none open the door's own
+/// portal 0 opens for it (the TV rule; the operator's own portals never
+/// multiply from a reach).
 ///
 /// The placement flags reuse the pane path's spellings and ride the
-/// verb's `placement` field. They steer a FRESH open; a portal that already
-/// has a live seat keeps its geometry (the server says so) - same contract
-/// the server holds for the TUI.
+/// verb's `placement` field. A `--split DIR` halves the caller's own pane
+/// (FNO_PANE); `--from portal N|worker|current` names another cell. A
+/// caller with no pane of its own names `--from` or is refused with the
+/// flag named. They steer a FRESH open; a portal that already has a live
+/// seat keeps its geometry (the server says so) - same contract the server
+/// holds for the TUI.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     let (session_flag, parsed) = match parse_thread_args(args) {
         Ok(t) => t,
@@ -92,6 +93,46 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
                 eprintln!("fno mux thread: {e}");
                 return EXIT_USAGE;
             }
+        }
+    }
+    if let Some(v) = &parsed.from {
+        if v == "current" {
+            // `current` names the calling pane: resolve it HERE from
+            // FNO_PANE, the way the spawn placement layer and pane_args
+            // do. The literal never rides the wire - the server has no
+            // calling pane to resolve it with.
+            let fno_pane = std::env::var("FNO_PANE")
+                .ok()
+                .map(|s| s.trim().trim_start_matches('%').to_string())
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok());
+            match fno_pane {
+                Some(pane) => placement.at = Some(pane),
+                None => {
+                    eprintln!(
+                        "fno mux thread: --from current needs a numeric \
+                         FNO_PANE (run it inside a mux pane)"
+                    );
+                    return EXIT_USAGE;
+                }
+            }
+        } else {
+            placement.from = Some(v.clone());
+        }
+    }
+    // A split that named no anchor defaults to the caller's own pane; a
+    // pane-less caller is refused with --from named.
+    match super::pane_args::anchor_or_refuse(
+        placement.split.is_some(),
+        placement.at,
+        placement.from.as_deref(),
+        super::pane_args::pane_from_env(),
+    ) {
+        Ok(Some(pane)) => placement.at = Some(pane),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("fno mux thread: {e}");
+            return EXIT_USAGE;
         }
     }
     let Some(name) = parsed
@@ -200,5 +241,25 @@ mod tests {
     fn thread_still_refuses_its_own_unknown_flags() {
         let err = parse_thread_args(&os(&["--wat", "myagent"])).expect_err("unknown flag refuses");
         assert!(err.contains("--wat"), "{err}");
+    }
+
+    #[test]
+    fn a_split_with_no_anchor_halves_the_callers_pane_or_refuses() {
+        use super::super::pane_args::anchor_or_refuse;
+        // The default: split + no anchor + a calling pane = the caller's cell.
+        assert_eq!(
+            anchor_or_refuse(true, None, None, Some(7)).ok(),
+            Some(Some(7))
+        );
+        // A caller with no pane names --from or is refused with the flag named.
+        let err = anchor_or_refuse(true, None, None, None).expect_err("pane-less refuses");
+        assert!(err.contains("--from"), "{err}");
+        // No split, or an anchor already named: no default, no refusal.
+        assert_eq!(anchor_or_refuse(false, None, None, None).ok(), Some(None));
+        assert_eq!(anchor_or_refuse(true, Some(3), None, None).ok(), Some(None));
+        assert_eq!(
+            anchor_or_refuse(true, None, Some("portal 0"), None).ok(),
+            Some(None)
+        );
     }
 }

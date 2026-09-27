@@ -2365,7 +2365,7 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// exit code. `env_session` is `FNO_SESSION` (set in every pane).
 pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
     let args = op.tail();
-    let parsed = match parse_pane_args(&op, &args) {
+    let mut parsed = match parse_pane_args(&op, &args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fno mux pane: {e}");
@@ -2395,6 +2395,10 @@ pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
         }
     }
     let session = resolve_session(parsed.session.as_deref(), env_session);
+    if let Err(e) = pane_args::apply_split_anchor_default(&mut parsed) {
+        eprintln!("fno mux pane: {e}");
+        return EXIT_USAGE;
+    }
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,
         Err(e) => {
@@ -2918,19 +2922,13 @@ fn layout_graft_cli(
         return EXIT_USAGE;
     }
 
-    // Resolve the anchor: `current` -> FNO_PANE (run inside a mux pane), else a
-    // numeric pane id. The symbolic resolution lives here so one parser owns it.
+    // Resolve the anchor: `current` -> the calling pane, else a numeric pane id.
     let anchor = match at_raw.as_deref() {
         None => {
             eprintln!("fno mux layout graft: --at <current|pane> is required");
             return EXIT_USAGE;
         }
-        Some("current") => match std::env::var("FNO_PANE")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<u64>().ok())
-        {
+        Some("current") => match pane_args::pane_from_env() {
             Some(p) => p,
             None => {
                 eprintln!(

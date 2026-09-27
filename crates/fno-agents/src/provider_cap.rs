@@ -2931,7 +2931,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(home.root());
         let lane = lane_fixture(Some(now_epoch_secs() + 3 * 3600), None);
         let cfg = ProviderCapConfig {
-            sleep_hours: "00:00-23:59".into(),
+            // 24:00, not 23:59: the window is end-exclusive, so 23:59 is
+            // awake for one minute a day and this CI test ran inside it
+            // (2026-09-26 23:59 UTC). The test wants "asleep now", always.
+            sleep_hours: "00:00-24:00".into(),
             sleep_timezone: String::new(),
             ..Default::default()
         };

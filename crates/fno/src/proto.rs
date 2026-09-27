@@ -339,7 +339,11 @@ fn default_true() -> bool {
 /// stays 58.
 /// v92: `PaneMeta.node`/`branch`/`ctx` (serde default), the pane frame's
 /// bottom-edge fields; floor stays 58.
-pub const PROTO_VERSION: u32 = 92;
+/// v93: `PanePlacement.view` + `PanePlacement.from` (serde default), the
+/// transient machine view (`fno mux command`: a screen that is never a
+/// portal) and the named anchor cell (`--from portal N|worker|current`)
+/// a split halves; floor stays 58.
+pub const PROTO_VERSION: u32 = 93;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4053,7 +4057,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 92);
+        assert_eq!(PROTO_VERSION, 93);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4506,6 +4510,8 @@ mod tests {
     fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
         let placement = PanePlacement {
             portal_new: false,
+            view: false,
+            from: None,
             portal: None,
             tab: None,
             at: None,

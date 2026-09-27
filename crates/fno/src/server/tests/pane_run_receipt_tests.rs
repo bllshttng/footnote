@@ -19,6 +19,8 @@ fn run_pane_places_at_named_tab_and_anchor() {
             80,
             false,
             PanePlacement {
+                view: false,
+                from: None,
                 portal_new: false,
                 portal: None,
                 target: PaneTarget::SquadId(1),
@@ -56,6 +58,8 @@ fn run_pane_places_at_named_tab_and_anchor() {
             80,
             false,
             PanePlacement {
+                view: false,
+                from: None,
                 portal_new: false,
                 portal: None,
                 target: PaneTarget::SquadId(1),
@@ -96,6 +100,8 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
         rows: Some(24),
         claim: false,
         placement: PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             target: PaneTarget::SquadId(1),
@@ -132,6 +138,8 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
         rows: Some(24),
         claim: false,
         placement: PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             target: PaneTarget::SquadId(1),
