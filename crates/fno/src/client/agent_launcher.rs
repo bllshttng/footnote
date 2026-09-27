@@ -2148,14 +2148,7 @@ pub(crate) fn picker_rows(
                     // leads and the harness-own floor sorts last, so the
                     // configured rows stay above the fold on a short
                     // terminal.
-                    let mut groups: Vec<(String, Vec<&ModelChoice>)> = Vec::new();
-                    for m in models.iter() {
-                        let key = m.provider.clone().unwrap_or_else(|| harness.clone());
-                        match groups.iter_mut().find(|(k, _)| *k == key) {
-                            Some((_, list)) => list.push(m),
-                            None => groups.push((key, vec![m])),
-                        }
-                    }
+                    let mut groups = group_by_provider(models, &harness);
                     groups.sort_by(|a, b| {
                         let harness_own = |g: &(String, Vec<&ModelChoice>)| g.0 == harness;
                         harness_own(a)
@@ -2200,11 +2193,14 @@ pub(crate) fn picker_rows(
                 }
                 // The more row: the harness's full catalog tail, searchable
                 // by typing. A catalog read failure disables it with the
-                // reason.
+                // reason; an empty tail disables it with the count.
                 if let Some(hr) = harness_row {
                     let (enabled, hint) = match &hr.catalog_error {
                         Some(reason) => (false, reason.clone()),
-                        None => (true, format!("{} models, type to search", hr.more.len())),
+                        None => (
+                            !hr.more.is_empty(),
+                            format!("{} models, type to search", hr.more.len()),
+                        ),
                     };
                     push_entry(
                         &mut rows,
@@ -2422,6 +2418,23 @@ pub(crate) fn picker_rows(
     (rows, actions)
 }
 
+/// Group model rows by provider under one key: the provider, or the
+/// harness itself for rows with no provider. Insertion order kept.
+fn group_by_provider<'a>(
+    models: &'a [ModelChoice],
+    harness: &str,
+) -> Vec<(String, Vec<&'a ModelChoice>)> {
+    let mut groups: Vec<(String, Vec<&'a ModelChoice>)> = Vec::new();
+    for m in models {
+        let key = m.provider.clone().unwrap_or_else(|| harness.to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push(m),
+            None => groups.push((key, vec![m])),
+        }
+    }
+    groups
+}
+
 /// One Model row's hint: the launch id when it differs from the label and
 /// no route spells it, else the route; empty when the route restates it.
 fn model_hint(m: &ModelChoice) -> String {
@@ -2449,14 +2462,7 @@ pub(crate) fn more_rows(
     let Some(row) = rows_found.iter().find(|row| row.name == harness) else {
         return (rows, actions);
     };
-    let mut groups: Vec<(String, Vec<&ModelChoice>)> = Vec::new();
-    for m in row.more.iter() {
-        let key = m.provider.clone().unwrap_or_else(|| harness.clone());
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, list)) => list.push(m),
-            None => groups.push((key, vec![m])),
-        }
-    }
+    let groups = group_by_provider(&row.more, &harness);
     for (key, list) in &groups {
         rows.push(PopupRow::Header(key.clone()));
         actions.push(None);
