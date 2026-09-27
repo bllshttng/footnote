@@ -6,20 +6,19 @@
 //! cwd resolves to.
 //!
 //! Rust-owned like `escalations`: nothing in Python reads this list, so there
-//! is no Python accessor to mirror. The per-project resolution itself is NOT
-//! reimplemented here - each project root is probed with the real
-//! `fno do plan path --slug _plans_dir_probe` (cwd anchored at the root), so
-//! the `plansDirectory -> config.plans_dir` chain keeps exactly one owner. The
-//! probe slug never touches disk. A probe may migrate a legacy `<root>/.fno/plans`
-//! onto the project's space; that is the verb's own designed behavior, and the
-//! session-cwd probe the guard already runs does the same thing today.
+//! is no Python accessor to mirror. The per-project resolution is the
+//! `plans_path` chain (the ported `plansDirectory -> plans_dir` owner), run
+//! in-process per project root - the shell-out to `fno do plan path` this
+//! module once paid per project is gone, and the probe slug never touches
+//! disk. A probe may migrate a legacy `<root>/.fno/plans` onto the project's
+//! space; that is the chain's own designed behavior, and the session-cwd
+//! probe the guard already runs does the same thing today.
 //!
-//! Probes are one Python CLI startup each, so the set is cached under
-//! `<state_dir>/cache/plans-dirs-v1.txt`, keyed on a blake3 stamp over the
-//! project list and every config file the chain reads. A stamp miss
-//! recomputes; a cache read failure just recomputes. Callers (the shell
-//! helper) treat empty output, a missing binary, and an unknown subcommand
-//! identically: fewer accepted dirs, never a wrong one.
+//! The set is cached under `<state_dir>/cache/plans-dirs-v1.txt`, keyed on a
+//! blake3 stamp over the project list and every config file the chain reads.
+//! A stamp miss recomputes; a cache read failure just recomputes. Callers
+//! (the shell helper) treat empty output identically: fewer accepted dirs,
+//! never a wrong one.
 
 use std::path::{Path, PathBuf};
 
@@ -116,21 +115,11 @@ fn probe_all(roots: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// One anchored probe: the plans dir the real resolver names for `root`.
+/// One anchored probe: the plans dir the chain names for `root`.
 fn probe(root: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new(crate::scrape::fno_bin())
-        .args(["do", "plan", "path", "--slug", "_plans_dir_probe"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().rev().find(|l| l.starts_with('/'))?;
-    let dir = PathBuf::from(line).parent()?.to_path_buf();
-    // A `/` plans dir would accept every path; the resolver never names one.
-    if dir.parent().is_none() {
+    let dir = crate::plans_path::plans_content_dir(root)?;
+    // Same shape the old verb probe enforced: absolute, never the root.
+    if !dir.is_absolute() || dir.parent().is_none() {
         return None;
     }
     Some(dir)
@@ -228,69 +217,41 @@ fn write_cache(path: &Option<PathBuf>, stamp: &str, dirs: &[PathBuf]) {
         let _ = std::fs::rename(&tmp, path);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::claims::test_env_lock;
+    use crate::paths::space_slug;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    /// Pins FNO_CONFIG, PATH, and the cache dir for one test. FNO_CONFIG
+    /// Pins config, state roots, and the cache dir for one test. FNO_CONFIG
     /// replaces the whole config candidate list, so a planted file is the only
     /// config this process (and `workspace_paths`) can read.
     struct EnvGuard {
-        saved_config: Option<std::ffi::OsString>,
-        saved_path: Option<std::ffi::OsString>,
-        saved_bin: Option<std::ffi::OsString>,
-        saved_cache: Option<std::ffi::OsString>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     impl EnvGuard {
-        fn new(config: &Path, fake_bin: &Path, cache: &Path) -> Self {
-            let saved_config = std::env::var_os("FNO_CONFIG");
-            let saved_path = std::env::var_os("PATH");
-            let saved_bin = std::env::var_os("FNO_BIN");
-            let saved_cache = std::env::var_os("FNO_PLANS_DIRS_CACHE_DIR");
-            std::env::set_var("FNO_CONFIG", config);
-            std::env::set_var(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    fake_bin.display(),
-                    saved_path.as_deref().unwrap_or_default().to_string_lossy()
-                ),
-            );
-            // The probe execs through scrape::fno_bin, which under cfg!(test)
-            // answers only a declared FNO_BIN: pin the same stub PATH pins.
-            std::env::set_var("FNO_BIN", fake_bin.join("fno"));
-            std::env::set_var("FNO_PLANS_DIRS_CACHE_DIR", cache);
-            Self {
-                saved_config,
-                saved_path,
-                saved_bin,
-                saved_cache,
+        fn new(pins: &[(&'static str, String)]) -> Self {
+            let saved = pins
+                .iter()
+                .map(|(k, _)| (*k, std::env::var_os(k)))
+                .collect();
+            for (k, v) in pins {
+                std::env::set_var(k, v);
             }
+            EnvGuard { saved }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.saved_config {
-                Some(v) => std::env::set_var("FNO_CONFIG", v),
-                None => std::env::remove_var("FNO_CONFIG"),
-            }
-            match &self.saved_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-            match &self.saved_bin {
-                Some(v) => std::env::set_var("FNO_BIN", v),
-                None => std::env::remove_var("FNO_BIN"),
-            }
-            match &self.saved_cache {
-                Some(v) => std::env::set_var("FNO_PLANS_DIRS_CACHE_DIR", v),
-                None => std::env::remove_var("FNO_PLANS_DIRS_CACHE_DIR"),
+            for (k, v) in &self.saved {
+                match v {
+                    Some(old) => std::env::set_var(k, old),
+                    None => std::env::remove_var(k),
+                }
             }
         }
     }
@@ -300,18 +261,18 @@ mod tests {
     }
 
     impl Fixture {
-        /// Two registered projects, each with a fake `fno` that answers the
-        /// probe from its own cwd, and a project-scoped config file so the
-        /// stamp has something per-project to watch.
+        /// Two registered git repos, each with its own canonical root (the
+        /// default plans dir is space-keyed), plus the config registering
+        /// both.
         fn new(tag: &str) -> Self {
             let base =
                 std::env::temp_dir().join(format!("fno-plans-dirs-{}-{}", tag, std::process::id()));
             let _ = fs::remove_dir_all(&base);
             for name in ["alpha", "beta"] {
                 let root = base.join(name);
-                fs::create_dir_all(root.join("plans")).unwrap();
                 fs::create_dir_all(root.join(".fno")).unwrap();
                 fs::write(root.join(".fno").join("config.toml"), "").unwrap();
+                git_init(&root);
             }
             let config = base.join("work.toml");
             fs::write(
@@ -323,16 +284,6 @@ mod tests {
                 ),
             )
             .unwrap();
-            let fake_bin = base.join("bin");
-            fs::create_dir_all(&fake_bin).unwrap();
-            // Answers from its own cwd; `$PWD` comes back in the physical
-            // form (`/private/var/...` on macOS), which the expectations
-            // below must match.
-            crate::write_exec_stub(
-                &fake_bin,
-                "fno",
-                "#!/bin/sh\necho \"$PWD/plans/20260101-x.md\"\n",
-            );
             fs::create_dir_all(base.join("cache")).unwrap();
             Fixture { base }
         }
@@ -341,19 +292,26 @@ mod tests {
             self.base.join("work.toml")
         }
 
-        fn fake_bin(&self) -> PathBuf {
-            self.base.join("bin")
-        }
-
         fn cache(&self) -> PathBuf {
             self.base.join("cache")
         }
 
-        fn probe_count(&self) -> usize {
-            // The fake fno appends one byte to this file per run.
-            fs::read_to_string(self.fake_bin().join("count"))
-                .unwrap_or_default()
-                .len()
+        fn pins(&self) -> Vec<(&'static str, String)> {
+            vec![
+                ("FNO_CONFIG", self.config().display().to_string()),
+                (
+                    "FNO_STATE_DIR",
+                    self.base.join("state").display().to_string(),
+                ),
+                (
+                    "FNO_SPACES_DIR",
+                    self.base.join("spaces").display().to_string(),
+                ),
+                (
+                    "FNO_PLANS_DIRS_CACHE_DIR",
+                    self.cache().display().to_string(),
+                ),
+            ]
         }
     }
 
@@ -372,14 +330,40 @@ mod tests {
         }
     }
 
-    fn guard_for<'a>(fx: &'a Fixture) -> EnvGuard {
-        EnvGuard::new(&fx.config(), &fx.fake_bin(), &fx.cache())
+    fn git_init(dir: &Path) {
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .status()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
     }
 
-    fn count_script() -> &'static str {
-        // Appends one byte to $0.dir/count so tests can count real probe
-        // invocations.
-        "#!/bin/sh\nprintf 'x' >> \"$(dirname \"$0\")/count\"\necho \"$PWD/plans/20260101-x.md\"\n"
+    fn guard_for(fx: &Fixture) -> EnvGuard {
+        EnvGuard::new(&fx.pins())
+    }
+
+    /// The plans dir the default chain names for one fixture repo: the
+    /// pinned spaces root, keyed on the repo's canonical slug.
+    fn expected_space_plans(base: &Path, repo: &str) -> PathBuf {
+        let slug = space_slug(&fs::canonicalize(base.join(repo)).unwrap());
+        fs::canonicalize(base)
+            .unwrap()
+            .join("spaces")
+            .join(slug)
+            .join("plans")
+    }
+
+    fn set_mtime(path: &Path, at: std::time::SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(at).unwrap();
     }
 
     #[test]
@@ -389,15 +373,9 @@ mod tests {
         let _env = guard_for(&fx);
 
         let dirs = plans_dirs(&fx.base);
-        // The probe answers in `$PWD`'s physical form, so the expectation is
-        // canonicalized to the same namespace.
         let want = vec![
-            fs::canonicalize(fx.base.join("alpha"))
-                .unwrap()
-                .join("plans"),
-            fs::canonicalize(fx.base.join("beta"))
-                .unwrap()
-                .join("plans"),
+            expected_space_plans(&fx.base, "alpha"),
+            expected_space_plans(&fx.base, "beta"),
         ];
         assert_eq!(dirs, want, "one sorted dir per registered project");
     }
@@ -406,15 +384,30 @@ mod tests {
     fn plans_dirs_cache_hit_skips_probes_until_stamp_moves() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = Fixture::new("cache");
-        crate::write_exec_stub(&fx.fake_bin(), "fno", &count_script());
         let _env = guard_for(&fx);
 
-        let _ = plans_dirs(&fx.base);
-        let after_first = fx.probe_count();
-        assert_eq!(after_first, 2, "one probe per project");
+        let real = plans_dirs(&fx.base);
+        assert_eq!(real.len(), 2, "one dir per project");
 
-        let _ = plans_dirs(&fx.base);
-        assert_eq!(fx.probe_count(), after_first, "cache hit spawns nothing");
+        // Poison the cached dirs under the live stamp: a cache hit answers
+        // with the poison, proving no recompute ran.
+        let cache_file = fx.cache().join("plans-dirs-v1.txt");
+        let content = fs::read_to_string(&cache_file).unwrap();
+        let stamp = content.lines().next().unwrap().to_string();
+        fs::write(
+            &cache_file,
+            format!("{stamp}\n/cache/canary-a\n/cache/canary-b\n"),
+        )
+        .unwrap();
+        let dirs = plans_dirs(&fx.base);
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/cache/canary-a"),
+                PathBuf::from("/cache/canary-b")
+            ],
+            "cache hit skips the probes"
+        );
 
         // A per-project config touch moves the stamp and forces a re-probe.
         let path = fx.base.join("alpha").join(".fno").join("config.toml");
@@ -423,54 +416,29 @@ mod tests {
         fs::set_permissions(&path, perms).unwrap();
         fs::write(&path, "plans_dir = \".fno/plans/\"\n").unwrap();
         let now = std::time::SystemTime::now();
-        let future = now + std::time::Duration::from_secs(5);
-        set_mtime(&path, future);
+        set_mtime(&path, now + std::time::Duration::from_secs(5));
 
-        let _ = plans_dirs(&fx.base);
-        assert_eq!(fx.probe_count(), after_first + 2, "stamp miss re-probes");
+        let dirs = plans_dirs(&fx.base);
+        assert_eq!(
+            dirs,
+            vec![
+                expected_space_plans(&fx.base, "alpha"),
+                expected_space_plans(&fx.base, "beta")
+            ],
+            "stamp miss re-probes"
+        );
     }
 
     #[test]
-    fn plans_dirs_skip_failed_and_non_absolute_probes() {
+    fn plans_dirs_skip_failed_probes() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = Fixture::new("skip");
         let _env = guard_for(&fx);
 
-        // The fake fno exits 1 for the beta project, so only alpha's dir
-        // comes back.
-        crate::write_exec_stub(
-            &fx.fake_bin(),
-            "fno",
-            "#!/bin/sh\ncase \"$PWD\" in */beta) exit 1;; esac\necho \"$PWD/plans/20260101-x.md\"\n",
-        );
+        // A chain error ({vault} with no obsidian block) makes the probe
+        // contribute nothing; here it fails for both registered projects.
+        fs::write(fx.config(), "plans_dir = \"{vault}/plans\"\n").unwrap();
         let dirs = plans_dirs(&fx.base);
-        assert_eq!(
-            dirs,
-            vec![fs::canonicalize(fx.base.join("alpha"))
-                .unwrap()
-                .join("plans")]
-        );
-
-        // A probe that answers a relative line contributes nothing. The stamp
-        // moves first, or the cache from phase 1 answers and no probe runs.
-        let path = fx.base.join("alpha").join(".fno").join("config.toml");
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o200);
-        fs::set_permissions(&path, perms).unwrap();
-        fs::write(&path, "plans_dir = \".fno/plans/\"\n").unwrap();
-        let now = std::time::SystemTime::now();
-        set_mtime(&path, now + std::time::Duration::from_secs(5));
-        crate::write_exec_stub(
-            &fx.fake_bin(),
-            "fno",
-            "#!/bin/sh\necho \"plans/20260101-x.md\"\n",
-        );
-        let dirs = plans_dirs(&fx.base);
-        assert!(dirs.is_empty(), "relative probe lines are not dirs");
-    }
-
-    fn set_mtime(path: &Path, at: std::time::SystemTime) {
-        let file = fs::File::options().write(true).open(path).unwrap();
-        file.set_modified(at).unwrap();
+        assert!(dirs.is_empty(), "failed probes are not dirs");
     }
 }
