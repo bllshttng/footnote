@@ -2,7 +2,7 @@
 # claude-config-write-guard.sh - PreToolUse hook: refuse a write or redirect
 # to a file DIRECTLY inside the Claude config dir (~/.claude, or
 # CLAUDE_CONFIG_DIR), top level only. Agents scratch-littering the config dir
-# (ab.out, uvsync.out, agents-ci.log, x-2bda) dropped the jobs/<id>/tmp
+# (ab.out, uvsync.out, agents-ci.log) dropped the jobs/<id>/tmp
 # segment; the refusal names the session's job tmp dir as the place to write.
 #
 # jobs/, projects/, plugins/ and every other subdirectory stay allowed. Named

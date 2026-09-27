@@ -653,8 +653,8 @@ fn serve_client(
                             if pid > 0 {
                                 // SIGTERM first, then SIGKILL only past the
                                 // grace: a killed-mid-write claude leaves an
-                                // orphaned .claude.json.tmp in the config dir
-                                // (x-2bda). The endpoint is unchanged for a
+                                // orphaned .claude.json.tmp in the config
+                                // dir. The endpoint is unchanged for a
                                 // worker that ignores SIGTERM.
                                 // SAFETY: kill with a valid pid and SIGTERM,
                                 // then SIGKILL after the confirmed grace.
