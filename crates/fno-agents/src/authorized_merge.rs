@@ -1252,7 +1252,7 @@ pub struct RealProbes;
 
 impl RealProbes {
     fn fno(cwd: &Path, args: &[&str]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
-        let out = Command::new("fno")
+        let out = Command::new(crate::scrape::fno_bin())
             .args(args)
             .current_dir(cwd)
             .output()
@@ -1261,7 +1261,7 @@ impl RealProbes {
     }
 
     fn fno_strings(cwd: &Path, args: &[String]) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
-        let out = Command::new("fno")
+        let out = Command::new(crate::scrape::fno_bin())
             .args(args)
             .current_dir(cwd)
             .output()

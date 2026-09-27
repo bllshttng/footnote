@@ -195,7 +195,7 @@ pub(crate) fn collect_from(
 }
 
 pub(crate) fn read_court_payload(config_cwd: &Path) -> Result<Value, String> {
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let fno = crate::scrape::fno_bin();
     let mut cmd = std::process::Command::new(&fno);
     cmd.args(["agents", "court", "--nodes"])
         .current_dir(config_cwd)

@@ -675,7 +675,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             );
             return Ok(2);
         };
-        let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = crate::loopcheck::loopcheck_fno_bin();
         match crate::loop_king::KingQueue::from_manifest_full(
             &cwd,
             scope,

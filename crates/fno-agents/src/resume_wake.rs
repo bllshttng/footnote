@@ -155,7 +155,9 @@ pub(crate) struct ShellViewportIo;
 impl ViewportIo for ShellViewportIo {
     fn launch(&self, argv: &[String]) -> std::io::Result<String> {
         // `fno mux pane run` prints the new pane id alone on stdout.
-        let out = std::process::Command::new("fno").args(argv).output()?;
+        let out = std::process::Command::new(crate::scrape::fno_bin())
+            .args(argv)
+            .output()?;
         if !out.status.success() {
             return Err(std::io::Error::other(format!(
                 "pane run exited {}",
@@ -166,7 +168,7 @@ impl ViewportIo for ShellViewportIo {
     }
 
     fn screen(&self, server: &str, pane: &str) -> String {
-        std::process::Command::new("fno")
+        std::process::Command::new(crate::scrape::fno_bin())
             .args([
                 "mux", "pane", "read", "--server", server, "--lines", "40", pane,
             ])

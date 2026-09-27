@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Returns whether the child spawned, so the signal store can refuse to
 /// commit state for a notice that never left the machine.
 pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let fno = crate::scrape::fno_bin();
     notify_operator_with(&fno, title, body, pointer)
 }
 
@@ -83,7 +83,7 @@ pub fn notify_operator_with(bin: &OsStr, title: &str, body: &str, pointer: Optio
 /// detached badge path keeps `notify_operator`: `notify_transition` runs
 /// inside a registry write and must not block on the child.
 pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let fno = crate::scrape::fno_bin();
     let mut cmd = std::process::Command::new(&fno);
     notify_args(&mut cmd, title, body, pointer);
     cmd.stdin(std::process::Stdio::null());

@@ -140,7 +140,7 @@ impl FleetArms {
                         crate::merge_reap::merge_cleanup_requested(&home, root).into()
                     },
                     &|root, apply| {
-                        let mut cmd = std::process::Command::new("fno");
+                        let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
                         cmd.current_dir(root)
                             .env("FNO_AGENTS_HOME", home.root())
                             .args(["agents", "workspace", "worktree", "cleanup", "--merged"]);
@@ -230,7 +230,7 @@ impl FleetArms {
             tokio::task::spawn_blocking(move || {
                 let _gate = SweepGate(flag);
                 stale_sweep(&home, &emitter, now_epoch_secs(), &|| {
-                    std::process::Command::new("fno")
+                    std::process::Command::new(crate::scrape::fno_bin())
                         .args(["agents", "stale-escalate", "--json"])
                         .output()
                         .ok()
