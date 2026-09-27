@@ -8,7 +8,7 @@ import io
 import json
 import sys
 import tempfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,16 +35,41 @@ def _setup_state(tmp_path: Path, target_sid: str, nonce: str, transcript_uuid: s
     return state_dir
 
 
+@contextmanager
+def _captured_appends():
+    """Capture envelopes at the append_event boundary.
+
+    append_event commits to the events.db store (no file fallback) and the
+    hermetic fence refuses a pytest tmp journal path, so tests stub only the
+    commit. The envelope is already validated: `_build` runs the real
+    validate() before returning it.
+    """
+    import fno.events as fno_events
+
+    captured = []
+    original_append = fno_events.append_event
+    fno_events.append_event = lambda event, events_path=None, **kwargs: captured.append(event)
+    try:
+        yield captured
+    finally:
+        fno_events.append_event = original_append
+
+
 def test_emit_ledger_transition_uses_target_session_id():
     """Regression test for ab-31391d35.
 
     `_emit_ledger_transition` MUST emit the target session_id (the scalar
     `entry["session_id"]`, set from `state.get("session_id")`), NOT
     `sessions[0]` which is the Claude transcript UUID passed by the stop
-    hook as a CLI arg. The stop hook's `verify_provenance` greps
-    events.jsonl by the target session_id read from target-state.md, so
+    hook as a CLI arg. The stop hook's `verify_provenance` filters gate
+    events by the target session_id read from target-state.md, so
     emitting with the transcript UUID makes the event invisible to the
     gate (no_transition_for_gate diagnostic).
+
+    append_event commits to the events.db store (no file fallback), and
+    the hermetic fence refuses a pytest tmp journal path, so the envelope
+    is captured at the append boundary instead. `_build` has already run
+    the real envelope validation by the time the stub sees it.
     """
     target_sid = "20260420T091434Z-56177-a1b2c3"
     transcript_uuid = "11111111-2222-3333-4444-555555555555"
@@ -64,35 +89,27 @@ def test_emit_ledger_transition_uses_target_session_id():
             "pr_number": 42,
         }
 
-        register_task._emit_ledger_transition(entry)
+        with _captured_appends() as captured:
+            register_task._emit_ledger_transition(entry)
 
-        events_file = state_dir / "events.jsonl"
-        assert events_file.exists(), (
-            f"events.jsonl was not created at {events_file}; "
-            "_emit_ledger_transition silently no-op'd"
+        assert captured, (
+            "_emit_ledger_transition never reached append_event; "
+            "the ledger_updated gate event was not emitted"
         )
+        assert len(captured) == 1, f"expected one emit, got {len(captured)}"
 
-        lines = [line for line in events_file.read_text().splitlines() if line.strip()]
-        assert lines, (
-            f"events.jsonl is empty at {events_file}; "
-            "_emit_ledger_transition wrote nothing"
-        )
-
-        events = [json.loads(line) for line in lines]
-        transitions = [e for e in events if e.get("type") == "phase_transition"]
-        assert transitions, (
-            f"No phase_transition event in events.jsonl. Lines: {lines}"
-        )
-
-        event_data = transitions[0].get("data", {})
+        event_data = captured[0].get("data", {})
         emitted_sid = event_data.get("session_id")
+
+        assert captured[0].get("type") == "phase_transition", (
+            f"expected phase_transition, got {captured[0].get('type')!r}"
+        )
 
         assert emitted_sid == target_sid, (
             f"Expected emitted session_id == target_sid ({target_sid!r}), "
             f"got {emitted_sid!r}. The bug: _emit_ledger_transition reads "
             "sessions[0] (transcript UUID) instead of entry.get('session_id') "
-            "(target session_id from state). Fix at "
-            "scripts/metrics/register-task.py:735-736."
+            "(target session_id from state)."
         )
 
         assert emitted_sid != transcript_uuid, (
@@ -113,6 +130,10 @@ def test_emit_ledger_transition_warns_when_session_id_missing():
     event with session_id="" - which verify_provenance can never match, silently
     turning the ledger_updated gate into a no-op. The warning makes the failure
     mode visible (downstream gate trip is the intended diagnostic).
+
+    append_event commits to the events.db store (no file fallback), and the
+    hermetic fence refuses a pytest tmp journal path, so the skip is proven by
+    append_event never being called, not by a journal file staying absent.
     """
     nonce = "abcdef0123456789"
     transcript_uuid = "11111111-2222-3333-4444-555555555555"
@@ -140,18 +161,19 @@ def test_emit_ledger_transition_warns_when_session_id_missing():
             "pr_number": 99,
         }
 
-        buf = io.StringIO()
-        with redirect_stderr(buf):
-            register_task._emit_ledger_transition(entry)
-        stderr_text = buf.getvalue()
+        with _captured_appends() as captured:
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                register_task._emit_ledger_transition(entry)
+            stderr_text = buf.getvalue()
 
         assert "Warning" in stderr_text and "session_id" in stderr_text, (
             f"Expected stderr warning about missing session_id; got: {stderr_text!r}"
         )
 
-        events_file = state_dir / "events.jsonl"
-        assert not events_file.exists() or not events_file.read_text().strip(), (
-            "events.jsonl was written despite missing session_id; emit should be skipped"
+        assert not captured, (
+            "append_event was reached despite missing session_id; "
+            "emit should be skipped"
         )
 
 
