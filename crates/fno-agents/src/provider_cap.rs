@@ -574,8 +574,8 @@ pub fn settings_candidates(cwd: &Path) -> Vec<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// The claude transcript bridge: one answer for every non-codex row, keyed by
-/// the row's own id (full uuid or 8-hex short id), through the Python
-/// resolver `fno agents peek` reads transcripts with.
+/// the row's own id (full uuid or 8-hex short id), resolved natively against
+/// the claude projects store ([`crate::claude_transcript_paths`]).
 pub type ClaudePaths = Box<dyn Fn(&[String]) -> Result<BTreeMap<String, String>, String>>;
 
 /// One scan's resolved inputs. The env-resolving wrapper builds this; tests
@@ -601,43 +601,6 @@ pub struct CapScan {
     pub codex_sessions_dir: Option<std::path::PathBuf>,
 }
 
-/// The production bridge: one `fno agents transcript-paths` child answers
-/// every id through the Python resolver. A child that fails or times out
-/// answers Err; the snapshot then reads the named unknown, never a false
-/// "fine".
-pub fn python_transcript_paths(projects_root: std::path::PathBuf) -> ClaudePaths {
-    Box::new(move |ids: &[String]| {
-        if ids.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let payload = json!({
-            "ids": ids,
-            "projects_root": projects_root.to_string_lossy(),
-        })
-        .to_string();
-        let args: Vec<&str> = vec!["agents", "transcript-paths"];
-        let answer = crate::provider_cap_verbs::run_fno_output_env(
-            &args,
-            None,
-            std::time::Duration::from_secs(60),
-            &[("FNO_AGENTS_RUNTIME", "python")],
-            Some(payload.as_str()),
-        )
-        .ok_or_else(|| "transcript-paths child failed".to_string())?;
-        let v: Value = serde_json::from_str(&answer)
-            .map_err(|e| format!("transcript-paths answer unparseable: {e}"))?;
-        let mut out = BTreeMap::new();
-        if let Some(map) = v.as_object() {
-            for (k, val) in map {
-                if let Some(p) = val.as_str() {
-                    out.insert(k.clone(), p.to_string());
-                }
-            }
-        }
-        Ok(out)
-    })
-}
-
 /// The env-resolved scan, built once and shared by the status verb and the
 /// armed arm so the two cannot resolve different inputs.
 pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
@@ -651,7 +614,7 @@ pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
         claude_home: crate::claude_ask::ClaudeHome::from_env()
             .home()
             .to_path_buf(),
-        claude_paths: python_transcript_paths(projects_dir),
+        claude_paths: crate::claude_transcript_paths::claude_transcript_paths(projects_dir),
         record_zones: record_reset_timezones(cwd),
         codex_sessions_dir: None,
     }
@@ -691,7 +654,7 @@ pub fn snapshot_with(
         &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
         &thread_ids,
     );
-    // One bridge call for the sweep. A codex row resolves its own rollout;
+    // One bridge pass for the sweep. A codex row resolves its own rollout;
     // every other row's transcript is answered here, keyed by the id the row
     // itself carries.
     let bridge_ids: Vec<String> = rows
@@ -2245,8 +2208,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A bridge that fails (child missing, timeout, unparseable answer) reads
-    /// a NAMED unknown on every unmeasured row, never a false "fine".
+    /// A bridge that fails (the resolver errors) reads a NAMED unknown on
+    /// every unmeasured row, never a false "fine".
     #[test]
     fn ac_err_a_failing_bridge_reads_a_named_unknown() {
         let root = std::env::temp_dir().join(format!("pc-ac2b-{}", std::process::id()));
@@ -2258,7 +2221,7 @@ mod tests {
             r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
         );
         let scan = CapScan {
-            claude_paths: Box::new(|_| Err("transcript-paths child failed".to_string())),
+            claude_paths: Box::new(|_| Err("transcript resolver failed".to_string())),
             ..scan(
                 claude_home.join("registry.json"),
                 projects.parent().unwrap().to_path_buf(),
@@ -2284,7 +2247,7 @@ mod tests {
         assert_eq!(lane.state, "unmeasured");
         assert_eq!(
             snap.resolver_unavailable.as_deref(),
-            Some("transcript-paths child failed"),
+            Some("transcript resolver failed"),
             "the sweep names its broken resolver, never a silent hold"
         );
         let _ = std::fs::remove_dir_all(&root);
