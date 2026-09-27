@@ -6546,7 +6546,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
@@ -6640,8 +6639,8 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
-                hold_pass: false,
-            };
+            hold_pass: false,
+        };
 
         std::env::set_var("FNO_BIN", &script);
         let refused = dispatch("t", &sock, false, send_cmd(false));
@@ -6729,8 +6728,8 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
-                hold_pass: false,
-            };
+            hold_pass: false,
+        };
 
         let over = dispatch("t", &sock, false, send_cmd(big));
         let ok = dispatch(

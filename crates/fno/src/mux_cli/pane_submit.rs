@@ -66,7 +66,15 @@ pub(super) fn submit_pane(
     expected_identity: Option<&str>,
     json: bool,
 ) -> i32 {
-    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity, false) {
+    if let Err(e) = send_pane_bytes(
+        sock,
+        session,
+        pane,
+        bytes,
+        guarded,
+        expected_identity,
+        false,
+    ) {
         eprintln!("fno mux pane: {e}");
         return match e {
             ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
