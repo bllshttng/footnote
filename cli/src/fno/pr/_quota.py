@@ -18,8 +18,7 @@ from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
-#: How long a healthy probe answer is reused; a drained bucket is never cached.
-_PROBE_TTL_S = 60.0
+_PROBE_TTL_S = 60.0  # healthy probe answers are reused this long
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 
@@ -253,12 +252,10 @@ def _cached_probe(cache: Path) -> Optional[tuple[int, int]]:
 
 
 def _record_probe(cache: Path, remaining: int, reset: int) -> None:
-    """Record a healthy probe answer; failure just costs the next caller a probe."""
-    if remaining > GRAPHQL_RESERVE:
-        try:
-            cache.write_text(json.dumps({"ts": time.time(), "remaining": remaining, "reset": reset}))
-        except OSError:
-            pass
+    try:
+        cache.write_text(json.dumps({"ts": time.time(), "remaining": remaining, "reset": reset}))
+    except OSError:
+        pass
 
 
 def _pr_number(args: Sequence[str]) -> str:
@@ -488,7 +485,7 @@ def execute_graphql(
                     [gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env
                 )
                 remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
-                if remaining is not None and reset is not None:
+                if remaining is not None and remaining > GRAPHQL_RESERVE and reset is not None:
                     _record_probe(cache, remaining, reset)
             if purpose == "discretionary":
                 if remaining is None:

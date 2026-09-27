@@ -268,6 +268,12 @@ pub struct Request {
     /// GitHub's own merge-hold words, as status computed them (`github_blocked`,
     /// `github_behind`, ...). Absent: the walk derives them from `checks_read`.
     pub supplied_github_blockers: Option<Vec<String>>,
+    /// The dispatch-hold answer the caller (the status read) already probed.
+    /// `Some(None)` = probed clear; `Some(Some(reason))` = held; `None` = not
+    /// supplied (the walk probes, and a real merge NEVER sees a supplied
+    /// value: only the preview walk reads this, decide's own chain always
+    /// probes live).
+    pub supplied_dispatch_hold: Option<Option<String>>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -762,8 +768,15 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
 
-    // (4) holds, in decide's order.
-    if let Some(reason) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
+    // (4) holds, in decide's order. A preview ask may carry the dispatch-hold
+    // answer its caller already probed; the supplied value rides only the
+    // preview (advisory) walk, never decide's own merge chain.
+    let dispatch_hold_outcome = match &request.supplied_dispatch_hold {
+        Some(None) => ProbeOutcome::Clear,
+        Some(Some(reason)) => ProbeOutcome::Refused(reason.clone()),
+        None => probes.dispatch_hold(cwd, facts.number),
+    };
+    if let Some(reason) = dispatch_hold_outcome.fail_closed() {
         blockers.push(Blocker::held("dispatch_hold", reason));
     }
     if let Some(reason) = probes.review_hold(cwd, facts.number).fail_closed() {
@@ -2285,6 +2298,11 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
                     .map(str::to_owned)
                     .collect()
             }),
+        // Present-but-null is a probed CLEAR, so a held answer must stay a
+        // string and an unprobed ask omits the key entirely.
+        supplied_dispatch_hold: payload
+            .get("dispatch_hold_reason")
+            .map(|v| v.as_str().map(str::to_owned)),
     })
 }
 
@@ -2520,6 +2538,7 @@ mod tests {
             supplied_rerun_recovered: None,
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
+            supplied_dispatch_hold: None,
         }
     }
 
