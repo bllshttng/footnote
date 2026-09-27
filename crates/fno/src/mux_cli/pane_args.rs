@@ -75,6 +75,26 @@ pub(crate) fn pane_from_env() -> Option<u64> {
 pub(crate) const SPLIT_ANCHOR_HELP: &str = "a --split needs an anchor: pass \
 --from <portal N|worker name|current> to name the cell it halves";
 
+/// The dispatch-side application of the split default to a parsed pane
+/// command: a split with no anchor halves the caller's own pane, and a
+/// pane-less caller is refused with `--from` named. Lives beside the rule
+/// it applies; the doors call this instead of re-deriving it.
+pub(crate) fn apply_split_anchor_default(parsed: &mut ParsedPane) -> Result<(), String> {
+    let PaneCmd::Run { placement, .. } = &mut parsed.cmd else {
+        return Ok(());
+    };
+    match anchor_or_refuse(
+        placement.split.is_some(),
+        placement.at,
+        placement.from.as_deref(),
+        pane_from_env(),
+    )? {
+        Some(anchor) => placement.at = Some(anchor),
+        None => {}
+    }
+    Ok(())
+}
+
 /// The split default: a split with no anchor halves the caller's own pane,
 /// as tmux splits the current pane. A caller with no pane of its own names
 /// `--from` or is refused with the flag named. Returns the pane to anchor
@@ -293,7 +313,7 @@ pub fn parse_pane_args(
             at = Some(fno_pane);
             fallback = PlacementFallback::Refuse;
         }
-        let mut placement = PanePlacement {
+        let placement = PanePlacement {
             target: squad
                 .map(PaneTarget::SquadName)
                 .unwrap_or(PaneTarget::CurrentRoute),

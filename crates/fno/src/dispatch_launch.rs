@@ -183,17 +183,18 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(p) = &req.permission_mode {
         argv.extend(["--permission-mode".to_string(), p.clone()]);
     }
-    // A thread launch carries NO placement flags: a spawn is a paneless
-    // thread, and the composer's portal opens server-side on the Launched
-    // receipt (the attached-client reach, agent_launch's desk). A pane
-    // launch keeps the tab/split spellings - that lane honors them.
-    if req.substrate == "pane" {
-        if let Some(t) = &req.placement {
-            argv.extend(["--tab".to_string(), t.clone()]);
-        }
-        if let Some(s) = &req.split {
-            argv.extend(["--split".to_string(), s.clone()]);
-        }
+    // Explicit placement rides ANY substrate: an explicit flag creates a
+    // portal, human or agent, so the door forwards what the caller named
+    // and the spawn CLI opens it after the receipt. A bare launch names
+    // none (the fields are Option) and stays a paneless thread.
+    if let Some(t) = &req.placement {
+        argv.extend(["--tab".to_string(), t.clone()]);
+    }
+    if let Some(p) = &req.portal {
+        argv.extend(["--portal".to_string(), p.to_string()]);
+    }
+    if let Some(s) = &req.split {
+        argv.extend(["--split".to_string(), s.clone()]);
     }
     argv.extend(req.extra_flags.iter().cloned());
     // The seed rides stdin even when empty: an empty stdin is the honest
@@ -848,10 +849,9 @@ mod tests {
                 "-",
             ]
         );
-        // Empty substrate omits the flag so the door's default decides. A
-        // thread launch carries NO placement flags - the composer's portal
-        // opens server-side on the Launched receipt - so the geometry the
-        // request named never reaches the spawn argv.
+        // Empty substrate omits the flag so the door's default decides.
+        // Explicit placement rides anyway: the flag is the ask, any
+        // substrate, and the spawn CLI opens the portal after the receipt.
         let thread = AgentLaunchRequest {
             request_id: 2,
             revision: 1,
@@ -883,6 +883,10 @@ mod tests {
                 "--mux-session",
                 "s",
                 "--no-wait",
+                "--portal",
+                "1",
+                "--split",
+                "right",
                 "--prompt-file",
                 "-",
             ]
@@ -960,8 +964,8 @@ mod tests {
                 && argv.contains(&"glm-5.3-flash[1m]".to_string()),
             "the model id rides: {argv:?}"
         );
-        // Thread new tab: the placement stays OFF the argv. The desk
-        // carries it; the server opens the portal on the receipt.
+        // Thread new tab: the explicit ask rides the argv like any
+        // substrate; the spawn CLI opens the portal after the receipt.
         let new_tab = AgentLaunchRequest {
             request_id: 4,
             revision: 1,
@@ -995,6 +999,10 @@ mod tests {
                 "--mux-session",
                 "s",
                 "--no-wait",
+                "--tab",
+                "new",
+                "--portal",
+                "2",
                 "--prompt-file",
                 "-",
             ]
