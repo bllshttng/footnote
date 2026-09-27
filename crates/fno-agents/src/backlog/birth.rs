@@ -115,7 +115,7 @@ fn display_name(root: &Path) -> String {
 }
 
 /// The first `<key>: <value>` value in a target-state.md manifest.
-fn scan_md_field(text: &str, key: &str) -> Option<String> {
+pub(crate) fn scan_md_field(text: &str, key: &str) -> Option<String> {
     let pattern = format!("(?m)^\\s*{}:\\s*(.+)", key.replace(':', "\\:"));
     let re = regex::Regex::new(&pattern).ok()?;
     let value = re.captures(text)?.get(1)?.as_str().trim().to_string();
@@ -380,8 +380,17 @@ pub fn maybe_spawn_think(
     if node_id.is_empty() {
         return skip("no-node-id", None, None);
     }
-    // 2. Bulk roadmap/vision intake is excluded.
-    if node.get("roadmap_id").is_some() || node.get("vision_path").is_some() {
+    // 2. Bulk roadmap/vision intake is excluded. Null/empty are absent,
+    // matching Python's falsy .get().
+    let has_roadmap = node
+        .get("roadmap_id")
+        .and_then(Value::as_str)
+        .is_some_and(|v| !v.trim().is_empty());
+    let has_vision = node
+        .get("vision_path")
+        .and_then(Value::as_str)
+        .is_some_and(|v| !v.trim().is_empty());
+    if has_roadmap || has_vision {
         return skip("bulk-intake", None, None);
     }
     // 3. A node with no captured origin cannot carry a why.
@@ -408,9 +417,12 @@ pub fn maybe_spawn_think(
         .trim()
         .to_uppercase();
     if node_type == "bug" || node_size == "S" {
+        // The `or '?'` spelling: an absent word reads as ?, never empty.
+        let type_word = if node_type.is_empty() { "?" } else { node_type.as_str() };
+        let size_word = if node_size.is_empty() { "?" } else { node_size.as_str() };
         return skip(
             "not-design-warranting",
-            Some(format!("type={node_type} size={node_size}")),
+            Some(format!("type={type_word} size={size_word}")),
             None,
         );
     }

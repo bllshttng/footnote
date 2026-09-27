@@ -10,6 +10,7 @@ pub mod cli;
 pub mod commands;
 pub mod comments;
 pub mod costs;
+pub mod create_cli;
 pub mod decisions;
 pub mod done_evidence;
 pub mod encounters;

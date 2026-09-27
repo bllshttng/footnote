@@ -142,6 +142,21 @@ pub fn project_root(project: &str) -> Option<String> {
     None
 }
 
+/// The configured node-id hex width, or the legacy 8. Fail-open like the
+/// prefix: an absent key resolves to 8.
+pub fn node_id_hex_width() -> usize {
+    for path in candidates() {
+        let n = read_flat(&path)
+            .get("backlog")
+            .and_then(|b| b.get("id_hex_width"))
+            .and_then(Value::as_u64);
+        if let Some(n) = n {
+            return n as usize;
+        }
+    }
+    8
+}
+
 /// The state directory the porcelain reads serve from: `FNO_STATE_DIR` when
 /// the env names a root (the carrier `fno.paths.state_dir` resolves and
 /// `seal_state_root` pins, so a sealed read serves the store its parent
