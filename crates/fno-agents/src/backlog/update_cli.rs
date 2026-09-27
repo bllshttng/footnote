@@ -1,9 +1,6 @@
 //! `fno backlog update` - the legacy field-flag surface, ported from
-//! `cmd_update` wave by wave. The dispatcher routes here when every flag in
-//! the tail is one this port already owns ([`NATIVE_UPDATE_FLAGS`]); any
-//! other shape still rides the compat forward, so the not-yet-ported flags
-//! keep their Python answers until their wave lands. The cut-over wave
-//! deletes that constant and the forward together.
+//! `cmd_update` wave by wave and cut over fully native: every flag parses
+//! here, and any other shape refuses with the retired-forward message.
 //!
 //! Door flags (`--status`/`--leave`/`--set`) relay to the patch door
 //! in-process, refusing the mixed legacy+door call exactly as the Python
@@ -22,75 +19,17 @@ use crate::graph_store::{
     DEFAULT_LOCK_TIMEOUT,
 };
 
-/// Flags the native engine owns so far. Widened per port wave; the cut-over
-/// wave deletes it together with the forward arm.
-const NATIVE_UPDATE_FLAGS: &[&str] = &[
-    "--title",
-    "-t",
-    "--details",
-    "--description",
-    "-d",
-    "--details-file",
-    "--domain",
-    "--size",
-    "--difficulty",
-    "--model",
-    "--model-tier",
-    "--public",
-    "--no-public",
-    "--batch",
-    "--orphan-ok",
-    "--has-brief",
-    "--priority",
-    "-p",
-    "--blocks-everything",
-    "--project",
-    "--cwd",
-    "-c",
-    "--completion-note",
-    "--acknowledge-collisions",
-    "--fixes-pr",
-    "--reverted",
-    "--no-reverted",
-    "--tag",
-    "--untag",
-    "--dispatch-verb",
-    "--dispatch-brief",
-    "--locked-by",
-    "--locked-by-harness",
-    "--locked-by-harness-session",
-    "--plan-path",
-    "--force",
-    "-F",
-    "--parent",
-    "--caused-by",
-    "--source-node",
-    "--related",
-    "--blocked-by",
-    "--add-blocker",
-    "--remove-blocker",
-    "--pr-number",
-    "--pr-url",
-    "--repo",
-    "--add-pr",
-    "--add-pr-url",
-    "--add-pr-note",
-    "--remove-pr",
-    "--type",
-    "--help",
-    "-h",
-    "--status",
-    "--leave",
-    "--set",
-];
-
-const DOOR_FLAGS: &[&str] = &["--status", "--leave", "--set"];
-
 /// The lock deadline every update write rides.
 const LOCK_TIMEOUT: Duration = DEFAULT_LOCK_TIMEOUT;
 
 /// One parsed invocation. A `None` from [`UpdateArgs::parse`] is the forward
 /// shape: any token outside [`NATIVE_UPDATE_FLAGS`].
+/// The parse outcome: usable args, or a usage refusal this verb owns.
+enum ParsedUpdate {
+    Args(UpdateArgs),
+    Refusal { message: String, exit: i32 },
+}
+
 struct UpdateArgs {
     task_id: String,
     help: bool,
@@ -147,7 +86,7 @@ struct UpdateArgs {
 }
 
 impl UpdateArgs {
-    fn parse(tail: &[String]) -> Option<UpdateArgs> {
+    fn parse(tail: &[String]) -> ParsedUpdate {
         let mut a = UpdateArgs {
             task_id: String::new(),
             help: false,
@@ -207,9 +146,6 @@ impl UpdateArgs {
             };
             macro_rules! take_value {
                 ($slot:expr) => {{
-                    if !NATIVE_UPDATE_FLAGS.contains(&name.as_str()) {
-                        return None;
-                    }
                     match inline {
                         Some(ref v) => {
                             $slot = Some(v.clone());
@@ -220,7 +156,14 @@ impl UpdateArgs {
                                 $slot = Some(v);
                                 i += 1;
                             }
-                            None => return None,
+                            None => {
+                                return ParsedUpdate::Refusal {
+                                    message: format!(
+                                        "Error: Option '{name}' requires an argument."
+                                    ),
+                                    exit: 2,
+                                }
+                            }
                         },
                     }
                 }};
@@ -235,7 +178,12 @@ impl UpdateArgs {
                         Some(_) => a.door.push(tail[i].clone()),
                         None => {
                             if i + 1 >= tail.len() {
-                                return None;
+                                return ParsedUpdate::Refusal {
+                                    message: format!(
+                                        "Error: Option '{name}' requires an argument."
+                                    ),
+                                    exit: 2,
+                                };
                             }
                             a.door.push(tail[i].clone());
                             a.door.push(tail[i + 1].clone());
@@ -272,7 +220,20 @@ impl UpdateArgs {
                 "--cwd" | "-c" => take_value!(a.cwd),
                 "--completion-note" => take_value!(a.completion_note),
                 "--acknowledge-collisions" => take_value!(a.acknowledge_collisions),
-                "--fixes-pr" => take_value!(a.fixes_pr),
+                "--fixes-pr" => {
+                    take_value!(a.fixes_pr);
+                    if let Some(v) = &a.fixes_pr {
+                        if v.parse::<i64>().is_err() {
+                            return ParsedUpdate::Refusal {
+                                message: format!(
+                                    "Error: Invalid value for '--fixes-pr': \
+                                     '{v}' is not a valid integer."
+                                ),
+                                exit: 2,
+                            };
+                        }
+                    }
+                }
                 "--reverted" => {
                     a.reverted = Some(true);
                     i += 1;
@@ -299,7 +260,12 @@ impl UpdateArgs {
                             }
                             i += 1;
                         }
-                        None => return None,
+                        None => {
+                            return ParsedUpdate::Refusal {
+                                message: format!("Error: Option '{name}' requires an argument."),
+                                exit: 2,
+                            }
+                        }
                     }
                 }
                 "--dispatch-verb" => take_value!(a.dispatch_verb),
@@ -343,21 +309,50 @@ impl UpdateArgs {
                             }
                             i += 1;
                         }
-                        None => return None,
+                        None => {
+                            return ParsedUpdate::Refusal {
+                                message: format!("Error: Option '{name}' requires an argument."),
+                                exit: 2,
+                            }
+                        }
                     }
                 }
                 other => {
                     if !other.starts_with('-') && id.is_none() {
                         id = Some(other.to_string());
                         i += 1;
+                    } else if other.starts_with('-') {
+                        return ParsedUpdate::Refusal {
+                            message: format!(
+                                "Error: no such option: {other}. \
+                                 `fno backlog update` carries one door per call: \
+                                 --status, --leave, and repeatable --set field=value \
+                                 (legacy one-flag-per-field spellings are retired)."
+                            ),
+                            exit: 2,
+                        };
                     } else {
-                        return None;
+                        return ParsedUpdate::Refusal {
+                            message: format!("Error: Got unexpected extra argument ({other})."),
+                            exit: 2,
+                        };
                     }
                 }
             }
         }
-        a.task_id = id?;
-        Some(a)
+        if a.help {
+            return ParsedUpdate::Args(a);
+        }
+        match id {
+            Some(task_id) => {
+                a.task_id = task_id;
+                ParsedUpdate::Args(a)
+            }
+            None => ParsedUpdate::Refusal {
+                message: "Error: Missing argument 'TASK_ID'.".to_string(),
+                exit: 2,
+            },
+        }
     }
 }
 
@@ -388,8 +383,12 @@ fn refused(message: impl Into<String>, exit: i32) -> Refusal {
 
 /// The run entry: returns the process exit code.
 pub fn run(tail: &[String]) -> i32 {
-    let Some(args) = UpdateArgs::parse(tail) else {
-        return super::cli::forward_to_python("update", tail);
+    let args = match UpdateArgs::parse(tail) {
+        ParsedUpdate::Args(a) => a,
+        ParsedUpdate::Refusal { message, exit } => {
+            eprintln!("{message}");
+            return exit;
+        }
     };
     if args.help {
         print!("{}", UPDATE_HELP);
@@ -1977,7 +1976,10 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let a = UpdateArgs::parse(&tail).expect("parses");
+        let a = match UpdateArgs::parse(&tail) {
+            ParsedUpdate::Args(a) => a,
+            ParsedUpdate::Refusal { .. } => panic!("parses"),
+        };
         assert_eq!(a.task_id, "x-aaaa1111");
         assert_eq!(a.title.as_deref(), Some("T"));
         assert_eq!(a.public, Some(true));
@@ -1985,17 +1987,62 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_or_not_yet_native_flag_rides_the_forward() {
+    fn an_unknown_flag_refuses_with_the_retired_message() {
         let retired: Vec<String> = ["x-aaaa1111", "--completed", "yes"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(UpdateArgs::parse(&retired).is_none());
-        let later_wave: Vec<String> = ["x-aaaa1111", "--pr", "https://github.com/o/r/pull/9"]
+        let message = match UpdateArgs::parse(&retired) {
+            ParsedUpdate::Args(_) => panic!("retired flag must refuse"),
+            ParsedUpdate::Refusal { message, exit } => {
+                assert_eq!(exit, 2);
+                message
+            }
+        };
+        assert_eq!(
+            message,
+            "Error: no such option: --completed. \
+             `fno backlog update` carries one door per call: --status, --leave, \
+             and repeatable --set field=value (legacy one-flag-per-field \
+             spellings are retired)."
+        );
+    }
+
+    #[test]
+    fn usage_refusals_keep_the_typer_shapes() {
+        let missing: Vec<String> = ["--title", "T"].iter().map(|s| s.to_string()).collect();
+        match UpdateArgs::parse(&missing) {
+            ParsedUpdate::Args(_) => panic!("missing task id must refuse"),
+            ParsedUpdate::Refusal { message, exit } => {
+                assert_eq!(message, "Error: Missing argument 'TASK_ID'.");
+                assert_eq!(exit, 2);
+            }
+        }
+        let no_value: Vec<String> = ["x-aaaa1111", "--title"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(UpdateArgs::parse(&later_wave).is_none());
+        match UpdateArgs::parse(&no_value) {
+            ParsedUpdate::Args(_) => panic!("valueless flag must refuse"),
+            ParsedUpdate::Refusal { message, exit } => {
+                assert_eq!(message, "Error: Option '--title' requires an argument.");
+                assert_eq!(exit, 2);
+            }
+        }
+        let bad_int: Vec<String> = ["x-aaaa1111", "--fixes-pr", "soon"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        match UpdateArgs::parse(&bad_int) {
+            ParsedUpdate::Args(_) => panic!("non-int fixes-pr must refuse"),
+            ParsedUpdate::Refusal { message, exit } => {
+                assert_eq!(
+                    message,
+                    "Error: Invalid value for '--fixes-pr': 'soon' is not a valid integer."
+                );
+                assert_eq!(exit, 2);
+            }
+        }
     }
 
     #[test]
