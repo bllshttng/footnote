@@ -208,3 +208,19 @@ cli/tests/unit/test_stale_escalate.py::test_reconcile_channel_end_to_end_against
 cli/tests/unit/test_target_init_review_gate.py::test_the_script_reads_the_marker_this_module_writes::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_worktree_reap_equivalence.py::_gate_binary::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_worktree_reap_equivalence.py::_gate_env::pytest.skip  # on main before this ratchet
+cli/tests/graph/test_batched_member_selection.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/integration/test_backlog_alias.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/integration/test_backlog_reconcile.py::test_reconcile_names_leftover_model_tier_rows::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/integration/test_graph_status.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/integration/test_parent_filter.py::_set_parent::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/integration/test_target_node_claim.py::_sandbox::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_backlog_receipt_readback.py::test_update_receipt_names_the_resolved_id::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_backlog_reopen.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_backlog_requeue.py::test_update_null_locked_by_refuses_wedge::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_capture_size_cost.py::test_valid_node_types_is_the_one_vocabulary::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_contain.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_decompose.py::test_contained_in_survives_a_later_unrelated_mutation::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_external_backend_refusals.py::test_tracker_owned_verbs_refuse_under_external::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_graph_provenance.py::test_origin_ac2_edge_update_never_rewrites_birth::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_reconcile_cascade.py::_native_update::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/unit/test_strand.py::test_canonical_done_force_reparents_to_nearest_live_ancestor::pytest.skip  # native update door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
