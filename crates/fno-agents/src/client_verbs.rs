@@ -1255,7 +1255,7 @@ pub(crate) fn resolve_entry_with_heal(
     resolve_entry_with_heal_scoped(rows, token, registry_path, false, None)
 }
 
-fn resolve_entry_with_heal_scoped(
+pub(crate) fn resolve_entry_with_heal_scoped(
     rows: &[Value],
     token: &str,
     registry_path: &Path,

@@ -31,6 +31,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 mod blocking_bound;
 mod claude_stop;
 mod fleet_arms;
+mod lifecycle;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
@@ -41,6 +42,7 @@ pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::claude_stop::{end_survivors, stop_claude};
+use self::lifecycle::entry_for_lifecycle;
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
@@ -4596,44 +4598,6 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// Resolve lifecycle tokens through the all-source client resolver. Return the
-/// resolved row itself because the helper may have just adopted a store-only
-/// session that is absent from the caller's pre-heal registry snapshot.
-async fn entry_for_lifecycle(
-    registry: &state::Registry,
-    token: &str,
-    registry_path: &std::path::Path,
-) -> Result<Option<RegistryEntry>, String> {
-    let Value::Array(rows) = serde_json::to_value(&registry.entries)
-        .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
-    else {
-        return Err("could not inspect registry identities".to_string());
-    };
-    let worker_token = token.to_string();
-    let path = registry_path.to_path_buf();
-    let resolved = tokio::task::spawn_blocking(move || {
-        crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
-    })
-    .await
-    .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
-    match resolved {
-        Ok(entry) => {
-            let mut entry: RegistryEntry = serde_json::from_value(entry)
-                .map_err(|exc| format!("resolved identity row is unreadable: {exc}"))?;
-            entry.backfill_harness_aliases();
-            if let Some(legacy) = entry.backfill_short_id() {
-                return Err(format!(
-                    "resolved identity row {:?} has conflicting transport ids (legacy={legacy:?})",
-                    entry.name
-                ));
-            }
-            Ok(Some(entry))
-        }
-        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(None),
-        Err(err) => Err(err.message()),
-    }
-}
-
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let mut response = stop_body(ctx, req).await;
     attach_stopped_claims_release(ctx, req, "stop", &mut response).await;
@@ -4645,22 +4609,35 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
+    // stop shares rm's cross-project grant: its store heal resolves through
+    // the same confinement refusal that names --cross-project.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     if entry.status == AgentStatus::Exited {
         // An exited agent needs no stop work. (Pre-G4 this also force-cleared a
@@ -4881,18 +4858,25 @@ async fn attach_stopped_claims_release(
         return;
     };
     // A stop leaves the row (terminal); an rm removes it, so the caller
-    // passes the resolved identity instead of re-reading the registry.
+    // passes the resolved identity instead of re-reading the registry. The
+    // requested token may be a session id rather than the row name (a
+    // stop-by-id, or a cross-project heal that just minted the row), so
+    // resolve through the same finder the lifecycle verbs resolve with; an
+    // exact-name miss here dropped the healed row's claims on the floor.
     let identity = load_registry_offloaded(ctx.home.registry_json())
         .await
         .ok()
         .and_then(|registry| {
-            registry
-                .entries
-                .iter()
-                .find(|e| e.name == name)
-                .map(|e| (e.harness_session_id.clone(), Some(e.cwd.clone())))
+            registry.find_name_or_full_session_id(name).map(|e| {
+                (
+                    Some(e.name.clone()),
+                    e.harness_session_id.clone(),
+                    Some(e.cwd.clone()),
+                )
+            })
         });
-    let (session_id, cwd) = identity.unwrap_or((None, None));
+    let (resolved_name, session_id, cwd) = identity.unwrap_or((None, None, None));
+    let name: &str = resolved_name.as_deref().unwrap_or(name);
     release_stopped_claims_into(&ctx.emitter, name, session_id, cwd, verb, response);
 }
 
@@ -5343,22 +5327,36 @@ async fn handle_rm_with(
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // rm is the one lifecycle verb whose caller can name a session whose cwd
+    // resolves outside this project (the store heal's refusal prescribes
+    // --cross-project for exactly that case); forward the grant to resolution.
+    let cross_project = req
+        .params
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry =
-        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                return Response::err(
-                    req.id,
-                    ErrorCode::AgentNotFound,
-                    format!("agent {requested_name} not found"),
-                )
-            }
-            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-        };
+    let entry = match entry_for_lifecycle(
+        &registry,
+        &requested_name,
+        &ctx.home.registry_json(),
+        cross_project,
+    )
+    .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("agent {requested_name} not found"),
+            )
+        }
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let name = entry.name.clone();
     let audit = RemovalAuditContext::from_request(req, &entry);
     // Computed once (self-review finding): every other reference in this
