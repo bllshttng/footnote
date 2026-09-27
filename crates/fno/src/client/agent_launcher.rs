@@ -2077,6 +2077,29 @@ fn picker_rows(
                     true,
                     Some(PickerAction::ClearModel),
                 );
+                // A failed read names itself right under the default, so
+                // the notice stays above the fold whatever the model list
+                // fills in below.
+                let harness_error = rows_found
+                    .iter()
+                    .find(|row| row.name == harness)
+                    .and_then(|row| row.models_error.as_deref())
+                    .or_else(|| {
+                        (harness != "opencode")
+                            .then_some(())
+                            .and_then(|_| models_err.as_deref())
+                    });
+                if let Some(error) = harness_error {
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        "\u{2022}",
+                        "model list unavailable",
+                        error,
+                        false,
+                        None,
+                    );
+                }
                 if let Some(models) = models {
                     // The Model body groups by provider (the opencode
                     // ruling): one header per connected provider with its
@@ -2128,33 +2151,6 @@ fn picker_rows(
                                 }),
                             );
                         }
-                    }
-                }
-                let harness_error = rows_found
-                    .iter()
-                    .find(|row| row.name == harness)
-                    .and_then(|row| row.models_error.as_deref());
-                if let Some(error) = harness_error {
-                    push_entry(
-                        &mut rows,
-                        &mut actions,
-                        "\u{2022}",
-                        "model list unavailable",
-                        error,
-                        false,
-                        None,
-                    );
-                } else if harness != "opencode" {
-                    if let Some(error) = models_err {
-                        push_entry(
-                            &mut rows,
-                            &mut actions,
-                            "\u{2022}",
-                            "model list unavailable",
-                            error,
-                            false,
-                            None,
-                        );
                     }
                 }
             }
