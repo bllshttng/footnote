@@ -208,14 +208,18 @@ pub(crate) async fn probe_release() -> ReleaseOutcome {
 /// Run the channel's upgrade off the UI loop and return one notice line.
 pub(crate) async fn run_upgrade_verb(channel: Channel) -> String {
     let argv = channel.upgrade_argv();
-    let args: Vec<&str> = argv[1..]
-        .iter()
-        .filter(|a| !a.is_empty())
-        .copied()
-        .collect();
-    let mut command = crate::process_admission::tokio_command(argv[0]);
+    // The probe may have found uv in an install dir off PATH; spawn that one.
+    let program = match channel {
+        Channel::Uv => tokio::task::spawn_blocking(crate::bootstrap::find_uv)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| argv[0].into()),
+        Channel::Brew => argv[0].into(),
+    };
+    let mut command = crate::process_admission::tokio_command(program);
     command
-        .args(&args)
+        .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
