@@ -97,3 +97,22 @@ def test_nonzero_and_unparseable_runs_are_notify_failed(monkeypatch, tmp_path, r
     pr_watch_cli._run_notify_watch_phase()
     _, kwargs = rows[0]
     assert kwargs["skip_reason"] == "notify_failed"
+
+
+def test_bound_overrun_reads_starved_not_failed(monkeypatch, tmp_path, rows):
+    """The subprocess bound is the phase slice minus its reserve, so
+    an overrun is a budget cut, not a broken arm. The row must read
+    ``starved`` - "notify_failed" rides FAILURE_SKIPS and rendered a healthy
+    loop as FAIL for 43 minutes."""
+    import subprocess
+
+    def _overrun(*_a, **_kw):
+        raise subprocess.TimeoutExpired(cmd="fno-agents", timeout=28.0)
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: tmp_path / "absent")
+    monkeypatch.setattr("subprocess.run", _overrun)
+    pr_watch_cli._run_notify_watch_phase()
+    assert len(rows) == 1
+    _, kwargs = rows[0]
+    assert kwargs["skip_reason"] == "starved"
+    assert "28s bound" in kwargs["detail"]

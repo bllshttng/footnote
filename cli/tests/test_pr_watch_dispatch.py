@@ -2418,7 +2418,7 @@ class TestTickRecordsAndDeadline:
         # king_wake finished early and reads as quiet, not saturated.
         assert ends[-1].get("saturated") == ["sweep"]
 
-    def test_a_notify_slice_below_its_real_cost_mints_the_timeout_row(
+    def test_a_notify_slice_below_its_real_cost_mints_the_starved_row(
         self, monkeypatch, tmp_path
     ):
         """x-0fc2 (12:35Z specimen): the notify_watch phase spent its slice
@@ -2454,7 +2454,9 @@ class TestTickRecordsAndDeadline:
         rows = [d for t, d in events if t == "control_plane_tick"]
         notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
         assert notify_rows, "notify_watch wrote no row"
-        assert notify_rows[-1].get("skip_reason") == "timeout"
+        # A slice cut reads starved: "timeout" is a failure token and would
+        # render a budget-cut phase as a broken arm.
+        assert notify_rows[-1].get("skip_reason") == "starved"
         assert "phase slice 1s spent" in notify_rows[-1]["detail"], notify_rows[-1]
         # The cut phase does not stop the tick: the merge row still lands.
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
@@ -2611,7 +2613,9 @@ class TestTickRecordsAndDeadline:
         assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
-        assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
+        # A slice cut reads starved: "timeout" is a failure token and would
+        # render a budget-cut phase as a broken arm.
+        assert king_rows and king_rows[-1].get("skip_reason") == "starved"
         assert "at king_wake:truth:epic-x" in king_rows[-1].get("detail", ""), (
             f"the cut must name its sub-step: {king_rows[-1].get('detail')!r}"
         )
