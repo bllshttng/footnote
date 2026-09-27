@@ -1088,6 +1088,13 @@ pub(crate) fn node_closed_question_ids(
             if closed.contains(qid) {
                 return false;
             }
+            // A user-only why_user survives the node: the user answers or
+            // withdraws, the sweep never closes it.
+            if crate::escalation::why_user_is_user_only(
+                data.get("why_user").and_then(Value::as_str).unwrap_or(""),
+            ) {
+                return false;
+            }
             let mut nodes: Vec<String> = data
                 .get("node")
                 .and_then(Value::as_str)
@@ -2403,6 +2410,50 @@ mod tests {
         assert_eq!(mk("superseded"), vec!["q-hold".to_string()]);
         assert!(mk("in_progress").is_empty());
         assert!(mk("blocked").is_empty());
+    }
+
+    fn operator_question_with_why_user(ts: &str, qid: &str, why: &str, blocks: &[&str]) -> String {
+        let blocks = blocks
+            .iter()
+            .map(|b| format!("\"{b}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"ts":"{ts}","type":"operator_question","source":"target","data":{{"question_id":"{qid}","question":"approve?","blocks":[{blocks}],"why_user":"{why}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn sweep_spares_a_user_only_question_whose_node_closed() {
+        // A user-only why_user survives its node closing; only an answer or
+        // a withdrawal closes it. A machine-side reason, or no why_user at
+        // all, still closes with the node.
+        let statuses: std::collections::BTreeMap<String, String> =
+            [("x-bbbb".to_string(), "done".to_string())]
+                .into_iter()
+                .collect();
+        let raw = operator_question_with_why_user(
+            "2026-07-03T02:00:00Z",
+            "q-user",
+            "a product or taste call",
+            &["x-bbbb"],
+        );
+        assert!(node_closed_question_ids(&raw, &statuses).is_empty());
+        let raw = operator_question_with_why_user(
+            "2026-07-03T02:00:00Z",
+            "q-mach",
+            "reversible, any agent on the machine can run it",
+            &["x-bbbb"],
+        );
+        assert_eq!(
+            node_closed_question_ids(&raw, &statuses),
+            vec!["q-mach".to_string()]
+        );
+        let raw = operator_question_blocked("2026-07-03T02:00:00Z", "q-plain", "pick", &["x-bbbb"]);
+        assert_eq!(
+            node_closed_question_ids(&raw, &statuses),
+            vec!["q-plain".to_string()]
+        );
     }
 
     #[test]
