@@ -98,63 +98,73 @@ pub(crate) enum CatalogOutcome {
     Degraded(String),
 }
 
-/// Which tab owns the keyboard. The tabs are the composer's axes; the
-/// active tab's body renders the axis's full choice list.
+/// Which control owns the keyboard. The chips carry the axes; a chip's
+/// picker renders the axis's full choice list. `Message` is the editor, and
+/// `ExtraFlags` is the flags editor reached through the Plus chip's picker -
+/// it paints no chip and sits outside the Tab cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
+    Where,
+    Project,
+    Message,
+    Plus,
+    Permission,
     Harness,
     Model,
-    Project,
-    Permission,
-    Placement,
+    Effort,
     ExtraFlags,
-    Message,
 }
 
 impl Focus {
-    fn tab_order(_launcher: &Launcher, _catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
-        // The ruling's bar: no Provider tab. Providers group inside the
-        // Model body, in opencode's provider_id/model_id shape.
-        vec![
+    /// The chip-row cycle, in paint order. The effort chip joins only when
+    /// the catalog says the harness has an effort surface.
+    fn tab_order(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
+        let mut order = vec![
+            Self::Where,
+            Self::Project,
+            Self::Message,
+            Self::Plus,
+            Self::Permission,
             Self::Harness,
             Self::Model,
-            Self::Project,
-            Self::Permission,
-            Self::Placement,
-            Self::ExtraFlags,
-            Self::Message,
-        ]
-    }
-
-    /// The tab bar's label for this axis.
-    pub(crate) fn tab_title(self) -> &'static str {
-        match self {
-            Self::Harness => "Harness",
-            Self::Model => "Model",
-            Self::Project => "Project",
-            Self::Permission => "Mode",
-            Self::Placement => "Where",
-            Self::ExtraFlags => "Flags",
-            Self::Message => "Message",
+        ];
+        if effort_offered(launcher, catalog) {
+            order.push(Self::Effort);
         }
-    }
-
-    /// A list tab (every tab but the two text editors).
-    fn is_list(self) -> bool {
-        !matches!(self, Self::Message | Self::ExtraFlags)
+        order
     }
 
     fn next(self, launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Focus {
+        // The flags editor has no chip: Tab hands the keyboard back to the
+        // row after the Plus chip that opened it.
+        if self == Self::ExtraFlags {
+            return Self::Plus;
+        }
         let order = Self::tab_order(launcher, catalog);
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         order[(pos + 1) % order.len()]
     }
 
     fn prev(self, launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Focus {
+        if self == Self::ExtraFlags {
+            return Self::Message;
+        }
         let order = Self::tab_order(launcher, catalog);
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         order[(pos + order.len() - 1) % order.len()]
     }
+}
+
+/// The effort chip paints only when the harness's catalog row declares an
+/// effort surface at all (`None` = no axis).
+pub(crate) fn effort_offered(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> bool {
+    let harness = launcher.draft.harness();
+    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+        return false;
+    };
+    rows.iter()
+        .find(|r| r.name == harness)
+        .is_some_and(|r| r.efforts.is_some())
 }
 
 /// The launch lifecycle the dock renders. `Submitting` freezes the
@@ -196,10 +206,8 @@ pub(crate) struct Launcher {
     /// The request id this sheet's launch armed, if a launch is owned.
     pub armed: Option<u64>,
     pub next_request_id: u64,
-    /// The active tab body's selection: an index into the FILTERED row list.
-    pub sel: usize,
-    /// The active tab body's type-to-filter query. Reset on a tab switch.
-    pub filter: String,
+    /// The mouse rests on the Project chip: the cwd facts line shows.
+    pub project_hover: bool,
     /// The `@` node picker over the message: the one remaining popover, a
     /// transient insert list rather than an axis editor. Keyed inside
     /// `launcher_keys` (never through `view.aux`: the aux route is raw-fed
@@ -215,6 +223,8 @@ pub(crate) enum PickerAction {
     /// The "<harness> decides" first row: clear the pin.
     Clear,
     ClearModel,
+    /// The Plus chip's one row: focus the flags editor.
+    EditFlags,
     /// A configured routing row: pin its harness, provider and model together.
     PickRow {
         harness: String,
@@ -483,12 +493,11 @@ pub(crate) fn open(view: &mut View) {
         None => Launcher {
             draft: fresh_draft(view),
             recent_models: Vec::new(),
-            focus: Focus::Harness,
+            focus: Focus::Message,
             phase: Phase::Editing,
             armed: None,
             next_request_id: 1,
-            sel: 0,
-            filter: String::new(),
+            project_hover: false,
             picker: None,
         },
     };
@@ -586,7 +595,7 @@ pub(crate) fn open_with(
         launcher.draft.project_idx = idx;
     }
     launcher.phase = Phase::Editing;
-    launcher.focus = Focus::Harness;
+    launcher.focus = Focus::Message;
     launcher.draft.bump();
     Ok(())
 }
@@ -1146,7 +1155,7 @@ pub(crate) async fn launcher_keys(
                             .selected()
                             .and_then(|(ri, _)| picker.actions.get(ri).cloned().flatten());
                         if let Some(action) = action {
-                            apply_picker_action(l, &catalog, action, portal);
+                            apply_picker_action(l, &catalog, action, portal, picker.field);
                         }
                         // A disabled or header row: the picker stays open.
                     }
@@ -1197,32 +1206,18 @@ pub(crate) async fn launcher_keys(
             LKey::Tab | LKey::BackTab => {
                 let delta = if matches!(key, LKey::Tab) { 1 } else { -1 };
                 if let Some(l) = view.launcher.as_mut() {
-                    let focus = if delta > 0 {
+                    l.focus = if delta > 0 {
                         l.focus.next(l, &view.launcher_catalog)
                     } else {
                         l.focus.prev(l, &view.launcher_catalog)
                     };
-                    if focus != l.focus {
-                        // A tab switch resets the body: each tab's list
-                        // starts unfiltered at the top.
-                        l.sel = 0;
-                        l.filter.clear();
-                    }
-                    l.focus = focus;
                 }
             }
             LKey::Up | LKey::Down => {
                 let delta = if matches!(key, LKey::Up) { -1 } else { 1 };
                 if let Some(l) = view.launcher.as_mut() {
-                    match l.focus {
-                        Focus::Message => move_up_down(&mut l.draft, delta),
-                        f if f.is_list() => {
-                            // Move the selection; header rows are captions,
-                            // never targets, so they are stepped over.
-                            let (rows, _) = tab_body_rows(l, &view.launcher_catalog, &view.backlog);
-                            l.sel = step_selection(&rows, l.sel, delta);
-                        }
-                        _ => {}
+                    if l.focus == Focus::Message {
+                        move_up_down(&mut l.draft, delta);
                     }
                 }
             }
@@ -1238,24 +1233,6 @@ pub(crate) async fn launcher_keys(
                             }
                         }
                         Focus::ExtraFlags => move_extra_flag_cursor(&mut l.draft, delta),
-                        Focus::Model => {
-                            // Effort rides the selected model row, like
-                            // opencode's per-model variants.
-                            cycle_effort(l, delta, &view.launcher_catalog);
-                        }
-                        f if f.is_list() => {
-                            // The tab switch: the arrows walk the tab bar.
-                            let focus = if delta > 0 {
-                                l.focus.next(l, &view.launcher_catalog)
-                            } else {
-                                l.focus.prev(l, &view.launcher_catalog)
-                            };
-                            if focus != l.focus {
-                                l.sel = 0;
-                                l.filter.clear();
-                            }
-                            l.focus = focus;
-                        }
                         _ => {}
                     }
                 }
@@ -1268,10 +1245,6 @@ pub(crate) async fn launcher_keys(
                         Focus::Permission => {
                             l.draft.permission.pop();
                             l.draft.bump();
-                        }
-                        f if f.is_list() => {
-                            l.filter.pop();
-                            l.sel = 0;
                         }
                         _ => {}
                     }
@@ -1303,26 +1276,20 @@ pub(crate) async fn launcher_keys(
                         )
                     })
                     .unwrap_or((Focus::Message, false));
-                match focus {
-                    Focus::Message if !pending => submit(view, sock_w).await?,
-                    f if f.is_list() && !pending => {
-                        // Commit the selected row; a header or a disabled
-                        // row carries no action and the sheet stays as it is.
-                        let portal = next_free_portal(view);
-                        let catalog = view.launcher_catalog.clone();
-                        let action = view.launcher.as_ref().and_then(|l| {
-                            let (rows, actions) =
-                                tab_body_rows(l, &view.launcher_catalog, &view.backlog);
-                            let sel_eff = effective_sel(&rows, l.sel);
-                            actions.get(sel_eff).cloned().flatten()
-                        });
-                        if let Some(action) = action {
-                            if let Some(l) = view.launcher.as_mut() {
-                                apply_picker_action(l, &catalog, action, portal);
-                            }
-                        }
+                if pending {
+                    // Esc is the explicit cancel while an attempt pends.
+                } else if focus == Focus::Message {
+                    submit(view, sock_w).await?;
+                } else if focus != Focus::ExtraFlags {
+                    // A chip: Enter opens its picker, anchored one row under
+                    // the chip. The flags editor paints no chip.
+                    let anchor = view
+                        .launcher
+                        .as_ref()
+                        .and_then(|l| chip_anchor(l, view, focus));
+                    if let Some(l) = view.launcher.as_mut() {
+                        open_picker_at(l, &view.launcher_catalog, &view.backlog, anchor, focus);
                     }
-                    _ => {}
                 }
             }
             LKey::Char(c) => {
@@ -1356,12 +1323,6 @@ pub(crate) async fn launcher_keys(
                                 l.draft.bump();
                             }
                         }
-                        f if f.is_list() => {
-                            // Type-to-filter: the query narrows the body in
-                            // place; the visible list is the feedback.
-                            l.filter.push(c);
-                            l.sel = 0;
-                        }
                         _ => {}
                     }
                 }
@@ -1384,8 +1345,8 @@ pub(crate) async fn launcher_keys(
                             insert_extra_flag_char(&mut l.draft, c);
                         }
                     }
-                    // A paste while another tab is focused: the bytes are
-                    // data and are dropped, never forwarded to a pane.
+                    // A paste while a chip is focused: the bytes are data
+                    // and are dropped, never forwarded to a pane.
                 }
             }
         }
@@ -1714,7 +1675,7 @@ fn open_picker_at(
     let Some((row, col)) = anchor else {
         return false;
     };
-    let (rows, actions) = picker_rows(l, catalog, backlog);
+    let (rows, actions) = picker_rows(l, field, catalog, backlog);
     let (all_rows, all_actions) = (rows.clone(), actions.clone());
     // The model picker names its effort-cycling grammar in the footer.
     let footer = if field == Focus::Model {
@@ -1811,13 +1772,15 @@ fn title_for(field: Focus) -> String {
         Focus::Harness => "harness".to_string(),
         Focus::Model => "model".to_string(),
         Focus::Project => "project".to_string(),
+        Focus::Permission => "mode".to_string(),
+        Focus::Where => "where".to_string(),
+        Focus::Effort => "effort".to_string(),
         _ => String::new(),
     }
 }
 
 /// The `@` node picker's anchor: the editor's cell inside the sheet, in the
-/// same geometry `launcher_mouse` maps with. The axis pickers are gone; the
-/// `@` insert list is the one remaining popover.
+/// same geometry `launcher_mouse` maps with.
 fn picker_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
     if l.focus != Focus::Message {
         return None;
@@ -1828,6 +1791,16 @@ fn picker_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
         (oy + sl.message.y as usize + 1) as u16,
         (ox + sl.message.x as usize) as u16,
     ))
+}
+
+/// A chip picker's anchor: one row under the chip, in the same geometry
+/// paint and `launcher_mouse` map with. `None` when the chip is not painted
+/// (the sheet cannot fit) or the field paints no chip.
+fn chip_anchor(l: &Launcher, view: &View, field: Focus) -> Option<(u16, u16)> {
+    let sl = l.sheet_layout(view)?;
+    let (_, r) = sl.chips.iter().find(|(f, _)| *f == field)?;
+    let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
+    Some(((oy + r.y as usize + 1) as u16, (ox + r.x as usize) as u16))
 }
 
 /// The popover's rows and their commit actions for `field`, read off the
@@ -1853,8 +1826,9 @@ fn push_entry(
 }
 
 /// entry carrying its reason (the popup's greyed-with-reason grammar).
-fn picker_rows(
+pub(crate) fn picker_rows(
     l: &Launcher,
+    field: Focus,
     catalog: &Option<CatalogOutcome>,
     backlog: &[crate::proto::BacklogCard],
 ) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
@@ -1866,7 +1840,7 @@ fn picker_rows(
     } else {
         format!("{harness} decides")
     };
-    match l.focus {
+    match field {
         Focus::Harness => match catalog {
             Some(CatalogOutcome::Ok(rows_found, _)) => {
                 for h in rows_found.iter().filter(|h| h.selectable()) {
@@ -2169,42 +2143,86 @@ fn picker_rows(
                 );
             }
         }
-        Focus::Placement => {
+        Focus::Where => {
+            // Run on: today only Local. Cloud, Remote Control and SSH name
+            // no substrate in the door yet, so there are no rows to offer.
+            rows.push(PopupRow::Header("Run on".to_string()));
+            actions.push(None);
+            push_entry(&mut rows, &mut actions, "\u{2713}", "Local", "", true, None);
+            // Open as: the placement (the view a thread shows through).
+            rows.push(PopupRow::Header("Open as".to_string()));
+            actions.push(None);
+            for p in [
+                Placement::Thread,
+                Placement::ThreadSplitBeside,
+                Placement::ThreadNewTab,
+                Placement::PaneActiveTab,
+            ] {
+                push_entry(
+                    &mut rows,
+                    &mut actions,
+                    if l.draft.placement == p {
+                        "\u{2713}"
+                    } else {
+                        "\u{2022}"
+                    },
+                    p.label(),
+                    "",
+                    true,
+                    Some(PickerAction::Place(p)),
+                );
+            }
+        }
+        Focus::Effort => {
+            // "<harness> decides" clears the pin; the catalog's declared
+            // efforts follow. A harness whose row declares no effort axis
+            // paints no chip at all, so this arm only runs when it exists.
             push_entry(
                 &mut rows,
                 &mut actions,
-                "\u{2022}",
-                Placement::Thread.label(),
+                if l.draft.effort.is_empty() {
+                    "\u{2713}"
+                } else {
+                    "\u{2022}"
+                },
+                &decides,
                 "",
                 true,
-                Some(PickerAction::Place(Placement::Thread)),
+                Some(PickerAction::Clear),
             );
+            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
+                if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
+                    if let Some(efforts) = &row.efforts {
+                        for e in efforts {
+                            push_entry(
+                                &mut rows,
+                                &mut actions,
+                                if l.draft.effort == *e {
+                                    "\u{2713}"
+                                } else {
+                                    "\u{2022}"
+                                },
+                                e,
+                                "",
+                                true,
+                                Some(PickerAction::Set(e.clone())),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Focus::Plus => {
+            // One row: the flags editor. Picking it focuses the editor in
+            // the editor's place (PickerAction::EditFlags).
             push_entry(
                 &mut rows,
                 &mut actions,
                 "\u{2022}",
-                Placement::ThreadSplitBeside.label(),
+                "launch flags",
                 "",
                 true,
-                Some(PickerAction::Place(Placement::ThreadSplitBeside)),
-            );
-            push_entry(
-                &mut rows,
-                &mut actions,
-                "\u{2022}",
-                Placement::ThreadNewTab.label(),
-                "",
-                true,
-                Some(PickerAction::Place(Placement::ThreadNewTab)),
-            );
-            push_entry(
-                &mut rows,
-                &mut actions,
-                "\u{2022}",
-                Placement::PaneActiveTab.label(),
-                "",
-                true,
-                Some(PickerAction::Place(Placement::PaneActiveTab)),
+                Some(PickerAction::EditFlags),
             );
         }
         _ => {}
@@ -2213,18 +2231,25 @@ fn picker_rows(
 }
 
 /// Commit a picked row. `portal` was resolved before the picker borrow; a
-/// stale index costs one verbatim door refusal, never a wrong lane.
+/// stale index costs one verbatim door refusal, never a wrong lane. `field`
+/// is the picker's axis, so a commit lands on the axis it was picked from
+/// whatever holds sheet focus.
 pub(crate) fn apply_picker_action(
     l: &mut Launcher,
     catalog: &Option<CatalogOutcome>,
     action: PickerAction,
     portal: u8,
+    field: Focus,
 ) {
     l.picker = None;
     match action {
-        PickerAction::Set(name) => match l.focus {
+        PickerAction::Set(name) => match field {
             Focus::Permission => {
                 l.draft.permission = name;
+                l.draft.bump();
+            }
+            Focus::Effort => {
+                l.draft.effort = name;
                 l.draft.bump();
             }
             _ => {}
@@ -2303,21 +2328,33 @@ pub(crate) fn apply_picker_action(
             l.draft.bump();
         }
         PickerAction::Clear => {
-            // The permission chip's "<harness> decides" row: the pin
-            // clears and the harness default takes over.
-            if l.focus == Focus::Permission {
-                l.draft.permission.clear();
-                l.draft.bump();
+            // The "<harness> decides" row of the mode or effort picker: the
+            // pin clears and the harness default takes over.
+            match field {
+                Focus::Permission => {
+                    l.draft.permission.clear();
+                    l.draft.bump();
+                }
+                Focus::Effort => {
+                    l.draft.effort.clear();
+                    l.draft.bump();
+                }
+                _ => {}
             }
         }
         PickerAction::TypeIn => {
             // Permission keeps free text only where the capability table
             // declares an empty choice list; the pin clears and the next
             // typed chars are the value.
-            if l.focus == Focus::Permission {
+            if field == Focus::Permission {
                 l.draft.permission.clear();
                 l.draft.bump();
             }
+        }
+        PickerAction::EditFlags => {
+            // The Plus chip's one row: the flags editor takes the keyboard
+            // in the editor's place.
+            l.focus = Focus::ExtraFlags;
         }
     }
 }
@@ -2325,18 +2362,14 @@ pub(crate) fn apply_picker_action(
 // -- render ------------------------------------------------------------------
 
 /// The model chip shows the selected configured row or explicit model id.
+/// The effort pin rides the effort chip now, never the model chip.
 fn model_label(d: &LaunchDraft) -> String {
     let base = d
         .model_row
         .clone()
         .or_else(|| non_empty(&d.model))
         .unwrap_or_else(|| "default".to_string());
-    let label = if d.effort.is_empty() {
-        base
-    } else {
-        format!("{base} \u{b7} {}", d.effort)
-    };
-    compact_chip_value(&label, 28)
+    compact_chip_value(&base, 28)
 }
 
 fn compact_chip_value(value: &str, limit: usize) -> String {
@@ -2370,36 +2403,6 @@ fn paint_extra_flags_cursor(buf: &mut RtBuffer, r: RtRect, flags: &str, cursor_c
 }
 
 impl Launcher {
-    /// Every axis's current choice, one joined strip for the sheet header.
-    /// The values are the STATE the tab bodies edit; the strip is read-only.
-    pub(crate) fn values_strip(&self) -> String {
-        let d = &self.draft;
-        let harness = non_empty(&d.harness()).unwrap_or_else(|| "harness".to_string());
-        let model = model_label(d);
-        let project = match d.cwd().rsplit('/').find(|s| !s.is_empty()) {
-            Some(base) => base.to_string(),
-            None => "project".to_string(),
-        };
-        let permission = if !d.permission.is_empty() {
-            d.permission.clone()
-        } else if d.harness().is_empty() {
-            "harness decides".to_string()
-        } else {
-            format!("{} decides", d.harness())
-        };
-        let mut parts = vec![
-            harness,
-            model,
-            project,
-            permission,
-            d.placement.label().to_string(),
-        ];
-        if !d.extra_flags.is_empty() {
-            parts.push(compact_chip_value(&d.extra_flags, 28));
-        }
-        parts.join(" \u{b7} ")
-    }
-
     /// The lifecycle line: refusal reasons, unknown-evidence, seed doubt,
     /// or blank in Editing (the hint row above carries the key rule).
     pub(crate) fn footer(&self) -> String {
@@ -2414,6 +2417,44 @@ impl Launcher {
                 let note = seed_note.map(|n| format!(" ({n})")).unwrap_or_default();
                 format!("launched {name}{note}")
             }
+        }
+    }
+
+    /// One chip's label: the axis's current VALUE, never the axis name.
+    pub(crate) fn chip_label(&self, f: Focus) -> String {
+        let d = &self.draft;
+        match f {
+            Focus::Where => {
+                if d.placement == Placement::default() {
+                    "Local".to_string()
+                } else {
+                    compact_chip_value(&format!("Local \u{b7} {}", d.placement.label()), 28)
+                }
+            }
+            Focus::Project => d
+                .cwd()
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or("project")
+                .to_string(),
+            Focus::Plus => "+".to_string(),
+            Focus::Permission => {
+                if d.permission.is_empty() {
+                    "auto".to_string()
+                } else {
+                    compact_chip_value(&d.permission, 28)
+                }
+            }
+            Focus::Harness => non_empty(&d.harness()).unwrap_or_else(|| "harness".to_string()),
+            Focus::Model => model_label(d),
+            Focus::Effort => {
+                if d.effort.is_empty() {
+                    "default".to_string()
+                } else {
+                    compact_chip_value(&d.effort, 28)
+                }
+            }
+            _ => String::new(),
         }
     }
 }
@@ -2491,21 +2532,21 @@ pub(crate) struct SheetLayout {
     pub origin: (u16, u16),
     pub framed_w: usize,
     pub framed_h: usize,
-    /// The tab bar rects in body coordinates, in paint order.
-    pub tabs: Vec<(Focus, RtRect)>,
-    /// The body: the active tab's list or editor window in body coords.
-    pub body: RtRect,
-    /// One rect per VISIBLE list row: (index into the filtered row list,
-    /// full-width rect in body coordinates). Empty on the editor tabs.
-    pub row_rects: Vec<(usize, RtRect)>,
-    /// The editor window when the Message tab is active.
+    /// One rect per painted chip, in paint order. `Message` and the flags
+    /// editor paint no chip.
+    pub chips: Vec<(Focus, RtRect)>,
+    /// The cwd facts line above the chips (reserved row, painted only while
+    /// Project holds focus or the mouse).
+    pub cwd_line: RtRect,
+    /// The editor window (the message, or the flags editor focused in its
+    /// place) in body coords.
     pub message: RtRect,
     pub start_chunk: usize,
     pub editor_rows: usize,
+    /// The keybar's body row (right under the bottom chip row).
+    pub keybar_y: u16,
     /// The [cancel] footer rect while an attempt is pending.
     pub cancel: Option<RtRect>,
-    /// The selected list row's full-width rect, when a list is shown.
-    pub selected: Option<RtRect>,
 }
 
 impl Launcher {
@@ -2519,103 +2560,106 @@ impl Launcher {
         }
         let framed_w = (cols.saturating_sub(8)).min(96).max(3);
         let inner_w = framed_w.saturating_sub(2).max(1);
-        // The tab bar: greedy wrap of the axis tabs across `inner_w`. Every
-        // tab cell is its label plus two padding columns, one gap between.
-        let order = Focus::tab_order(self, &view.launcher_catalog);
-        let mut tab_rows_n = 1usize;
-        let mut row_w = 0usize;
-        for f in &order {
-            let w = label_width(f.tab_title()) as usize + 2;
-            if row_w + w > inner_w && row_w > 0 {
-                tab_rows_n += 1;
-                row_w = 0;
+        // Fixed rows: the cwd facts line, the top chips, a blank row, the
+        // editor (1..=6 rows), a blank row, the bottom chip rows (1, or 2
+        // when the right group wraps), the keybar, the lifecycle line.
+        // Bottom row split: `+ mode` left; harness, model and effort
+        // right-aligned. When the two groups cannot share one row the right
+        // group wraps to its own row - a chip value is never truncated to
+        // make the row.
+        let top: Vec<Focus> = vec![Focus::Where, Focus::Project];
+        let left: Vec<Focus> = vec![Focus::Plus, Focus::Permission];
+        let right: Vec<Focus> = match Focus::tab_order(self, &view.launcher_catalog).last() {
+            Some(Focus::Effort) => vec![Focus::Harness, Focus::Model, Focus::Effort],
+            _ => vec![Focus::Harness, Focus::Model],
+        };
+        let chip_w = |f: Focus| -> usize {
+            if f == Focus::Plus {
+                return 1;
             }
-            row_w += w + 1;
-        }
-        // Fixed rows: values strip, tab bar, keybar, lifecycle line.
-        let other = 2 + tab_rows_n + 2;
-        let body_cap = rows.saturating_sub(2 + other).max(4);
-        let body_h = 10.min(body_cap).max(4);
-        let framed_h = 2 + other + body_h;
+            label_width(&self.chip_label(f)) as usize + 3 // text + caret + padding
+        };
+        let left_w: usize = left.iter().map(|f| chip_w(*f)).sum::<usize>() + (left.len() - 1) * 2;
+        let right_w: usize =
+            right.iter().map(|f| chip_w(*f)).sum::<usize>() + (right.len() - 1) * 2;
+        let bottom_rows = if left_w + 2 + right_w <= inner_w {
+            1
+        } else {
+            2
+        };
+        // The editor gets the leftover height, capped at 6 wrapped rows.
+        let other = 1 + 1 + 1 + 1 + bottom_rows + 2; // cwd, top chips, 2 blanks, bottom chips, keybar+footer
+        let editor_rows = (rows.saturating_sub(2 + other)).clamp(1, 6);
+        let framed_h = 2 + other + editor_rows;
         let origin = (
             ((rows.saturating_sub(framed_h)) / 2) as u16,
             ((cols.saturating_sub(framed_w)) / 2) as u16,
         );
-        // Tab rects, per wrapped row, in body coordinates.
-        let mut tabs: Vec<(Focus, RtRect)> = Vec::new();
-        let mut ry = 1usize; // row 0 is the values strip
+        // Top chips at body row 1 (row 0 is the cwd line).
+        let mut chips: Vec<(Focus, RtRect)> = Vec::new();
         let mut x = 0usize;
-        for f in &order {
-            let w = label_width(f.tab_title()) as usize + 2;
-            if x + w > inner_w && x > 0 {
-                ry += 1;
-                x = 0;
-            }
-            tabs.push((*f, RtRect::new(x as u16, ry as u16, w as u16, 1)));
-            x += w + 1;
+        for f in &top {
+            let w = chip_w(*f);
+            chips.push((*f, RtRect::new(x as u16, 1, w as u16, 1)));
+            x += w + 2;
         }
-        let body_y = 1 + tab_rows_n;
-        let body = RtRect::new(0, body_y as u16, inner_w as u16, body_h as u16);
-        // List tabs: the visible window follows the selection; editor tabs
-        // get the message-editor window follow instead.
-        let (row_rects, message, start_chunk, editor_rows, selected) = if self.focus
-            == Focus::Message
-        {
-            let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
-            let chunks = wrap_message(&self.draft.message, wrap_w);
-            let (cur_row, _) = wrapped_cursor(&self.draft.message, self.draft.cursor_chars, wrap_w);
-            let editor_rows = body_h;
-            let mut start = chunks.len().saturating_sub(editor_rows);
-            if cur_row < start {
-                start = cur_row;
-            } else if cur_row >= start + editor_rows {
-                start = cur_row + 1 - editor_rows;
+        // Bottom chips.
+        let bottom_y = 4 + editor_rows;
+        if bottom_rows == 1 {
+            let mut x = 0usize;
+            for f in &left {
+                let w = chip_w(*f);
+                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
+                x += w + 2;
             }
-            (
-                Vec::new(),
-                RtRect::new(0, body_y as u16, inner_w as u16, editor_rows as u16),
-                start,
-                editor_rows,
-                None,
-            )
-        } else if self.focus.is_list() {
-            let (rows_list, _) = tab_body_rows(self, &view.launcher_catalog, &view.backlog);
-            let n = rows_list.len();
-            let sel_eff = effective_sel(&rows_list, self.sel);
-            let start = sel_eff.min(n.saturating_sub(1)).saturating_sub(body_h / 2);
-            let mut selected = None;
-            let row_rects = (0..body_h)
-                .filter_map(|k| {
-                    let idx = start + k;
-                    rows_list.get(idx).map(|_| {
-                        let r = RtRect::new(0, (body_y + k) as u16, inner_w as u16, 1);
-                        if idx == sel_eff {
-                            selected = Some(r);
-                        }
-                        (idx, r)
-                    })
-                })
-                .collect();
-            (row_rects, RtRect::new(0, 0, 0, 0), 0, 0, selected)
+            let mut x = inner_w - right_w;
+            for f in &right {
+                let w = chip_w(*f);
+                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
+                x += w + 2;
+            }
         } else {
-            // The Flags tab: a one-line editor painted in the body.
-            (Vec::new(), RtRect::new(0, 0, 0, 0), 0, 0, None)
-        };
+            let mut x = 0usize;
+            for f in &left {
+                let w = chip_w(*f);
+                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
+                x += w + 2;
+            }
+            let mut x = inner_w - right_w;
+            for f in &right {
+                let w = chip_w(*f);
+                chips.push((
+                    *f,
+                    RtRect::new(x as u16, (bottom_y + 1) as u16, w as u16, 1),
+                ));
+                x += w + 2;
+            }
+        }
+        // The editor window follows the cursor (1..=6 rows).
+        let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
+        let chunks = wrap_message(&self.draft.message, wrap_w);
+        let (cur_row, _) = wrapped_cursor(&self.draft.message, self.draft.cursor_chars, wrap_w);
+        let mut start_chunk = chunks.len().saturating_sub(editor_rows);
+        if cur_row < start_chunk {
+            start_chunk = cur_row;
+        } else if cur_row >= start_chunk + editor_rows {
+            start_chunk = cur_row + 1 - editor_rows;
+        }
         // The [cancel] item rides the keybar row while an attempt is pending.
         let pending = matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. });
-        let cancel = pending.then(|| RtRect::new(0, (body_y + body_h) as u16, 8, 1));
+        let keybar_y = bottom_y + bottom_rows;
+        let cancel = pending.then(|| RtRect::new(0, keybar_y as u16, 8, 1));
         Some(SheetLayout {
             origin,
             framed_w,
             framed_h,
-            tabs,
-            body,
-            row_rects,
-            message,
+            chips,
+            cwd_line: RtRect::new(0, 0, inner_w as u16, 1),
+            message: RtRect::new(0, 3, inner_w as u16, editor_rows as u16),
             start_chunk,
             editor_rows,
+            keybar_y: keybar_y as u16,
             cancel,
-            selected,
         })
     }
 
@@ -2647,30 +2691,41 @@ impl Launcher {
         );
         let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
         let mut buf = RtBuffer::empty(RtRect::new(0, 0, inner_w as u16, body_h as u16));
-        // The values strip: every axis's current choice, read-only, dim.
-        buf.set_string(
-            0,
-            0,
-            compact_chip_value(&self.values_strip(), inner_w),
-            role_style(Role::BodyDim, &view.theme),
-        );
-        // The tab bar; the active tab wears the selected block.
-        for (f, r) in &sl.tabs {
-            let role = if *f == self.focus {
-                Role::BodySel
-            } else {
-                Role::Body
-            };
-            paint_chip(
-                &mut buf,
-                *r,
-                f.tab_title(),
-                role_style(role, &view.theme),
-                false,
+        // The cwd facts line (row 0, reserved): the label bold, the full
+        // path regular. It shows while Project holds focus or the mouse.
+        if self.focus == Focus::Project || self.project_hover {
+            buf.set_string(
+                sl.cwd_line.x,
+                sl.cwd_line.y,
+                "Working directory",
+                role_style(Role::PanelHead, &view.theme),
+            );
+            buf.set_string(
+                sl.cwd_line.x + 18,
+                sl.cwd_line.y,
+                compact_chip_value(&self.draft.cwd(), inner_w.saturating_sub(18)),
+                role_style(Role::PanelBody, &view.theme),
             );
         }
-        // The body: the active tab.
-        if self.focus == Focus::Message {
+        // The chip row(s): the focused chip is the one filled chip; the
+        // caret rides the dim caret role.
+        for (f, r) in &sl.chips {
+            let style = if *f == self.focus {
+                role_style(Role::BodySel, &view.theme)
+            } else {
+                role_style(Role::PanelBody, &view.theme)
+            };
+            paint_chip(&mut buf, *r, &self.chip_label(*f), style, false);
+            if *f != Focus::Plus {
+                let caret_x = r.x + r.width - 1;
+                buf[(caret_x, r.y)].set_char('\u{25be}');
+                buf[(caret_x, r.y)].set_style(role_style(Role::PanelMeta, &view.theme));
+            }
+        }
+        // The editor: prompt gutter, wrapped rows, cursor mark, and on an
+        // empty draft the dim placeholder naming the shape. The flags
+        // editor takes the same rows while it holds the keyboard.
+        if self.focus != Focus::ExtraFlags {
             // The editor: prompt gutter, wrapped rows, cursor mark, and on
             // an empty draft the dim placeholder naming the shape.
             let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
@@ -2706,24 +2761,26 @@ impl Launcher {
                     buf.set_string(
                         sl.message.x + PROMPT_GUTTER as u16,
                         sl.message.y,
-                        "/fno:target <node> or a task",
-                        role_style(Role::BodyDim, &view.theme),
+                        "What do you want to work on?",
+                        role_style(Role::PanelMeta, &view.theme),
                     );
                 }
             }
-        } else if self.focus == Focus::ExtraFlags {
-            // The flags editor: the field with its cursor, and the parse
-            // state under it - argv count, or the refusal verbatim.
-            let r = RtRect::new(0, sl.body.y, inner_w as u16, 1);
+        }
+        if self.focus == Focus::ExtraFlags {
+            // The flags editor in the editor's place: the field with its
+            // cursor, and the parse state under it - argv count, or the
+            // refusal verbatim.
+            let r = RtRect::new(0, sl.message.y, inner_w as u16, 1);
             buf.set_string(
                 0,
-                sl.body.y,
+                sl.message.y,
                 "flags ",
-                role_style(Role::BodyDim, &view.theme),
+                role_style(Role::PanelMeta, &view.theme),
             );
             buf.set_string(
                 6,
-                sl.body.y,
+                sl.message.y,
                 compact_chip_value(&self.draft.extra_flags, inner_w.saturating_sub(6)),
                 RtStyle::new(),
             );
@@ -2742,68 +2799,23 @@ impl Launcher {
             };
             buf.set_string(
                 0,
-                sl.body.y + 1,
+                sl.message.y + 1,
                 compact_chip_value(&state, inner_w),
-                role_style(Role::BodyDim, &view.theme),
+                role_style(Role::PanelMeta, &view.theme),
             );
-        } else {
-            // A list tab: full-width rows, the selection painted across the
-            // WHOLE inner width. The label is never ellipsized to make room
-            // for the hint - the hint truncates instead, so a refusal's
-            // label ("model list unavailable") always reads whole.
-            let (list, _) = tab_body_rows(self, &view.launcher_catalog, &view.backlog);
-            for (idx, r) in &sl.row_rects {
-                let Some(row) = list.get(*idx) else {
-                    continue;
-                };
-                let selected = sl.selected == Some(*r);
-                match row {
-                    PopupRow::Header(text) => {
-                        buf.set_string(r.x, r.y, text, role_style(Role::BodyDim, &view.theme));
-                    }
-                    PopupRow::Entry {
-                        glyph,
-                        label,
-                        hint,
-                        enabled,
-                    } => {
-                        let style = if selected {
-                            role_style(Role::BodySel, &view.theme)
-                        } else if !enabled {
-                            role_style(Role::BodyDim, &view.theme)
-                        } else {
-                            RtStyle::new()
-                        };
-                        buf.set_style(*r, style);
-                        let mut text = String::new();
-                        if !glyph.is_empty() {
-                            text.push_str(glyph);
-                            text.push(' ');
-                        }
-                        text.push_str(label);
-                        buf.set_string(r.x, r.y, &text, style);
-                        if !hint.is_empty() {
-                            let used = label_width(&text) as usize;
-                            let room = (r.width as usize).saturating_sub(used + 1);
-                            if room > 2 {
-                                let hint_text = compact_chip_value(hint, room);
-                                let hw = label_width(&hint_text) as usize;
-                                buf.set_string(
-                                    r.x + (r.width as usize - hw) as u16,
-                                    r.y,
-                                    &hint_text,
-                                    role_style(Role::BodyDim, &view.theme),
-                                );
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        }
+        // A non-empty flags value, unfocused: one dim line under the input.
+        if !self.draft.extra_flags.is_empty() && self.focus != Focus::ExtraFlags {
+            buf.set_string(
+                0,
+                sl.message.y + sl.editor_rows as u16,
+                compact_chip_value(&format!("flags {}", self.draft.extra_flags), inner_w),
+                role_style(Role::PanelMeta, &view.theme),
+            );
         }
         // Keybar row: [cancel] while pending, then the key rule; the
         // lifecycle line under it, dim.
-        let keybar_y = sl.body.y + sl.body.height;
+        let keybar_y = sl.keybar_y;
         if let Some(cr) = sl.cancel {
             paint_chip(
                 &mut buf,
@@ -2836,19 +2848,9 @@ impl Launcher {
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             return "esc cancel".to_string();
         }
-        match self.focus {
-            Focus::Message => {
-                "\u{21b5} launch \u{b7} ^j newline \u{b7} type message \u{b7} esc close".to_string()
-            }
-            Focus::Model => {
-                "\u{2191}\u{2193} choose \u{b7} \u{21b5} pick \u{b7} \u{2190}\u{2192} effort \u{b7} ^j launch \u{b7} esc close"
-                    .to_string()
-            }
-            Focus::ExtraFlags => {
-                "type flags \u{b7} \u{2190}\u{2192} tab \u{b7} esc close".to_string()
-            }
-            _ => "\u{2191}\u{2193} choose \u{b7} \u{21b5} pick \u{b7} \u{2190}\u{2192} tab \u{b7} ^j launch \u{b7} esc close".to_string(),
-        }
+        // One grammar for the whole chip row: Tab moves, Enter opens a
+        // picker (or launches from the input), ^j is a newline.
+        "\u{21b5} open/launch \u{b7} tab next \u{b7} ^j newline \u{b7} esc close".to_string()
     }
 }
 
@@ -2860,76 +2862,8 @@ fn launcher_can_launch(view: &View) -> bool {
         .is_some_and(|l| !matches!(l.phase, Phase::Submitting { .. } | Phase::Unknown { .. }))
 }
 
-/// The next selectable index stepping `delta` from `sel`: header rows are
-/// captions, never targets, so they are stepped over; the ends stop the
-/// walk (no wrap - the list's ends are visible in the body).
-fn step_selection(rows: &[PopupRow], sel: usize, delta: i32) -> usize {
-    let last = rows.len().saturating_sub(1);
-    let mut idx = sel.min(last) as i64;
-    loop {
-        idx += delta as i64;
-        if idx < 0 {
-            return 0;
-        }
-        if idx as usize > last {
-            return last;
-        }
-        if !matches!(rows.get(idx as usize), Some(PopupRow::Header(_))) {
-            return idx as usize;
-        }
-    }
-}
-
-/// The effective selection: a body never RESTS on a header caption. If the
-/// stored index points at one (the common case: a fresh body at 0), the
-/// first entry after it is the selection for paint, layout and commit.
-fn effective_sel(rows: &[PopupRow], sel: usize) -> usize {
-    if matches!(rows.get(sel), Some(PopupRow::Header(_))) {
-        step_selection(rows, sel, 1)
-    } else {
-        sel
-    }
-}
-
-/// The active tab body's rows with their commit actions: the axis's full
-/// row set from [`picker_rows`], narrowed by the live filter. Derived at
-/// layout and paint time, so a catalog landing re-renders the body with no
-/// refresh step.
-pub(crate) fn tab_body_rows(
-    l: &Launcher,
-    catalog: &Option<CatalogOutcome>,
-    backlog: &[crate::proto::BacklogCard],
-) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
-    let (all_rows, all_actions) = picker_rows(l, catalog, backlog);
-    let q = l.filter.to_lowercase();
-    let mut rows: Vec<PopupRow> = Vec::new();
-    let mut actions: Vec<Option<PickerAction>> = Vec::new();
-    let mut last_header: Option<(PopupRow, Option<PickerAction>)> = None;
-    for (row, action) in all_rows.into_iter().zip(all_actions.into_iter()) {
-        match &row {
-            PopupRow::Header(_) => last_header = Some((row, action)),
-            PopupRow::Entry { label, .. } => {
-                if !q.is_empty() && !label.to_lowercase().contains(&q) {
-                    continue;
-                }
-                if let Some((hr, ha)) = last_header.take() {
-                    rows.push(hr);
-                    actions.push(ha);
-                }
-                rows.push(row);
-                actions.push(action);
-            }
-            other => {
-                rows.push(other.clone());
-                actions.push(action);
-            }
-        }
-    }
-    (rows, actions)
-}
-
 /// The one draw arm the client's overlay chain calls: the sheet, then the
-/// `@` node picker (the one remaining popover), in that order.
+/// open popover (a chip picker, or the `@` node picker), in that order.
 pub(crate) fn draw_overlay(
     view: &View,
     cells: &mut [crate::proto::Cell],
@@ -3066,6 +3000,7 @@ pub(crate) async fn launcher_mouse(
             }
             match hit {
                 Some(target) => {
+                    let field = picker.field;
                     picker.popup.select(target);
                     let action = picker
                         .popup
@@ -3076,7 +3011,7 @@ pub(crate) async fn launcher_mouse(
                         .flatten();
                     l.picker = Some(picker);
                     if let Some(action) = action {
-                        apply_picker_action(l, &catalog, action, portal);
+                        apply_picker_action(l, &catalog, action, portal, field);
                     }
                 }
                 _ => {
@@ -3108,36 +3043,18 @@ pub(crate) async fn launcher_mouse(
             && row >= oy + r.y as usize
             && row < oy + (r.y + r.height) as usize
     };
-    let hit_row = sl
-        .row_rects
-        .iter()
-        .find(|(_, r)| hit(*r))
-        .map(|(idx, _)| *idx);
-    let hit_tab = sl.tabs.iter().find(|(_, r)| hit(*r)).map(|(f, _)| *f);
+    let hit_chip = sl.chips.iter().find(|(_, r)| hit(*r)).map(|(f, _)| *f);
+    let hit_message = hit(sl.message);
     let hit_cancel = sl.cancel.is_some_and(|r| hit(r));
     if let MouseKind::Move = rep.kind {
-        // Motion over a body row selects it and never closes the sheet;
-        // motion anywhere else over the sheet is consumed silently.
-        if let Some(idx) = hit_row {
-            if let Some(l) = view.launcher.as_mut() {
-                l.sel = idx;
-            }
+        // Motion over the Project chip shows the cwd facts line; motion
+        // anywhere else over the sheet is consumed silently.
+        if let Some(l) = view.launcher.as_mut() {
+            l.project_hover = hit_chip == Some(Focus::Project);
         }
         return Ok(true);
     }
     if !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-        return Ok(true);
-    }
-    let portal = next_free_portal(view);
-    let catalog = view.launcher_catalog.clone();
-    if let Some(tab) = hit_tab {
-        if let Some(l) = view.launcher.as_mut() {
-            if l.focus != tab {
-                l.sel = 0;
-                l.filter.clear();
-            }
-            l.focus = tab;
-        }
         return Ok(true);
     }
     if hit_cancel {
@@ -3147,25 +3064,24 @@ pub(crate) async fn launcher_mouse(
         }
         return Ok(true);
     }
-    let Some(idx) = hit_row else {
+    if hit_message {
+        // The obvious gesture: a press on the input focuses it.
+        if let Some(l) = view.launcher.as_mut() {
+            l.focus = Focus::Message;
+        }
+        return Ok(true);
+    }
+    let Some(field) = hit_chip else {
         return Ok(true);
     };
+    // A press on a chip focuses it and drops its picker at it.
+    let anchor = view
+        .launcher
+        .as_ref()
+        .and_then(|l| chip_anchor(l, view, field));
     if let Some(l) = view.launcher.as_mut() {
-        if l.sel != idx {
-            // First press on a row: select it. A press on the ALREADY
-            // selected row commits it, matching Enter.
-            l.sel = idx;
-            return Ok(true);
-        }
-    }
-    let action = view.launcher.as_ref().and_then(|l| {
-        let (_, actions) = tab_body_rows(l, &view.launcher_catalog, &view.backlog);
-        actions.get(idx).cloned().flatten()
-    });
-    if let Some(action) = action {
-        if let Some(l) = view.launcher.as_mut() {
-            apply_picker_action(l, &catalog, action, portal);
-        }
+        l.focus = field;
+        open_picker_at(l, &view.launcher_catalog, &view.backlog, anchor, field);
     }
     Ok(true)
 }
