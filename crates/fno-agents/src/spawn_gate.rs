@@ -1174,7 +1174,7 @@ fn maybe_emit_spawn_cap_escape() {
     if !spawn_cap_would_emit(|k| std::env::var(k).ok()) {
         return;
     }
-    let _ = std::process::Command::new("fno")
+    let _ = std::process::Command::new(crate::scrape::fno_bin())
         .args([
             "doctor",
             "event",

@@ -1721,7 +1721,12 @@ mod tests {
             || {
                 let old_path = std::env::var("PATH").unwrap_or_default();
                 std::env::set_var("X_A45C_SHIM_LOG", &log_path);
+                let prev_bin = std::env::var_os("FNO_BIN");
                 std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                // The probe execs through scrape::fno_bin, which under
+                // cfg!(test) answers only a declared FNO_BIN: pin the same
+                // shim PATH pins.
+                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let records = vec![
                     witness_rec("holder-a", &s_live),
                     witness_rec("holder-b", &s_wire1),
@@ -1743,6 +1748,10 @@ mod tests {
                     ));
                 }
                 let logged = std::fs::read_to_string(&log_path).unwrap();
+                match prev_bin {
+                    Some(v) => std::env::set_var("FNO_BIN", v),
+                    None => std::env::remove_var("FNO_BIN"),
+                }
                 std::env::set_var("PATH", old_path);
                 std::env::remove_var("X_A45C_SHIM_LOG");
                 // Other tests in this binary share the process PATH and can
@@ -1778,10 +1787,19 @@ mod tests {
         let s_wire = format!("xa45c-dead-{uniq}");
         with_registry(serde_json::json!([]), || {
             let old_path = std::env::var("PATH").unwrap_or_default();
+            let prev_bin = std::env::var_os("FNO_BIN");
             std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+            // The probe execs through scrape::fno_bin, which under
+            // cfg!(test) answers only a declared FNO_BIN: pin the same
+            // shim PATH pins.
+            std::env::set_var("FNO_BIN", shim_dir.join("fno"));
             let rec = witness_rec("holder-x", &s_wire);
             let (witness, _drain) = session_witness_primed_for(std::iter::once(&rec));
             let answer = witness(&rec);
+            match prev_bin {
+                Some(v) => std::env::set_var("FNO_BIN", v),
+                None => std::env::remove_var("FNO_BIN"),
+            }
             std::env::set_var("PATH", old_path);
             assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
         });
@@ -1861,7 +1879,12 @@ mod tests {
             || {
                 let old_path = std::env::var("PATH").unwrap_or_default();
                 std::env::set_var("X_A45C_SHIM_LOG", &log_path);
+                let prev_bin = std::env::var_os("FNO_BIN");
                 std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                // The probe execs through scrape::fno_bin, which under
+                // cfg!(test) answers only a declared FNO_BIN: pin the same
+                // shim PATH pins.
+                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let records = vec![
                     witness_rec("holder-fresh", &s_fresh),
                     witness_rec("holder-stale", &s_stale),
@@ -1870,6 +1893,10 @@ mod tests {
                 // Touch the witness so the primed answers are actually read.
                 let _ = witness(&records[0]);
                 let _ = witness(&records[1]);
+                match prev_bin {
+                    Some(v) => std::env::set_var("FNO_BIN", v),
+                    None => std::env::remove_var("FNO_BIN"),
+                }
                 std::env::set_var("PATH", old_path);
                 std::env::remove_var("X_A45C_SHIM_LOG");
                 let logged = std::fs::read_to_string(&log_path).unwrap();
@@ -1909,10 +1936,19 @@ mod tests {
             }]),
             || {
                 let old_path = std::env::var("PATH").unwrap_or_default();
+                let prev_bin = std::env::var_os("FNO_BIN");
                 std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                // The probe execs through scrape::fno_bin, which under
+                // cfg!(test) answers only a declared FNO_BIN: pin the same
+                // shim PATH pins.
+                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let (witness, _drain) = default_session_witness();
                 let rec = witness_rec("spawn-handover:w-dead", "s-king-elsewhere");
                 let answer = witness(&rec);
+                match prev_bin {
+                    Some(v) => std::env::set_var("FNO_BIN", v),
+                    None => std::env::remove_var("FNO_BIN"),
+                }
                 std::env::set_var("PATH", old_path);
                 assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
             },
@@ -1937,7 +1973,12 @@ mod tests {
                 let td = tempfile::TempDir::new().unwrap();
                 let shim_dir = write_truth_shim(td.path(), "exit 1");
                 let old_path = std::env::var("PATH").unwrap_or_default();
+                let prev_bin = std::env::var_os("FNO_BIN");
                 std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                // The probe execs through scrape::fno_bin, which under
+                // cfg!(test) answers only a declared FNO_BIN: pin the same
+                // shim PATH pins.
+                std::env::set_var("FNO_BIN", shim_dir.join("fno"));
                 let cell = std::cell::RefCell::new(None);
                 let index_cell = std::cell::RefCell::new(None);
                 let rec = witness_rec("spawn-handover:w-worker", "s-king");
@@ -1954,6 +1995,10 @@ mod tests {
                 let row = &sweep["claims"][0];
                 assert_eq!(row["session_id"], "s-worker");
                 assert_eq!(row["metadata"]["dispatched_by_session"], "s-king");
+                match prev_bin {
+                    Some(v) => std::env::set_var("FNO_BIN", v),
+                    None => std::env::remove_var("FNO_BIN"),
+                }
                 std::env::set_var("PATH", old_path);
             },
         );

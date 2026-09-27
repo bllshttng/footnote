@@ -442,7 +442,7 @@ fn ruling_for(rulings: &[Value], report: &str) -> Option<String> {
 }
 
 fn note_exit(node: &str, body: &str, quiet: bool) -> Option<i32> {
-    let mut cmd = Command::new("fno");
+    let mut cmd = Command::new(crate::scrape::fno_bin());
     cmd.args(["backlog", "note", node, "--body-file", "-"]);
     if quiet {
         cmd.arg("--quiet");

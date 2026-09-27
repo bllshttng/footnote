@@ -1632,7 +1632,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let ab_handle = if sandbox {
         tokio::spawn(std::future::ready(()))
     } else {
-        let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = crate::scrape::fno_bin().to_string_lossy().into_owned();
         let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
         let live = Arc::clone(&ab_live);
         let shutdown = Arc::clone(&ab_shutdown);
@@ -5195,7 +5195,7 @@ pub enum PaneProbe {
 /// "absent" means the mux layer itself said the pane is gone.
 pub(crate) fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let pane = pane_id.to_string();
-    let mut child = match std::process::Command::new("fno")
+    let mut child = match std::process::Command::new(crate::scrape::fno_bin())
         .args([
             "mux", "pane", "read", "--server", session, "--lines", "1", &pane,
         ])
@@ -6066,7 +6066,7 @@ pub(crate) fn apply_session_transition(
 /// shell-and-parse-a-marker pattern). Fails closed to `None` on anything but
 /// a clean exit with a non-empty `session_id=` line.
 fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("fno")
+    let out = std::process::Command::new(crate::scrape::fno_bin())
         .args(["agents", "codex-session-for-pid", &pid.to_string()])
         .output()
         .ok()?;

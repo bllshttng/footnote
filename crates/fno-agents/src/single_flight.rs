@@ -31,7 +31,7 @@
 //! ## Callers not yet on it, and the one that needs care
 //!
 //! Three spawn sites ride this today: both `truth_probe` sites and the
-//! `discovered-json` helper in `bin/client.rs`. The other `Command::new("fno")`
+//! `discovered-json` helper in `bin/client.rs`. The other `fno` shellout
 //! sites in this crate are unported because porting all of them at once is a
 //! rewrite the evidence did not support. One of them has since been measured,
 //! so it is named rather than left to be rediscovered.

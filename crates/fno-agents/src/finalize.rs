@@ -1855,7 +1855,7 @@ fn valid_project_id(s: &str) -> bool {
 
 /// Best-effort PR metadata for the current HEAD/branch through the REST reader.
 pub(crate) fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
-    let mut command = Command::new("fno");
+    let mut command = Command::new(crate::scrape::fno_bin());
     command.args(["do", "pr", "info"]);
     if let Some(number) = number {
         command.arg(number.to_string());
@@ -1911,7 +1911,7 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
         eprintln!("finalize: no open PR found for branch; skipped pr_number stamp for node {node}");
         return;
     };
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args([
             "backlog",
             "update",
@@ -2312,7 +2312,7 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
         created_at,
         &now_rfc3339_utc(),
     );
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args(&args)
         .current_dir(cwd)
         .status()
@@ -2394,7 +2394,7 @@ fn cancel_settle_claims(cwd: &Path, m: &ManifestFields) {
         eprintln!("finalize: cancel settle skipped for key {key} (not a node claim)");
         return;
     }
-    let ok = Command::new("fno")
+    let ok = Command::new(crate::scrape::fno_bin())
         .args(cancel_release_args(key, holder))
         .current_dir(cwd)
         .status()
@@ -2764,7 +2764,7 @@ fn extract_operator_question(text: &str) -> Option<String> {
 /// inbox outstanding --json` an operator would run, so dedup can never drift
 /// from what is actually on record (never re-derived state).
 fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
-    let out = match Command::new("fno")
+    let out = match Command::new(crate::scrape::fno_bin())
         .current_dir(cwd)
         .args(["inbox", "outstanding", "--json"])
         .output()
@@ -2784,7 +2784,7 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 }
 
 fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
-    let mut cmd = Command::new("fno");
+    let mut cmd = Command::new(crate::scrape::fno_bin());
     cmd.current_dir(cwd).args([
         "inbox",
         "outstanding",
