@@ -42,6 +42,30 @@ schema floor (`retention.minimum_ephemeral_ttl_hours`, currently 672) in
 bounded deletes. Rejected and migration rows never expire; an explicit
 operator deletion is the only other removal.
 
+## Poll coalescing and the coverage epoch
+
+Declared poll kinds coalesce at both insert paths (`append_envelope` and
+`import_file`). `OBSERVATION_HEARTBEATS` declares `(guard_decision, 300s)`
+and `(advance_skipped, 1800s)`. A healthy poll whose subject, fingerprint,
+and heartbeat window match the last stored observation is counted pending
+(`event_observation_pending`) instead of stored; a block, a malformed
+payload, an undeclared kind, and every heartbeat expiry store ordinary rows.
+When the window closes (fingerprint change, heartbeat expiry, or the end-of-sync
+sweep), one summary row carries the total as an explicit
+`occurrence_count` in its payload. Readers sum `occurrence_count` (default
+1) across matched rows to recover represented totals; stored rows and
+represented occurrences are two counts, never merged.
+
+Every open stamps `events_meta.coverage_complete_since_ms` once: the first
+moment this build observed the store. History proven complete starts there,
+never at `MIN(ts_ms)`. `coverage(journal, since_ms, types)` returns a
+receipt: `unreadable` (missing or unopenable store), `unknown` (no stamp,
+a store opened only by pre-epoch builds), `partial` (the requested `since`
+reaches before the proven start), or `complete`. The proven start is the
+epoch for durable and gate kinds, and the later of epoch and the last
+prune's retention cutoff for ephemeral kinds. A missing row before the
+proven start never reads as a confident zero.
+
 ## Ownership boundaries
 
 `events.db` owns event facts only:
