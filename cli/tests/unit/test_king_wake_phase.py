@@ -2142,3 +2142,117 @@ def test_a_blocked_truth_read_yields_the_crown_and_still_wakes_the_next(
     assert sorted(scope for scope, *_ in rec.dispatches) == ["epic-b1"]
     assert summary["evaluated"] >= 1
     assert summary["truth_reads"] == 1
+
+
+def _two_crown_setup(root):
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rows = lambda: [
+        SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
+        SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
+    ]
+    return crowns, rows
+
+
+def test_a_blocked_graph_read_degrades_and_mail_still_wakes(tmp_path, monkeypatch):
+    # The graph read's timeout used to stop the whole pass: one slow read on
+    # a thrashing machine zeroed every crown, mail triggers included (the
+    # 2026-09-27 16:40Z tick read evaluated=0/5). The pass now degrades to no
+    # board signal and the cheaper triggers still wake.
+    import threading
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns, rows = _two_crown_setup(root)
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    b_addresses = {"king-b", "cc22dd33", "epic-b1"}
+    try:
+        summary = run_king_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            court_fn=_court(crowns),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [object()] if address in b_addresses else [],
+            entries_fn=slow_graph,
+            answered_fn=lambda: [],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert [scope for scope, *_ in rec.dispatches] == ["epic-b1"]
+    assert "graph read timed out" in summary["note"]
+    assert not summary.get("budget_spent")
+    assert summary["evaluated"] == 2
+
+
+def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
+    tmp_path, monkeypatch
+):
+    # The stop note used to clobber the graph-timeout note, so the tick row
+    # read as an unexplained budget stop. The stop now appends.
+    import itertools
+    import threading
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns, rows = _two_crown_setup(root)
+    # The rotation starts on targets[offset]; the quiet (board-lane) crown
+    # must be evaluated first so its degraded read precedes the stop.
+    offset = int(NOW.timestamp() // 900) % 2
+    quiet, loud = crowns[offset], crowns[1 - offset]
+    short_ids = {"king-a": "aa11bb22", "king-b": "cc22dd33"}
+    loud_addresses = {loud["holder"], short_ids[loud["holder"]], loud["scope"]}
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    seconds = itertools.cycle([44.0, 14.0])
+    try:
+        summary = run_king_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            court_fn=_court(crowns),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [object()] if address in loud_addresses else [],
+            entries_fn=slow_graph,
+            answered_fn=lambda: [],
+            seconds_left_fn=lambda: next(seconds),
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["budget_spent"] is True
+    assert "graph read timed out" in summary["note"]
+    assert "budget spent after 1 of 2 crowns" in summary["note"]

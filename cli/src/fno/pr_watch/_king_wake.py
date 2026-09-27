@@ -572,11 +572,14 @@ def run_king_wake(
         finally:
             pool.shutdown(wait=False)
 
+    def _note(msg: str) -> None:
+        prior = str(summary.get("note") or "")
+        summary["note"] = f"{prior}; {msg}" if prior else msg
+
     def _budget_stop() -> dict[str, Any]:
-        budget_note = (
-            f"budget spent after {summary['evaluated']} of {len(targets)} crowns"
-        )
-        summary["note"] = f"{note}; {budget_note}" if note else budget_note
+        # Appends, never clobbers: a stop must keep the note naming why
+        # (a clobbered graph-timeout note once read as an unexplained stop).
+        _note(f"budget spent after {summary['evaluated']} of {len(targets)} crowns")
         summary["budget_spent"] = True
         return summary
 
@@ -650,8 +653,12 @@ def run_king_wake(
                 _step("graph")
                 entries, cut = _bounded(entries_fn, wait_s=_wait_cap(left))
                 if cut:
-                    summary["note"] = "graph read timed out; crowns wait for the next tick"
-                    return _budget_stop()
+                    # Degrade, never stop: a thrashing machine must not zero
+                    # the pass. `[]` (not None) skips the board lane without
+                    # re-entering this read for later crowns; the mail and
+                    # answer triggers still fire.
+                    entries = []
+                    _note("graph read timed out; board triggers wait for the next tick")
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
             _step("board")
