@@ -159,7 +159,10 @@ FIELD_META: dict[str, Meta] = {
     "post_merge.sync_command": Meta(
         "advanced",
         "Canonical-sync incantation run via `bash -lc` after a merge (e.g. "
-        "`git fetch origin main && git merge --ff-only origin/main && fno doctor update && fno agents restart`). Unset = off.",
+        "`git fetch origin main && git merge --ff-only origin/main && fno doctor update`). Unset = off. "
+        "Deploy only: never restart a shared process (daemon, mux) inside it; a restart "
+        "replaces the process mid-sync and orphans running sync shells. Restart from the "
+        "operator lane after the sync lands.",
     ),
     "post_merge.sync_paths": Meta(
         "advanced",
