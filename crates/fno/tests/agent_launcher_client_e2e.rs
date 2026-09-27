@@ -410,5 +410,63 @@ fn arrows_in_the_model_body_move_and_up_never_launches() {
     );
 }
 
+/// The regression behind the model-floor contract: with claude chosen, the
+/// Model tab listed
+/// only "harness default" because no account record pinned a model. Each
+/// harness now floors its list off the capability table; configured rows
+/// merge over. One test per harness: the launcher retains focus across a
+/// close/reopen, so each composer runs from a fresh client.
+#[test]
+fn claude_model_tab_lists_the_claude_families() {
+    let scratch = Scratch::new("composer-model-floor");
+    seed_routing_config(&scratch);
+    let envs = with_fake_harnesses(&scratch);
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    pick_claude_and_open_model_tab(&mut h);
+    // The floor lands with the catalog read; the accounts door may take up
+    // to 30s in CI, so wait like the route-hint test does.
+    let screen = h.wait_screen(35, |s| {
+        s.contains("harness default")
+            && s.contains("opus")
+            && s.contains("sonnet")
+            && s.contains("haiku")
+    });
+    for want in ["harness default", "opus", "sonnet", "haiku", "fable"] {
+        assert!(screen.contains(want), "claude floor lists {want}: {screen}");
+    }
+}
+
+#[test]
+fn codex_model_tab_lists_the_codex_slugs() {
+    let scratch = Scratch::new("composer-model-floor-codex");
+    seed_routing_config(&scratch);
+    let envs = with_fake_harnesses(&scratch);
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    // Narrow the Harness body to codex, commit it, step right to the Model
+    // body. Same grammar pick_claude_and_open_model_tab exercises.
+    h.wait_screen(10, |s| {
+        s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
+    });
+    type_and_settle(&mut h, b"codex");
+    h.wait_screen(10, |s| {
+        !s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
+    });
+    type_and_settle(&mut h, b"\r");
+    h.wait_screen(10, |s| s.contains("codex · default"));
+    type_and_settle(&mut h, RIGHT);
+    let screen = h.wait_screen(35, |s| {
+        s.contains("harness default") && s.contains("gpt-6-luna")
+    });
+    for want in ["gpt-6-luna", "gpt-6-astra", "gpt-5.5"] {
+        assert!(screen.contains(want), "codex floor lists {want}: {screen}");
+    }
+}
+
 #[allow(dead_code)]
 fn unused_path_helper(_: PathBuf) {}

@@ -102,7 +102,6 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         session_terminal: None,
         superseded_by_live_peer: None,
         node_merged: false,
-        pid_gone: false,
         process_gone: false,
         release_quiet: false,
         open_pr: None,
@@ -111,6 +110,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         origin_corpse: false,
         registry_terminal: false,
         open_work_retire_s: fno_agents::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
+        live_claim: None,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(

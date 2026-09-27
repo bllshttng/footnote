@@ -1558,6 +1558,9 @@ struct PeekView {
 struct KeysModal {
     popup: Popup,
     row_events: Vec<Option<Event>>,
+    /// The live `/` filter query. `None` = browsing; `Some` (possibly empty) =
+    /// filtering, rows rebuilt per keystroke by [`keys_modal_with_filter`].
+    filter: Option<String>,
 }
 
 /// (US2) The right-click / `m` row context menu over a sideline agent
@@ -11057,123 +11060,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// Which-key modal keys (US3). Esc closes; arrows/pgup scroll+select;
-/// Enter/`click` run the selected row; a bound printable key runs immediately
-/// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
-/// is folded like every other overlay (carried across reads) so a split arrow
-/// sequence can never leak its tail into a pane (codex P2). No key ever reaches
-/// a pane.
-async fn keys_modal_keys(
-    view: &mut View,
-    scanner: &mut Scanner,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.keys_modal_esc);
-    let toks = fold_modal_keys(&mut esc, bytes);
-    view.keys_modal_esc = esc;
-    for tok in toks {
-        if view.keys_modal.is_none() {
-            break; // closed mid-chunk: swallow the rest, never forward
-        }
-        match tok {
-            ModalKey::Esc => view.keys_modal = None,
-            ModalKey::Up => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Up);
-                }
-                view.follow_modal_selection();
-            }
-            ModalKey::Down => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Down);
-                }
-                view.follow_modal_selection();
-            }
-            ModalKey::Left => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Left);
-                }
-            }
-            ModalKey::Right => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.nav(NavDir::Right);
-                }
-            }
-            ModalKey::PageUp => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.scroll_by(-page);
-                    m.popup.clamp_sel_to_view(trows); // Enter never runs an off-screen row
-                }
-            }
-            ModalKey::PageDown => {
-                let (page, trows) = ((view.term.0 as isize - 2).max(1), view.term.0 as usize);
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.scroll_by(page);
-                    m.popup.clamp_sel_to_view(trows);
-                }
-            }
-            ModalKey::Enter => {
-                if matches!(
-                    keys_modal_execute_selected(view, scanner, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
-                }
-            }
-            ModalKey::Byte(b) => match resolve_chord(b) {
-                // Unbound key dismisses (AC2-EDGE): no action fires.
-                Event::Bell => view.keys_modal = None,
-                // Bound key runs immediately through the SAME dispatch a typed
-                // chord uses (Locked 3), then the modal closes.
-                ev => {
-                    view.keys_modal = None;
-                    // Parity with a typed chord: modal execution arms any
-                    // repeatable event too (the scanner never saw this byte).
-                    scanner.arm_if_repeat(&ev, Instant::now());
-                    if matches!(
-                        dispatch_event(view, ev, sock_w).await?,
-                        DispatchFlow::Detach
-                    ) {
-                        return Ok(StdinFlow::Detach);
-                    }
-                }
-            },
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// Run the modal's selected row (Enter/click) through the shared dispatch, then
-/// close - a header/meta row with no chord BELs and stays open (nothing ran, so
-/// the "execute always closes" invariant is not tripped). Returns the dispatch
-/// flow so a detach chord (prefix+d) run from the modal actually detaches.
-async fn keys_modal_execute_selected(
-    view: &mut View,
-    scanner: &mut Scanner,
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<DispatchFlow, String> {
-    let ev = view.keys_modal.as_ref().and_then(|m| {
-        m.popup
-            .selected()
-            .and_then(|(ri, _)| m.row_events.get(ri).cloned().flatten())
-    });
-    match ev {
-        Some(ev) => {
-            view.keys_modal = None;
-            // Parity with a typed chord: modal execution arms any repeatable
-            // event too (the scanner never saw a key here).
-            scanner.arm_if_repeat(&ev, Instant::now());
-            dispatch_event(view, ev, sock_w).await
-        }
-        None => {
-            let _ = raw_out(b"\x07");
-            Ok(DispatchFlow::Continue)
-        }
-    }
 }
 
 /// Run a row-menu entry (US2) against the LIVE agent row (resolved by the

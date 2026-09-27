@@ -1,7 +1,7 @@
 ---
 name: mail
 description: "Message background agent workers and projects from a runner-less surface (phone / Happy app). One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, and drain. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message' or 'check my unread'."
-argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  unread|list|status [name]"
+argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  dnd [off|cancel]  |  unread|list|status [name]"
 metadata:
   internal: false
   requires:
@@ -85,6 +85,7 @@ the matching section. Messaging is free, so **nothing here confirms** (contrast
 | `status` | `fno agents mail status` | no (read) | free |
 | `drain` | `fno agents mail drain` | no | free |
 | `hold [minutes\|off\|status]` | `/fno:dnd` (codex `$fno:dnd`) with the same argument | natural-language duration | free |
+| `dnd [off\|cancel]` | `/fno:dnd` (codex `$fno:dnd`) with the same argument | no | free |
 
 An unrecognized leading token is an error - tell the user the verb set above; do
 NOT guess a send. (Unlike `/agent`, a bare non-verb is not a default action here,

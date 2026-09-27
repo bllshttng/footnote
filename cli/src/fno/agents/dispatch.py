@@ -35,7 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from fno.agents.dispatch_errors import DispatchAskError
+from fno.agents.dispatch_errors import DispatchAskError, RouteRestoreRefused
 from fno.agents.rust_spawn import _codex_thread_spawn, _opencode_serve_spawn
 from typing import (
     TYPE_CHECKING,
@@ -2148,12 +2148,11 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     2026-08-17 operator rule) with a stderr note naming the move.
 
     Raises:
-        DispatchAskError: exit 2, when the row names a route file that is gone
-            or unreadable. Refusing beats relaunching unrouted. Exit 2 is the
-            code every other route-composition refusal already uses
-            (``RouteCompositionError``); notably NOT 15, which the ask/followup
-            lane documents as "reply timeout, the message WAS delivered" - the
-            opposite claim, since this refusal starts nothing at all.
+        RouteRestoreRefused: exit 2, when the row names a route file that is
+            gone or unreadable - refusing beats relaunching unrouted, on the
+            code every other route-composition refusal uses
+            (``RouteCompositionError``), NOT 15 - the ask/followup lane's
+            "reply timeout, the message WAS delivered" is the opposite claim.
     """
     path = getattr(entry, "route_settings_path", None)
     if not path:
@@ -2167,7 +2166,7 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     try:
         restored = read_route_settings(path)
     except RouteRestoreError as exc:
-        raise DispatchAskError(
+        raise RouteRestoreRefused(
             f"agent {entry.name!r} was launched on the route recorded at {path}, "
             f"and it cannot be restored ({exc}). Refusing to relaunch it on the "
             f"default account; re-spawn with an explicit --route/-P to choose one.",
@@ -2755,7 +2754,7 @@ def dispatch_spawn(
                 if restored_route:
                     restored_provider = getattr(source_row, "provider", None)
                     if not restored_provider:
-                        raise DispatchAskError(
+                        raise RouteRestoreRefused(
                             f"route recorded for {source_row.name!r} has no model-provider "
                             "axis in its registry row; refusing to relaunch because its "
                             "provider cap cannot be evaluated; no worker launched",
@@ -6657,7 +6656,7 @@ def wake_and_deliver(
     bare hex because a bare 8-hex name is refused as an id/name collision. That
     flock plus the same-name collision check is what serializes two senders --
     the second wake finds the first's row live and is refused as
-    ``wake-already-in-flight``.
+    ``wake-already-in-flight``; a gone route file refuses and says wake-unrouted.
 
     The single-writer claim lives in ``_claude_create_path`` (see there). Every
     revival passes the spawn gate, charged to the revived row's parent, never the sender.
@@ -6825,12 +6824,13 @@ def wake_and_deliver(
         return False, f"spawn-exit-{exc.code}"
     except fork_lineage.ResumeUnpinned as exc:
         return False, f"wake-unpinned({exc})"
+    except RouteRestoreRefused as exc:
+        # Nothing started: this is not a concurrent-wake race.
+        return False, f"wake-unrouted({exc})"
     except DispatchAskError as exc:
-        # Exit 11 is the writer claim refusing: another writer holds the
-        # transcript, so the session is not actually asleep. Exit 2 is the name
-        # collision, which for a uuid-derived name means a concurrent wake won
-        # the race. Both are honest "do not wake" answers, and the caller
-        # re-probes the now-live session before demoting.
+        # Exit 11: the writer claim refused, so the session is not asleep.
+        # Exit 2: the name collision, i.e. a concurrent wake won the race.
+        # Both re-probe the now-live session before demoting.
         if exc.exit_code == 11:
             return False, "writer-possibly-live"
         if exc.exit_code == 2:

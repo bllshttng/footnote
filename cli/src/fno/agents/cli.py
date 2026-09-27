@@ -3764,6 +3764,11 @@ from fno.agents.pane_identity import cmd_pane_identity  # noqa: E402
 
 agents_app.command("pane-identity", hidden=True)(cmd_pane_identity)
 
+# The batch transcript-path answer lives in fno.agents.transcript_paths (file budget).
+from fno.agents.transcript_paths import cmd_transcript_paths  # noqa: E402
+
+agents_app.command("transcript-paths", hidden=True)(cmd_transcript_paths)
+
 
 
 def _registry_falsifiers(
