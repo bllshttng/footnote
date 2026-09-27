@@ -281,6 +281,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: None,
                 provenance: Some("mail".into()),
+                hold_pass: false,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -383,6 +384,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: None,
                 provenance: Some("mail:msg-abc123".into()),
+                hold_pass: false,
             },
         );
         server.join().unwrap();
@@ -454,6 +456,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: None,
                 provenance: None,
+                hold_pass: false,
             },
         );
         server.join().unwrap();
@@ -486,6 +489,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: None,
                 provenance: Some("mail".into()),
+                hold_pass: false,
             },
         );
         std::env::remove_var("FNO_BIN");

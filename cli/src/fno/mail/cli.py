@@ -2999,14 +2999,14 @@ def _raw_send(
             "parses):\n    fno agents mail send '<payload>' --to-self --raw"
         )
 
-    # 3b. Bus-only delivery policy: this recipient's mail belongs on
-    #     the durable bus, and the raw lane never queues durable -- so a raw
-    #     send here can do nothing and must refuse loud rather than silently
-    #     not-deliver. Under --check this refusal is an ANSWER about the
-    #     session, the same not-injectable shape as any other no-path verdict.
+    # 3b. Bus-only: the raw lane never queues durable, so a held payload parks
+    # through the gate (C15) and the receipt names when it runs. --check only asks.
     from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
-
-    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+    refusal = _delivery_policy_refusal(entry, stripped, park=not check)
+    if refusal is not None:
+        if refusal != BUS_ONLY_POLICY:
+            print(refusal)  # parked: the gate's receipt names the run-when
+            return
         _refused(
             f"{name!r} is DND (delivery-policy bus-only): prompt-line injection is "
             "forbidden for this recipient. Send wrapped mail instead - it "
