@@ -104,6 +104,93 @@ pub(super) fn is_submit(bytes: &[u8]) -> bool {
     false
 }
 
+/// Length of the terminal-generated reply at the head of `b`, or 0 when `b`
+/// is not one. The classes the loopback delivers as pane input through the
+/// client's own terminal: DEC 1004 focus reports (the client mirrors the
+/// pane's enablement to the real TTY on every view switch, so switching
+/// rows answers a fresh focus-in), CPR `ESC[...R`, DA replies `ESC[?...c` /
+/// `ESC[>...c`, DSR `ESC[...n`, kitty keyboard-query replies `ESC[?...u`,
+/// OSC replies (BEL- or ST-terminated), and mouse encodings (SGR
+/// `ESC[<b;x;yM|m`, X10 `ESC[M` + 3 coord bytes). A keyboard never emits
+/// these finals with these param shapes: F1-F4 ride `ESC O P` (second byte
+/// `O`, not `[`), kitty KEYBOARD events carry no `?`.
+fn terminal_reply_len(b: &[u8]) -> usize {
+    if b.len() < 2 || b[0] != 0x1b {
+        return 0;
+    }
+    match b[1] {
+        b'[' if b.len() >= 3 && (b[2] == b'I' || b[2] == b'O') => 3,
+        b'[' => {
+            // CSI: parameter bytes, then one final 0x40-0x7e.
+            let mut j = 2;
+            let mut saw_private = false;
+            let mut saw_left = false;
+            while j < b.len() && matches!(b[j], b'0'..=b'9' | b';' | b'?' | b'<' | b'=' | b'>') {
+                saw_private |= matches!(b[j], b'?' | b'>');
+                saw_left |= b[j] == b'<';
+                j += 1;
+            }
+            if j >= b.len() {
+                // Fragment cut at the chunk edge; the rest rides the next
+                // chunk, so the tail reads as reply, not keystrokes.
+                return b.len();
+            }
+            if !(0x40..=0x7e).contains(&b[j]) {
+                return 0;
+            }
+            let n = j + 1;
+            match b[j] {
+                b'R' | b'c' | b'n' => n,
+                b'u' if saw_private => n,
+                b'M' | b'm' if saw_left => n,
+                b'M' => n.saturating_add(3).min(b.len()),
+                _ => 0,
+            }
+        }
+        b']' => {
+            // OSC reply, BEL- or ST-terminated; an unterminated body is a
+            // fragment whose terminator rides the next chunk.
+            let mut k = 2;
+            while k < b.len() {
+                if b[k] == 0x07 {
+                    return k + 1;
+                }
+                if b[k] == 0x1b && b.get(k + 1) == Some(&b'\\') {
+                    return k + 2;
+                }
+                k += 1;
+            }
+            b.len()
+        }
+        _ => 0,
+    }
+}
+
+/// Does this input chunk carry at least one human keystroke? The client
+/// forwards terminal-generated replies as pane input, so a chunk written by
+/// a mere view switch carries nothing typed; those bytes never arm the
+/// attended hold, never emit the touch telemetry, and never witness a
+/// submit. The pane write (which already happened upstream) is untouched.
+/// ponytail: a reply split across chunks can leave a fragment that reads
+/// human and arms once; the fold's one-to-one binding bounds the effect,
+/// same caveat `is_submit` carries for pastes.
+pub(super) fn has_human_keystroke(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"\x1b[200~") {
+            // A bracketed paste is human even when the pasted text itself
+            // contains reply-shaped escapes.
+            return true;
+        }
+        let skip = terminal_reply_len(&bytes[i..]);
+        if skip == 0 {
+            return true;
+        }
+        i += skip;
+    }
+    false
+}
+
 /// The `operator_submit` journal row: where and when a human pressed Enter.
 /// No typed text is ever recorded. Pure so tests can assert the envelope.
 fn submit_row(
@@ -330,8 +417,13 @@ impl Core {
     /// The tail of the `CoreMsg::Input` arm, one call from `handle_msg` so
     /// server.rs only shrinks: touch telemetry, the attended hold, the
     /// submit witness. A keystroke here is past the relay guard - PaneSend
-    /// and relay writes never reach this.
+    /// and relay writes never reach this - and past the reply classifier:
+    /// terminal-generated loopback (focus reports, query replies, mouse
+    /// encodings) is not steering, so a viewed row arms nothing.
     pub(super) fn input_tail(&mut self, focus: u64, bytes: &[u8]) {
+        if !has_human_keystroke(bytes) {
+            return;
+        }
         self.touch(focus, "inject", true);
         let submitted = is_submit(bytes);
         self.arm_attended_hold(focus, submitted);
@@ -717,6 +809,102 @@ mod tests {
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_replies_arm_nothing_and_a_keystroke_still_arms() {
+        use crate::server::CoreMsg;
+        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fno-hold-replies-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        let mut core = witness_test_core(7);
+        core.clients.push(crate::server::Client {
+            id: 1,
+            reliable_tx: tokio::sync::mpsc::channel(1).0,
+            dirty: Default::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            synced_modes: Default::default(),
+            view: (1, 1),
+            visible: Default::default(),
+            dims: (24, 80),
+            passive: false,
+            last_press: None,
+        });
+        // The loopback the client forwards when a row is merely viewed: the
+        // DEC 1004 focus reports, a CPR reply, a DA1 reply, an OSC 11 color
+        // reply, an SGR mouse press, a kitty keyboard-query reply.
+        for reply in [
+            &b"\x1b[I"[..],
+            b"\x1b[O",
+            b"\x1b[12;34R",
+            b"\x1b[?62;1;6;9;15;22c",
+            b"\x1b]11;rgb:1c1c/1c1c/1c1c\x07",
+            b"\x1b[<0;10;5M",
+            b"\x1b[?1u",
+        ] {
+            core.handle(CoreMsg::Input {
+                id: 1,
+                bytes: reply.to_vec(),
+            });
+        }
+        assert!(
+            core.hold_arm_last.is_empty(),
+            "terminal-generated replies never arm the attended hold"
+        );
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"a".to_vec(),
+        });
+        assert!(
+            core.hold_arm_last.contains_key(&7),
+            "a typed keystroke still arms the hold"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_replies_never_eat_human_keystrokes() {
+        // The classifier's false-positive class: sequences a keyboard
+        // legitimately produces that sit next to the reply shapes.
+        assert!(super::has_human_keystroke(b"a"));
+        assert!(super::has_human_keystroke(b"\x1b[A"), "up arrow");
+        assert!(super::has_human_keystroke(b"\x1b[3~"), "delete");
+        assert!(
+            super::has_human_keystroke(b"\x1bOR"),
+            "F3 rides ESC O, not ESC ["
+        );
+        assert!(
+            super::has_human_keystroke(b"\x1b[97;5u"),
+            "kitty keyboard input has no ?"
+        );
+        assert!(super::has_human_keystroke(b"\x1b"), "a lone Esc");
+        assert!(
+            super::has_human_keystroke(b"\x1b[200~line one\r\n\x1b[6n\x1b[201~"),
+            "a paste is human even when its text contains reply shapes"
+        );
+        // The pure reply classes, whole-chunk and mixed with real keys.
+        assert!(!super::has_human_keystroke(b"\x1b[I"));
+        assert!(
+            !super::has_human_keystroke(b"\x1b[M#*%"),
+            "an X10 mouse encoding carries three coord bytes"
+        );
+        assert!(!super::has_human_keystroke(b"\x1b[12;34R\x1b[I"));
+        assert!(
+            super::has_human_keystroke(b"\x1b[Ia"),
+            "a mixed chunk still carries the typed a"
+        );
     }
 
     #[test]

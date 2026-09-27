@@ -254,7 +254,7 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
 
 _ADVERTISED_BACKLOG_VERBS = {
     "add", "idea", "get", "update", "view", "next", "done", "defer",
-    "rank", "triage", "note",
+    "triage", "note",
 }
 
 

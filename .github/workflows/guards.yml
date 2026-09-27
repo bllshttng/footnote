@@ -137,7 +137,10 @@ jobs:
         working-directory: crates/fno-agents
         run: |
           cargo build --bin fno-agents
-          cp target/debug/fno-agents "$HOME/.cargo/bin/"
+          # Runner-only: replayed locally this overwrites the deployed binary
+          # in place and macOS SIGKILLs every launch. Pin a local build with
+          # FNO_AGENTS_FRONT instead.
+          if [ "$CI" = true ]; then cp target/debug/fno-agents "$HOME/.cargo/bin/"; fi
 
       - name: Verb matrix fresh
         if: ${{ !cancelled() }}
