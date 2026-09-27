@@ -1006,8 +1006,10 @@ jobs:
     # everything except the fno-agents integration leg at about six minutes.
     # No python or uv steps here: flock_interop.rs, the cross-language test,
     # lives in fno-agents, and no fno crate test spawns the cli venv.
-    # The widest of 14 passing runs sampled 2026-09-24 was 11.1m.
-    timeout-minutes: 15
+    # The widest of 14 passing runs sampled 2026-09-24 was 11.1m; by
+    # 2026-09-27 the median passing run measured 14.7m against this cap,
+    # so a noise wiggle killed the job. 20 restores the headroom.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
