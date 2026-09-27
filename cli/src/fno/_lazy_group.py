@@ -64,7 +64,14 @@ class _CollapsedForward(click.Command):
         parent: click.Context | None = None,
         **extra: Any,
     ) -> click.Context:
-        return self._action.make_context(info_name, args, parent=parent, **extra)
+        try:
+            return self._action.make_context(info_name, args, parent=parent, **extra)
+        except click.exceptions.Exit as e:
+            # A plain-click action raises plain click's Exit for --help.
+            # Typer's vendored click main catches only its own Exit, so the
+            # raise escapes as a traceback. Translate the way click's own
+            # main() does.
+            raise SystemExit(e.exit_code) from None
 
     def invoke(self, ctx: click.Context) -> Any:
         return self._action.invoke(ctx)
@@ -298,7 +305,11 @@ class _LazyStub(click.Group):
         parent: click.Context | None = None,
         **extra: Any,
     ) -> click.Context:
-        return self._load_real().make_context(info_name, args, parent=parent, **extra)
+        try:
+            return self._load_real().make_context(info_name, args, parent=parent, **extra)
+        except click.exceptions.Exit as e:
+            # Same plain-click Exit translation as _CollapsedForward above.
+            raise SystemExit(e.exit_code) from None
 
     def invoke(self, ctx: click.Context) -> Any:
         # Defense-in-depth: although Click 8.x's ``Group.invoke`` calls

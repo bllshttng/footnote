@@ -11,6 +11,7 @@ Covers:
 - undefer after contain keeps containment
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 runner = CliRunner()
 
@@ -29,7 +31,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh empty graph.json routed to tmp_path (the test_defer.py pattern)."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -45,12 +47,50 @@ def _invoke(*args):
     return runner.invoke(app, list(args), catch_exceptions=False)
 
 
+def _native_update(g: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    return read_graph_strict(g)
 
 
 def _by_id(g: Path) -> dict:
     return {e["id"]: e for e in _read_entries(g)}
+
+
+def _write_rows(g: Path, rows: dict) -> None:
+    """Replace the graph's rows through the store: a json rewrite would be
+    ignored, because the db outlives the file it was imported from."""
+
+    def mutator(_entries):
+        return list(rows.values())
+
+    commit_rows_via_store(g, mutator)
 
 
 def _seed_idea(g: Path, title: str, *extra: str) -> str:
@@ -120,13 +160,15 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     # --force: closing over live children is refused without it (x-a31a), and
     # the forced close re-parents the kids - irrelevant here, the owner is
-    # done either way and contain must still refuse.
+    # done either way and contain must still refuse. The completion note
+    # satisfies the close-evidence rule; the force keeps the child gate.
+    _native_update(tmp_graph, owner, "--completion-note", "setup: done owner")
     _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is done" in r.output
     rows = _by_id(tmp_graph)
-    assert all("contained_in" not in rows[k] for k in kids)
+    assert all(rows[k].get("contained_in") is None for k in kids)
 
 
 def test_contain_refuses_a_deferred_owner_and_stamps_nothing(tmp_graph):
@@ -135,7 +177,7 @@ def test_contain_refuses_a_deferred_owner_and_stamps_nothing(tmp_graph):
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is deferred" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kids[0]]
+    assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_refuses_a_missing_owner(tmp_graph):
@@ -143,7 +185,7 @@ def test_contain_refuses_a_missing_owner(tmp_graph):
     r = _invoke("backlog", "contain", "x-dead0001", kid)
     assert r.exit_code == 3, r.output
     assert "owner not found" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kid]
+    assert _by_id(tmp_graph)[kid].get("contained_in") is None
 
 
 def test_contain_refuses_the_owner_naming_itself(tmp_graph):
@@ -181,12 +223,12 @@ def test_contain_refuses_a_target_with_an_open_pr_and_stamps_nothing_in_the_batc
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     rows = _by_id(tmp_graph)
     rows[kids[0]]["pr_number"] = 4242
-    tmp_graph.write_text(json.dumps({"entries": list(rows.values())}))
+    _write_rows(tmp_graph, rows)
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "own delivery unit mid-flight" in r.output
     fresh = _by_id(tmp_graph)
-    assert all("contained_in" not in fresh[k] for k in kids)
+    assert all(fresh[k].get("contained_in") is None for k in kids)
 
 
 def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
@@ -197,7 +239,7 @@ def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "being built right now by worker-7" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kids[0]]
+    assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_live_worker_positive_control_on_an_unclaimed_node(tmp_graph):
@@ -213,16 +255,17 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     # _cascade_close_parents (an all-children-done epic closes automatically).
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     kid = kids[0]
+    _native_update(tmp_graph, kid, "--completion-note", "setup: done target")
     _invoke("backlog", "done", kid)
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"
     rows[kid]["pr_number"] = 4243
-    tmp_graph.write_text(json.dumps({"entries": list(rows.values())}))
+    _write_rows(tmp_graph, rows)
     r = _invoke("backlog", "contain", owner, kid)
     assert r.exit_code == 0, r.output
     row = _by_id(tmp_graph)[kid]
     assert row["parent"] == owner
-    assert "contained_in" not in row
+    assert row.get("contained_in") is None
     assert "did NOT mark it contained" in r.output
 
 
@@ -411,3 +454,97 @@ def test_undefer_after_contain_keeps_containment(tmp_graph):
     assert row["contained_in"] == owner
     now = datetime.now(timezone.utc)
     assert selection_guards(row, _by_id(tmp_graph), now) == f"contained:{owner}"
+
+
+# ---------------------------------------------------------------------------
+# Releasing containment drops the owner's PR link
+# ---------------------------------------------------------------------------
+
+
+def test_release_drops_owner_pr_link_and_records_released_from(tmp_graph):
+    """AC1-HP: a release drops the PR the containment bind stamped on the
+    child, so the owner's merge cannot close a node that no longer ships
+    inside it. The owner keeps its own PR."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    other = _seed_idea(tmp_graph, "other epic")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] in (owner, child):
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    code, out = _native_update(tmp_graph, child, "--parent", other)
+    assert code == 0, out
+    rows = _by_id(tmp_graph)
+    c = rows[child]
+    assert c.get("contained_in") is None
+    assert c.get("pr_number") is None
+    assert c.get("pr_url") is None
+    assert c.get("merge_status") is None
+    assert c.get("released_from") == owner
+    assert rows[owner]["pr_number"] == 900
+
+
+def test_release_keeps_own_pr_and_recontain_clears_marker(tmp_graph):
+    """AC2-EDGE: only the owner's PR goes; the child's own additional PR
+    stays. Re-containing clears released_from so the closure bind honors the
+    node again."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] == owner:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+            if e["id"] == child:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+                e["additional_prs"] = [
+                    {"number": 901, "url": "https://github.com/o/r/pull/901"}
+                ]
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    assert _native_update(tmp_graph, child, "--parent", "null")[0] == 0
+    c = _by_id(tmp_graph)[child]
+    assert c.get("pr_number") is None
+    assert c["additional_prs"] == [
+        {"number": 901, "url": "https://github.com/o/r/pull/901"}
+    ]
+    assert c.get("released_from") == owner
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+    c2 = _by_id(tmp_graph)[child]
+    assert c2["contained_in"] == owner
+    assert "released_from" not in c2
+
+
+def test_release_keeps_same_number_pr_from_another_repo(tmp_graph):
+    """PR numbers are repository-local: a child PR numbered #900 in another
+    repo is independent delivery, not the owner's inherited ref, so the
+    release keeps it and drops only the same-repo #900."""
+    owner = _seed_idea(tmp_graph, "owner epic")
+    child = _seed_idea(tmp_graph, "child")
+    assert _invoke("backlog", "contain", owner, child).exit_code == 0
+
+    def _stamp(entries):
+        for e in entries:
+            if e["id"] == owner:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/o/r/pull/900"
+            if e["id"] == child:
+                e["pr_number"] = 900
+                e["pr_url"] = "https://github.com/other/repo/pull/900"
+        return entries
+
+    commit_rows_via_store(tmp_graph, _stamp)
+    assert _native_update(tmp_graph, child, "--parent", "null")[0] == 0
+    c = _by_id(tmp_graph)[child]
+    assert c["pr_number"] == 900
+    assert c["pr_url"] == "https://github.com/other/repo/pull/900"

@@ -115,6 +115,18 @@ def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Opti
             raise typer.Exit(code=3)
         node["locked_by"] = None
         node["locked_at"] = None
+        # session_id is the lock's mirror (_normalize_lock_fields keeps it
+        # equal to locked_by): leaving it set re-materializes the holder on
+        # the next write, so the release clears the whole lock family.
+        node["session_id"] = None
+        node["locked_by_harness"] = None
+        node["locked_by_harness_session"] = None
+        # The keeper cannot derive plan rungs; a released row returns to the
+        # state it was claimed from (ready, or idea for an undesigned plan).
+        if node.get("status") == "in_progress":
+            from fno.graph.ladder import Rung, plan_rung
+
+            node["status"] = "idea" if plan_rung(node) in (Rung.IDEA, Rung.NONE) else "ready"
         return entries
 
     commit_rows_via_store(_graph_path(), mutator)
@@ -126,58 +138,6 @@ def _wedge_refusal(verb: str, node_id: str, open_do: int) -> None:
     plural = "s" if open_do != 1 else ""
     typer.echo(f"{verb}: {node_id} still reads in_progress after clearing the claim ({open_do} open do row{plural}). The claim was not what held it. Use: fno backlog requeue {node_id}", err=True)
     raise typer.Exit(code=3)
-
-
-def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: str = "") -> None:
-    """The post-commit read-back for ``update --locked-by``: the Updated
-    receipt answers "was the command accepted", never "is the value there",
-    and only the committed row can answer the second. Refuses the receipt
-    when the stored owner differs; a non-null stamp with no backing claim
-    lockfile warns (mirror-only state claim hygiene clears); a null release
-    that leaves an open do row wedged refuses, naming the settling verb.
-    """
-    from fno.claims.io import node_has_live_claim
-
-    node_id = stored_node.get("id") or fallback_id
-    expected_owner = None if locked_by == "null" else locked_by
-    stored_owner = stored_node.get("locked_by")
-    if stored_owner != expected_owner:
-        typer.echo(
-            f"error: {node_id} read back locked_by={stored_owner!r}, not "
-            f"{expected_owner!r}: the write did not persist. A concurrent "
-            "claim transition may have cleared it; re-check before trusting.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    if expected_owner is None:
-        # Earned-success rule, same as unclaim: a lock clear that left the
-        # node in_progress on its own open do rows did not return it to the
-        # queue, so the receipt refuses and names the verb that settles it.
-        # persisted_status when the caller read typed, raw status otherwise:
-        # derived `status` ignores open do rows and would miss the wedge.
-        stored_status = stored_node.get("persisted_status")
-        if stored_status is None:
-            stored_status = stored_node.get("status")
-        if stored_status == "in_progress":
-            from fno.graph.statuses import is_open_do_row
-
-            _wedge_refusal(
-                "update",
-                node_id,
-                sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
-            )
-        return
-    try:
-        has_claim = node_has_live_claim(f"node:{node_id}")
-    except Exception:  # noqa: BLE001 - the probe must not fail a write that landed
-        return
-    if not has_claim:
-        typer.echo(
-            f"warning: no live claim lockfile backs node:{node_id}; claim "
-            "hygiene (fno agents claim reap) clears locked_by without one. "
-            f"To hold the node: fno agents claim acquire node:{node_id}",
-            err=True,
-        )
 
 
 def _unclaim_node(task_id: str) -> None:
@@ -259,21 +219,25 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         )
         if reach.verdict == REACHABLE:
             from datetime import datetime, timezone
+            from fno.graph.maintain import abandoned_do_rows, do_row_idle_s
 
+            why = next((a.reason for a in abandoned_do_rows([{**row, "locked_by": None}], set(), strict=False) if a.session_id == r.get("session_id") and a.verdict == "held"), None)
+            if why is None:
+                continue
             # reap-open is NOT named here: this worker reads reachable, so a
             # death claim would be false. The owner's honest self-close is.
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             typer.echo(
                 f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
-                "a reachable worker still owns the do window. If that session is "
+                "a reachable worker still owns the execute window. If that session is "
                 f"yours and has stopped this node: fno backlog session add {node_id} "
-                f"--phase do --ended-at {now}",
+                f"--phase execute --ended-at {now}. The execute row stays: {why}.",
                 err=True,
             )
             raise typer.Exit(code=3)
 
     for r in open_rows:
-        reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
+        reap_open_session_record(_graph_path(), node_id, phase="execute", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
 
     _clear_locked_by(node_id, expect_locked_by=row.get("locked_by"))
     _release_node_lockfile(node_id)
@@ -287,7 +251,9 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
 
     # `working, 0 samples` names a corpse and `working, 31 samples` names a
     # worker. None is a harness that keeps no transcript, never a zero.
-    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
+    from datetime import datetime, timezone
+    from fno.graph.maintain import do_row_idle_s
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s")), "row_idle_s": do_row_idle_s(row, r, datetime.now(timezone.utc).timestamp())} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))

@@ -35,9 +35,23 @@ def _journal_text(path: Path) -> str:
     """A journal plus its .ephemeral sibling (retention routing):
     ephemeral-class rows like claim_acquired land in the sibling, so a reader
     that wants the full stream reads both files. The shared derivation resolves
-    the journal first so a symlinked journal still finds its sibling."""
+    the journal first so a symlinked journal still finds its sibling.
+
+    The store commit is the write boundary, so each sibling is read through
+    the native rows verb (raw fallback built in); the raw bytes only serve a
+    box with no binary at all."""
     from fno.paths import journal_and_ephemeral_sibling
 
+    try:
+        from fno.events.store_client import native_rows
+
+        parts = []
+        for p in journal_and_ephemeral_sibling(path):
+            committed = native_rows(p, legacy_fallback=True)
+            parts.append("\n".join(committed) if committed is not None else "")
+        return "".join(parts)
+    except Exception:
+        pass
     parts = [
         p.read_text(encoding="utf-8") if p.exists() else ""
         for p in journal_and_ephemeral_sibling(path)

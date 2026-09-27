@@ -59,6 +59,7 @@ require_before() { # require_before <haystack-file> <first> <second> <label>
 HOOK="$REPO_ROOT/scripts/setup/worktree-create-hook.sh"
 PRE="$REPO_ROOT/scripts/ci/preflight.sh"
 CV="$REPO_ROOT/crates/fno-agents/src/client_verbs.rs"
+RG="$REPO_ROOT/crates/fno-agents/src/resume_gate.rs"
 
 # --- 1. worktree-create-hook.sh -------------------------------------------
 # Reuse rung named.
@@ -105,8 +106,9 @@ require "$PRE" "rm -rf '\$LOCKDIR'" "preflight: rm -rf remains the last rung"
 require "$CV" "the row is the resume handle" "resume(rust): messages name the handle cost"
 require "$CV" "fno agents adopt" "resume(rust): rm-then-adopt rebind pair named"
 require "$CV" "gone for good" "resume(rust): rm framed as the gone-for-good case"
-require "$CV" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
-require "$CV" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
+# The two resume-cwd refusal messages moved to the resume gate module.
+require "$RG" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
+require "$RG" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
 
 # --- 4. rm-naming refusals: the Rust ask twins ---------------------------------
 # The Python rm-fallback refusals retired with the rm twin (the Python side of
@@ -129,15 +131,16 @@ require "$REPO_ROOT/crates/fno-agents/src/codex_ask.rs" "the exchange finished" 
 require "$REPO_ROOT/crates/fno-agents/src/gemini_ask.rs" "the exchange finished" "teardown(gemini): states the exchange finished first"
 
 # --- 5. the claude stop rm runs itself, and stop_claude's dead end ------------
-DM="$REPO_ROOT/crates/fno-agents/src/daemon.rs"
 # The two rm refusal texts live in the builder module the file-budget gate
-# moved them into; the stop_claude claim still lives in the handler. rm
-# stopped telling the caller to stop (law: remove needs no prior stop) - it
-# runs the claude stop itself and reports the roster evidence.
+# moved them into; the stop_claude claim moved beside them into the claude
+# stop submodule (same file-budget motion). rm stopped telling the caller to
+# stop (law: remove needs no prior stop) - it runs the claude stop itself and
+# reports the roster evidence.
 RR="$REPO_ROOT/crates/fno-agents/src/daemon/rm_refusal_detail.rs"
+CS="$REPO_ROOT/crates/fno-agents/src/daemon/claude_stop.rs"
 require "$RR" "rm ran \`claude stop\`" "rm(live): names the stop rm ran itself"
 require "$RR" "rm could not run its claude stop" "rm(idless): says rm could not run its claude stop"
-require "$DM" "stopping has no exit here" "stop_claude(idless): no false rm-clears claim"
+require "$CS" "stopping has no exit here" "stop_claude(idless): no false rm-clears claim"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "$FAILURES check(s) failed"

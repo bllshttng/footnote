@@ -164,7 +164,68 @@ transcript marker, then runs
 carries claim heartbeat/context monitoring, compact handoff hooks, subagent
 guards, and the PreToolUse state/git protection guards.
 
+Codex provider goals are a separate controller surface. The provider goal receipt proves the objective and continuation owner; the Footnote `Stop` receipt separately proves that the loop hook can drive the next turn. Treat the verified provider goal as primary continuation state, but never infer Stop from it. A readable quiet state parks by pausing the goal and preserving its objective; it does not clear the goal or create a replacement session. Codex returns the thread id, objective, and status; Footnote derives the continuation owner from the exact crown scope or target session in its controller receipt.
+
+Continuation proof has five separate receipts: packaged capability, machine
+plugin installation, exact-session lifecycle readiness, the correlated Stop
+decision, and the useful consumer action. A plugin cache, a native goal, a
+global arms row, daemon acceptance, or a user-shaped message proves only its
+own layer. The consumer proof must join the full thread id, turn id,
+correlation id, continuation owner, action hash, and exactly one user message.
+
 Every Codex `Stop` handler must exit 0 with empty stdout or one Stop JSON object. Exit 2 with non-empty stderr is a block. Plain text fails the hook, and `cli/tests/hooks/test_codex_stop_output_contract.py` enforces it.
+
+Raw mail to an app-server Codex thread is not a prompt-line transport. Declared
+native non-review commands such as `/compact`, `/model`, and `/status` are
+refused with the controller replacement. Ordinary wrapped text continues over
+the turn transport, and `/review` continues over structured `review/start`.
+Use provider-backed compact and goal receipts. Manual Escape followed by
+`/compact` is a fallback only for a measured mux-hosted pane.
+
+The exact-session command journey is opt-in and must use disposable sessions
+and the isolated roots below. A Codex thread run covers paused-to-active goal
+resume, goal readback, timeout retry idempotency, and provider compaction. An
+attached pane run covers busy refusal, pending-composer preservation, and the
+`/rc` picker. Pane proofs require `FNO_EMPTY_COMPOSER_EXPECT` as an anchored
+line regex that matches the blank prompt before typing, plus an
+`FNO_SCREEN_EXPECT_*` regex absent before and present after the command. The
+controller refuses a short selector, identity mismatch, unreadable registry,
+non-empty composer, or any root outside this private set. It opens a new portal
+only for an interactive attach row and closes only its own portal after the
+terminal receipt. Verified provider command receipts retain the readback under
+`provider_receipt`; goal pause and resume receipts include token budget, tokens
+used, and elapsed time, and refuse when those counters regress.
+
+```bash
+FNO_HOME=/private/tmp/fno-continuation-proof \
+FNO_AGENTS_HOME=/private/tmp/fno-continuation-proof/agents \
+FNO_CLAIMS_ROOT=/private/tmp/fno-continuation-proof/claims \
+FNO_SPACES_DIR=/private/tmp/fno-continuation-proof/spaces \
+HOME=/private/tmp/fno-continuation-proof/home \
+CODEX_HOME=/private/tmp/fno-continuation-proof/codex \
+bash scripts/diagnostics/harness-command-control-smoke.sh \
+  --session <full-disposable-session-id> --harness <codex|claude>
+```
+
+The independent continuation probe creates its own private Git repository,
+`CODEX_HOME`, and FNO state. It sends one initial prompt and never sends mail
+or queue input. The current runner measures the independent Stop-to-nonce
+journey, but does not collect provider goal/window, quiet-park/wake, or repeated
+boundary receipts yet. It exits blocked without writing a full verification
+receipt; it never fills those fields from expected constants. The verifier
+accepts only the current receipt schema and rejects older synthetic receipts.
+
+```bash
+python3 scripts/diagnostics/codex-reign-continuation-smoke.py --run
+python3 scripts/diagnostics/codex-reign-continuation-smoke.py \
+  --verify-latest --max-age-hours 24
+```
+
+The verifier reports one primary failure class and its failed reader for
+missing plugin/session refresh, disabled hooks, stale lifecycle markers,
+identity misses, malformed or rejected Stop output, explicit park, and wake
+refusals. The observed Escape plus `/compact` sequence is interruption and
+compaction-boundary evidence only; it is not autonomous continuation proof.
 
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
@@ -190,6 +251,8 @@ dispatch receives a prose brief through an owned-PTY `pane` or a one-shot `headl
 spawn; it is never sent a Claude slash command and is never reported as `claude --bg`.
 
 ## Dependency Model
+
+The shared daemon is visible three ways, and each is a different claim. `thread/loaded/list` names the id (daemon listing). `thread/read` answers with the same id and history (same-id read, what the upgrade transaction verifies). The id opening in ChatGPT mobile Remote Control with a new message loading (operator visibility, read by a person after merge). A test that proves the first two has not proven the third.
 
 Core dependencies:
 

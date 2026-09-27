@@ -43,8 +43,8 @@ def _isolated_world(tmp_path, monkeypatch):
     cfg.write_text("[agents]\nmin_free_gb = 0\nmax_swap_pct = 0\n", encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
     # x-7783: the gate takes a footprint reading on EVERY spawn, so the
-    # fixture pins an idle one; the getloadavg pin below now feeds only the
-    # 15-minute backstop input (the third element). The scenario roster stays
+    # fixture pins an idle one; the getloadavg pin below is pure context
+    # (nothing decides on load, x-c588). The scenario roster stays
     # the variable under test.
     from fno import doctor_footprint
     from fno.footprint import Footprint
@@ -53,7 +53,7 @@ def _isolated_world(tmp_path, monkeypatch):
     monkeypatch.setattr(
         spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
     )
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
     # The gate reads the HOST load average live, so an "under cap" scenario
     # fails on any machine whose real load crosses the ceiling (a busy fleet

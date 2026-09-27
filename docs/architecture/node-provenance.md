@@ -25,6 +25,8 @@ Every graph node carries (all nullable, defaulted on read in `cli/src/fno/graph/
 | `spawned_by_harness` | parent harness | worker spawn |
 | `spawned_by_cwd` | parent cwd, for the transcript-path slug resolver | worker spawn |
 | `lineage_reason` | why no parent session could be proved: the identity disposition the capture read, or the daemon-mint miss. An origin=spawn row carries a session or a reason, never neither | worker spawn (schema v33) |
+| `node` | the backlog node the worker is FOR, stamped at the spawn seam - never the spawner's ambient value | worker spawn (registry v21) |
+| `node_reason` | why the row works no node when the spawn NAMED one: the seed's verb argument read as a node id but resolved to no readable row. Absent when the node resolved; absent when none was named | worker spawn (registry v36) |
 
 The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `spawned_by_*` triple, so the durable event log keeps the parent edge even if a registry row is later rewritten.
 

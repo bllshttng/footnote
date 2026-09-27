@@ -24,7 +24,6 @@ from typing import Optional
 
 from fno.harness_identity import claude_transport_short_id
 
-_MIB = 1024 * 1024
 
 
 def transport_join_key(short_id: Optional[str], session_id: Optional[str]) -> str:
@@ -179,27 +178,3 @@ def resolve_session_pid(
             if hit:
                 return hit
     return pid
-
-
-def tree_rss_mb(pid: Optional[int], _psutil=None) -> Optional[int]:
-    """RSS of the whole process tree rooted at ``pid``, in MiB.
-
-    A worker forks helpers the row's own pid never accounts for: per-session
-    stdio MCP servers and fno helpers. ``top``'s cost column and any
-    process-cost gate read this same function, so the two cannot disagree
-    about what a row costs. A dead pid or a psutil-less host returns None.
-    """
-    if not pid:
-        return None
-    try:
-        psutil = _psutil or __import__("psutil")
-        proc = psutil.Process(pid)
-        total = proc.memory_info().rss
-        for child in proc.children(recursive=True):
-            try:
-                total += child.memory_info().rss
-            except psutil.Error:
-                continue  # a child that died mid-scan is cost that already left
-        return int(total // _MIB)
-    except Exception:
-        return None

@@ -29,6 +29,10 @@
 # it. The rest of the two files stay in sync.
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # Read stdin JSON from CC (contains worktree name, branch, path context).
 # Prefer an explicit `path` field from the harness over $(pwd) - if CC ever
 # starts invoking the hook without chdir'ing, the JSON path is still right.

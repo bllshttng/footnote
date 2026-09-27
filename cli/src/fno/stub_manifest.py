@@ -34,7 +34,6 @@ single hold signal.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -134,93 +133,6 @@ def write(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path
-
-
-def _node_pr_numbers(node: dict) -> set[int]:
-    """Every PR number a node carries: its primary `pr_number` plus any in
-    `additional_prs` (ints, or URLs ending `/pull/<n>`; codex P2). A contract
-    dependent whose PR is recorded only in `additional_prs` must still be found
-    or the merge guard is bypassed."""
-    out: set[int] = set()
-    candidates = [node.get("pr_number"), *(node.get("additional_prs") or [])]
-    for raw in candidates:
-        if raw is None:
-            continue
-        # The typed read hands back PullRequest-shaped dicts; a raw read
-        # hands back ints or /pull/<n> URLs. Both name a number.
-        if isinstance(raw, dict):
-            raw = raw.get("number", raw.get("url"))
-            if raw is None:
-                continue
-        try:
-            out.add(int(raw))
-            continue
-        except (TypeError, ValueError):
-            pass
-        m = re.search(r"/pull/(\d+)", str(raw))
-        if m:
-            out.add(int(m.group(1)))
-    return out
-
-
-def _node_for_pr(pr_number: int, graph_path: Optional[Path]) -> Optional[dict]:
-    """The node carrying this pr_number, or None. Read-only; degrades to
-    None on ANY store trouble (the read AND the iteration are guarded, so a
-    non-iterable / mid-iteration error never escapes to the merge path; gemini).
-    Reads the guarded metadata store: the ``dep=contract`` hold this feeds can
-    only exist on nodes footnote's own (refusing) creation verbs minted, so an
-    external backend selection degrades to None = the default hard merge path."""
-    try:
-        if graph_path is not None:
-            from fno.graph.api import wire_rows
-
-            entries = wire_rows(path=graph_path)
-        else:
-            from fno.tracker.metadata import read_entries
-
-            entries = read_entries("stub_manifest")
-        for e in entries:
-            if pr_number in _node_pr_numbers(e):
-                return e
-    except Exception:
-        return None
-    return None
-
-
-def unreconciled_manifest_for_pr(
-    pr_number: int, root: Path | str, *, graph_path: Optional[Path] = None
-) -> Optional[dict]:
-    """Return the held manifest (with `_node` added) iff merging this PR would
-    ship mocks: its node is `dep=contract` AND carries a manifest file that is
-    not yet reconciled. None means "nothing holds this merge" — the default
-    `hard` path and every non-contract PR fall through unchanged (AC6-EDGE)."""
-    node = _node_for_pr(pr_number, graph_path)
-    # ponytail: a hard node (or no node) never holds — keeps the path
-    # byte-for-byte unchanged. dep is popped to absent on hard nodes (G2).
-    if not node or node.get("dep") != "contract":
-        return None
-    node_id = node.get("id")
-    if not node_id:
-        return None
-    # From here we KNOW this PR is a contract dependent, so fail CLOSED on any
-    # trouble (hold the merge) rather than letting mocks slip through (gemini):
-    # an existing-but-unreadable manifest, or an OS error reading it, all hold.
-    held_on_error = {"_node": node_id, "reconciled": False, "_malformed": True, "stubs": []}
-    try:
-        path = manifest_path(node_id, root)
-        if not path.exists():
-            # No manifest carried -> nothing to hold against. Reconciliation
-            # retains the file (sets reconciled:true) rather than deleting it, so
-            # a missing file is not "reconciled-and-cleaned"; the draft-PR flag
-            # is the belt for the first-pass-not-yet-written window.
-            return None
-        manifest = load(path)
-    except (StubManifestError, OSError):
-        return held_on_error
-    if manifest.get("reconciled") is True:
-        return None
-    manifest["_node"] = node_id
-    return manifest
 
 
 # --------------------------------------------------------------------------- #

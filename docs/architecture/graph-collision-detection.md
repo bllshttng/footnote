@@ -100,14 +100,11 @@ plan ages:
 
 | Relationship | Action |
 |--------------|--------|
-| candidate is a strict subset of other | `absorb` (existing plan covers everything) |
-| other is a strict subset of candidate | `supersede` (new plan covers more) |
-| shared >= 50% of both sides AND other is older | `absorb` |
-| shared >= 50% of both sides AND ages tied | `coordinate` |
+| shared < 50% of the wider surface | `coordinate` |
+| shared >= 50% of the wider surface AND candidate is a strict subset of other | `absorb` (existing plan covers everything) |
+| shared >= 50% of the wider surface AND other is a strict subset of candidate | `supersede` (new plan covers more) |
+| shared >= 50% of the wider surface AND other is older | `absorb` |
 | anything else | `coordinate` |
-
-Severity-low cases get a `coordinate` action with a "split into a shared
-dependency" rationale appended to the message.
 
 ## Dispatch-time gate
 

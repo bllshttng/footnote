@@ -20,6 +20,9 @@ from pathlib import Path
 import pytest
 
 from tests._init_space import install_state_path_stub
+from tests.fixtures.graph_seed import seed_graph
+
+from fno.rust_binary import find_dev_binary
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
@@ -54,16 +57,17 @@ if [[ "$1" == "do" && "$2" == "target" && "$3" == "resolve-owned-identity" ]]; t
   exit 0
 fi
 # The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
-# it as a bare success would hollow out the identity assertion. Delegate to the
-# real writer under the pinned python3; the shim exposes graph.cli directly, so
-# the leading `backlog` token is dropped.
+# it as a bare success would hollow out the identity assertion. The update leaf
+# answers natively now, so delegate to this checkout's fno-agents dev build - the
+# same writer the installed fno front dispatches to.
 if [[ "$1" == "backlog" && "$2" == "update" ]]; then
   # MOCK_ABI_STALE simulates an installed fno predating the harness flags.
   if [[ -n "${MOCK_ABI_STALE:-}" && "$*" == *--locked-by-harness* ]]; then
     echo "Error: No such option: --locked-by-harness" >&2
     exit 2
   fi
-  exec python3 "$MOCK_ABI_SHIM" "${@:2}"
+  export FNO_STATE_DIR="${MOCK_ABI_STATE_DIR}"
+  exec "${MOCK_ABI_NATIVE:?no dev fno-agents build}" "${@:1}"
 fi
 exit 0
 """
@@ -72,9 +76,10 @@ exit 0
 def _sandbox(tmp_path: Path):
     home = tmp_path / "home"
     (home / ".fno").mkdir(parents=True)
-    (home / ".fno" / "graph.json").write_text(
-        '{"entries":[{"id":"%s","title":"t","status":"idea","priority":"p2",'
-        '"project":"fno","plan_path":null}]}' % NODE_ID
+    seed_graph(
+        home / ".fno" / "graph.json",
+        [{"id": NODE_ID, "title": "t", "status": "idea", "priority": "p2",
+          "project": "fno", "plan_path": None}],
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -104,6 +109,10 @@ def _sandbox(tmp_path: Path):
     py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
     py.chmod(0o755)
 
+    native = find_dev_binary()
+    if native is None:
+        pytest.skip("no dev fno-agents build under crates/fno-agents/target")
+
     env = os.environ.copy()
     env.update({
         "TARGET_START": "1",
@@ -114,6 +123,8 @@ def _sandbox(tmp_path: Path):
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
         "MOCK_ABI_SHIM": str(REPO_ROOT / "scripts" / "roadmap-tasks.py"),
+        "MOCK_ABI_NATIVE": str(native),
+        "MOCK_ABI_STATE_DIR": str(home / ".fno"),
         **stub_env,
     })
     return repo, home, log, env
@@ -236,7 +247,10 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     result = _run_init(repo, env)
     state = _state(repo)
     assert state, result.stderr
-    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+    # The store owns state; the json mirror can lag the last write.
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(home / ".fno" / "graph.json")[0]
     acquire = next(
         line for line in log.read_text().splitlines() if "claim acquire" in line
     )
@@ -264,7 +278,10 @@ def test_stale_installed_fno_stamps_owner_only_and_says_so(tmp_path):
     env["MOCK_ABI_STALE"] = "1"
 
     r = _run_init(repo, env)
-    graph = json.loads((home / ".fno" / "graph.json").read_text())["entries"][0]
+    # The store owns state; the json mirror can lag the last write.
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(home / ".fno" / "graph.json")[0]
 
     assert graph.get("locked_by"), f"owner must survive a stale fno: {graph}"
     assert not graph.get("locked_by_harness"), \

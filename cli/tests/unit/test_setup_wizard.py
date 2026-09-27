@@ -263,7 +263,13 @@ def test_ac4_fr_cancel_midrun_keeps_written_nothing_partial(tmp_path, monkeypatc
 def test_cli_wizard_smoke_accepts_defaults(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
+    from fno.setup import integration
     from fno.setup_cli import app
+
+    # The integration step execs `claude plugin list` when a real agent CLI is
+    # on PATH, which the pytest provider-exec guard refuses; the prompt flow is
+    # what this test asserts, so stub the step like the receipt test does.
+    monkeypatch.setattr(integration, "run_cli_integration", lambda **kwargs: None)
 
     fields = _always_fields()
     # One newline per field accepts each default.
@@ -301,7 +307,11 @@ def test_cli_wizard_completion_receipt_names_autonomy_status(tmp_path, monkeypat
 def test_cli_wizard_advanced_surfaces_more_fields(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
+    from fno.setup import integration
     from fno.setup_cli import app
+
+    # Same stub as the smoke test: a real agent CLI on PATH would exec here.
+    monkeypatch.setattr(integration, "run_cli_integration", lambda **kwargs: None)
 
     advanced = json.loads(schema_gen.wizard_plan())["fields"]
     # --advanced asks more than the always-only set; feed plenty of newlines.
@@ -370,7 +380,6 @@ def test_report_machine_blockers_names_a_real_blocker(monkeypatch):
         lambda source=None: {
             "status": "stale",
             "launch_agents": {},
-            "archive_id_collisions": {},
             "fd_limit": {},
             "plugin_hooks": {},
             "plugin_cache": {},
@@ -416,7 +425,6 @@ def test_report_machine_blockers_clean_machine_says_so(monkeypatch):
         lambda source=None: {
             "status": "fresh",
             "launch_agents": {"applicable": True, "dead": []},
-            "archive_id_collisions": {"count": 0, "ids": []},
             "fd_limit": {"verdict": "ok"},
             "plugin_hooks": {"failed": 0},
             "plugin_cache": {"status": "fresh"},

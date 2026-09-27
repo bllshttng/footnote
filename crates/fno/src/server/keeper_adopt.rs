@@ -25,6 +25,109 @@ pub(super) struct AdoptedKeeper {
 }
 
 impl Core {
+    /// The keeper attempt for a plain shell: try each shell candidate through
+    /// a keeper, carrying the shell-integration rc as an `env` argv prefix
+    /// (`pty::keeper_shell_argv`). `Ok(Some(id))` = hosted; the pane is
+    /// registered, its ring fed, and its rc dir owned by `shell_rc_dirs`.
+    /// `Ok(None)` = no keeper could host it: the caller falls back to the
+    /// inline pty and marks the pane unkept. `Err` = the spawn itself is
+    /// impossible (admission refused, no child pid). A failed candidate's rc
+    /// dir is removed here; only a REGISTERED pane's dir is kept.
+    ///
+    /// Silent when NOT ONE candidate even reaches a real keeper attempt (a
+    /// `SHELL` naming neither zsh nor bash - `keeper_shell_argv`'s known-shell
+    /// gate, integration is bash/zsh-only by design): that pane was never
+    /// going to be hosted, so it is expected non-participation, not a
+    /// failure worth a client-visible notice. A genuine spawn attempt that
+    /// errors (admission, handshake, a keeper binary that dies) still
+    /// notifies - operationally that IS worth surfacing. Getting this
+    /// backwards is user-visible: the notice renders into the client's
+    /// status row and nothing re-draws to clear it once its TTL lapses
+    /// (`client/row_stamp.rs`'s `NOTICE_TTL`), so on a plain `/bin/sh`
+    /// session it would show on every single split, permanently, baked into
+    /// whatever screen a test (or a real client) settles on next - exactly
+    /// the byte-exact-reattach mismatch a `/bin/sh`-shelled session hits on
+    /// every pane spawn, proven via `crates/fno/tests/persistence.rs`'s
+    /// `persistence_multi_pane_reattach_is_screen_exact` (row 1 of the
+    /// settled "before" screen read `keeper spawn failed for pane 2 (no
+    /// shell candidate produce…`, a row no fresh reattach ever reproduces).
+    #[cfg(not(test))]
+    pub(super) fn spawn_pane_kept(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        id: u64,
+        dir: Option<&std::path::Path>,
+    ) -> Result<Option<u64>, String> {
+        let mut last = String::from("no shell candidate produced a keeper argv");
+        let mut attempted = false;
+        for cand in &self.shells {
+            let Some((argv, rc_dir)) = crate::pty::keeper_shell_argv(cand, &self.session_name, id)
+            else {
+                continue;
+            };
+            attempted = true;
+            let permit = match crate::process_admission::admit_fleet() {
+                Ok(permit) => permit,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&rc_dir);
+                    return Err(e.to_string());
+                }
+            };
+            match crate::pty::PtyShell::spawn_cmd_keeper_with_permit(
+                &keeper_worker_bin(),
+                &argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            ) {
+                Ok((shell, ring)) => {
+                    // A shell pane carries no node provenance (no wrapper
+                    // argv worth parsing: the env prefix is integration, not
+                    // identity).
+                    self.register_pane(
+                        id,
+                        shell,
+                        rows,
+                        cols,
+                        None,
+                        None,
+                        cwd.to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )?;
+                    if !ring.is_empty() {
+                        if let Some(entry) = self.panes.get_mut(&id) {
+                            entry.vt.feed(&ring);
+                        }
+                    }
+                    self.shell_rc_dirs.insert(id, rc_dir);
+                    return Ok(Some(id));
+                }
+                Err(e) => {
+                    last = e.to_string();
+                    let _ = std::fs::remove_dir_all(&rc_dir);
+                }
+            }
+        }
+        if attempted {
+            self.notice_all(format!(
+                "keeper spawn failed for pane {id} ({last}); opening an unkept inline shell"
+            ));
+        }
+        Ok(None)
+    }
+
     /// Re-adopt surviving keeper panes at server start, BEFORE restore runs
     /// (an ordering constraint, not a preference: restore must see adopted
     /// panes as already-live members so it binds them instead of spawning
@@ -130,6 +233,8 @@ impl Core {
                         account_from_argv(&argv),
                         resume_target_from_argv(&argv),
                         refused_worker_from_argv(&argv),
+                        portal_hold_from_argv(&argv),
+                        transient_view_from_argv(&argv),
                     ) {
                         self.notice_all(format!(
                             "keeper readopt: {} refused registration ({e}); child was not adopted",
@@ -162,6 +267,14 @@ impl Core {
                             .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
                             .unwrap_or_default();
                         self.worker_session_pane.insert((harness, session_id), id);
+                    }
+                    // The shell-integration rc dir a keeper shell's argv
+                    // references outlived the spawning server: re-own it, so
+                    // a later close removes it and an adopted shell never
+                    // loses its rc to a server death.
+                    let rc_dir = crate::pty::shell_rc_dir(&self.session_name, id);
+                    if rc_dir.exists() {
+                        self.shell_rc_dirs.insert(id, rc_dir);
                     }
                     self.keeper_adopted.push(AdoptedKeeper {
                         pane: id,
@@ -222,6 +335,126 @@ impl Core {
         Some(a.pane)
     }
 
+    /// Bind one stored SHELL slot to its re-adopted pane by birth pane id:
+    /// the slot recorded the pane id that lived in the leaf at capture, and
+    /// the keeper re-adopts at the birth id, so the id is a safe join. Only
+    /// an unplaced adoptee joins; a fresh-id adoption (unreconciled) never
+    /// matches and lands in its own tab with today's notice.
+    pub(crate) fn take_adopted_for_slot(&mut self, birth: u64) -> Option<u64> {
+        let hit = self
+            .keeper_adopted
+            .iter_mut()
+            .find(|a| !a.placed && a.pane == birth);
+        let a = hit?;
+        a.placed = true;
+        Some(a.pane)
+    }
+
+    /// The one-time stand-in prune, run at restore after the portal slots
+    /// bind and before the leftovers place. A pane an OLDER server minted
+    /// as a stand-in closes here, operator-shaped, with no parked screen:
+    /// the shapes no code mints anymore. A pane is a candidate only when
+    /// its child runs no child process of its own and no portal's screen
+    /// names it, and one of:
+    /// - its name matches `^portal[0-9]+$` (the old restore naming);
+    /// - its argv carried `FNO_PORTAL_HELD=` but no portal entry claims it;
+    /// - its argv carried `FNO_VIEW_TRANSIENT=` (a killed caller's view);
+    /// - it wears a worker name whose registry row is live and paneless
+    ///   (a thread row's shell stand-in - the row's resume door is
+    ///   `fno agents resume`, never the shell). A name no row answers is
+    ///   absence, never `gone`: a `mux pane run --worker` pane has no row
+    ///   by design, and absence must not kill the child its keeper holds;
+    /// and a pane-substrate worker hold (its row hosts a pane) is kept on
+    /// purpose: it is that worker's resume door, not a portal. Unknown
+    /// process state never prunes.
+    pub(super) fn prune_portal_standins(&mut self) {
+        let screens: std::collections::HashSet<u64> =
+            self.portals.values().map(|p| p.seat).collect();
+        let candidates: Vec<u64> = self
+            .panes
+            .iter()
+            .filter(|(pid, _)| !screens.contains(pid))
+            .map(|(pid, _)| *pid)
+            .collect();
+        let mut pruned = 0;
+        for pid in candidates {
+            let child = match self.panes.get(&pid).and_then(|e| e.pty.child_pid()) {
+                Some(child) => child,
+                None => continue,
+            };
+            match crate::process_admission::pid_has_child(child) {
+                Some(false) => {}
+                _ => continue,
+            }
+            // A close that would empty the session shuts the server down
+            // mid-restore; the prune never takes the last pane.
+            if self.panes.len() <= 1 {
+                break;
+            }
+            let entry = match self.panes.get(&pid) {
+                Some(entry) => entry,
+                None => continue,
+            };
+            // This server's own held worker placeholders are resume doors
+            // recorded in `held_workers`: never candidates, whatever the
+            // registry snapshot says (at startup it may not have landed
+            // yet). Only an OLDER server's adopted stand-in (never held by
+            // this one) can prune on the name arm.
+            if self.held_workers.contains_key(&pid) {
+                continue;
+            }
+            let name = entry.name.as_deref();
+            let portal_number = name
+                .filter(|n| {
+                    n.starts_with("portal")
+                        && n.len() > "portal".len()
+                        && n["portal".len()..].bytes().all(|b| b.is_ascii_digit())
+                })
+                .is_some();
+            let orphan_hold = entry.portal_hold.is_some();
+            let transient = entry.transient_view;
+            // The name arm reads the registry the restore walk reads, fresh
+            // from the file: the off-loop snapshot is empty at startup, and
+            // an empty read must mean "unknown", never "gone" (it would eat
+            // every held worker's placeholder). `None` (unreadable) is
+            // unknown too. The arm fires on a POSITIVE record only: at
+            // least one row answers the name and none hosts a pane. A name
+            // no row answers is absence, never `gone` - a `mux pane run
+            // --worker` pane has no registry row by design, and pruning on
+            // absence would kill the child its keeper holds.
+            let registry = crate::restore_gate::restore_registry_rows();
+            let named_row_paneless = entry.name.as_deref().is_some_and(|n| {
+                registry.as_deref().is_some_and(|rows| {
+                    let named: Vec<_> = rows.iter().filter(|a| a.name == n).collect();
+                    !named.is_empty() && named.iter().all(|a| a.mux.is_none())
+                })
+            });
+            if !(portal_number || orphan_hold || transient || named_row_paneless) {
+                continue;
+            }
+            let why = if portal_number {
+                "portalN stand-in shell"
+            } else if orphan_hold {
+                "held screen with no portal entry"
+            } else if transient {
+                "leftover transient view"
+            } else {
+                "shell stand-in for a paneless row"
+            };
+            let label = entry.name.clone().unwrap_or_else(|| "pane".into());
+            self.notice_all(format!(
+                "restore: pruned {why} (pane {pid}, {label}); it is no portal and nothing is lost"
+            ));
+            pruned += 1;
+            self.close_by_operator(pid);
+        }
+        if pruned > 0 {
+            self.notice_all(format!(
+                "restore: pruned {pruned} stand-in pane(s) an older server left"
+            ));
+        }
+    }
+
     /// Place any adopted pane restore's member walk did not bind (its stored
     /// member is gone, or the store held no squads at all). A live pane must
     /// never be left dangling without a tab: one tab each, named from the
@@ -234,6 +467,38 @@ impl Core {
             .cloned()
             .collect();
         for a in unplaced {
+            // A portal remnant is never tabbed: a viewer (an attach argv),
+            // a parked screen or a transient view is reaped here, named in
+            // the notice. Every other leftover keeps today's own-tab
+            // placement.
+            let remnant = match self.panes.get(&a.pane) {
+                Some(entry)
+                    if entry.portal_hold.is_some()
+                        || entry.transient_view
+                        || (cmd_from_argv(&a.argv).as_deref() == Some("claude")
+                            && a.argv.get(1).map(String::as_str) == Some("attach")) =>
+                {
+                    Some(if entry.portal_hold.is_some() {
+                        "parked screen"
+                    } else if entry.transient_view {
+                        "transient view"
+                    } else {
+                        "viewer"
+                    })
+                }
+                _ => None,
+            };
+            if let Some(kind) = remnant {
+                self.notice_all(format!(
+                    "keeper readopt: pane {} was a portal remnant ({kind}); reaped, not tabbed",
+                    a.pane
+                ));
+                if let Some(entry) = self.keeper_adopted.iter_mut().find(|x| x.pane == a.pane) {
+                    entry.placed = true;
+                }
+                self.reap_pane(a.pane);
+                continue;
+            }
             let owner = self
                 .session
                 .squads

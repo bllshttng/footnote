@@ -7,6 +7,7 @@ ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 CLAUDE_RUST="$ROOT/crates/fno-agents/src/claude_ask.rs"
 ADOPT_RUST="$ROOT/crates/fno-agents/src/claude_adopt.rs"
+CLIENT_RUST="$ROOT/crates/fno-agents/src/client_verbs.rs"
 CODEX_RUST="$ROOT/crates/fno-agents/src/codex_ask.rs"
 RUST_GATE="$ROOT/crates/fno-agents/src/spawn_gate.rs"
 OVERLAY_RUST="$ROOT/crates/fno-agents/src/spawn_overlay.rs"
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --claude-rust) CLAUDE_RUST="$2"; shift 2 ;;
     --adopt-rust) ADOPT_RUST="$2"; shift 2 ;;
+    --client-rust) CLIENT_RUST="$2"; shift 2 ;;
     --codex-rust) CODEX_RUST="$2"; shift 2 ;;
     --rust-gate) RUST_GATE="$2"; shift 2 ;;
     --overlay-rust) OVERLAY_RUST="$2"; shift 2 ;;
@@ -25,7 +27,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for file in "$CLAUDE_RUST" "$ADOPT_RUST" "$CODEX_RUST" "$RUST_GATE" "$OVERLAY_RUST" "$PYTHON_GATE"; do
+for file in "$CLAUDE_RUST" "$ADOPT_RUST" "$CLIENT_RUST" "$CODEX_RUST" "$RUST_GATE" "$OVERLAY_RUST" "$PYTHON_GATE"; do
   if [[ ! -f "$file" ]]; then
     echo "ERROR: provider vocabulary source not found: $file" >&2
     exit 1
@@ -81,21 +83,23 @@ require_value() {
 require_value 'Rust Claude provider' "$rust_claude"
 require_value 'Rust Codex provider' "$rust_codex"
 
-# The adopt path carries NO provider literal: the mint stamps None (adoption
-# observed no route, and the retired unconditional vendor was exactly the
-# wrong-bill guess a vocabulary gate should never enforce), and `adopt`
-# resolves the provider from the route-settings match, recording none on no
-# match. Both shapes are the contract, so both are asserted here.
-adopt_mint=$(awk -v start="pub fn mint_adopted_entry" -v end="pub fn upsert_adopted_row" '
+# The adopt path carries NO provider literal: the live mint stamps None
+# (adoption observed no route, and the retired unconditional vendor was
+# exactly the wrong-bill guess a vocabulary gate should never enforce), and
+# the manifest-identity persist resolves the provider from the route-settings
+# match, recording none on no match. Both shapes are the contract, so both
+# are asserted here. The retired claude_adopt mint is gone; the live path
+# lives in client_verbs.rs.
+adopt_mint=$(awk -v start="fn mint_synthesized_entry(" -v end="enum AdoptError" '
   index($0, start) == 1 { inside = 1 }
   inside { print }
   inside && index($0, end) == 1 { exit }
-' "$ADOPT_RUST")
+' "$CLIENT_RUST")
 if [[ "$adopt_mint" != *'provider: None'* ]]; then
   echo 'ERROR: Rust adopted-Claude mint must stamp provider: None (adoption observed no route)' >&2
   failed=1
 fi
-if ! grep -q 'provider_from_route_settings(Some(&model))' "$ADOPT_RUST"; then
+if ! grep -q 'provider_from_route_settings(Some(&model))' "$CLIENT_RUST"; then
   echo 'ERROR: Rust adopt must resolve the provider via provider_from_route_settings, never a vendor literal' >&2
   failed=1
 fi

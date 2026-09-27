@@ -241,11 +241,13 @@ check "$(grep -q 'warns at 50%' <<<"$out" && echo 1)" \
       "the warning reports the fraction actually in force" \
       "the warning did not name the overridden fraction"
 
-# --- the cap in the trap must match the job's real ceiling ----------------
-# The cap now lives in two places per shard: `timeout-minutes` on the job, and
-# the third argument to the reporter, because GitHub does not expose
-# timeout-minutes to a step. A raise applied to only one would move the warning
-# threshold away from the real ceiling and nothing would say so.
+# --- the cap in the trap must match the clock that really kills the step ---
+# The cap lives in up to three places per shard: `timeout-minutes` on the STEP
+# that calls the reporter (the binding ceiling when declared), `timeout-minutes`
+# on the job (the backstop), and the third argument to the reporter, because
+# GitHub does not expose timeout-minutes to a step. A raise applied to only one
+# would move the warning threshold away from the real ceiling and nothing would
+# say so.
 echo ""
 echo "== cap agreement between timeout-minutes and the reporter argument =="
 python3 - <<'PY'
@@ -287,9 +289,17 @@ checked = 0
 
 for name in sorted(shards):
     job, run = shards[name]
-    # The reporter's own invocation line, isolated. Reading the whole job's
-    # concatenated run text let an unrelated `|| true` in any other step
-    # satisfy the guard below.
+    # The reporter's own invocation line, isolated to the STEP that calls it.
+    # Reading the whole job's concatenated run text let an unrelated `|| true`
+    # in any other step satisfy the guard below, and a step-level
+    # timeout-minutes would be invisible at job granularity.
+    step = next((st for st in job.get("steps", [])
+                 if "smoke-duration-report.sh" in st.get("run", "")), None)
+    if step is None:
+        print(f"  FAIL: {name} times a shard but never calls the duration reporter")
+        bad += 1
+        continue
+    run = step.get("run", "")
     call = next((ln for ln in run.splitlines() if "smoke-duration-report.sh" in ln), None)
     if call is None:
         print(f"  FAIL: {name} times a shard but never calls the duration reporter")
@@ -305,12 +315,18 @@ for name in sorted(shards):
         print(f"  FAIL: {name} calls the reporter with no cap argument")
         bad += 1
         continue
-    arg_cap, job_cap = int(caps[-1]), job.get("timeout-minutes")
-    if job_cap != arg_cap:
-        print(f"  FAIL: {name} timeout-minutes={job_cap} but reporter cap={arg_cap}")
+    arg_cap = int(caps[-1])
+    # The clock that kills the step is the cap to agree on: the calling
+    # step's own timeout-minutes when it declares one, else the job's.
+    cap = step.get("timeout-minutes")
+    cap_src = "step"
+    if cap is None:
+        cap, cap_src = job.get("timeout-minutes"), "job"
+    if cap != arg_cap:
+        print(f"  FAIL: {name} {cap_src} timeout-minutes={cap} but reporter cap={arg_cap}")
         bad += 1
     else:
-        print(f"  ok: {name} cap agrees ({job_cap}m in both places)")
+        print(f"  ok: {name} cap agrees ({cap}m in both places)")
         checked += 1
 
     # Independent of the cap parse, and tolerant of `||true`, which is

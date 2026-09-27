@@ -178,7 +178,9 @@ def test_route_to_rust_exports_the_pin_at_exec(tmp_path, monkeypatch):
     assert execed["argv"][0] == str(binary)
 
 
-def test_spawn_carries_ambient_policy_override_on_the_pane(tmp_path, monkeypatch):
+def test_spawn_carries_ambient_policy_override_on_the_pane(
+    tmp_path, monkeypatch, loop_admission_ready
+):
     """An explicit ambient override rides the provenance overlay: the pane
     wrapper's set-or-clear must preserve what the operator set."""
     from typer.testing import CliRunner

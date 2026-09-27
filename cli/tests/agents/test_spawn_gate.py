@@ -48,7 +48,7 @@ def _no_live_cpu_axis(monkeypatch):
     monkeypatch.setattr(
         spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
     )
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     admit = Admission(
         verdict="admit",
         axis="fleet_cpu_share",
@@ -61,8 +61,6 @@ def _no_live_cpu_axis(monkeypatch):
         capacity_cores=12.0,
         ceiling=0.5,
         gap=None,
-        load_15m=1.0,
-        backstop=480.0,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
 
@@ -756,7 +754,7 @@ class TestTransport:
         assert data["name"] == "w"
         assert data["substrate"] == "pane"
 
-    def test_missing_binary_refuses_exit_86_gate_unavailable(self, monkeypatch, capsys):
+    def test_missing_binary_refuses_exit_87_gate_unavailable(self, monkeypatch, capsys):
         from fno.rust_binary import VerbUnavailable
 
         events = []
@@ -770,12 +768,30 @@ class TestTransport:
         assert exc.value.receipt["reason"] == "gate_unavailable"
         assert "not found" in exc.value.receipt["error"]
         assert [k for k, _ in events] == ["spawn_gate_refused"]
+        # The transport prints its OWN verdict line, so a spawn-failure reader
+        # keys on it the same way it keys on the Rust gate's verdict (x-d769).
+        err_lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
+        assert err_lines[-1].startswith(
+            f"spawn-gate: refused on gate (gate_unavailable, exit {spawn_gate.EXIT_GATE_UNAVAILABLE})"
+        )
 
     def test_the_callers_session_rides_the_payload(self, monkeypatch):
         stub = _stub_verb(monkeypatch, {"status": "admitted"})
         spawn_gate.run_gate("w", "bg")
         assert "caller_session" in stub.payload
         assert stub.payload["account"] is None
+
+    def test_succession_scope_rides_the_payload_and_defaults_to_none(self, monkeypatch):
+        stub = _stub_verb(monkeypatch, {"status": "admitted"})
+        try:
+            spawn_gate.run_gate("w", "bg", succession_scope="x-epic")
+        except TypeError:
+            pytest.fail("run_gate must accept and transport succession_scope")
+        assert stub.payload["succession_scope"] == "x-epic"
+
+        stub = _stub_verb(monkeypatch, {"status": "admitted"})
+        spawn_gate.run_gate("w", "bg")
+        assert stub.payload["succession_scope"] is None
 
     def test_probe_is_a_verb_call_passed_through(self, monkeypatch):
         stub = _stub_verb(
@@ -842,7 +858,10 @@ class TestQos:
 
         monkeypatch.setattr(subprocess, "run", boom)
         spawn_gate.qos_demote_pid(12345)
-        assert "non-fatal" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "non-fatal" in err
+        # Pass-path lines carry the note prefix: only refusals say `spawn-gate:`
+        assert err.strip().startswith("spawn-gate note:")
 
     def test_bg_demotion_bounded_when_pid_never_appears(
         self, tmp_path, monkeypatch, capsys

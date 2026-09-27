@@ -1456,49 +1456,6 @@ def headroom(
     )
 
 
-def headrooms(
-    provider_ids: list[str] | tuple[str, ...],
-    *,
-    now: float | None = None,
-    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
-    threshold_pct: float = 90.0,
-    repo_root: Path | None = None,
-) -> dict[str, Headroom]:
-    """Headroom verdicts for many accounts from ONE state-file read.
-
-    :func:`headroom` per id would re-read and re-parse the whole file per
-    account; the capacity seam asks about every account a harness can speak
-    for, so the shared payload is read once and each verdict derives from it
-    via the same pure :func:`_headroom_from`. Fail-open like the single read.
-    """
-    if now is None:
-        now = time.time()
-    try:
-        raw = _read_disk_payload(_resolve_state_path(repo_root))
-    except Exception:  # noqa: BLE001 - a corrupt state read never breaks dispatch
-        raw = None
-    health, _dropped = _drop_stale(_parse_state_payload(raw) if raw else {}, now)
-    usage = _parse_usage_payload(raw) if raw else {}
-    out: dict[str, Headroom] = {}
-    for pid in provider_ids:
-        h = health.get(pid)
-        rlu = None
-        if h is not None and h.rate_limited_until is not None:
-            rlu = h.rate_limited_until if h.rate_limited_until > now else None
-        snap = usage.get(pid)
-        window = "fresh"
-        if snap is None:
-            window = "absent"
-        elif snap.probed_at < now - ttl_seconds:
-            window = "stale"
-            snap = None
-        out[pid] = _headroom_from(
-            snap, rlu, now=now, threshold_pct=threshold_pct, window=window,
-            lock_at=h.last_error_at if h is not None else None,
-        )
-    return out
-
-
 def _headroom_from(
     snap: UsageSnapshot | None,
     rlu: float | None,

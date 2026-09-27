@@ -156,7 +156,6 @@ def test_inside_own_worktree_defers_rather_than_advising(tmp_path: Path) -> None
     """
     runner = _Recorder(state="MERGED")
     r = _ritual_for(runner, tmp_path)
-    r._find_worktree = lambda branch: str(tmp_path)  # type: ignore[method-assign]
     seen = _emits(r)
 
     r.leg_archive()
@@ -167,7 +166,7 @@ def test_inside_own_worktree_defers_rather_than_advising(tmp_path: Path) -> None
     assert seen[0][0] == "archive"
     assert seen[0][1] == "deferred"
     assert seen[0][2].startswith("cleanup-requested request_id=")
-    assert f"worktree={tmp_path}" in seen[0][2]
+    assert "daemon resolves the tree from feature/x-dead" in seen[0][2]
     assert "merged-pr" in seen[0][2]
 
 

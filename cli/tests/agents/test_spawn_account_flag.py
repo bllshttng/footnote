@@ -431,7 +431,10 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     from fno import rust_binary
     from fno.agents import dispatch as dsp
 
-    monkeypatch.setenv("HOME", "/real/home")
+    # The fake home sits under tmp_path so the hermetic guard allows the
+    # state_dir() resolution the seal performs.
+    fake_home = tmp_path / "real-home"
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
@@ -439,6 +442,14 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run(argv, **kw):
+        # The sealed lane probes the binary's state-root door before relying
+        # on the pin; answer that handshake the way the current binary does.
+        if argv[1] == "state-root":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=kw["env"]["FNO_STATE_DIR"] + "\n",
+                stderr="",
+            )
         captured["env"] = kw.get("env")
         return SimpleNamespace(
             returncode=0,
@@ -463,8 +474,9 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     # The credential still reaches the launched harness.
     assert env["HOME"] == "/accounts/zai-1/home"
     # The positive markers: our roots name the REAL home, not the account's.
-    assert env["FNO_AGENTS_HOME"] == "/real/home/.fno/agents"
-    assert env["FNO_CLAIMS_ROOT"] == "/real/home"
+    assert env["FNO_AGENTS_HOME"] == str(fake_home / ".fno" / "agents")
+    assert env["FNO_CLAIMS_ROOT"] == str(fake_home)
+    assert env["FNO_STATE_DIR"] == str(fake_home / ".fno")
 
 
 def test_codex_thread_client_env_unsealed_without_a_home_overlay(
@@ -476,7 +488,8 @@ def test_codex_thread_client_env_unsealed_without_a_home_overlay(
     from fno import rust_binary
     from fno.agents import dispatch as dsp
 
-    monkeypatch.setenv("HOME", "/real/home")
+    fake_home = tmp_path / "real-home"
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
 
@@ -504,7 +517,7 @@ def test_codex_thread_client_env_unsealed_without_a_home_overlay(
     )
 
     env = captured["env"]
-    assert env["HOME"] == "/real/home"
+    assert env["HOME"] == str(fake_home)
     assert "FNO_AGENTS_HOME" not in env
 
 

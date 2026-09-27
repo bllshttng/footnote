@@ -39,12 +39,12 @@ use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
     AgentNoPaneReason, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState,
     ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
-    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement,
-    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
-    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PanePlacement,
+    PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement, RestoreRow,
+    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
-use crate::pty::{shell_candidates, PtyShell};
+use crate::pty::{shell_candidates, PaneChunk, PtyShell};
 use crate::restore_liveness::{
     classify_member, no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
     MemberVerdict,
@@ -57,17 +57,23 @@ use crate::spawn_journal::{
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::{SquadSnapshot, StoredTabTree};
+
+use self::slot_capture::SlotCapture;
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
+pub(crate) mod agent_launch;
 mod agent_rows_join;
+mod drift_retire;
+mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
+mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
 mod portal_reach;
@@ -75,10 +81,15 @@ mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
 mod row_set;
+mod session_guard;
 mod shutdown_capture;
+mod slot_capture;
 mod squad_persistence;
 mod squad_sync;
+mod thread_workspace;
 mod truth_probe;
+mod workspace_restore;
+use self::session_guard::{ConnAlive, SocketGuard};
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
@@ -509,21 +520,6 @@ fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'
     }
 }
 
-/// True only when the current session/pane join names a LIVE row that
-/// explicitly declared the bus-only delivery policy. DND is presence, never
-/// liveness, but an exited row is skipped (matching [`rerun_allowed`]): a hold
-/// stamped on a reaped agent must not veto the shell or successor that
-/// inherited the pane and can never lift it.
-fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
-    agents.iter().any(|a| {
-        !a.exited
-            && a.dnd
-            && a.mux
-                .as_ref()
-                .is_some_and(|(s, p)| s == session && *p == pane)
-    })
-}
-
 /// Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -643,11 +639,30 @@ pub(crate) enum CoreMsg {
         account: Option<String>,
     },
     /// The off-loop dispatch task's outcome, routed back so the notice is sent
-    /// from the core loop (which owns `clients`). `notice` empty = say nothing
-    /// (the launched pane speaks for itself via the layout push).
+    /// from the core loop (which owns `clients`). `notice` phrases carry over
+    /// from the retired porcelain (see `dispatch_launch::dispatch_notice`).
     DispatchResult {
         id: u64,
         notice: String,
+    },
+    /// (v83, ) One sideline launcher request from client `id`. The
+    /// handler validates pre-birth, dedups by request id, and runs exactly
+    /// one canonical spawn off-loop; progress returns as
+    /// [`CoreMsg::AgentLaunchUpdate`]. Gated on passive observers like
+    /// DispatchNext.
+    AgentLaunch {
+        id: u64,
+        request: crate::proto::AgentLaunchRequest,
+    },
+    /// The off-loop launcher task's terminal update, routed back so it is
+    /// sent from the core loop (which owns `clients`). Trusted origin (a
+    /// server task, not a client), so it is NOT in the passive gate - the
+    /// same shape as DispatchResult/PeekResult. `retry` bounds the
+    /// redelivery when the target client's channel is momentarily full.
+    AgentLaunchUpdate {
+        id: u64,
+        update: crate::proto::AgentLaunchUpdate,
+        retry: u8,
     },
     /// (v29) The off-loop peek task's transcript, routed back so the
     /// `PeekBody` is sent from the core loop (which owns `clients`) to the
@@ -779,6 +794,10 @@ pub(crate) enum CoreMsg {
         bytes: Vec<u8>,
         guarded: bool,
         expected_identity: Option<String>,
+        /// A send the Rust hold gate already passed (`own`, `control:` or a
+        /// parked-mail replay): the pane's DND refusal stands down for this
+        /// write. Every other guard stays.
+        hold_pass: bool,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `Err` carries the refusal reason: either the read
         /// failed or the registry carries a row whose pane cannot be read
@@ -801,6 +820,7 @@ pub(crate) enum CoreMsg {
     },
     PaneKill {
         pane: u64,
+        hand_off_to: Option<String>,
         reply: ControlReply,
     },
     /// Acquire/release the per-pane writer claim (4a-G3, brief Locked 5).
@@ -936,31 +956,27 @@ pub(crate) enum CoreMsg {
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
     /// (4a-G2). Sent only when the set changed; the core stores it and
-    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`
-    /// (US4) is the reader's off-loop cwd -> git-branch resolution for
-    /// the row cwds, joined into each row's `subline` at layout time; a cwd
-    /// with no resolvable branch is simply absent (the subline degrades to the
-    /// cwd tail).
-    /// `tails` is the same shape one level over: the reader's off-loop
-    /// session-uuid -> most-recent-assistant-line map, joined into each row's
-    /// `tail` at layout time. A uuid with no readable transcript is absent, so
-    /// the extended table's cell renders empty rather than fabricated.
+    /// re-pushes layouts (rects unchanged, so no frame re-emit). `branches`,
+    /// `tails` and `ctx` are the reader's off-loop maps, joined into each
+    /// row's subline/tail and each pane's `PaneMeta` at layout time; an
+    /// absent reading degrades to an absent cell, never a fabrication.
     AgentRows {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
+        ctx: HashMap<String, String>,
         /// The reader's registry+roster read succeeded (parsed bytes,
         /// last-good, or a confirmed-vanished file; a present-but-unreadable
         /// file reads false). Gates the daemon-side registry-absence death
         /// rule, which must stay inert while the read state is unknown.
         read_ok: bool,
     },
-    /// A fresh session-uuid -> message-tail map with no row change
-    /// behind it. Transcripts grow independently of the registry, so the tail
-    /// pass runs every tick; when only it moved, this pushes the map alone
-    /// rather than forcing an unchanged row set through.
+    /// Tails (and ctx, v91) moved with no row change behind them:
+    /// transcripts grow independently of the registry, so when only this
+    /// pass moved, it pushes alone rather than forcing a row set through.
     AgentTails {
         tails: HashMap<String, String>,
+        ctx: HashMap<String, String>,
     },
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
     /// probe (`fno agents list --json`, one process for the whole fleet).
@@ -988,8 +1004,8 @@ pub(crate) enum CoreMsg {
         holders: HashMap<String, String>,
         /// node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
-        /// Active missions, from the same graph read as `cards`.
-        missions: backlog_view::MissionMap,
+        /// node id -> driving session short id, from the same graph read.
+        drivers: HashMap<String, String>,
     },
     /// The per-pane counter snapshot cadence fired: snapshot every live pane's
     /// monotonic totals and emit one event onto the machine-global events
@@ -1098,11 +1114,28 @@ struct PaneEntry {
     /// This positive refusal marker is sweepable; it is not inferred from an
     /// absent registry row.
     refused_worker: Option<String>,
+    /// The held portal row this placeholder seat stands in for
+    /// (`FNO_PORTAL_HELD`), parsed once at spawn and re-parsed at keeper
+    /// re-adoption. A placeholder is held even though adoption gives its
+    /// bare shell `cmd: Some`; the portal doors read
+    /// [`Core::portal_seat_is_viewer`], never `cmd` alone.
+    portal_hold: Option<String>,
+    /// True when this pane is a TRANSIENT machine view (`FNO_VIEW_TRANSIENT`
+    /// in its own argv, re-derived at keeper re-adoption): a screen a side
+    /// effect opened. It is never a portal (no `portals` entry), never
+    /// captured as anything but an ordinal shell slot, and the restore
+    /// prune reaps it instead of tabbing it.
+    transient_view: bool,
     /// True when this pane was adopted at a fresh id because the pane key its
     /// keeper socket carries could not be reused (zero, or already live). Set
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
     /// rather than delivered to whatever the number now names.
     unreconciled: bool,
+    /// True when the keeper could not host this pane and the inline pty
+    /// fell back instead: the pane is LIVE but will die with the server.
+    /// Set only at spawn (never at re-adoption, whose panes are keeper-hosted
+    /// by construction); `kill-server` refuses while an unkept pane is live.
+    unkept: bool,
     /// When this pane last produced PTY output, stamped on the drain
     /// path itself so a pane with no `pane wait` watcher still records activity
     /// (`note_pane_output` returns early with zero subscribers, which is why
@@ -1118,403 +1151,21 @@ struct PaneEntry {
     /// signal burst the resize itself raised and coalesces into it, so a
     /// renderer that repaints exactly once on the burst never sees it.
     nudge_due: Option<Instant>,
+    /// The most recently REQUESTED pane size, set by the geometry pass
+    /// whether or not `vt` has caught up yet. A keeper-hosted pane's resize
+    /// is a round trip (`PtyShell::resize` queues a frame; `entry.vt.resize`
+    /// applies only once the keeper's ack arrives via `PaneChunk::Resized`
+    /// on the pane's own ordered output channel) - so this, not `vt.size()`,
+    /// is the one source of "what size did we last ask for", used by the
+    /// geometry pass itself (to dedupe a repeat request) and the repaint
+    /// nudge (to never nudge back to a stale pre-resize size while the ack
+    /// is still in flight).
+    requested_size: (u16, u16),
 }
 
-/// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
-/// (mux_spawn.py) prefixes the command with `env FNO_NODE=<id> ...`, so the id
-/// is already in the argv the server receives - no new IPC from the pane. An
-/// ad-hoc pane (no such token) yields `None`.
-///
-/// Anchored to the `env(1)` wrapper to avoid false positives: only a leading
-/// `env` followed by its `NAME=VALUE` assignment run is scanned, stopping at
-/// the actual command. So a real command that merely mentions `FNO_NODE=` in
-/// its own args (e.g. `grep FNO_NODE=x file`) is never mistaken for provenance.
-fn node_from_argv(argv: &[String]) -> Option<String> {
-    env_token_from_argv(argv, "FNO_NODE=")
-}
+mod argv_facts;
 
-/// The refused worker a restore placeholder was minted for, from the
-/// same `env(1)` wrapper (`FNO_REFUSED_WORKER=<name>`). The refusal marker then
-/// travels in the pane's own argv like every other durable pane fact, so a
-/// later server re-derives it on keeper re-adoption and can sweep a
-/// placeholder it did not mint - no stored state to go stale.
-fn refused_worker_from_argv(argv: &[String]) -> Option<String> {
-    env_token_from_argv(argv, "FNO_REFUSED_WORKER=")
-}
-
-/// The pane's `FNO_ACCOUNT` birth account, parsed from the same
-/// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
-/// spawn was routed with `--account`). `None` for a default-account or ad-hoc
-/// pane. This is the mux-spawned-pane source for the sideline account glyph
-/// (managed accounts share `~/.claude`, so the roster can't distinguish them -
-/// the pane's own birth env can).
-fn account_from_argv(argv: &[String]) -> Option<String> {
-    env_token_from_argv(argv, "FNO_ACCOUNT=")
-}
-
-/// The pane's `FNO_AGENT_SELF` registered worker name, parsed from the
-/// same `env(1)` wrapper prefix as `FNO_NODE`. `_mesh_env_wrapper` stamps it for
-/// every mux-spawned agent pane - the unique identity the sideline row already
-/// shows. The tab/pane title reads this, not the process table, so a QoS
-/// wrapper (taskpolicy/nice) that rewrites argv[0] cannot collapse the title.
-fn agent_self_from_argv(argv: &[String]) -> Option<String> {
-    env_token_from_argv(argv, "FNO_AGENT_SELF=")
-}
-
-/// The argv index where the `env(1)` `NAME=VALUE` assignment run begins:
-/// past `env` itself and its option run. `_mesh_env_wrapper` emits an auth-var
-/// scrub (`-u VAR`) BEFORE the assignments on an `--account` spawn, so
-/// a naive "first token after env" scan would stop on `-u` and miss every
-/// assignment (dropping both `FNO_NODE` and `FNO_ACCOUNT`). Skip `-u VAR` (and
-/// `--unset VAR`) pairs, other `-flags`, and a `--` terminator. `None` when
-/// argv doesn't start with `env`.
-fn env_assignments_start(argv: &[String]) -> Option<usize> {
-    if argv.first().map(String::as_str) != Some("env") {
-        return None;
-    }
-    let mut i = 1;
-    while let Some(tok) = argv.get(i).map(String::as_str) {
-        if tok == "--" {
-            i += 1;
-            break;
-        }
-        if tok.starts_with('-') {
-            // `-u`/`--unset` consumes the next token (the var name to unset).
-            i += if tok == "-u" || tok == "--unset" {
-                2
-            } else {
-                1
-            };
-        } else {
-            break; // the assignment run (or the command) starts here
-        }
-    }
-    // A trailing bare `-u` / `--unset` advances past the end, and every caller
-    // slices `argv[start..]`, which panics for start > len. Clamp here (one
-    // fix, four call sites) rather than guarding each slice.
-    Some(i.min(argv.len()))
-}
-
-/// Shared scan for a `NAME=` token in the leading `env(1)` assignment run of a
-/// pane-run argv (anchored to `env` so a command that merely mentions the token
-/// in its own args is never mistaken for provenance).
-fn env_token_from_argv(argv: &[String], prefix: &str) -> Option<String> {
-    let start = env_assignments_start(argv)?;
-    argv[start..]
-        .iter()
-        .take_while(|a| a.contains('='))
-        .find_map(|a| a.strip_prefix(prefix))
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-}
-
-/// The spawned command's basename for the tab-label chain: the first
-/// argv token past an optional leading `env` + its `NAME=VALUE` run (the same
-/// scan shape as [`node_from_argv`]). `None` when the scan finds no command -
-/// spawn never fails on labeling.
-fn cmd_from_argv(argv: &[String]) -> Option<String> {
-    let cmd = match env_assignments_start(argv) {
-        // Past the assignment run (skip `NAME=VALUE`s) is the command; the
-        // option run was already skipped, so `-u` never masquerades as the cmd.
-        Some(start) => argv[start..].iter().find(|a| !a.contains('='))?,
-        None => argv.first()?,
-    };
-    let base = cmd.rsplit('/').next().unwrap_or(cmd);
-    (!base.is_empty()).then(|| base.to_string())
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test override for the attach program (see [`attach_argv`]): points unit
-    /// tests at a benign binary so the attach spawn+swap path runs without claude.
-    static ATTACH_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Test override for the Follow viewer program (see
-    /// [`peek_argv`]): the real argv boots the deployed `fno` CLI, which under
-    /// a loaded full-suite run can outlive any sane test budget. Same benign-
-    /// binary pattern as `ATTACH_PROGRAM`.
-    static PEEK_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// The base argv attaching bg session `id`: `claude attach <id>`. `id` is always
-/// a positional arg (never a shell string), so an 8-hex id can only name a
-/// session. Tests override the program via `set_attach_program`.
-fn attach_base(id: &str) -> Vec<String> {
-    #[cfg(test)]
-    if let Some(mut argv) = ATTACH_PROGRAM.with(|p| p.borrow().clone()) {
-        argv.push(id.to_string());
-        return argv;
-    }
-    vec!["claude".to_string(), "attach".to_string(), id.to_string()]
-}
-
-/// The argv attaching bg session `id`, routed to the right claude daemon. For an
-/// isolated-account row (`config_dir` set), wrap with `env CLAUDE_CONFIG_DIR=<dir>`
-/// so the attach hits that account's daemon instead of the ambient `~/.claude`
-/// (codex P1: a bare `claude attach` under the default dir fails, or worse
-/// targets a colliding default-account session); `FNO_ACCOUNT` rides along so the
-/// re-attached pane keeps its account glyph. A default-account row passes `None`
-/// and is byte-identical to the pre-feature attach.
-fn attach_argv(
-    id: &str,
-    account: Option<&str>,
-    config_dir: Option<&std::path::Path>,
-) -> Vec<String> {
-    attach_argv_for(Some("claude"), id, account, config_dir)
-}
-
-/// One attach gesture's argv, rendered from the harness's DECLARED
-/// attach form. Each harness gets its own interface, because the viewport execs
-/// that interface rather than rendering one:
-///
-/// - a harness whose contract row (or `[harness.<name>.attach]` config
-///   override) declares a form: that form, rendered - `claude attach <id>`,
-///   `sh -c 'codex app-server daemon start; exec codex resume <id> --remote
-///   unix://'`, and whatever a harness declares next. No account wrapper: a
-///   declared non-claude form is addressed by its own endpoint (codex's
-///   control socket via `CODEX_HOME`), and the wrapper is claude's routing.
-/// - pi, whose argv carries env-dependent `--provider`/`--model` no static
-///   form can name: its own builder.
-///
-/// cursor-agent declares no attach form at all (a second `--resume` is a
-/// rival TUI on the same remote chat, not a join), so its rows never reach
-/// here: no attach id resolves for them in the viewport.
-///
-/// Any other harness falls through to the claude shape, which is what every
-/// caller did before a harness was passed at all; only rows that resolved an
-/// attach id ever reach here.
-fn attach_argv_for(
-    harness: Option<&str>,
-    id: &str,
-    account: Option<&str>,
-    config_dir: Option<&std::path::Path>,
-) -> Vec<String> {
-    if harness == Some("pi") {
-        // No account wrapper and no socket: a pi session is addressed
-        // by the pair (cwd, session id), and the attach pane already spawns in
-        // the row's cwd. That pairing is what makes this a JOIN onto the
-        // session pi's rpc lane is driving rather than a second session under
-        // the same id.
-        return agents_view::pi_attach_argv(id);
-    }
-    // The declaration renders the argv, EXCEPT under a test program stub:
-    // the stub pins the claude-shaped base, and pre-declaration it
-    // reached every non-codex harness through attach_base. A declared
-    // non-claude form renders exactly as production; claude and the
-    // no-harness fallback route through attach_base, where the stub lives.
-    // Without this, a stub naming anything but claude's own shape would
-    // silently spawn the real claude in tests.
-    let declared = harness.and_then(agents_view::attach_form);
-    #[cfg(test)]
-    let declared = {
-        let stubbed = ATTACH_PROGRAM.with(|p| p.borrow().is_some());
-        if stubbed && !matches!(harness, Some(h) if h != "claude") {
-            None
-        } else {
-            declared
-        }
-    };
-    let base = match declared {
-        Some(form) => form.render(id),
-        None => attach_base(id),
-    };
-    // The account wrapper is claude's routing, not a general one: it points a
-    // claude attach at the right ~/.claude daemon. A harness carrying a
-    // config_dir must not inherit a CLAUDE_CONFIG_DIR prefix.
-    let dir = config_dir.filter(|_| harness.is_none_or(|h| h == "claude"));
-    let Some(dir) = dir else {
-        return base;
-    };
-    let mut wrapped = vec![
-        "env".to_string(),
-        format!("CLAUDE_CONFIG_DIR={}", dir.display()),
-    ];
-    if let Some(a) = account {
-        wrapped.push(format!("FNO_ACCOUNT={a}"));
-    }
-    wrapped.extend(base);
-    wrapped
-}
-
-#[cfg(test)]
-fn set_attach_program(argv: &[&str]) {
-    ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
-}
-
-/// The Follow tier's viewer argv: `fno agents peek <name> --follow`,
-/// tailing the row's transcript in the dedicated pane. Read-only by
-/// construction (peek never writes the observed). Tests override the program
-/// via `set_peek_program` so the spawn path runs without the deployed CLI.
-fn peek_argv(name: &str) -> Vec<String> {
-    #[cfg(test)]
-    if let Some(mut argv) = PEEK_PROGRAM.with(|p| p.borrow().clone()) {
-        argv.push(name.to_string());
-        return argv;
-    }
-    vec![
-        "fno".to_string(),
-        "agents".to_string(),
-        "peek".to_string(),
-        name.to_string(),
-        "--follow".to_string(),
-    ]
-}
-
-#[cfg(test)]
-fn set_peek_program(argv: &[&str]) {
-    PEEK_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
-}
-
-/// The Locate tier's one-screen explanation: the row's facts, the
-/// single sentence saying why no viewport exists for it, and the route that
-/// DOES reach it. Rendered through `sh -c 'printf ...; exec cat'` with every
-/// line as an ARGV (`"$@"`), never interpolated into the script, so a row
-/// field can never parse as shell. `exec cat` holds the PTY open until the
-/// pane is closed - the screen is not an empty pane and not a dead one; it
-/// stays up, self-teaching, exactly until the operator closes it.
-fn locate_argv(row: &RegistryAgent) -> Vec<String> {
-    let harness = row.harness.as_deref().unwrap_or("(none recorded)");
-    let cwd = if row.cwd.is_empty() {
-        "(none recorded)"
-    } else {
-        row.cwd.as_str()
-    };
-    let lines = [
-        "thread view - no live viewport exists for this row".to_string(),
-        String::new(),
-        format!("name:      {}", row.name),
-        format!("harness:   {harness}"),
-        // The registry records no substrate field; a paneless live row is by
-        // construction daemon-hosted, and that is the true thing to say.
-        "substrate: daemon-hosted (no pane; the daemon owns the session)".to_string(),
-        format!("cwd:       {cwd}"),
-        String::new(),
-        format!(
-            "why: the {harness} harness owns no interactive attach form and no \
-             transcript reader, so no live viewport can be opened for it here."
-        ),
-        String::new(),
-        format!("what reaches it: fno agents mail send {}", row.name),
-    ];
-    let mut argv = vec![
-        "sh".to_string(),
-        "-c".to_string(),
-        "printf '%s\\n' \"$@\"; exec cat".to_string(),
-        "fno-locate".to_string(),
-    ];
-    argv.extend(lines);
-    argv
-}
-#[cfg(test)]
-thread_local! {
-    /// Test override for the restore-time registry name set (see
-    /// [`Core::known_worker_names`]): restore reads the REAL registry once,
-    /// which unit tests cannot reach deterministically. The override is
-    /// itself Option-layered: `None` (the default) reads the file,
-    /// `Some(None)` simulates an unreadable registry, `Some(Some(set))` pins
-    /// the name set.
-    static KNOWN_WORKERS: std::cell::RefCell<Option<Option<std::collections::HashSet<String>>>> =
-        const { std::cell::RefCell::new(None) };
-    static HOLD_WORKERS_OVERRIDE: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn set_known_workers(names: &[&str]) {
-    KNOWN_WORKERS
-        .with(|p| *p.borrow_mut() = Some(Some(names.iter().map(|s| s.to_string()).collect())));
-}
-
-#[cfg(test)]
-fn set_known_workers_unreadable() {
-    KNOWN_WORKERS.with(|p| *p.borrow_mut() = Some(None));
-}
-
-#[cfg(test)]
-fn set_hold_workers(value: bool) {
-    HOLD_WORKERS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(value));
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test override for the three-state startup restore policy,
-    /// outranking the legacy `set_hold_workers` bool. `None` (the default)
-    /// falls through to the bool override, then to the real config ladder.
-    static RESTORE_POLICY_OVERRIDE:
-        std::cell::RefCell<Option<crate::digest_overlay::MuxRestorePolicy>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn set_restore_policy(policy: crate::digest_overlay::MuxRestorePolicy) {
-    RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(policy));
-}
-
-#[cfg(test)]
-struct RestorePolicyGuard;
-
-#[cfg(test)]
-impl Drop for RestorePolicyGuard {
-    fn drop(&mut self) {
-        RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
-/// The startup restore policy read from the config ladder. Free fn so the
-/// test override arm and the production arm share one defaulting path.
-fn restore_policy_now() -> crate::digest_overlay::MuxRestorePolicy {
-    std::env::current_dir()
-        .ok()
-        .as_deref()
-        .map(crate::digest_overlay::mux_restore_policy)
-        .unwrap_or(crate::digest_overlay::MuxRestorePolicy::Hold)
-}
-
-#[cfg(test)]
-struct HoldWorkersGuard;
-
-#[cfg(test)]
-impl Drop for HoldWorkersGuard {
-    fn drop(&mut self) {
-        HOLD_WORKERS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
-#[cfg(test)]
-fn clear_known_workers() {
-    KNOWN_WORKERS.with(|p| *p.borrow_mut() = None);
-}
-
-#[cfg(test)]
-struct KnownWorkersGuard;
-
-#[cfg(test)]
-impl Drop for KnownWorkersGuard {
-    fn drop(&mut self) {
-        clear_known_workers();
-    }
-}
-
-/// `short_id -> (account, config_dir)` for every isolated-account roster
-/// worker, so restore can route a persisted isolated member's `claude attach` at
-/// the right daemon (codex P1): at restore time `self.agents` is empty and the
-/// stored member carries no account, so `attach_account_ctx` cannot resolve it -
-/// this reverse lookup reads the isolated rosters directly. One-shot, read-only,
-/// fail-open to empty.
-fn isolated_attach_ctx() -> HashMap<String, (String, std::path::PathBuf)> {
-    let mut map = HashMap::new();
-    for (account, roster_path) in agents_view::isolated_roster_paths() {
-        let Some(dir) = agents_view::account_config_dir(&account) else {
-            continue;
-        };
-        if let Ok(raw) = std::fs::read_to_string(&roster_path) {
-            for w in agents_view::parse_roster(&raw).into_iter().flatten() {
-                map.insert(w.short_id, (account.clone(), dir.clone()));
-            }
-        }
-    }
-    map
-}
+use argv_facts::*;
 
 /// A tab's display label, from spawn-time facts only - no I/O, no
 /// subprocess on the layout path (squad.rs's origin-freeze discipline).
@@ -1572,28 +1223,11 @@ fn tab_label(
     (i + 1).to_string()
 }
 
-/// A pane's display label for the session navigator (v22). Unlike
-/// [`tab_label`] (which prefers a dir name so a tab reads as its worktree), a
-/// pane's discriminator WITHIN a tab is what it is running, so `cmd` leads when
-/// the pane carries no registered name. Chain: registered name
-/// (`FNO_AGENT_SELF`) -> `cmd` -> `node` -> cwd basename -> `shell`. Sanitized
-/// like a wire name (these land in chrome cells). Never an ordinal - a plain
-/// pane is `shell`, not a number the operator cannot map back.
-fn pane_label(name: Option<&str>, node: Option<&str>, cwd: &str, cmd: Option<&str>) -> String {
-    for c in [name, cmd, node].into_iter().flatten() {
-        let clean = sanitize_tab_name(c);
-        if !clean.is_empty() {
-            return clean;
-        }
-    }
-    let base = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    let clean = sanitize_tab_name(base);
-    if clean.is_empty() {
-        "shell".to_string()
-    } else {
-        clean
-    }
-}
+/// The label chain and the pure `PaneMeta` builder live in [`pane_meta`]
+/// (file-budget ratchet); re-imported so callers and tests resolve.
+use pane_meta::pane_label;
+
+mod pane_meta;
 
 /// Is an executable `delta` on `path`? Takes the PATH value rather than reading
 /// the environment so a test can probe a scratch dir without mutating
@@ -1752,40 +1386,6 @@ enum Flow {
     Shutdown,
 }
 
-/// Unlink the socket AND both its sidecars (`.ver`, `.pid`) on
-/// every exit path out of `run` (a SIGKILL leaves them behind by design; the
-/// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
-/// is inert - `ls` only reads it for a LIVE server, and a dead one probes
-/// `Stale`).
-struct SocketGuard(PathBuf);
-
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        let _ = crate::proto::remove_session_files(&self.0);
-        crate::proto::remove_startup_guard(&self.0);
-    }
-}
-
-/// RAII count of in-flight connections, read by the FNO_E2E idle reaper. A
-/// control one-shot (`pane run`, kill-server, a probe) is NOT an attached
-/// client, so without this the reaper can fire mid-verb on a young server
-/// whose test grace is shorter than a loaded machine's verb latency, killing
-/// the server out from under a live peer.
-struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-impl ConnAlive {
-    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::Release);
-        ConnAlive(count.clone())
-    }
-}
-
-impl Drop for ConnAlive {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
-    }
-}
-
 /// Run the server on `socket`. Returns the process exit code.
 ///
 /// The session NAME is the socket's file stem (`work.sock` -> `work`): every
@@ -1931,7 +1531,7 @@ pub(crate) struct Core {
     /// answer, and `FNO_SESSION` in every pane it spawns.
     session_name: String,
     shells: Vec<OsString>,
-    out_tx: mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: mpsc::Sender<u64>,
     /// A clone of the core channel so an off-loop task (the prefix+g dispatch
     /// shell-out) can route its outcome back as a `CoreMsg::DispatchResult`
@@ -1952,6 +1552,10 @@ pub(crate) struct Core {
     /// layout push, and a per-push journal scan would read the whole file
     /// every second.
     journal: crate::spawn_journal::JournalCache,
+    /// (v83, ) The sideline launcher's attempt memory: one request id
+    /// = one spawn attempt, with bounded replay for duplicate submissions
+    /// and reopened popups.
+    launch_desk: agent_launch::LaunchDesk,
     /// (US4) Latest cwd -> git-branch map from the off-loop reader,
     /// joined into each agent row's `subline` at layout time. A cwd absent from
     /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
@@ -1964,6 +1568,8 @@ pub(crate) struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
+    /// (v91) The context reading per transcript key, beside `tails`.
+    ctx_by_session: HashMap<String, String>,
     /// (v48) Latest reachability-evidence map from the off-loop truth probe,
     /// joined into each agent row's `basis` / `last_activity_age_s` at layout
     /// time. The key is the row's full harness session id when it
@@ -1993,9 +1599,9 @@ pub(crate) struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
-    /// Active missions, from the off-loop graph reader; grouped into
-    /// synthetic "mission squad" headers at layout time.
-    missions: backlog_view::MissionMap,
+    /// node id -> driving session short id; joined at layout time into
+    /// `AgentRow.pr_session_short` (the PR row's attach handle).
+    backlog_driver: HashMap<String, String>,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -2068,37 +1674,24 @@ pub(crate) struct Core {
     /// glance, and one operator wanting two at once is the case to hear about
     /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
-    /// The open PORTALS: the panes dedicated to
-    /// thread-substrate rows, keyed by the operator-facing index. A portal is
-    /// the thing you go through to reach a live harness thread, so several
-    /// threads can each hold one and the existing Join actions tile them side
-    /// by side.
+    /// The open PORTALS under the TV model: index -> entry (channel,
+    /// screen pane, tab). A portal is never a pane and never a tab: it is
+    /// the index plus the placement (which tab, which leaf) plus the
+    /// channel it is tuned to. The screen pane is what the portal plays
+    /// now: a live viewer, a parked screen, or (after an operator close)
+    /// nothing, and the entry always names the live screen.
     ///
-    /// This is deliberately NOT the singleton contract `diff_pane` above
-    /// keeps. A diff is a glance and one at a time is its design; a portal is
-    /// a window onto a running thread and the cap of one was the defect
-    /// (lifted it). Substrate semantics are untouched either way: a
-    /// thread still hosts no pane until one is created.
+    /// Reaching the SAME channel is a focus; reaching a different one
+    /// swaps the screen in place (spawn-first, `tree::replace_leaf`,
+    /// reap-last). Only an explicit gesture creates or closes: an
+    /// operator's sideline +, the composer, an explicit `--portal`, or an
+    /// operator close. Side-effect doors (a bare spawn, retask's plain
+    /// reach, the owned command view) never add to this map; a machine
+    /// view that must exist is a transient pane with no entry, never
+    /// restored.
     ///
-    /// Per index, the mechanics are exactly the old single slot's. Re-reaching
-    /// the SAME row is a no-op focus ("show me"), never a close - closing is
-    /// the ordinary close-pane gesture. A repoint to a different row reuses
-    /// the open-here mechanic (spawn-first, `tree::replace_leaf`, reap-last)
-    /// so the geometry never moves, and it touches only its own index. NEVER
-    /// persisted and NEVER rebuilt by restore: a pane binds a session to
-    /// geometry, a thread binds a session to a row, and persisting a portal
-    /// would re-bind a thread to a rectangle across a restart. `BTreeMap`
-    /// rather than `HashMap` so iteration is index-ordered and the sideline's
-    /// portal column cannot reshuffle between frames.
-    ///
-    /// After a viewer's child dies, the seat keeps the tab alive as
-    /// an idle-shell stand-in and the entry names the STAND-IN, so the next
-    /// reach repoints the seat in the same tab instead of minting a second
-    /// portal tab. That swap now fires only for the LAST open portal: it
-    /// exists so a dying viewer never deletes the only window onto the fleet,
-    /// and with another portal open that premise is false. The seat pane is a
-    /// live viewer iff `panes[seat].cmd` is `Some` (shells carry no argv
-    /// provenance); the same-row focus arm requires it.
+    /// `BTreeMap` rather than `HashMap` so iteration is index-ordered and
+    /// the sideline's portal column cannot reshuffle between frames.
     portals: BTreeMap<u8, Portal>,
     /// One-shot latch for the discoverability notice: the first
     /// thread row to appear with no portal open tells the operator the reach
@@ -2130,10 +1723,10 @@ pub(crate) struct Core {
     /// every external action and the startup reconcile. The durable truth is
     /// `squads.json`'s `external_lifecycle`; this is the render snapshot.
     external_lifecycle: Vec<crate::squad_store::ExternalLifecycle>,
-    /// Latch for the one-shot "persistence degraded" notice (AC3-ERR):
-    /// a store-write failure notices every client exactly once, then stays
-    /// silent so a full disk never spams a bell per keystroke.
+    /// One-shot notice latches: persistence degraded (a full disk never spams
+    /// a bell per keystroke), and each stored identity two live squads share.
     persist_degraded_notified: bool,
+    shared_identity_notified: HashSet<String>,
     /// First-attach restore fires once per server lifetime; this gates
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
@@ -2182,32 +1775,18 @@ pub(crate) struct Core {
     /// Keeper-hosted panes adopted at startup, awaiting their stored-member
     /// binding at restore. Empty once every adoptee is placed.
     keeper_adopted: Vec<AdoptedKeeper>,
-}
-
-/// At most one `human_touch(inject)` per pane per window: the first keystroke
-/// of a burst means "operator started steering this pane".
-/// ponytail: fixed 5s window; tune only if real bursts split.
-const TOUCH_COALESCE_WINDOW: Duration = Duration::from_secs(5);
-
-/// Whether an inject emit should fire now for `pane` (recording `now`), or be
-/// coalesced into the burst whose start time is already stored.
-fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> bool {
-    match last.entry(pane) {
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            // saturating: a `now` behind the stored instant (clock quirks
-            // under virtualization) coalesces instead of panicking.
-            if now.saturating_duration_since(*e.get()) < TOUCH_COALESCE_WINDOW {
-                false
-            } else {
-                e.insert(now);
-                true
-            }
-        }
-        std::collections::hash_map::Entry::Vacant(v) => {
-            v.insert(now);
-            true
-        }
-    }
+    /// Shell-integration rc dirs of KEEPER shells, `pane id -> dir`. A keeper
+    /// child outlives this server, so the dir must too: never a dropping
+    /// `pty::ShellRc`, which would remove the dir a live shell still
+    /// references at server exit. Removed on pane close; re-owned by
+    /// re-adoption.
+    shell_rc_dirs: HashMap<u64, std::path::PathBuf>,
+    /// Per-portal fill guards recorded at capture: `portal index -> FULL
+    /// harness session id`. A held seat whose key later resolves to a
+    /// different session id is a DIFFERENT thread under a familiar label;
+    /// the fill refuses and names both. Cleared when the seat fills live
+    /// (ownership is then the reach's, not the store's).
+    portal_session_guards: BTreeMap<u8, String>,
 }
 
 /// Wheel-passthrough rate gate: forward at most [`WHEEL_GATE_BUDGET`]
@@ -2269,119 +1848,6 @@ fn wheel_gate(
             });
             true
         }
-    }
-}
-
-/// Capture-side pane -> slot naming. Slot names are decided at
-/// CAPTURE, never at restore, so two snapshots of one session agree on which
-/// pane is which: a pane with an fno id names its slot that id and binds
-/// `Fno(id)` (restore re-attaches it); a pane without one names itself
-/// `p<ordinal>` and binds `Shell`. A duplicate attach id (the mirroring-ready
-/// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
-struct SlotCapture<'a> {
-    pane_owner: &'a HashMap<u64, &'a str>,
-    /// Each pane's live cwd, read once before the tab loop.
-    pane_cwd: &'a HashMap<u64, String>,
-    /// Every live portal seat -> (index, row_key), read once before
-    /// the tab loop. A seated leaf names its slot after the portal instead of
-    /// an ordinal, so the capture keeps what restore needs to hold it again.
-    portal_seats: &'a HashMap<u64, (u8, String)>,
-    slots: Vec<LayoutSlot>,
-    by_pane: HashMap<u64, String>,
-    ordinal: usize,
-}
-
-impl<'a> SlotCapture<'a> {
-    fn new(
-        pane_owner: &'a HashMap<u64, &str>,
-        pane_cwd: &'a HashMap<u64, String>,
-        portal_seats: &'a HashMap<u64, (u8, String)>,
-    ) -> Self {
-        SlotCapture {
-            pane_owner,
-            pane_cwd,
-            portal_seats,
-            slots: Vec::new(),
-            by_pane: HashMap::new(),
-            ordinal: 0,
-        }
-    }
-
-    /// The live tree -> the persisted spec. Weights are renormalized on the
-    /// way out rather than trusted: `tree::check_invariants` requires branch
-    /// ratios summing to 1.0, but a stored document is untrusted input and
-    /// geometry divides by the sum.
-    fn node_to_spec(&mut self, node: &Node) -> LayoutTreeSpec {
-        match node {
-            Node::Leaf(p) => LayoutTreeSpec::Slot(self.name_leaf(*p)),
-            Node::Branch { axis, children } => {
-                let weights: Vec<f32> = children.iter().map(|(w, _)| w.max(0.0)).collect();
-                let sum: f32 = weights.iter().sum();
-                let even = 1.0 / children.len() as f32;
-                let children = children
-                    .iter()
-                    .zip(weights)
-                    .map(|((_, n), w)| LayoutTreeChild {
-                        weight: if sum > 0.0 { w / sum } else { even },
-                        tree: self.node_to_spec(n),
-                    })
-                    .collect();
-                LayoutTreeSpec::Split {
-                    axis: *axis,
-                    children,
-                }
-            }
-        }
-    }
-
-    fn name_leaf(&mut self, pane: u64) -> String {
-        // Order is portal, owner, ordinal. A portal seat that is
-        // also an attach pane (a LIVE viewer is: the reach inserts the
-        // mapping) captures as the portal slot, never as `Fno(attach_id)` -
-        // an attach binding would re-bind the thread to the rectangle at
-        // restore, the exact thing never-persist rule exists for.
-        // The slot pair is the durable record; the viewer process is not.
-        let base = match self.portal_seats.get(&pane) {
-            Some((index, _)) => format!("portal{index}"),
-            None => match self.pane_owner.get(&pane) {
-                Some(id) => id.to_string(),
-                None => {
-                    self.ordinal += 1;
-                    format!("p{}", self.ordinal)
-                }
-            },
-        };
-        let mut name = base.clone();
-        let mut n = 2;
-        while self.slots.iter().any(|s| s.name == name) {
-            name = format!("{base}#{n}");
-            n += 1;
-        }
-        let binding = if self.portal_seats.contains_key(&pane) {
-            LayoutBinding::Shell
-        } else {
-            match self.pane_owner.get(&pane) {
-                Some(id) => LayoutBinding::Fno(id.to_string()),
-                None => LayoutBinding::Shell,
-            }
-        };
-        let portal = self.portal_seats.get(&pane).map(|(index, row)| PortalSlot {
-            index: *index,
-            row: row.clone(),
-        });
-        self.slots.push(LayoutSlot {
-            name: name.clone(),
-            binding,
-            cwd: self.pane_cwd.get(&pane).cloned(),
-            portal,
-        });
-        self.by_pane.insert(pane, name.clone());
-        name
-    }
-
-    /// The slot name capture gave `pane` (for the persisted focus marker).
-    fn slot_of(&self, pane: u64) -> Option<String> {
-        self.by_pane.get(&pane).cloned()
     }
 }
 
@@ -2691,68 +2157,6 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
     value
 }
 
-async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
-    // Selection + spawn crosses subprocesses and a mux socket round-trip, so the
-    // budget is seconds, not the digest's 800ms; a hung dispatch still fails
-    // open to a notice rather than wedging.
-    let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
-    let deadline = tokio::time::Instant::now() + dispatch_timeout;
-    let fno = fno_bin().display().to_string();
-
-    // Steps 1-2 (change 3): resolve the node identity. A targeted node
-    // (a clicked work-queue card) pins its id and reads through
-    // `fno backlog get`; without it the board's own order picks (`fno backlog
-    // next`, `null` or empty output on an empty bench).
-    let picked = if let Some(pinned) = node {
-        let argv = [fno.as_str(), "backlog", "get", pinned];
-        let answer =
-            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
-            {
-                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out)
-                    .ok_or_else(|| "grab work failed: the node record carries no id".to_string()),
-                _ => Err("grab work failed: the node read produced no answer".to_string()),
-            };
-        answer
-    } else {
-        let argv = [fno.as_str(), "backlog", "next"];
-        let answer =
-            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
-            {
-                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out),
-                _ => None,
-            };
-        answer.ok_or_else(|| "no ready work".to_string())
-    };
-    let (node_id, slug, parent) = match picked {
-        Ok(identity) => identity,
-        Err(notice) => return notice,
-    };
-
-    // Step 3: the door launches. The argv builder is pure and unit-pinned; no
-    // --harness/--model/--route and no message ride, so the grid picks the
-    // lane and the door renders the seed.
-    let argv = crate::dispatch_launch::dispatch_spawn_argv(
-        &fno,
-        &node_id,
-        session,
-        account,
-        parent.as_deref(),
-    );
-    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
-    // Step 4: the outcome maps to the operator's one-liner. Both streams are
-    // captured - the door's refusal receipt lives on stderr.
-    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout, deadline).await {
-        None => "grab work: timed out".to_string(),
-        Some((exit_ok, out, err)) => crate::dispatch_launch::dispatch_notice(
-            exit_ok,
-            &out,
-            &err,
-            &node_id,
-            slug.as_deref().unwrap_or(""),
-        ),
-    }
-}
-
 /// Sanitize peek-overlay free-text mail: strip control chars, trim,
 /// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
 /// silently cut instruction to a worker is worse than a visible refusal, Locked
@@ -2767,20 +2171,6 @@ fn sanitize_mail_text(text: &str) -> Result<String, String> {
         return Err("message too long".to_string());
     }
     Ok(clean.to_string())
-}
-
-/// Whether `s` is a lowercase 8-4-4-4-12 hex uuid (the respawn shape
-/// gate, the AttachAgent jobId precedent): a malformed value never reaches
-/// `spawn --resume`'s argv.
-fn valid_session_uuid(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
 }
 
 /// First non-empty line of `s` with control chars stripped, else
@@ -2820,65 +2210,6 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
         Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),
         Err(_) => format!("{label} {node}: unavailable"),
-    }
-}
-
-/// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-/// off-loop for the peek `r` respawn: a longer 60s bound (a bg spawn creates a
-/// thread; 20s is too tight). Success -> `respawned <name>`; failure -> the
-/// first stderr line. The 1s registry poll owns the row flipping live; this
-/// notice is advisory. Uses the `fno` porcelain, NOT `fno-agents`: the Rust
-/// runtime intercepts `agents spawn` and routes it (unlike stop/rm, which use
-/// the `fno-agents` binary deliberately).
-///
-/// `cwd` + `account` come from the registry row, NOT the `--resume` uuid:
-/// `fno agents spawn` defaults `--cwd` to the CANONICAL checkout, so a
-/// worker revived from a feature worktree would land in main without `--cwd`;
-/// an isolated-account session's uuid lives in that account's config dir, so it
-/// needs `--account` to be found. Both are omitted when empty/absent (the
-/// pre-existing default, correct for a canonical/default-account worker).
-async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -> String {
-    const RESPAWN_TIMEOUT: Duration = Duration::from_secs(60);
-    // Pin `--harness claude`: respawn is definitionally a claude revival (the
-    // uuid is carried only for claude rows), but `fno agents spawn` otherwise
-    // infers the harness from the invoking one, so a mux server running under a
-    // non-claude context would infer the wrong harness and fail the claude-only
-    // `--resume` guard. The name rides `--name`: the single positional is the
-    // prompt now, and a revival seeds none.
-    let mut args: Vec<&str> = vec![
-        "agents",
-        "spawn",
-        "--name",
-        name,
-        "--harness",
-        "claude",
-        "--resume",
-        uuid,
-        "--substrate",
-        "bg",
-    ];
-    if !cwd.is_empty() {
-        args.push("--cwd");
-        args.push(cwd);
-    }
-    if let Some(acct) = account.filter(|a| !a.is_empty()) {
-        args.push("--account");
-        args.push(acct);
-    }
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
-        Err(_) => format!("respawn {name}: timed out"),
-        Ok(Err(_)) => format!("respawn {name}: unavailable"),
-        Ok(Ok(o)) if o.status.success() => format!("respawned {name}"),
-        Ok(Ok(o)) => first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("respawn {name}: failed"),
-        ),
     }
 }
 
@@ -3008,6 +2339,21 @@ fn card_ready_to_dispatch(backlog: &[BacklogCard], node: &str) -> bool {
         .any(|c| (c.id == node || c.slug == node) && c.state == CardState::Ready)
 }
 
+/// Rewrite every `Leaf(from)` in `node` to `Leaf(to)`, leaving branches and
+/// other leaves untouched. Used by the home-shell reclaim: the stored shell's
+/// pane takes the leaf its slot recorded, the stand-in retires.
+fn subtree_swap(node: &mut Node, from: u64, to: u64) {
+    match node {
+        Node::Leaf(pid) if *pid == from => *pid = to,
+        Node::Branch { children, .. } => {
+            for (_, child) in children {
+                subtree_swap(child, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Whether `name` carries `node` as an exact token (plan Locked 6):
 /// the id appears with no alphanumeric neighbor on either side, so
 /// `tgt-` and `` match but `x-54f` inside `` (or ``
@@ -3110,6 +2456,15 @@ impl Core {
     pub(crate) fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
+        // Production shells are keeper-hosted like every other pane (the
+        // survival contract); the shell candidate loop and the integration
+        // prefix live in `spawn_pane_kept`. Unit fixtures keep the inline
+        // pty: they spawn short-lived shells that can exit before a keeper
+        // answers Identify.
+        #[cfg(not(test))]
+        if let Some(pid) = self.spawn_pane_kept(rows, cols, cwd, id, dir)? {
+            return Ok(pid);
+        }
         let pty = PtyShell::spawn(
             &self.shells,
             rows,
@@ -3134,6 +2489,8 @@ impl Core {
             None,
             None,
             None,
+            None,
+            false,
         )?;
         Ok(id)
     }
@@ -3149,6 +2506,12 @@ impl Core {
         cols: u16,
         cwd: &str,
     ) -> Result<u64, String> {
+        // Before admission: the ceiling probe must own the wall. At one free
+        // descriptor the admission census EMFILEs first and the operator
+        // would read a measurement failure where the truth is the ceiling.
+        if let Some(err) = crate::pty::fd_ceiling_refusal() {
+            return Err(err.to_string());
+        }
         let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
         self.spawn_pane_cmd_with_permit(argv, rows, cols, cwd, permit)
     }
@@ -3161,15 +2524,24 @@ impl Core {
         cwd: &str,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<u64, String> {
-        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, false)
+        // Unit fixtures keep the inline pty (short-lived /bin/cat children
+        // can exit before a keeper answers Identify); production panes are
+        // keeper-hosted.
+        #[cfg(test)]
+        let keeper = false;
+        #[cfg(not(test))]
+        let keeper = true;
+        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, keeper)
     }
 
-    /// The one spawn fork in the road: `keeper = true` routes a worker pane
-    /// through a `fno-agents-worker --pane` process that owns the pty master
+    /// The one spawn fork in the road: `keeper = true` routes a pane through
+    /// a `fno-agents-worker --pane` process that owns the pty master
     /// out-of-process, so the pane child outlives this server and a fresh
-    /// server re-adopts it. Plain shells and ad-hoc panes keep the inline
-    /// master: dying with the server is correct for them, and keeper-per-pane
-    /// would double the fleet process count.
+    /// server re-adopts it. EVERY pane takes this road now; the inline pty is
+    /// the named fallback for a keeper that cannot start, and the pane entry
+    /// is then marked `unkept` (kill-server refuses while one is live). A
+    /// deliberate close is unchanged: `reap_pane` sends Kill, the keeper
+    /// kills its child, unlinks its socket and exits.
     fn spawn_pane_shell_with_permit(
         &mut self,
         argv: &[String],
@@ -3189,8 +2561,13 @@ impl Core {
         let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
+        // A keeper that cannot start (missing binary, failed handshake, held
+        // seat) must not cost the pane: fall back to the inline pty, say so,
+        // and mark the entry `unkept` - the pane is live but will die with
+        // the server.
+        let mut fell_back: Option<String> = None;
         let (pty, keeper_ring) = if keeper {
-            PtyShell::spawn_cmd_keeper_with_permit(
+            match PtyShell::spawn_cmd_keeper_with_permit(
                 &keeper_worker_bin(),
                 argv,
                 rows,
@@ -3201,7 +2578,27 @@ impl Core {
                 self.out_tx.clone(),
                 self.exit_tx.clone(),
                 permit,
-            )
+            ) {
+                Ok(ok) => ok,
+                Err(keeper_err) => {
+                    let fallback_permit =
+                        crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+                    let shell = PtyShell::spawn_cmd_with_permit(
+                        argv,
+                        rows,
+                        cols,
+                        dir,
+                        &self.session_name,
+                        id,
+                        self.out_tx.clone(),
+                        self.exit_tx.clone(),
+                        fallback_permit,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    fell_back = Some(keeper_err.to_string());
+                    (shell, Vec::new())
+                }
+            }
         } else {
             PtyShell::spawn_cmd_with_permit(
                 argv,
@@ -3215,8 +2612,8 @@ impl Core {
                 permit,
             )
             .map(|shell| (shell, Vec::new()))
-        }
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        };
         self.register_pane(
             id,
             pty,
@@ -3229,7 +2626,25 @@ impl Core {
             account,
             resume_target,
             refused_worker_from_argv(argv),
+            portal_hold_from_argv(argv),
+            transient_view_from_argv(argv),
         )?;
+        if let Some(keeper_err) = fell_back {
+            if let Some(entry) = self.panes.get_mut(&id) {
+                entry.unkept = true;
+            }
+            // `notice_all` only reaches attached clients (Locked 5's own
+            // broadcast contract), so a keeper failure with nobody attached
+            // yet (the common case at spawn) never reaches the server's own
+            // log - the one place a headless caller (a stress script, CI)
+            // can see why a pane came up unkept. Say it here too.
+            eprintln!(
+                "fno mux: keeper unavailable for pane {id} ({keeper_err}); running unkept inline"
+            );
+            self.notice_all(format!(
+                "keeper unavailable for pane {id} ({keeper_err}); running unkept inline"
+            ));
+        }
         // The keeper's handshake replay carries everything the child printed
         // before the reader thread existed; the VT only now exists, so feed
         // it here (the re-adopt path feeds its ring the same way).
@@ -3269,6 +2684,22 @@ impl Core {
                     self.next_pane_id = id.saturating_add(1);
                     Ok(id)
                 }
+                Err(e)
+                    if e.raw_os_error() == Some(libc::EMFILE)
+                        || e.raw_os_error() == Some(libc::ENFILE) =>
+                {
+                    // The reservation died to the open-file ceiling, not to a
+                    // persistence fault: the same wall the pty spawn names,
+                    // named here because the reservation runs first.
+                    let limit = crate::pty::nofile_limit();
+                    let open = usize::try_from(limit).unwrap_or(0);
+                    return Err(crate::pty::PtyError::SpawnFdLimit {
+                        open,
+                        limit,
+                        detail: "the pane id reservation hit EMFILE".into(),
+                    }
+                    .to_string());
+                }
                 Err(e) => Err(format!("pane id reservation failed: {e}")),
             }
         }
@@ -3291,6 +2722,8 @@ impl Core {
         account: Option<String>,
         resume_target: Option<String>,
         refused_worker: Option<String>,
+        portal_hold: Option<String>,
+        transient_view: bool,
     ) -> Result<(), String> {
         let Some(child_pid) = pty.child_pid() else {
             pty.kill();
@@ -3321,10 +2754,14 @@ impl Core {
                 account,
                 resume_target,
                 refused_worker,
+                portal_hold,
+                transient_view,
                 unreconciled: false,
+                unkept: false,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
                 nudge_due: None,
+                requested_size: (rows, cols),
             },
         );
         self.pane_stats.write().unwrap().insert(id, stats);
@@ -3338,49 +2775,6 @@ impl Core {
     /// Kill+reap a pane's PTY and retire its watch (flipping `exited` so any
     /// subscribed `PaneWait` returns `PaneExited`). The single place panes
     /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
-    fn reap_pane(&mut self, pid: u64) {
-        if let Some(entry) = self.panes.remove(&pid) {
-            if let Ok(mut children) = self.pane_children.lock() {
-                if let Some(child_pid) = entry.pty.child_pid() {
-                    let child = PaneChild {
-                        pid: child_pid,
-                        keeper_hosted: entry.pty.is_keeper_hosted(),
-                    };
-                    children.remove(&child);
-                }
-                entry.pty.kill();
-            } else {
-                entry.pty.kill();
-            }
-        }
-        // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
-        // held claim never blocks the close cascade.
-        self.claims.remove(&pid);
-        self.claim_eligible.remove(&pid);
-        self.touch_last_emit.remove(&pid);
-        self.wheel_gate.remove(&pid);
-        self.pane_stats.write().unwrap().remove(&pid);
-        // Drop any attach mapping onto the dead pane so a re-attach
-        // spawns fresh rather than focusing a corpse (the lazy `panes` check in
-        // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
-        self.attached.retain(|_, p| *p != pid);
-        // Same for the worker resume map: the pane died, so the row
-        // returns to idle and resumable - never a mapping at a corpse.
-        self.worker_pane.retain(|_, panes| {
-            panes.retain(|candidate| *candidate != pid);
-            !panes.is_empty()
-        });
-        self.worker_session_pane.retain(|_, p| *p != pid);
-        self.held_workers.remove(&pid);
-        self.detached_panes.remove(&pid);
-        if let Some(tx) = self.pane_watch.remove(&pid) {
-            // Last observable tick before the sender drops: a watcher that
-            // reads it sees `exited`; one blocked in `changed()` sees the
-            // sender-dropped error and treats it identically.
-            tx.send_modify(|t| t.exited = true);
-        }
-    }
-
     /// Snapshot panes whose children and PTY readers have both finished.
     /// Every candidate's final output is already enqueued, so the caller can
     /// drain the shared output channel before closing this exact set.
@@ -3403,7 +2797,7 @@ impl Core {
                 self.reconcile_worker_member_close(&worker, true);
             }
             self.reconcile_member_close(ctx, true);
-            if self.close_pane_reasoned(pid, "child exited") == Flow::Shutdown {
+            if self.close_viewer_died(pid, "child exited") == Flow::Shutdown {
                 return Flow::Shutdown;
             }
         }
@@ -3487,7 +2881,11 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
-                    pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
+                    // A portal seat never reads pristine: the seat is
+                    // load-bearing, so no cleanup caller may close it.
+                    pristine_idle_shell: entry.cmd.is_none()
+                        && entry.vt.is_pristine_idle_shell()
+                        && self.portal_of(Some(pid)).is_none(),
                     // (v65) The spent-shell reading: shell integration
                     // measured, nothing running now. `cmd.is_none()` keeps an
                     // agent or `pane run` pane out of the category even when
@@ -3509,6 +2907,9 @@ impl Core {
                         .unwrap_or_default(),
                     forked_from_session_id: joined_row
                         .and_then(|a| a.forked_from_session_id.clone()),
+                    // (v90) The seat's portal index, under the same one-row
+                    // rule the sideline marker wears.
+                    portal: self.portal_marker(Some(pid)),
                 }
             })
             .collect();
@@ -3546,7 +2947,7 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err("squad name cannot be blank".into());
+                    return Err("workspace name cannot be blank".into());
                 }
                 let cwds: Vec<String> = self
                     .session
@@ -3564,15 +2965,15 @@ impl Core {
                     .map(|(s, _)| s);
                 match (hits.next(), hits.next()) {
                     (Some(s), None) => Ok(Some(s.id)),
-                    (Some(_), Some(_)) => Err(format!("ambiguous squad name: {n}")),
-                    (None, _) => Err(format!("no such squad: {n}")),
+                    (Some(_), Some(_)) => Err(format!("ambiguous workspace name: {n}")),
+                    (None, _) => Err(format!("no such workspace: {n}")),
                 }
             }
             PaneTarget::SquadId(id) => self
                 .session
                 .squad(*id)
                 .map(|s| Some(s.id))
-                .ok_or_else(|| format!("no such squad id: {id}")),
+                .ok_or_else(|| format!("no such workspace id: {id}")),
         }
     }
 
@@ -3612,7 +3013,7 @@ impl Core {
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err("selected squad vanished".into());
+            return Err("selected workspace vanished".into());
         };
         let new_tab = |this: &mut Self, si: usize| {
             let tid = this.session.mint_tab_id();
@@ -3712,13 +3113,16 @@ impl Core {
             PaneTarget::SquadName(name) => {
                 let n = name.trim();
                 if n.is_empty() {
-                    return Err((err_code::BAD_REQUEST, "squad name cannot be blank".into()));
+                    return Err((
+                        err_code::BAD_REQUEST,
+                        "workspace name cannot be blank".into(),
+                    ));
                 }
                 match self.resolve_placement_target(&placement.target, None) {
                     Ok(d) => (d, None),
                     // Coupled to resolve_placement_target's error text: a name matching NO squad is
                     // creatable; an ambiguous name (2+ matches) still errors - never silently pick one.
-                    Err(e) if e.starts_with("no such squad") => (None, Some(n.to_string())),
+                    Err(e) if e.starts_with("no such workspace") => (None, Some(n.to_string())),
                     Err(e) => return Err((err_code::BAD_REQUEST, e)),
                 }
             }
@@ -3747,8 +3151,15 @@ impl Core {
                 spawn_argv = wrapped;
             }
         }
+        // Every spawned pane takes the keeper road in production, worker or
+        // not; unit fixtures keep today's split (short-lived fixtures can
+        // exit before a keeper answers Identify).
+        #[cfg(test)]
+        let keeper = worker.is_some();
+        #[cfg(not(test))]
+        let keeper = true;
         let pid = self
-            .spawn_pane_shell_with_permit(&spawn_argv, rows, cols, &cwd, permit, worker.is_some())
+            .spawn_pane_shell_with_permit(&spawn_argv, rows, cols, &cwd, permit, keeper)
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -3804,9 +3215,9 @@ impl Core {
         let sq = self
             .session
             .squad(sid)
-            .ok_or_else(|| format!("no such squad id: {sid}"))?;
+            .ok_or_else(|| format!("no such workspace id: {sid}"))?;
         if sq.tabs.is_empty() {
-            return Err(format!("squad {sid} has no tabs"));
+            return Err(format!("workspace {sid} has no tabs"));
         }
         sq.resolve_tab(sel)
     }
@@ -3844,12 +3255,12 @@ impl Core {
             self.reap_pane(pid);
             return Err((
                 err_code::BAD_REQUEST,
-                "a --tab/--at placement needs a resolved squad".into(),
+                "a --tab/--at placement needs a resolved workspace".into(),
             ));
         };
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         // An explicit `New` tab ignores any anchor - it is born with this pane.
         if matches!(placement.tab, Some(TabSel::New)) {
@@ -4105,10 +3516,10 @@ impl Core {
     /// List a squad's tabs for [`ControlVerb::TabLs`].
     fn tab_ls(&self, squad: &PaneTarget) -> Result<Vec<TabInfo>, (u32, String)> {
         let sid = self.resolve_squad(squad)?;
-        let sq = self
-            .session
-            .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+        let sq = self.session.squad(sid).ok_or((
+            err_code::BAD_REQUEST,
+            format!("no such workspace id: {sid}"),
+        ))?;
         let active_ti = sq.active_tab.min(sq.tabs.len().saturating_sub(1));
         Ok(sq
             .tabs
@@ -4141,7 +3552,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -4169,7 +3580,7 @@ impl Core {
         let sq = self
             .session
             .squad_mut(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?;
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?;
         let tid = sq.tabs[ti].id;
         sq.tabs[ti].name = clean;
         // A template tab's stored spec is keyed by tab name; a rename
@@ -4228,7 +3639,7 @@ impl Core {
         let tid = self
             .session
             .squad(sid)
-            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?
+            .ok_or((err_code::BAD_REQUEST, "workspace vanished".to_string()))?
             .tabs[from]
             .id;
         if self.reorder_tab(sid, tid, (dest as i64 - from as i64) as i32) {
@@ -4378,10 +3789,10 @@ impl Core {
                 .collect()),
             LayoutScope::Squad(t) => {
                 let sid = self.resolve_squad(t)?;
-                let sq = self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
+                let sq = self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?;
                 Ok(vec![self.squad_layout(sq, agents)])
             }
             LayoutScope::Tab { squad, tab } => {
@@ -4798,10 +4209,10 @@ impl Core {
             PaneTarget::CurrentRoute => self.session.squads.iter().collect(),
             t => {
                 let sid = self.resolve_squad(t)?;
-                vec![self
-                    .session
-                    .squad(sid)
-                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?]
+                vec![self.session.squad(sid).ok_or((
+                    err_code::BAD_REQUEST,
+                    format!("no such workspace id: {sid}"),
+                ))?]
             }
         };
         // Resolve one dictionary form across the candidates. An absent form
@@ -5153,7 +4564,7 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
             self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
+            return Err((err_code::SPAWN_FAILED, "selected workspace vanished".into()));
         };
         let tid = self.session.mint_tab_id();
         self.session.squads[si].tabs.push(Tab {
@@ -5792,7 +5203,7 @@ impl Core {
     fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
         self.resolve_placement_target(target, self.session.active_squad)
             .map_err(|e| (err_code::BAD_REQUEST, e))?
-            .ok_or((err_code::BAD_REQUEST, "no target squad".into()))
+            .ok_or((err_code::BAD_REQUEST, "no target workspace".into()))
     }
 
     /// A one-line refusal/notice to ONE client (BEL + transient message on
@@ -5839,18 +5250,17 @@ impl Core {
         if !has_sid {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
         }
-        if !a.exited {
-            return RowResumeDisposition::NoPane(match a.liveness {
-                agents_view::Liveness::Alive => AgentNoPaneReason::LivePaneless,
-                // BackendNotLive asserts a FALSIFIED backend, so it
-                // fires only on Dead. Unmeasured is the absent reading and
-                // says so itself - the old fold printed "backend is not live"
-                // for rows whose pane was running in this very sideline.
-                agents_view::Liveness::Dead => AgentNoPaneReason::BackendNotLive,
-                agents_view::Liveness::Unmeasured => AgentNoPaneReason::LivenessUnmeasured,
-            });
+        // Reconcile marks a row it measured gone `orphaned`, not `exited`:
+        // a positive dead reading resumes whatever the status word says.
+        match (a.exited, &a.liveness) {
+            (false, agents_view::Liveness::Alive) => {
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            }
+            (false, agents_view::Liveness::Unmeasured) => {
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured)
+            }
+            _ => RowResumeDisposition::Resumable,
         }
-        RowResumeDisposition::Resumable
     }
 
     /// The disposition with the pane join applied: a pane in THIS
@@ -6011,11 +5421,11 @@ impl Core {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
         };
+        // Screen text only: the line is fed to the seat's VT and never
+        // typed as shell input - a typed printf echoed and executed on the
+        // placeholder, so the operator read the same message three times.
         let line = format!("{message}\r\n");
         entry.vt.feed(line.as_bytes());
-        let quoted = message.replace('\'', "'\"'\"'");
-        let command = format!("printf '%s\\n' '{quoted}'\r");
-        let _ = entry.pty.write_input(command.as_bytes());
     }
 
     fn hold_worker_pane(
@@ -6029,10 +5439,17 @@ impl Core {
         let (cwd, _) = restore_member_cwd(stored_cwd, fallback_cwd, |path| {
             std::path::Path::new(path).is_dir()
         });
-        let pid = self.spawn_pane(rows, cols, &cwd)?;
-        if let Some(entry) = self.panes.get_mut(&pid) {
-            entry.name = Some(facts.name.clone());
-        }
+        // The placeholder's identity rides its argv (the same wrapper the
+        // worker spawn path uses): every pane is keeper-hosted, so the
+        // placeholder outlives this server, and the next one re-derives whose
+        // seat it holds from the argv instead of minting a twin beside it.
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_AGENT_SELF={}", facts.name),
+            rows,
+            cols,
+            &cwd,
+            "held placeholder",
+        )?;
         self.write_restore_message(
             pid,
             &format!(
@@ -6059,24 +5476,13 @@ impl Core {
         // argv cannot. Each shell candidate takes its turn, so a broken
         // $SHELL falls through to /bin/sh the way the plain shell spawn
         // always did; the title carries the human-readable half.
-        let candidates: Vec<String> = self
-            .shells
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        let mut spawned = Err("no shell candidate for refused placeholder".to_string());
-        for shell in &candidates {
-            let argv = vec![
-                "env".to_string(),
-                format!("FNO_REFUSED_WORKER={name}"),
-                shell.clone(),
-            ];
-            spawned = self.spawn_pane_cmd(&argv, rows, cols, cwd);
-            if spawned.is_ok() {
-                break;
-            }
-        }
-        let pid = spawned?;
+        let pid = self.spawn_env_placeholder(
+            format!("FNO_REFUSED_WORKER={name}"),
+            rows,
+            cols,
+            cwd,
+            "refused placeholder",
+        )?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
             entry.refused_worker = Some(name.to_string());
@@ -6254,20 +5660,41 @@ impl Core {
         if dry_run {
             return ResumeOutcome::Planned;
         }
-        let sid = self
-            .squad_members
-            .iter()
-            .find(|(_, members)| {
-                members.iter().any(|member| {
-                    stored_member
-                        .as_ref()
-                        .is_some_and(|stored| stored == member)
-                        || member.worker.as_deref() == Some(name)
-                })
-            })
-            .map(|(sid, _)| *sid)
-            .or_else(|| self.session.find_by_cwd(&facts.cwd))
-            .unwrap_or(view.0);
+        // The resumed pane lands where the row renders: a registry row asks
+        // the one thread-workspace resolver (member, then spawner, then
+        // cwd); the loose stored-member rung answers only for a receipt-only
+        // row with no registry entry, because it matches ANY member named
+        // `name` across workspaces, where the resolver would refuse the
+        // ambiguity - running it first would split a dangling dead row from
+        // its own resume. The row join repeats the selection above: the
+        // member-identity match when a stored member names the row, else the
+        // display name. A name-only find could pick a DIFFERENT row sharing
+        // the display name and place the resume in its workspace.
+        let sid = {
+            let registry_row = self.agents.iter().find(|a| match stored_member.as_ref() {
+                Some(member) => worker_registry_match(member, a, name),
+                None => a.name == name,
+            });
+            match registry_row {
+                Some(row) => self
+                    .thread_workspace(row)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+                None => self
+                    .squad_members
+                    .iter()
+                    .find(|(_, members)| {
+                        members.iter().any(|member| {
+                            stored_member
+                                .as_ref()
+                                .is_some_and(|stored| stored == member)
+                                || member.worker.as_deref() == Some(name)
+                        })
+                    })
+                    .map(|(sid, _)| *sid)
+                    .or_else(|| self.session.find_by_cwd(&facts.cwd)),
+            }
+        }
+        .unwrap_or(view.0);
         // A claude row's resume runs the canonical re-entry
         // plan; the `None` arm fires the off-loop resolution and the
         // gesture replays with the verdict staged. A receipt-only row
@@ -6358,249 +5785,6 @@ impl Core {
             })
             .map(|m| (m.worker.clone().expect("checked above"), m.clone()))
             .collect()
-    }
-
-    /// `fno mux workspace restore`, phase 1: split the run. A dry
-    /// run never resolves plans (it reports classifications and spawns
-    /// nothing), and a run with no claude members needs none, so both apply
-    /// inline. Otherwise the claude members' re-entry plans resolve OFF the
-    /// core loop (the BatchPlansReady shape) and the apply half re-enters
-    /// with the verdicts in hand - no bare claude resume on this axis, and
-    /// no per-member resolver wait landing on the loop.
-    fn workspace_restore_start(
-        &mut self,
-        dry_run: bool,
-        harness: Option<String>,
-        reply: ControlReply,
-    ) {
-        // The off-loop registry reader ticks independently and may never have
-        // run in a session nobody has watched (a headless reboot-restore).
-        // This verb's classification IS a registry read, so it reads the file
-        // itself rather than refuse members whose rows exist on disk.
-        if let Some(rows) = restore_registry_rows() {
-            self.agents = rows;
-        }
-        if dry_run {
-            self.workspace_restore_apply(true, harness, HashMap::new(), reply);
-            return;
-        }
-        let claude_names: Vec<String> = self
-            .restore_candidates(harness.as_deref())
-            .into_iter()
-            .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
-            .map(|(name, _)| name)
-            .collect();
-        let portal_names = portal_reach::portals_needing_claude_plan(self);
-        if claude_names.is_empty() && portal_names.is_empty() {
-            self.workspace_restore_apply(false, harness, HashMap::new(), reply);
-            return;
-        }
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let plans = agent_actions::resolve_restore_plans(claude_names, portal_names).await;
-            let _ = core_tx
-                .send(CoreMsg::WorkspaceRestoreApply {
-                    dry_run,
-                    harness,
-                    plans,
-                    reply,
-                })
-                .await;
-        });
-    }
-
-    /// `fno mux workspace restore`, phase 2: walk every candidate
-    /// through [`Core::resume_one`] and report one row per member. A claude
-    /// member whose plan refused (or never resolved) refuses with the
-    /// resolver's own reason - never a bare claude resume - and
-    /// `reentry_verdict` is cleared around every attempt so one member's
-    /// verdict can never leak into the next one's argv.
-    fn workspace_restore_apply(
-        &mut self,
-        dry_run: bool,
-        harness: Option<String>,
-        mut plans: HashMap<String, Result<ReentryVerdict, String>>,
-        reply: ControlReply,
-    ) {
-        use self::portal_reach::RESTORE_CLIENT;
-        let candidates = self.restore_candidates(harness.as_deref());
-        // A worker NAME the store holds more than once (distinct sessions,
-        // one display name - a supported state) refuses up front instead of
-        // reaching resume_one: the second twin would find the first one's
-        // pane through the name-only map and report "focused" while its own
-        // session was never restored.
-        let mut name_counts: HashMap<String, usize> = HashMap::new();
-        for (name, _) in &candidates {
-            *name_counts.entry(name.clone()).or_default() += 1;
-        }
-        let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
-        // A reap receipt is the session's death record: a member it preserves
-        // must not read as a live restore candidate, or restore resurrects a
-        // session the fleet deliberately retired.
-        let retired = crate::restore_gate::retired_receipt_session_ids().unwrap_or_default();
-        let mut rows = Vec::with_capacity(candidates.len());
-        for (name, member) in candidates {
-            if let Some(reason) =
-                crate::restore_gate::retired_refusal(member.harness_session_id.as_deref(), &retired)
-            {
-                rows.push(restore_route_gate::refused_row(
-                    name,
-                    member.harness.clone(),
-                    reason,
-                ));
-                continue;
-            }
-            if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
-                rows.push(restore_route_gate::refused_row(
-                    name,
-                    member.harness.clone(),
-                    "member name is ambiguous in the store; resume by exact session id".into(),
-                ));
-                continue;
-            }
-            let harness_name = member.harness.clone();
-            // a routed codex member refuses before any staging. A pane
-            // spawn's only env channel is an argv prefix (visible in ps), so it
-            // cannot carry the route's key; `fno agents resume` is the door
-            // that restores the route, and the member is marked refused here.
-            if harness_name.as_deref() == Some("codex") {
-                let row = self.agents.iter().find(|a| {
-                    agent_harness_session_id(a)
-                        == member
-                            .harness_session_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                });
-                if let Some(reason) =
-                    row.and_then(|row| restore_route_gate::member_routed_codex_refusal(row, &name))
-                {
-                    rows.push(restore_route_gate::refused_row(name, harness_name, reason));
-                    continue;
-                }
-            }
-            // A claude member without a resolvable plan refuses here instead
-            // of firing a stray off-loop resolution from the bulk path; the
-            // single gesture keeps its own replay behavior.
-            if !dry_run && harness_name.as_deref() == Some("claude") {
-                match plans.get(&name) {
-                    Some(Ok(_)) => {
-                        self.reentry_verdict = plans.remove(&name).and_then(|r| r.ok());
-                    }
-                    Some(Err(reason)) => {
-                        rows.push(restore_route_gate::refused_row(
-                            name,
-                            harness_name,
-                            reason.clone(),
-                        ));
-                        continue;
-                    }
-                    None => {
-                        rows.push(restore_route_gate::refused_row(
-                            name,
-                            harness_name,
-                            "claude re-entry plan unresolved; resume it from the agent panel"
-                                .into(),
-                        ));
-                        continue;
-                    }
-                }
-            }
-            let structural = member_structural_refusal(&member);
-            // Pre-stage the sync render so the non-claude arm never
-            // fires the off-loop resolution per bulk member: bulk restore
-            // stays byte-identical to before.
-            if harness_name.as_deref().is_some_and(|h| h != "claude") {
-                self.staged_resume_argv = resume_argv_for(
-                    harness_name.as_deref().unwrap_or(""),
-                    member.harness_session_id.as_deref().unwrap_or(""),
-                )
-                .ok();
-            }
-            let outcome =
-                self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
-            self.staged_resume_argv = None;
-            self.reentry_verdict = None;
-            let row = match outcome {
-                ResumeOutcome::Resumed {
-                    pane,
-                    squad,
-                    tab,
-                    notice,
-                } => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad,
-                    portal: None,
-                    outcome: "resumed".into(),
-                    pane: Some(pane),
-                    tab: Some(tab),
-                    reason: None,
-                    notice,
-                },
-                ResumeOutcome::Focused { pane, squad, tab } => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad,
-                    portal: None,
-                    outcome: "focused".into(),
-                    pane: Some(pane),
-                    tab: Some(tab),
-                    reason: None,
-                    notice: None,
-                },
-                ResumeOutcome::Refused { reason } => {
-                    // The member's own structural gap outranks the generic
-                    // gesture notice in the REPORT: a no-form harness or a
-                    // missing session id is the specific reason AC5-ERR
-                    // demands. The gates themselves already ran.
-                    restore_route_gate::refused_row(
-                        name,
-                        harness_name,
-                        structural.unwrap_or(reason),
-                    )
-                }
-                ResumeOutcome::PlanPending => restore_route_gate::refused_row(
-                    name,
-                    harness_name,
-                    "claude re-entry plan unresolved; resume it from the agent panel".into(),
-                ),
-                ResumeOutcome::Planned => RestoreRow {
-                    member: name,
-                    harness: harness_name,
-                    squad: 0,
-                    portal: None,
-                    outcome: "planned".into(),
-                    pane: None,
-                    tab: None,
-                    reason: None,
-                    notice: None,
-                },
-            };
-            rows.push(row);
-        }
-        rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
-        let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
-        if resumed > 0 {
-            self.push_layout(true);
-        }
-        if !dry_run {
-            // Every refusal reaches the attached clients by name (AC5-ERR),
-            // and a zero-inclusive summary answers "did restore do anything"
-            // without reading a pane count.
-            for row in rows.iter().filter(|r| r.outcome == "refused") {
-                self.notice_all(format!(
-                    "workspace restore: {} could not be resumed: {}",
-                    row.member,
-                    row.reason.as_deref().unwrap_or("no reason given"),
-                ));
-            }
-            let focused = rows.iter().filter(|r| r.outcome == "focused").count();
-            let refused = rows.iter().filter(|r| r.outcome == "refused").count();
-            self.notice_all(format!(
-                "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
-            ));
-        }
-        let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
     }
 
     /// The directory a resumed member spawns at, and the missing
@@ -6759,16 +5943,15 @@ impl Core {
                 s.key = key.clone();
             }
         }
-        // A fresh server may need one bootstrap shell before its first client
-        // attach triggers restore. Do not let that empty shell overwrite an
-        // existing same-origin squad that contains keeper-backed members.
-        if !self.restored
-            && self.pre_restore_squads.contains(&sid)
-            && self.squad_members.get(&sid).is_some_and(Vec::is_empty)
-            && crate::squad_store::load()
-                .squads
-                .iter()
-                .any(|stored| stored.name == name && stored.key == key && stored.origins == origins)
+        // A pre-restore bootstrap shell must not overwrite an existing
+        // same-origin squad that contains keeper-backed members.
+        if self.shared_identity_write_skipped(sid, &name, &key)
+            || !self.restored
+                && self.pre_restore_squads.contains(&sid)
+                && self.squad_members.get(&sid).is_some_and(Vec::is_empty)
+                && crate::squad_store::load().squads.iter().any(|stored| {
+                    stored.name == name && stored.key == key && stored.origins == origins
+                })
         {
             return None;
         }
@@ -6876,16 +6059,41 @@ impl Core {
         })
     }
 
+    /// Seat `adopted` (a keeper shell re-adopted at its birth id) into the
+    /// home tab's leaf in place of the just-spawned attach stand-in, which is
+    /// then reaped: it was born this attach, holds nothing, and leaving both
+    /// alive would accrete a shell tab on every restart.
+    fn reclaim_home_shell(&mut self, home_sid: u64, adopted: u64) {
+        let fresh = self
+            .session
+            .squad(home_sid)
+            .and_then(|sq| sq.tabs.first())
+            .and_then(|tab| tree::leaves(&tab.root).first().copied());
+        let Some(fresh) = fresh else {
+            return;
+        };
+        if fresh == adopted {
+            return;
+        }
+        if let Some(tab) = self
+            .session
+            .squad_mut(home_sid)
+            .and_then(|sq| sq.tabs.first_mut())
+        {
+            subtree_swap(&mut tab.root, fresh, adopted);
+            if tab.focus == fresh {
+                tab.focus = adopted;
+            }
+        }
+        self.reap_pane(fresh);
+    }
+
     /// Capture squad `sid`'s whole tab topology into store shape -
     /// EVERY tab, hand-split and template alike, ending the three gates
     /// (template-only, named-squad-only, named-tab-only) that left the
-    /// operator's real layouts unpersisted. A mission squad is synthetic and
-    /// never captured. `None` when the squad is gone.
+    /// operator's real layouts unpersisted. `None` when the squad is gone.
     fn stored_tab_trees(&self, sid: u64) -> Option<(Vec<StoredTabTree>, usize)> {
         let sq = self.session.squad(sid)?;
-        if crate::proto::is_mission_squad(sid) {
-            return None;
-        }
         // Reverse the attach join so a pane with an fno id names its slot that
         // id (stable across restarts); anything else is an ordinal shell.
         let mut pane_owner_names: HashMap<u64, String> = self
@@ -6915,11 +6123,28 @@ impl Core {
             .iter()
             .map(|(idx, p)| (p.seat, (*idx, p.row_key.clone())))
             .collect();
+        // A view pane is never a slot of its own kind: the capture reads
+        // the marker set once.
+        let transient_views: HashMap<u64, ()> = self
+            .panes
+            .iter()
+            .filter(|(_, e)| e.transient_view)
+            .map(|(pid, _)| (*pid, ()))
+            .collect();
         // Filled per tab below.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         for (i, t) in sq.tabs.iter().enumerate() {
+            let leaves = tree::leaves(&t.root);
+            // A tab whose every leaf is a transient view is never stored:
+            // nothing in it is the operator's to restore.
+            if !leaves.is_empty() && leaves.iter().all(|p| transient_views.contains_key(p)) {
+                if i == sq.active_tab {
+                    active_tab = usize::MAX;
+                }
+                continue;
+            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
@@ -6930,7 +6155,14 @@ impl Core {
                     .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
             };
             crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
-            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd, &portal_seats);
+            let mut capture = SlotCapture::new(
+                &pane_owner,
+                &pane_cwd,
+                &portal_seats,
+                &self.portals,
+                &self.agents,
+                &transient_views,
+            );
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -6954,8 +6186,11 @@ impl Core {
     const NUDGE_DELAY: Duration = Duration::from_millis(300);
 
     /// Fire every due deferred repaint request (the 1s core tick's pass).
-    /// Re-reads each pane's CURRENT size, so a nudge armed by an older
-    /// geometry never re-introduces a stale winsize.
+    /// Re-reads each pane's CURRENT requested size (not `vt.size()`: a
+    /// keeper-hosted pane's `vt` only catches up once its resize ack lands,
+    /// so reading `vt.size()` here could still see the OLD size and nudge
+    /// the pty right back to it), so a nudge armed by an older geometry
+    /// never re-introduces a stale winsize.
     fn fire_due_nudges(&mut self) {
         let due: Vec<u64> = self
             .panes
@@ -6967,7 +6202,7 @@ impl Core {
         for pid in due {
             if let Some(entry) = self.panes.get_mut(&pid) {
                 entry.nudge_due = None;
-                let (rows, cols) = entry.vt.size();
+                let (rows, cols) = entry.requested_size;
                 entry.pty.nudge_winch(rows, cols);
                 e2e_log(format_args!(
                     "resize repaint nudge fired for pane {pid} at {rows}x{cols}"
@@ -7284,47 +6519,6 @@ impl Core {
             .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
     }
 
-    fn member_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
-        let exact: Vec<u64> = match (agent.harness.as_deref(), agent_harness_session_id(agent)) {
-            (Some(harness), Some(session_id)) => self
-                .squad_members
-                .iter()
-                .filter_map(|(sid, members)| {
-                    members
-                        .iter()
-                        .any(|member| {
-                            member.worker.as_deref() == Some(agent.name.as_str())
-                                && member.harness.as_deref() == Some(harness)
-                                && member.harness_session_id.as_deref() == Some(session_id)
-                        })
-                        .then_some(*sid)
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        if exact.len() == 1 {
-            return exact.first().copied();
-        }
-        if exact.len() > 1 {
-            return None;
-        }
-        let legacy: Vec<u64> = self
-            .squad_members
-            .iter()
-            .filter_map(|(sid, members)| {
-                members
-                    .iter()
-                    .any(|member| {
-                        member.worker.as_deref() == Some(agent.name.as_str())
-                            && member.harness.is_none()
-                            && member.harness_session_id.is_none()
-                    })
-                    .then_some(*sid)
-            })
-            .collect();
-        (legacy.len() == 1).then(|| legacy[0])
-    }
-
     fn unique_worker_pane_by_name(&self, name: &str) -> Result<Option<u64>, ()> {
         match self.worker_pane.get(name) {
             None => Ok(None),
@@ -7506,7 +6700,7 @@ impl Core {
         match outcome {
             Ok((outcome, batch)) => {
                 if !self.persist_result(Ok(batch)) {
-                    self.notice(client_id, "sweep skipped: squad store changed");
+                    self.notice(client_id, "sweep skipped: workspace store changed");
                     return;
                 }
                 self.reload_members_from_store();
@@ -7553,7 +6747,7 @@ impl Core {
         // prune-shaped; a write error degrades to a notice, never refuses
         // (AC2-FR / AC-ERR1).
         if let Err(e) = crate::squad_store::collapse_duplicate_squads() {
-            self.notice_all(format!("squad collapse at restore skipped: {e}"));
+            self.notice_all(format!("workspace collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
         self.store_generations = loaded.generations;
@@ -7567,8 +6761,10 @@ impl Core {
         // attach path and refreshes this via `ExternalLifecycleSync`.
         self.external_lifecycle = loaded.external_lifecycle;
         if loaded.squads.is_empty() {
-            // No stored workspace: adopted panes get their own tabs in home
-            // rather than dangling unplaced.
+            // No stored workspace: the stand-in prune runs first, then
+            // adopted panes get their own tabs in home rather than
+            // dangling unplaced.
+            self.prune_portal_standins();
             self.place_adopted_leftovers(home_sid);
             self.restored = true;
             return;
@@ -7598,7 +6794,7 @@ impl Core {
                 ) {
                     Ok(batch) => self.store_generations.extend(batch.generations),
                     Err(e) => {
-                        self.notice_all(format!("squad prune at restore skipped: {e}"));
+                        self.notice_all(format!("workspace prune at restore skipped: {e}"));
                     }
                 }
                 continue;
@@ -7660,6 +6856,7 @@ impl Core {
         let mut held_workers_total = 0usize;
         // Portal seats held idle across every restored squad.
         let mut held_portals_total = 0usize;
+        let mut live_portals_total = 0usize;
         let mut refused_workers_total = 0usize;
         // Worker members whose work the graph says is DONE. They are
         // history, not garbage: kept as members, never held, never refused-
@@ -7737,7 +6934,7 @@ impl Core {
             // Portal slots held idle by this restore: (index, row,
             // pane, tab id). Filled in the tree lane once the tab id exists,
             // inserted into `portals` after the squad lands.
-            let mut held_portal_seats: Vec<(u8, String, u64, TabId)> = Vec::new();
+            let mut held_portal_seats: Vec<(u8, String, u64, TabId, Option<String>)> = Vec::new();
             // Live member panes spawned but not yet placed in a tab:
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
@@ -7747,15 +6944,17 @@ impl Core {
             // a deferred template restore removes it once real template tabs land.
             let mut fallback_tid: Option<TabId> = None;
             // An empty stored name is the unnamed sentinel (a home squad / lane);
-            // it restores unnamed. A restored unnamed lane whose origins match the
-            // freshly-minted home squad IS home (restore runs after attach() minted
-            // it): merge its member tabs into home_sid rather than duplicating.
+            // it restores unnamed. A restored unnamed lane folds into the home
+            // squad when origins match, else into the live squad already holding
+            // its key: one live squad per stored identity.
             let restore_name = (!ps.name.is_empty()).then(|| ps.name.clone());
-            let home_match = restore_name.is_none()
-                && self
-                    .session
-                    .squad(home_sid)
-                    .is_some_and(|h| h.origins == ps.origins);
+            let fold_sid = match restore_name {
+                Some(_) => None,
+                None if (self.session.squad(home_sid)).is_some_and(|h| h.origins == ps.origins) => {
+                    Some(home_sid)
+                }
+                None => self.live_holder_of("", &ps.key, None),
+            };
             // The persisted durable identity, adopted onto the rebuilt squad so a
             // later persist reuses its store entry instead of minting a new one.
             let restore_key = ps.key.clone();
@@ -8153,11 +7352,8 @@ impl Core {
                 // re-captured both, so every server life left one more shell
                 // tree in the store (the measured 12). The first such tree
                 // consumes the claim: the fresh tab stands in for it.
-                let mut fresh_home_shell_claim = home_match
-                    && self
-                        .session
-                        .squad(home_sid)
-                        .is_some_and(|h| !h.tabs.is_empty());
+                let mut fresh_home_shell_claim = fold_sid == Some(home_sid)
+                    && (self.session.squad(home_sid)).is_some_and(|h| !h.tabs.is_empty());
                 for st in &ps.tab_trees {
                     // Prune done leaves BEFORE any pane minting: a
                     // slot binding a done member's leaf is removed, one-child
@@ -8192,6 +7388,17 @@ impl Core {
                         && kept_slots[0].portal.is_none();
                     if pure_shell_unnamed && fresh_home_shell_claim {
                         fresh_home_shell_claim = false;
+                        // The fresh home shell stands in for the stored tab.
+                        // The stored slot's own keeper shell re-adopted at its
+                        // birth id, though: seat THAT pane in the home tab (the
+                        // operator keeps their shell, ring included) and retire
+                        // the just-minted stand-in, so a restart converges
+                        // instead of accreting a shell tab every cycle.
+                        if let Some(birth) = kept_slots.first().and_then(|slot| slot.pane_id) {
+                            if let Some(adopted) = self.take_adopted_for_slot(birth) {
+                                self.reclaim_home_shell(home_sid, adopted);
+                            }
+                        }
                         continue;
                     }
                     let mut slot_pane: HashMap<&str, u64> = HashMap::new();
@@ -8302,7 +7509,7 @@ impl Core {
             // failed): open one shell at origins[0] (else $HOME). Skipped for a
             // home-merge lane - home_sid already has its own shell tab, so an
             // all-dead lane merges only its tombstone members (no extra shell).
-            if tabs.is_empty() && !home_match {
+            if tabs.is_empty() && fold_sid.is_none() {
                 match self.spawn_pane(rows, cols, &cwd0) {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
@@ -8324,13 +7531,13 @@ impl Core {
             }
             // Register the squad with its first tab, push the rest, so
             // agent_rows reconciles the panes and member_ctx resolves them. A
-            // home-merge lane folds its tabs + members INTO the freshly-minted
-            // home squad rather than adding a duplicate.
-            let sid = if home_match {
+            // folded lane merges its tabs + members INTO the live squad
+            // holding its identity rather than adding a duplicate.
+            let sid = if let Some(home_sid) = fold_sid {
                 for tab in tabs {
                     self.session
                         .squad_mut(home_sid)
-                        .expect("home squad live")
+                        .expect("fold squad live")
                         .tabs
                         .push(tab);
                 }
@@ -8389,8 +7596,11 @@ impl Core {
             // Re-arm every held portal seat (in portal_reach): the
             // entry goes back in the map, the seat pane gets its name and its
             // held message, and the reach or a focus fills it on first demand.
-            held_portals_total +=
+            // A seat whose re-adopted viewer joined its slot re-arms LIVE.
+            let (this_held, this_live) =
                 portal_reach::rearm_held_portal_seats(self, std::mem::take(&mut held_portal_seats));
+            held_portals_total += this_held;
+            live_portals_total += this_live;
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -8424,8 +7634,13 @@ impl Core {
         }
         if hold_workers && worker_members_total == 0 && held_portals_total == 0 {
             self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
-        } else if hold_workers || held_portals_total > 0 {
-            portal_reach::notify_held_receipt(self, held_workers_total, held_portals_total);
+        } else if hold_workers || held_portals_total > 0 || live_portals_total > 0 {
+            portal_reach::notify_held_receipt(
+                self,
+                held_workers_total,
+                held_portals_total,
+                live_portals_total,
+            );
         }
         if hold_workers && refused_workers_total > 0 {
             self.notice_all(format!(
@@ -8472,6 +7687,11 @@ impl Core {
                 "restore: kept {kept_unknown_members} member(s) with no death evidence; they re-decide on the next restore"
             ));
         }
+        // The one-time stand-in prune, after every squad's portal slots
+        // bound (a portal's screen is never a candidate) and before the
+        // leftovers place. The shapes no code mints anymore close here,
+        // operator-shaped, with no parked screen minted.
+        self.prune_portal_standins();
         // policy = resume: the walk deliberately left every member
         // idle; the bulk driver now brings each back through its own
         // harness's declared form. The reply end is dropped on purpose - at
@@ -8546,22 +7766,6 @@ impl Core {
                 .reliable_tx
                 .try_send(ServerMsg::Notice { text: text.into() });
         }
-    }
-
-    /// "Grab work" (prefix+g): dispatch the next ready backlog node into
-    /// a new pane. Board selection is `fno backlog next`; the launch is the door
-    /// (`fno agents spawn`), shelled OFF the core loop in a detached
-    /// task so a slow backlog read never stalls a pane. The launched pane
-    /// appears through the existing registry reader; the outcome (dispatched /
-    /// no-work / refusal / failure) routes back as `DispatchResult` for a
-    /// one-line notice.
-    fn dispatch_next(&self, id: u64, node: Option<String>, account: Option<String>) {
-        let session = self.session_name.clone();
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
     }
 
     /// Resolve a gesture's re-entry plan OFF the core loop and
@@ -8647,7 +7851,7 @@ impl Core {
         tokio::spawn(async move {
             let mut plans = HashMap::new();
             for (attach_id, name) in wanted {
-                plans.insert(attach_id, run_reentry_plan(&name, "attach").await);
+                plans.insert(attach_id, run_reentry_plan(&name, "revive").await);
             }
             let _ = core_tx
                 .send(CoreMsg::BatchPlansReady {
@@ -8749,7 +7953,7 @@ impl Core {
             self.resolve_reentry(
                 client_id,
                 &name,
-                "attach",
+                "revive",
                 ReentrySpawnRequest::Attach {
                     attach_id: id.to_string(),
                     placement: placement.clone(),
@@ -8779,7 +7983,7 @@ impl Core {
         if let Some(verdict) = self.reentry_verdict.take() {
             return Some(verdict);
         }
-        self.resolve_reentry(client_id, row_name, "resume", request);
+        self.resolve_reentry(client_id, row_name, "revive", request);
         None
     }
 
@@ -8795,21 +7999,12 @@ impl Core {
         });
     }
 
-    /// Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
-    /// OFF the core loop: the advisory outcome routes back as a `DispatchResult`
-    /// notice; the 1s registry poll owns the row flipping live. `uuid` was
-    /// shape-validated by the caller.
-    fn respawn_agent(
-        &self,
-        id: u64,
-        name: String,
-        uuid: String,
-        cwd: String,
-        account: Option<String>,
-    ) {
+    /// Shell `fno agents resume <name>` off-loop; the door owns harness routing
+    /// and race-time refusals, and its verdict returns as the visible notice.
+    fn resume_agent(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_respawn(&name, &uuid, &cwd, account.as_deref()).await;
+            let notice = agent_actions::run_resume(&name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -9257,17 +8452,31 @@ impl Core {
                 },
             );
             let focus = tab.focus;
-            // Rect-driven pane sizing: only geometry that actually changed
-            // hits the PTY, so a resize storm's no-op tail is free (AC1-FR's
-            // bounded-update half; the storm's head coalesces at the channel).
+            // Rect-driven pane sizing: only real geometry changes hit the
+            // PTY (AC1-FR). A framed pane's pty is its CONTENT rect.
             for (pid, r) in &rects {
                 if let Some(entry) = self.panes.get_mut(pid) {
-                    if entry.vt.size() != (r.rows, r.cols) {
-                        if let Err(e) = entry.pty.resize(r.rows, r.cols, 0, 0) {
+                    let content = crate::pane_border::content_rect(*r);
+                    if entry.requested_size != (content.rows, content.cols) {
+                        entry.requested_size = (content.rows, content.cols);
+                        if let Err(e) = entry.pty.resize(content.rows, content.cols, 0, 0) {
                             // Grid and kernel winsize would disagree: log it.
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
-                        entry.vt.resize(r.rows, r.cols);
+                        if entry.pty.is_keeper_hosted() {
+                            // Applied later, in `drain_pty_output`, once the
+                            // keeper's ack for THIS resize round-trips
+                            // through the pane's own ordered output channel
+                            // (`PaneChunk::Resized`). Flipping `vt` here,
+                            // before the round trip lands, would let output
+                            // the child already produced under the OLD size
+                            // - still ahead of this resize on the wire -
+                            // arrive after the flip and get fed into the
+                            // wrong-size grid (the byte-exact reattach
+                            // race this branch's keeper hop introduced).
+                        } else {
+                            entry.vt.resize(content.rows, content.cols);
+                        }
                         // Ask the child to repaint once the resize dust
                         // settles: arm a deferred nudge the 1s core tick fires.
                         // An immediate re-signal would coalesce into the burst
@@ -9336,24 +8545,30 @@ impl Core {
         let mut dead = Vec::new();
         for (c, (layout_msg, focused_modes, rects)) in self.clients.iter_mut().zip(per) {
             // ModeSync BEFORE the Layout that assumes it (brief ordering).
-            // A failed send means the reliable channel is wedged: the client
-            // is dead, exactly like a failed Layout - a silently dropped
-            // ModeSync would desync its terminal's modes.
+            // Full means the reliable channel is wedged. Closed means its
+            // writer exited; leave membership to the reader so any command
+            // already on the socket stays ordered before `Gone`.
             if c.synced_modes != focused_modes {
                 let bytes = vt::mode_diff(c.synced_modes, focused_modes);
-                if !bytes.is_empty()
-                    && c.reliable_tx
-                        .try_send(ServerMsg::ModeSync { bytes })
-                        .is_err()
-                {
-                    dead.push(c.id);
-                    continue;
+                if !bytes.is_empty() {
+                    match c.reliable_tx.try_send(ServerMsg::ModeSync { bytes }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            dead.push(c.id);
+                            continue;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => continue,
+                    }
                 }
                 c.synced_modes = focused_modes;
             }
-            if c.reliable_tx.try_send(layout_msg).is_err() {
-                dead.push(c.id);
-                continue;
+            match c.reliable_tx.try_send(layout_msg) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    dead.push(c.id);
+                    continue;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => continue,
             }
             e2e_log(format_args!(
                 "layout -> client {}: {} rects, reemit={reemit}",
@@ -9466,15 +8681,22 @@ impl Core {
                             .iter()
                             .map(|pid| {
                                 let e = self.panes.get(pid);
-                                PaneMeta {
-                                    id: *pid,
-                                    label: pane_label(
-                                        e.and_then(|e| e.name.as_deref()),
-                                        e.and_then(|e| e.node.as_deref()),
-                                        e.map(|e| e.cwd.as_str()).unwrap_or(""),
-                                        e.and_then(|e| e.cmd.as_deref()),
-                                    ),
-                                }
+                                let ctx = pane_meta::pane_ctx(
+                                    &self.agents,
+                                    &self.session_name,
+                                    &self.ctx_by_session,
+                                    *pid,
+                                );
+                                pane_meta::pane_meta(
+                                    *pid,
+                                    e.and_then(|e| e.name.as_deref()),
+                                    e.and_then(|e| e.node.as_deref()),
+                                    e.map(|e| e.cwd.as_str()).unwrap_or(""),
+                                    e.and_then(|e| e.cmd.as_deref()),
+                                    e.and_then(|e| self.branch_by_cwd.get(&e.cwd))
+                                        .map(String::as_str),
+                                    ctx.as_deref(),
+                                )
                             })
                             .collect(),
                     })
@@ -9494,14 +8716,8 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
-        // Synthetic "mission squad" headers: one per active mission, done/total
-        // and the rotation `(i of n)` baked into the name. They ride their own
-        // lane, never `squads`, because a mission is a progress header the
-        // client draws as a band. Renders even with zero tagged workers -
-        // "nothing running" must stay visible. Identity: mission_squad.
         ServerMsg::Layout {
             squads,
-            missions: crate::mission_squad::headers(&self.missions.missions),
             active_squad: view.0,
             panes: rects.to_vec(),
             focus,
@@ -9632,49 +8848,6 @@ impl Core {
     /// sub-row is emitted). The client renders it verbatim and truncates.
     fn compose_subline(&self, cwd: &str) -> Option<String> {
         subline_from(self.branch_by_cwd.get(cwd).map(String::as_str), cwd)
-    }
-
-    /// Which portal shows `pane`, DERIVED from the open portals every
-    /// time the rows are built. Nothing is stored per row: the row-to-pane
-    /// relation is a pointer, so a row moving between portals stays ONE row
-    /// whose index changes, and no row can carry an index that has gone stale.
-    ///
-    /// `None` means this pane is not a portal seat - never "unknown". The
-    /// comparison is EQUALITY on the seat id, and the `Option` is matched
-    /// rather than tested: pane ids allocate from zero (`next_pane_id`), so
-    /// pane 0 is a valid seat and a truthiness test on it is the
-    /// defect that made six live workers invisible.
-    /// The lowest portal index nothing LIVE holds.
-    ///
-    /// Server-side on purpose. A client computing this from the rows it last
-    /// rendered races every other client: two of them pick the same number and
-    /// the second reach repoints the first one's brand-new portal. The server
-    /// handles reaches one at a time, so allocating here cannot collide.
-    ///
-    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
-    /// pane closed elsewhere is stale, and its index is free to reuse. The
-    /// reach's own stale-slot path then reads the leftover entry for its
-    /// remembered tab, so reusing the index lands the new viewer where the old
-    /// one was.
-    ///
-    /// `None` means every index holds a portal whose seat is live.
-    /// The old saturation at `u8::MAX` was itself an occupied index, so a
-    /// full space silently REPOINTED portal 255; the caller refuses instead.
-    fn next_free_portal(&self) -> Option<u8> {
-        (0..=u8::MAX).find(|idx| {
-            !self
-                .portals
-                .get(idx)
-                .is_some_and(|portal| self.panes.contains_key(&portal.seat))
-        })
-    }
-
-    fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
-        let pane = pane?;
-        self.portals
-            .iter()
-            .find(|(_, portal)| portal.seat == pane)
-            .map(|(idx, _)| *idx)
     }
 
     /// A registry row's message tail from the off-loop transcript map.
@@ -10148,6 +9321,7 @@ impl Core {
         guarded: bool,
         expected_identity: Option<&str>,
         agents: Result<Vec<RegistryAgent>, &'static str>,
+        hold_pass: bool,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
@@ -10228,9 +9402,10 @@ impl Core {
                 };
             }
         }
-        if agents
-            .as_deref()
-            .is_ok_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+        if !hold_pass
+            && agents
+                .as_deref()
+                .is_ok_and(|rows| agent_rows_join::pane_is_dnd(rows, &self.session_name, pane))
         {
             return ServerMsg::Err {
                 code: err_code::TARGET_DND,
@@ -10336,97 +9511,6 @@ impl Core {
         // W4 touch telemetry: one submitted answer = one steering action (a
         // bounced answer returned above and never emits).
         self.touch(pane, "answer", false);
-    }
-
-    /// (graph node id, squad cwd) for a `human_touch` emit on `pane`. Node id:
-    /// the pane's `FNO_NODE` provenance; fallback, the owning squad's
-    /// cwd basename when it is node-id shaped (the worktree-per-node
-    /// convention). Neither -> None, and the event carries resolution=failed
-    /// rather than being dropped (AC4-FR).
-    fn pane_touch_provenance(&self, pane: u64) -> (Option<String>, Option<String>) {
-        let cwd = self
-            .session
-            .find_pane(pane)
-            .and_then(|(sid, _)| self.session.squad(sid))
-            .map(|sq| sq.canonical_cwd().to_string());
-        let node = self
-            .panes
-            .get(&pane)
-            .and_then(|e| e.node.clone())
-            .or_else(|| {
-                cwd.as_deref()
-                    .and_then(|c| Path::new(c).file_name())
-                    .and_then(|b| b.to_str())
-                    .filter(|b| node_id_shaped(b))
-                    .map(str::to_owned)
-            });
-        (node, cwd)
-    }
-
-    /// Emit `human_touch` for one steering action on `pane` (W4 touch
-    /// telemetry). `coalesced` applies the per-pane window (inject bursts);
-    /// answer submits are one emit per action. The write rides the Python
-    /// `type` envelope via a fire-and-forget `fno doctor event emit` shell-out (the
-    /// digest idiom) - no Rust-side `kind`, so the three-places rule
-    /// never applies. The shell-out runs in the squad's cwd so the event
-    /// lands in that project's events.jsonl. A failure bumps
-    /// `touch_emit_failures` and never touches the steering path (AC4-ERR).
-    fn touch(&mut self, pane: u64, source: &'static str, coalesced: bool) {
-        if coalesced && !touch_coalesce(&mut self.touch_last_emit, pane, Instant::now()) {
-            return;
-        }
-        // cfg!(test): in unit tests current_exe is the test binary, and
-        // exec'ing it with event-emit args would re-enter the test harness.
-        // FNO_TOUCH_EMIT=0 is the operator kill switch.
-        if cfg!(test) || std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
-            return;
-        }
-        let (node, cwd) = self.pane_touch_provenance(pane);
-        let failures = Arc::clone(&self.touch_emit_failures);
-        tokio::spawn(async move {
-            let resolution = if node.is_some() { "ok" } else { "failed" };
-            let data = serde_json::json!({
-                "graph_node_id": node,
-                "source": source,
-                "resolution": resolution,
-            })
-            .to_string();
-            const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut cmd = crate::process_admission::tokio_command(fno_bin());
-            cmd.args([
-                "doctor",
-                "event",
-                "emit",
-                "--type",
-                "human_touch",
-                "--source",
-                "daemon",
-                "--data",
-                &data,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            let ok = matches!(
-                tokio::time::timeout(
-                    TOUCH_EMIT_TIMEOUT,
-                    crate::process_admission::tokio_status(&mut cmd),
-                )
-                .await,
-                Ok(Ok(s)) if s.success()
-            );
-            if !ok {
-                // Counted AND visible (never swallowed): a 100%-failing
-                // emitter silently inflates the autonomy rate, so each miss
-                // logs to the server's stderr alongside the running total.
-                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
-            }
-        });
     }
 
     /// The `mux_pane_counters` event payload for the current live pane set:
@@ -10750,19 +9834,9 @@ impl Core {
                 let Some(tab) = self.viewed_tab(view) else {
                     return Flow::Continue;
                 };
-                let pid = tab.focus;
-                // Capture membership BEFORE the reap clears it, reconcile AFTER
-                // the close settles (so squad-survival is known) - user close
-                // de-recruits (AC3-EDGE).
-                let ctx = self.member_ctx(pid);
-                let worker_ctx = self.worker_member_context(pid);
-                let flow = self.close_pane_reasoned(pid, "closed by operator");
-                self.reconcile_member_close(ctx, false);
-                if let Some(worker_ctx) = worker_ctx {
-                    self.reconcile_worker_member_close(&worker_ctx, false);
-                }
-                flow
+                self.close_by_operator(tab.focus)
             }
+            Command::ClosePortal { seat } => self.close_portal(client_id, seat),
             Command::DetachPane { pane } => {
                 match self.detach_worker_pane(pane) {
                     Ok(()) => self.push_layout(true),
@@ -11002,7 +10076,7 @@ impl Core {
                     // A stale id (squad died racing the selector) is refused
                     // fail-closed; the client re-anchors off the next Layout
                     // it already received.
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -11018,8 +10092,11 @@ impl Core {
                     // `Command::ResumeAgent` and the sideline render use: a
                     // pane of this session already running the row's session
                     // is direct observation the backend is live, and resuming
-                    // under it opens a second writer on the live rollout.
-                    if current.is_some_and(|agent| !self.row_resumable_in_session(agent)) {
+                    // under it opens a second writer on the live rollout. A
+                    // claude revive attaches a live session instead.
+                    if held.harness != "claude"
+                        && current.is_some_and(|agent| !self.row_resumable_in_session(agent))
+                    {
                         self.held_workers.remove(&pid);
                         self.write_restore_message(
                             pid,
@@ -11039,11 +10116,12 @@ impl Core {
                             .find(|client| client.id == client_id)
                             .map(|client| client.dims)
                             .unwrap_or((vp.rows, vp.cols));
-                        // A claude row's held resume runs the
-                        // canonical re-entry plan; the `None` arm fires the
+                        // A claude row's held seat runs the canonical revive
+                        // plan: attach a live session, else respawn or
+                        // bg-resume it, then attach. The `None` arm fires the
                         // off-loop resolution and this focus replays with the
-                        // verdict staged. A non-claude row does the
-                        // same with its resolved argv.
+                        // verdict staged. A non-claude row does the same with
+                        // its resolved argv.
                         let plan;
                         let staged_argv;
                         if facts.harness == "claude" {
@@ -11156,6 +10234,12 @@ impl Core {
                 // decision moved into the reach: a repoint keeps owning its
                 // geometry (ignored, visibly), a fresh open honors the
                 // caller's placement. This edge only resolves WHICH index.
+                if placement.view {
+                    // The transient machine view: never a portal, never an
+                    // entry in the map, never restored. A side effect's
+                    // screen; see `open_transient_view`.
+                    return self.open_transient_view(client_id, view, vp, &id, &placement);
+                }
                 if placement.wants_portal() {
                     // An explicit index wins over "any". `portal_new` names no
                     // index BECAUSE the caller must not choose one: allocating
@@ -11387,17 +10471,26 @@ impl Core {
                 // origin-less named target still starts claude in the agent's
                 // dir. Captured before target resolution because owner routing
                 // and the spawn cwd both derive from this one row.
-                let row_cwd = self
+                let matched_row = self
                     .agents
                     .iter()
                     .find(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(&id))
+                    .cloned();
+                let row_cwd = matched_row
+                    .as_ref()
                     .map(|a| a.cwd.clone())
                     .unwrap_or_default();
-                // Resolve the OWNING squad (Locked 2) as the CurrentRoute
-                // default: the squad whose `owns_path` matches the row cwd, so
-                // the attach lands where the agent lives, not the viewer's
-                // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self.session.find_by_cwd(&row_cwd).unwrap_or(view.0);
+                // Resolve the OWNING workspace (Locked 2) as the CurrentRoute
+                // default through the one thread-workspace resolver (member,
+                // then spawner, then the row's cwd), so the attach lands where
+                // the agent lives, not the viewer's workspace; fall back to the
+                // project default for a rowless attach id, and to the viewed
+                // workspace for an orphan (AC1-EDGE).
+                let owner = matched_row
+                    .as_ref()
+                    .and_then(|row| self.thread_workspace(row))
+                    .or_else(|| self.session.find_by_cwd(&row_cwd))
+                    .unwrap_or(view.0);
                 // (G3) An anchored drop ("attach beside THIS pane") names a
                 // concrete pane the operator can see, which overrides owner
                 // routing: the pane lands in the anchor's OWN tab, resolved from
@@ -11548,38 +10641,10 @@ impl Core {
                 Flow::Continue
             }
             Command::DispatchNode { node, account } => {
-                // Targeted work-queue dispatch (a clicked card). Reuses
-                // the prefix+g flow pinned to the card's node; the claim race
-                // (already-worked node bounces `already dispatching`) and lane
-                // cap live in the door (`fno agents spawn`). Routes through
-                // CoreMsg::Command, so the read-only-observer refusal already
-                // fired upstream.
-                //
-                // Re-check readiness against the server's OWN backlog snapshot
-                // (codex peer review): the client already gates the confirm to a
-                // ready card, but the server's snapshot is fresher, so a card that
-                // went blocked/in-flight between the client's Layout and the click
-                // is refused here - it must not start work prefix+g would never
-                // pick. An unknown or non-ready id fails closed to a notice, like
-                // the other catalog-named commands (and covers an empty id).
-                if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node), account);
-                } else if let Some(route) = self.inflight_route(&node) {
-                    // The client's Layout was stale: the card went in-flight
-                    // between publish and click, but the server can route it -
-                    // focus/attach instead of refusing (AC2-ERR). The
-                    // recursion reuses the FocusPane/AttachAgent gates verbatim
-                    // (catalog membership, jobId shape), so this adds no second
-                    // spawn path.
-                    return self.command(client_id, route);
-                } else if let Some(hint) = self.inflight_hint(&node) {
-                    // In flight but unroutable: say where the work is, the
-                    // same copy a routed v18 card click would show.
-                    self.notice(client_id, hint);
-                } else {
-                    self.notice(client_id, "card not ready to dispatch");
-                }
-                Flow::Continue
+                self.dispatch_card(client_id, node, account, false)
+            }
+            Command::DispatchPlan { node, account } => {
+                self.dispatch_card(client_id, node, account, true)
             }
             Command::NewSquad { name, origin } => {
                 // Explicit named-workspace creation (Unit 2). A blank/whitespace
@@ -11685,11 +10750,8 @@ impl Core {
                 match self.session.squad(squad) {
                     Some(sq) => {
                         let clean = sanitize_name(&name, MAX_SQUAD_NAME);
-                        // Blank-after-sanitize CLEARS back to the derived label
-                        // (the RenameTab precedent) - EXCEPT an origin-less
-                        // squad, whose derived label would be empty: there a
-                        // blank is refused (nothing to fall back to).
-                        if clean.is_empty() && sq.origins.is_empty() {
+                        // Blank-after-sanitize CLEARS back to the derived label.
+                        if clean.is_empty() && self.clear_name_refused(squad, &sq.origins) {
                             self.notice(client_id, "name required");
                             return Flow::Continue;
                         }
@@ -11771,7 +10833,7 @@ impl Core {
                             }
                         }
                     }
-                    None => self.notice(client_id, "no such squad"),
+                    None => self.notice(client_id, "no such workspace"),
                 }
                 Flow::Continue
             }
@@ -11780,7 +10842,7 @@ impl Core {
                 // its tabs, drop the squad, re-anchor views. Destructiveness is
                 // gated client-side by a confirm; the server just executes.
                 let Some(pos) = self.session.squads.iter().position(|s| s.id == id) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 // De-persist the whole squad up front (user dismissed it - it
@@ -11826,7 +10888,7 @@ impl Core {
                 // to the list bounds; an already-at-edge move is a silent no-op
                 // (holding a reorder key at the top must not bell).
                 let Some(idx) = self.session.squads.iter().position(|s| s.id == squad) else {
-                    self.notice(client_id, "no such squad");
+                    self.notice(client_id, "no such workspace");
                     return Flow::Continue;
                 };
                 let len = self.session.squads.len() as i64;
@@ -12153,7 +11215,7 @@ impl Core {
                 if !crate::registry_label::valid_agent_label(&new_name) {
                     self.notice(
                         client_id,
-                        "label must be 1-64 letters, numbers, underscores, or hyphens",
+                        "label must be 1-64 letters, numbers, underscores, hyphens, or apostrophes",
                     );
                     return Flow::Continue;
                 }
@@ -12270,43 +11332,11 @@ impl Core {
                 Flow::Continue
             }
             Command::RespawnAgent { name } => {
-                // Respawn an exited claude bg row from peek (`r`). Copy
-                // the two fields out via `.map` so the row borrow is dropped
-                // before the arm bodies touch `&mut self`. Refuse a still-live
-                // row, a uuid-less row (also covers non-claude - derive_rows only
-                // carries the uuid for claude), and a malformed uuid (shape gate
-                // before argv); else shell `fno agents spawn --resume` off-loop.
-                // Carry the row's cwd + account too: `fno agents spawn` defaults
-                // to the CANONICAL checkout, NOT the row's worktree, so a
-                // cross-worktree revival must pass `--cwd <recorded>` or it comes
-                // back in main; an isolated-account session needs `--account`
-                // (its uuid lives in that account's config dir). The row is the
-                // only source of these - they are not on the `--resume` uuid.
-                let resolved = self.resolve_lifecycle_target(&name, None).map(|a| {
-                    (
-                        a.exited,
-                        a.claude_session_uuid.clone(),
-                        a.cwd.clone(),
-                        a.account.clone(),
-                    )
-                });
-                match resolved {
+                // Keep the target check fail-closed, then let the shared resume
+                // door own its route and any row-state race.
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok((false, ..)) => self.notice(client_id, format!("{name} is still live")),
-                    Ok((true, None, ..)) => self.notice(
-                        client_id,
-                        format!("{name}: no claude session recorded - cannot respawn"),
-                    ),
-                    Ok((true, Some(uuid), cwd, account)) => {
-                        if valid_session_uuid(&uuid) {
-                            self.respawn_agent(client_id, name, uuid, cwd, account);
-                        } else {
-                            self.notice(
-                                client_id,
-                                format!("{name}: malformed session id - cannot respawn"),
-                            );
-                        }
-                    }
+                    Ok(_) => self.resume_agent(client_id, name),
                 }
                 Flow::Continue
             }
@@ -12431,8 +11461,10 @@ impl Core {
             // DispatchNext spawns a real worker pane; a passive
             // web-bridge observer must never start work (Invariant).
             // DispatchResult is NOT gated here - it originates from the trusted
-            // off-loop task, not a client.
-            | CoreMsg::DispatchNext { id, .. } => Some(*id),
+            // off-loop task, not a client. AgentLaunch (v83) spawns a real
+            // worker the same way, so it gates identically.
+            | CoreMsg::DispatchNext { id, .. }
+            | CoreMsg::AgentLaunch { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -12505,10 +11537,8 @@ impl Core {
                             }
                         }
                     }
-                    // W4 touch telemetry: a keystroke past the relay guard is
-                    // a human steering this pane; PaneSend (script API) and
-                    // relay writes never reach here.
-                    self.touch(focus, "inject", true);
+                    // Touch telemetry, the attended hold, the submit witness.
+                    self.input_tail(focus, &bytes);
                 }
                 Flow::Continue
             }
@@ -12561,13 +11591,21 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::DispatchNext { id, account } => {
-                self.dispatch_next(id, None, account);
+                self.dispatch_next(id, None, account, false);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {
                 if !notice.is_empty() {
                     self.notice(id, notice);
                 }
+                Flow::Continue
+            }
+            CoreMsg::AgentLaunch { id, request } => {
+                self.agent_launch(id, request);
+                Flow::Continue
+            }
+            CoreMsg::AgentLaunchUpdate { id, update, retry } => {
+                self.agent_launch_update(id, update, retry);
                 Flow::Continue
             }
             // A gesture's canonical re-entry verdict landed. A
@@ -12949,11 +11987,18 @@ impl Core {
                 bytes,
                 guarded,
                 expected_identity,
+                hold_pass,
                 agents,
                 reply,
             } => {
-                let msg =
-                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
+                let msg = self.pane_send(
+                    pane,
+                    &bytes,
+                    guarded,
+                    expected_identity.as_deref(),
+                    agents,
+                    hold_pass,
+                );
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -13004,9 +12049,20 @@ impl Core {
                 ));
                 Flow::Continue
             }
-            CoreMsg::PaneKill { pane, reply } => {
+            CoreMsg::PaneKill {
+                pane,
+                hand_off_to,
+                reply,
+            } => {
                 if !self.panes.contains_key(&pane) {
                     let _ = reply.send(dead_pane(pane));
+                    return Flow::Continue;
+                }
+                // A hand-off is the opposite of a kill: it RELEASES the pane
+                // so its keeper keeps the child. It refuses before touching
+                // the layout, so a failed rename leaves the pane as it was.
+                if let Some(target) = hand_off_to {
+                    let _ = reply.send(self.hand_off_pane(pane, &target));
                     return Flow::Continue;
                 }
                 // Reply Ok BEFORE propagating a possible session-ending
@@ -13290,8 +12346,9 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::AgentTails { tails } => {
+            CoreMsg::AgentTails { tails, ctx } => {
                 self.tail_by_session = tails;
+                self.ctx_by_session = ctx;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -13313,6 +12370,7 @@ impl Core {
                 rows,
                 branches,
                 tails,
+                ctx,
                 read_ok,
             } => {
                 self.agents_read_ok = read_ok;
@@ -13341,6 +12399,7 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                self.ctx_by_session = ctx;
                 // Row changes are the journal's change signal: a
                 // spawn or removal writes both. Refresh the cached scan here,
                 // off the per-push paths that read it.
@@ -13372,7 +12431,7 @@ impl Core {
                 stale,
                 holders,
                 prs,
-                missions,
+                drivers,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit.
@@ -13381,7 +12440,7 @@ impl Core {
                 self.backlog_stale = stale;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
-                self.missions = missions;
+                self.backlog_driver = drivers;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -13575,42 +12634,59 @@ async fn run_wait(
 
 fn drain_pty_output(
     core: &mut Core,
-    out_rx: &mut mpsc::Receiver<(u64, Vec<u8>)>,
-    first: Option<(u64, Vec<u8>)>,
+    out_rx: &mut mpsc::Receiver<(u64, PaneChunk)>,
+    first: Option<(u64, PaneChunk)>,
     e2e_first_out: &mut HashSet<u64>,
 ) -> bool {
     let mut drained = false;
     let mut touched = HashSet::new();
     {
-        let mut feed = |pid: u64, bytes: Vec<u8>| {
+        let mut feed = |pid: u64, chunk: PaneChunk| {
             drained = true;
-            if e2e_first_out.insert(pid) {
-                e2e_log(format_args!(
-                    "core loop: first output from pane {pid} ({} bytes)",
-                    bytes.len()
-                ));
-            }
-            if let Some(entry) = core.panes.get_mut(&pid) {
-                let t0 = Instant::now();
-                entry.vt.feed(&bytes);
-                entry.last_output = t0;
-                entry
-                    .stats
-                    .bytes_in
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                entry.stats.grid_updates.fetch_add(1, Ordering::Relaxed);
-                entry
-                    .stats
-                    .cpu_ns
-                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                touched.insert(pid);
+            match chunk {
+                PaneChunk::Output(bytes) => {
+                    if e2e_first_out.insert(pid) {
+                        e2e_log(format_args!(
+                            "core loop: first output from pane {pid} ({} bytes)",
+                            bytes.len()
+                        ));
+                    }
+                    if let Some(entry) = core.panes.get_mut(&pid) {
+                        let t0 = Instant::now();
+                        entry.vt.feed(&bytes);
+                        entry.last_output = t0;
+                        entry
+                            .stats
+                            .bytes_in
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        entry.stats.grid_updates.fetch_add(1, Ordering::Relaxed);
+                        entry
+                            .stats
+                            .cpu_ns
+                            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        touched.insert(pid);
+                    }
+                }
+                PaneChunk::Resized(rows, cols) => {
+                    // The keeper's resize round trip landed: apply the VT
+                    // dimension change here, at its exact point in this
+                    // pane's own ordered channel, never eagerly when the
+                    // resize was issued (server.rs's push_layout). Any
+                    // trailing pre-resize output is necessarily ahead of
+                    // this marker in the same channel, so it is always fed
+                    // before the resize lands.
+                    if let Some(entry) = core.panes.get_mut(&pid) {
+                        entry.vt.resize(rows, cols);
+                        touched.insert(pid);
+                    }
+                }
             }
         };
-        if let Some((pid, bytes)) = first {
-            feed(pid, bytes);
+        if let Some((pid, chunk)) = first {
+            feed(pid, chunk);
         }
-        while let Ok((pid, bytes)) = out_rx.try_recv() {
-            feed(pid, bytes);
+        while let Ok((pid, chunk)) = out_rx.try_recv() {
+            feed(pid, chunk);
         }
     }
     for pid in touched {
@@ -13646,7 +12722,7 @@ async fn serve(
     // One shared pane-tagged output channel + one exit channel for all PTY
     // reader threads. Squads (and their first panes) are born from attaches;
     // nothing is spawned upfront.
-    let (out_tx, mut out_rx) = mpsc::channel::<(u64, Vec<u8>)>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<(u64, PaneChunk)>(256);
     let (exit_tx, mut exit_rx) = mpsc::channel::<u64>(64);
     let (core_tx, mut core_rx) = mpsc::channel::<CoreMsg>(256);
     // Attached-client count for the periodic readers: Core owns the
@@ -13677,8 +12753,10 @@ async fn serve(
         agents: Vec::new(),
         agents_read_ok: false,
         journal: crate::spawn_journal::JournalCache::load(),
+        launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
+        ctx_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
         truth_seq: 0,
         backlog: Vec::new(),
@@ -13686,7 +12764,7 @@ async fn serve(
         backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
-        missions: backlog_view::MissionMap::default(),
+        backlog_driver: HashMap::new(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -13708,6 +12786,7 @@ async fn serve(
         pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
+        shared_identity_notified: HashSet::new(),
         restored: false,
         restore_pending: false,
         store_generations: HashMap::new(),
@@ -13719,6 +12798,8 @@ async fn serve(
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
+        shell_rc_dirs: HashMap::new(),
+        portal_session_guards: BTreeMap::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -13741,6 +12822,7 @@ async fn serve(
             // map pushed, so an unchanged result stays off the wire.
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
+            let mut last_ctx: HashMap<String, String> = HashMap::new();
             // Shared so the path cache survives across blocking-pool passes.
             let tail_reader = std::sync::Arc::new(std::sync::Mutex::new(
                 crate::transcript_tail::TailReader::new(),
@@ -13922,14 +13004,14 @@ async fn serve(
                 // was most of this loop's CPU.
                 let uuids = last_uuids.clone();
                 let reader = tail_reader.clone();
-                let tails = tokio::task::spawn_blocking(move || {
+                let (tails, ctx) = tokio::task::spawn_blocking(move || {
                     // Poison-recover rather than expect: a panic in one pass
                     // must not blank the column on every later tick (the
                     // cache is a HashMap, safe to reuse mid-poison).
                     reader
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .tails(&uuids)
+                        .tails_and_ctx(&uuids)
                 })
                 .await
                 .unwrap_or_default();
@@ -13957,11 +13039,13 @@ async fn serve(
                     .await
                     .unwrap_or_default();
                     last_tails = tails.clone();
+                    last_ctx = ctx.clone();
                     if core_tx
                         .send(CoreMsg::AgentRows {
                             rows,
                             branches,
                             tails,
+                            ctx,
                             read_ok: state.read_ok(),
                         })
                         .await
@@ -13969,11 +13053,16 @@ async fn serve(
                     {
                         return; // core loop gone; the server is shutting down
                     }
-                } else if tails != last_tails {
+                } else if tails != last_tails || ctx != last_ctx {
                     // Rows unchanged but somebody said something: push the tails
                     // alone rather than forcing a whole row set through.
                     last_tails = tails.clone();
-                    if core_tx.send(CoreMsg::AgentTails { tails }).await.is_err() {
+                    last_ctx = ctx.clone();
+                    if core_tx
+                        .send(CoreMsg::AgentTails { tails, ctx })
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -14077,6 +13166,12 @@ async fn serve(
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
 
+    // Build-drift retirement: the watch stats its own executable
+    // off-loop every 5th tick and retires through Flow::Shutdown only on a
+    // drifted verdict at a fully quiet tick. The machinery lives in
+    // server/drift_retire.rs.
+    let mut drift_watch = drift_retire::RetireWatch::new();
+
     // diagnostics: which panes' output the CORE LOOP has seen. Pairs
     // with the pty reader thread's own first-chunk line to split "shell never
     // spoke" from "core loop never drained it".
@@ -14090,11 +13185,11 @@ async fn serve(
         tokio::select! {
             chunk = out_rx.recv() => {
                 // out_tx lives in Core, so recv never yields None.
-                let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
+                let Some((pid, item)) = chunk else { break Flow::Shutdown };
                 drain_pty_output(
                     &mut core,
                     &mut out_rx,
-                    Some((pid, bytes)),
+                    Some((pid, item)),
                     &mut e2e_first_out,
                 );
                 // Pane output is a liveness signal: re-arm the idle
@@ -14118,7 +13213,7 @@ async fn serve(
                 // BEFORE the reap clears the mapping (AC4-EDGE).
                 let ctx = core.member_ctx(pid);
                 core.reconcile_member_close(ctx, true);
-                if core.close_pane(pid) == Flow::Shutdown {
+                if core.close_viewer_died(pid, "viewer exited") == Flow::Shutdown {
                     e2e_log(format_args!("last pane gone; shutting down"));
                     break Flow::Shutdown;
                 }
@@ -14126,6 +13221,7 @@ async fn serve(
             _ = pane_reap_tick.tick() => {
                 // Deferred repaint requests ride the same 1s pass.
                 core.fire_due_nudges();
+                core.follow_portal_viewer_titles();
                 // Snapshot first: reader completion guarantees all output for
                 // these panes was enqueued before this point. Drain it, then
                 // close exactly the snapshot even if another reader finishes
@@ -14139,6 +13235,24 @@ async fn serve(
                 }
                 if core.reap_dead_children(dead) == Flow::Shutdown {
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
+                    break Flow::Shutdown;
+                }
+                // Drift retirement: a drifted verdict at a fully
+                // quiet tick (no panes, clients, or connections) retires the
+                // server so the next attach spawns the installed build. The
+                // stat runs off-loop in server/drift_retire.rs.
+                if let Some((running, on_disk)) = drift_watch.tick(|| {
+                    core.panes.is_empty()
+                        && *core.client_count.borrow() == 0
+                        && conns_alive.load(Ordering::Acquire) == 0
+                }) {
+                    eprintln!(
+                        "fno mux: stale-build retire: on-disk binary changed ({} -> {}); \
+                         no panes, clients, or connections; retiring so the next \
+                         attach spawns the installed build",
+                        running.path.display(),
+                        on_disk.path.display()
+                    );
                     break Flow::Shutdown;
                 }
             }
@@ -14521,6 +13635,7 @@ async fn handle_control(
             bytes,
             guarded,
             expected_identity,
+            hold_pass,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -14545,6 +13660,7 @@ async fn handle_control(
                     bytes,
                     guarded,
                     expected_identity,
+                    hold_pass,
                     agents,
                     reply: reply_tx,
                 })
@@ -14586,10 +13702,11 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::PaneKill { pane } => {
+        ControlVerb::PaneKill { pane, hand_off_to } => {
             core_tx
                 .send(CoreMsg::PaneKill {
                     pane,
+                    hand_off_to,
                     reply: reply_tx,
                 })
                 .await
@@ -15001,15 +14118,7 @@ async fn handle_client(
         return;
     }
     let (read_half, write_half) = stream.into_split();
-    tokio::spawn(client_writer(
-        write_half,
-        reliable_rx,
-        dirty,
-        notify,
-        core_tx.clone(),
-        id,
-        stats,
-    ));
+    tokio::spawn(client_writer(write_half, reliable_rx, dirty, notify, stats));
     client_reader(read_half, core_tx, id).await;
 }
 
@@ -15174,6 +14283,15 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
                     break;
                 }
             }
+            Ok(ClientMsg::AgentLaunch(request)) => {
+                if core_tx
+                    .send(CoreMsg::AgentLaunch { id, request })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Ok(ClientMsg::Detach) => {
                 let _ = core_tx.send(CoreMsg::Gone(id)).await;
                 break;
@@ -15249,14 +14367,13 @@ where
 /// The per-client writer: reliable messages FIRST (biased select - a Layout
 /// is never stuck behind a frame burst), then the droppable dirty map. `Bye`
 /// is the exception: it flushes the final dirty frames before ending the
-/// stream. A write failure drops THIS client only (AC4-ERR generalized).
+/// stream. A write failure exits this half; the reader owns deregistration so
+/// commands already on the socket stay ordered before its `Gone` message.
 async fn client_writer(
     mut w: OwnedWriteHalf,
     mut reliable_rx: mpsc::Receiver<ServerMsg>,
     dirty: DirtyMap,
     notify: Arc<Notify>,
-    core_tx: mpsc::Sender<CoreMsg>,
-    id: u64,
     stats: PaneStats,
 ) {
     loop {
@@ -15267,10 +14384,7 @@ async fn client_writer(
                 match write_reliable(&mut w, &msg, &dirty, &stats).await {
                     Ok(true) => break,
                     Ok(false) => {}
-                    Err(_) => {
-                        let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
             _ = notify.notified() => {
@@ -15286,10 +14400,7 @@ async fn client_writer(
                         match write_reliable(&mut w, &msg, &dirty, &stats).await {
                             Ok(true) => return,
                             Ok(false) => {}
-                            Err(_) => {
-                                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                                return;
-                            }
+                            Err(_) => return,
                         }
                     }
                     let next = {
@@ -15302,7 +14413,6 @@ async fn client_writer(
                         .await
                         .is_err()
                     {
-                        let _ = core_tx.send(CoreMsg::Gone(id)).await;
                         return;
                     }
                     count_frame_emitted(&stats, pane_id);

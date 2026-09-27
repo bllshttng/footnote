@@ -143,7 +143,7 @@ commit_at "my own work" 1800000001 1800000001
 OUT=$(run_finalize DonePRGreen)
 CAP=$(cat "$CAPTURE")
 assert_not_contains "AC1-HP: no guard skip" "skipped" "$OUT"
-assert_contains "AC1-HP: stamps the node with phase do" "session add ab-e2e0001 --phase do" "$CAP"
+assert_contains "AC1-HP: stamps the node with phase execute" "session add ab-e2e0001 --phase execute" "$CAP"
 assert_contains "AC1-HP: passes the identity guard" "--require-session SESSION-LIVE" "$CAP"
 assert_contains "AC1-HP: passes the plan guard" "--guard-plan $T/repo/plan.md" "$CAP"
 # The binding a unit test cannot reach: started_at is the manifest's created_at,
@@ -168,7 +168,7 @@ printf -- '---\nfno_id: run-3\ncreated_at: %s\ninitial_head: %s\nharness_session
 : > "$CAPTURE"
 "$BIN" finalize --state "$M3" --cwd "$T/repo" --reason DoneAwaitingMerge >/dev/null 2>&1
 assert_contains "resumed: DoneAwaitingMerge still stamps after a Budget fire" \
-    "session add ab-e2e0001 --phase do" "$(cat "$CAPTURE")"
+    "session add ab-e2e0001 --phase execute" "$(cat "$CAPTURE")"
 
 # ---- AC7-EDGE: a legacy manifest without initial_head fails closed ----
 echo ""

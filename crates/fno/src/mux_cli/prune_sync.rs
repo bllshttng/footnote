@@ -80,7 +80,7 @@ pub(super) fn print_prune_summary(
     unreachable: &[String],
     reload: &ReloadOutcome,
 ) {
-    let mut parts = vec![format!("{verb} {n} squad(s)")];
+    let mut parts = vec![format!("{verb} {n} workspace(s)")];
     // The acted-on count carries its mood in the verb: an apply run says
     // `closed`, a dry-run says `would close`. Never both numbers at once - the
     // apply reading `tabs 1 (would close 0, ...)` put the closed count beside
@@ -91,7 +91,7 @@ pub(super) fn print_prune_summary(
         ("would close", tabs.would_close)
     };
     parts.push(format!(
-        "tabs {tabs_word} {tabs_n} (skipped named {}, kept {} = last-in-squad {}, not-pristine {}, zero-pane {}, unreachable {}{}, server reachable {answered}/{probed})",
+        "tabs {tabs_word} {tabs_n} (skipped named {}, kept {} = last-in-workspace {}, not-pristine {}, zero-pane {}, unreachable {}{}, server reachable {answered}/{probed})",
         tabs.skipped_named,
         tabs.kept,
         tabs.kept_last_in_squad,
@@ -154,7 +154,7 @@ pub(super) fn print_prune_summary(
             "would reap"
         };
         parts.push(format!(
-            "{mverb} {members_reaped} dead member(s) from surviving squads"
+            "{mverb} {members_reaped} dead member(s) from surviving workspaces"
         ));
     }
     if members_kept_live > 0 {

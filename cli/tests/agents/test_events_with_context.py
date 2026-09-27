@@ -8,7 +8,6 @@ Locks in:
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,7 @@ from typing import Any
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from tests._event_rows import event_rows
 
 
 EVENT_CONTEXT_FIELD_NAMES = {
@@ -60,9 +60,9 @@ def test_emit_with_context_writes_one_jsonl_line(
     ctx = _make_ctx()
     emit_with_context(ctx, "agent_ask_started", path=events_path)
 
-    lines = events_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    parsed = json.loads(lines[0])
+    rows = event_rows(events_path)
+    assert len(rows) == 1
+    parsed = rows[0]
     assert parsed["kind"] == "agent_ask_started"
     assert "ts" in parsed
 
@@ -86,7 +86,7 @@ def test_emit_with_context_includes_all_13_context_fields(
     )
     emit_with_context(ctx, "agent_ask_done", path=events_path)
 
-    record = json.loads(events_path.read_text(encoding="utf-8").strip())
+    record = event_rows(events_path)[0]
     for name in EVENT_CONTEXT_FIELD_NAMES:
         assert name in record, f"missing flattened field: {name}"
     assert record["from_name"] == "parent-agent"
@@ -109,7 +109,7 @@ def test_emit_with_context_kwargs_extend_record(
         path=events_path,
         duration_ms=1234, reply_chars=567, backend="direct-cli",
     )
-    record = json.loads(events_path.read_text(encoding="utf-8").strip())
+    record = event_rows(events_path)[0]
     assert record["duration_ms"] == 1234
     assert record["reply_chars"] == 567
     assert record["backend"] == "direct-cli"
@@ -127,7 +127,7 @@ def test_emit_with_context_kwargs_override_context_fields(
     emit_with_context(
         ctx, "agent_ask_done", path=events_path, to_session_id="from-kwargs"
     )
-    record = json.loads(events_path.read_text(encoding="utf-8").strip())
+    record = event_rows(events_path)[0]
     assert record["to_session_id"] == "from-kwargs"
 
 
@@ -145,7 +145,7 @@ def test_emit_with_context_ts_cannot_be_overridden_via_data(
     events_path = tmp_path / ".fno" / "events.jsonl"
     ctx = _make_ctx()
     emit_with_context(ctx, "agent_ask_done", path=events_path, ts="HIJACK")
-    record = json.loads(events_path.read_text(encoding="utf-8").strip())
+    record = event_rows(events_path)[0]
     assert record["kind"] == "agent_ask_done"
     assert record["ts"] != "HIJACK"
     assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", record["ts"])
@@ -154,22 +154,20 @@ def test_emit_with_context_ts_cannot_be_overridden_via_data(
 def test_legacy_emit_byte_identical_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression guard: legacy emit(kind, **data) output unchanged.
-
-    Pinned shape: keys in the JSON record are *exactly* the data kwargs
-    followed by ts then kind. No extra fields, no reordering.
-    """
+    """Regression guard: the legacy emit(kind, **data) shape survives the
+    committed-row envelope (data kwargs, ts, kind all round-trip top-level)."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.events import emit
 
     events_path = tmp_path / ".fno" / "events.jsonl"
     emit("agent_ask_done", path=events_path, name="foo", provider="codex", reply_chars=42)
-    line = events_path.read_text(encoding="utf-8").strip()
-    record = json.loads(line)
-    # Shape: data kwargs first, then ts, then kind. No ctx flattening.
-    assert list(record.keys()) == ["name", "provider", "reply_chars", "ts", "kind"]
+    record = event_rows(events_path)[0]
+    # Legacy projection: data kwargs, then ts, then kind. No ctx flattening.
     assert record["kind"] == "agent_ask_done"
     assert record["name"] == "foo"
+    assert record["provider"] == "codex"
+    assert record["reply_chars"] == 42
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", record["ts"])
 
 
 def test_emit_with_context_swallows_oserror(

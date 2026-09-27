@@ -41,9 +41,7 @@ from fno.agents.harnesses.codex import (
     NoSessionIdError,
 )
 from fno.agents.registry import (
-    AgentEntry,
     load_registry,
-    write_registry,
 )
 
 
@@ -77,12 +75,12 @@ def fake_codex_create(monkeypatch):
 
 
 def _read_events() -> list[dict]:
-    """Return parsed events.jsonl entries for assertions."""
+    """Return the committed event rows for the default journal."""
     from fno import paths
-    log = paths.state_dir() / "events.jsonl"
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text().splitlines() if line]
+
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +538,95 @@ def test_codex_thread_spawn_forwards_node_to_rust_client(monkeypatch, tmp_path):
     assert session_id == "thread-node"
     assert "--node" in seen["argv"]
     assert seen["argv"][seen["argv"].index("--node") + 1] == "x-535c"
+
+
+def _write_spawn_stub(tmp_path: Path, body: str) -> Path:
+    stub = tmp_path / "fno-agents-stub"
+    stub.write_text(f"#!/bin/sh\n{body}\n")
+    stub.chmod(0o755)
+    return stub
+
+
+# Emulates the current binary's contract: the state-root door answers with
+# the root the inherited env resolves, and a spawn prints a receipt.
+_STUB_DOOR_BODY = (
+    'if [ "$1" = "state-root" ]; then printf \'%s\\n\' "$FNO_STATE_DIR"; exit 0; fi\n'
+    'echo \'{"harness_session_id":"stub-thread"}\''
+)
+
+
+def test_sealed_codex_thread_spawn_refuses_a_stale_binary(monkeypatch, tmp_path):
+    """A binary predating the FNO_STATE_DIR carrier must not inherit a sealed env."""
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+    stale = _write_spawn_stub(
+        tmp_path, 'echo "read graph from $HOME/.fno/graph.json"'
+    )
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: stale)
+
+    with pytest.raises(dispatch_mod.DispatchAskError) as excinfo:
+        dispatch_mod._codex_thread_spawn(
+            name="worker-stale",
+            message="msg",
+            cwd=tmp_path,
+            from_name="fno",
+            model=None,
+            yolo=False,
+            account_env={"HOME": str(tmp_path / "account-home")},
+        )
+    assert "fno doctor update" in str(excinfo.value)
+    assert str(stale) in str(excinfo.value)
+
+
+def test_sealed_codex_thread_spawn_admits_a_binary_that_honors_the_carrier(
+    monkeypatch, tmp_path
+):
+    """A binary whose state-root door echoes the pin spawns through the seal."""
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+    good = _write_spawn_stub(tmp_path, _STUB_DOOR_BODY)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: good)
+
+    session_id = dispatch_mod._codex_thread_spawn(
+        name="worker-sealed",
+        message="msg",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+        account_env={"HOME": str(tmp_path / "account-home")},
+    )
+    assert session_id == "stub-thread"
+
+
+def test_codex_thread_spawn_skips_the_handshake_without_a_home_move(
+    monkeypatch, tmp_path
+):
+    """No HOME override, no seal reliance, no probe subprocess."""
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+
+    good = _write_spawn_stub(tmp_path, _STUB_DOOR_BODY)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: good)
+    seen: list[list[str]] = []
+    real_run = dispatch_mod.subprocess.run
+
+    def spy_run(argv, **kwargs):
+        seen.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", spy_run)
+    session_id = dispatch_mod._codex_thread_spawn(
+        name="worker-warm",
+        message="msg",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+    )
+    assert session_id == "stub-thread"
+    assert all(argv[1] != "state-root" for argv in seen)

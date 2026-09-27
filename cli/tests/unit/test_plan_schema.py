@@ -133,3 +133,22 @@ def test_retired_orchestration_spelling_is_gone():
     m = PlanFrontmatter.model_validate(_fm(orchestration="mechanical"))
     assert not hasattr(m, "orchestration")
     assert m.join == "manual"
+
+
+def test_claims_only_plan_fills_node_from_the_synonym():
+    """Blueprint authors write `claims:` and no `node:`; validation fills the
+    canonical key from the synonym instead of refusing a valid plan."""
+    m = PlanFrontmatter.model_validate(_fm(node=None, claims="x-claims"))
+    assert m.node == "x-claims"
+    assert m.claims == "x-claims"
+
+
+def test_node_outranks_claims_when_both_carry_values():
+    m = PlanFrontmatter.model_validate(_fm(node="x-canonical", claims="x-claims"))
+    assert m.node == "x-canonical"
+
+
+def test_neither_node_nor_claims_still_refuses():
+    with pytest.raises(ValidationError) as exc:
+        PlanFrontmatter.model_validate(_fm(node=None, claims=None))
+    assert "node" in str(exc.value)

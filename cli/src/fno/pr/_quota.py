@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
+_PROBE_TTL_S = 60.0  # healthy probe answers are reused this long
+_TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 
@@ -74,7 +77,7 @@ _SHIM_SCAN_BYTES = 65536
 def _is_proxy_shim(path: Path) -> bool:
     """Is this ``gh`` our own broker shim, judged by content rather than location?
 
-    ``github_cli_proxy_dir()`` is TMPDIR-derived, so directory identity only
+    ``fallback_proxy_dir()`` is TMPDIR-derived, so directory identity only
     recognizes a shim written by a process sharing our TMPDIR. A background job
     or a launchd agent inherits the shim on PATH but computes a different
     directory, and so fails to recognize it. The shim is a two-line script, but
@@ -235,6 +238,25 @@ def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
         return None, None
     if not isinstance(remaining, int) or not isinstance(reset, int):
         return None, None
+    return remaining, reset
+
+
+def _probe_quota(cache, gh, cwd, runner, env, timeout):
+    """Live `rate_limit` probe or a fresh healthy cached answer; cache=None never reads or writes."""
+    if cache is not None:
+        try:
+            row = json.loads(cache.read_text())
+            if time.time() - row["ts"] < _PROBE_TTL_S and row["remaining"] > GRAPHQL_RESERVE:
+                return row["remaining"], row["reset"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    probe = runner([gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env)
+    remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
+    if cache is not None and remaining is not None and remaining > GRAPHQL_RESERVE and reset is not None:
+        try:
+            cache.write_text(json.dumps({"ts": time.time(), "remaining": remaining, "reset": reset}))
+        except OSError:
+            pass
     return remaining, reset
 
 
@@ -416,6 +438,7 @@ def execute_graphql(
     runner: Callable = run,
     real_gh: Optional[str] = None,
     lock_path: Optional[Path] = None,
+    probe_cache: Optional[Path] = None,
     cwd: Optional[str] = None,
     timeout: float = 120,
 ) -> Result:
@@ -450,6 +473,8 @@ def execute_graphql(
     if not gh:
         return Result(127, "", "gh not found on PATH")
     lock = lock_path or quota_lock_path()
+    cache = (None if any(v in os.environ for v in _TOKEN_ENV)
+             else (probe_cache or lock.with_name("github-quota-probe.json")))
     lock.parent.mkdir(parents=True, exist_ok=True)
     with _locked_path(lock) as handle:
         try:
@@ -457,10 +482,7 @@ def execute_graphql(
                 env = delegate_environment()
             except ProxyIdentityError as exc:
                 return Result(2, "", proxy_identity_refusal(exc))
-            probe = runner(
-                [gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env
-            )
-            remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
+            remaining, reset = _probe_quota(cache, gh, cwd, runner, env, timeout)
             if purpose == "discretionary":
                 if remaining is None:
                     return Result(REFUSED, "", _refusal(gh_args, reset=None, unavailable=True))

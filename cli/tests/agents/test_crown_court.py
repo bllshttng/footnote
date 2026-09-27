@@ -7,6 +7,7 @@ reason on an unreadable graph - never ``True``, never ``False`` - and the
 summary counts unknowns separately from disagreements.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -44,9 +45,7 @@ def _prepare(monkeypatch, tmp_path, rows, graph_entries=None) -> None:
     if graph_entries is not None:
         graph_path = paths.graph_json()
         graph_path.parent.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(
-            json.dumps({"entries": graph_entries}), encoding="utf-8"
-        )
+        seed_graph(graph_path, json.dumps({"entries": graph_entries}))
 
 
 def test_a_crown_over_a_real_live_epic_agrees(tmp_path: Path, monkeypatch) -> None:
@@ -1296,5 +1295,84 @@ def test_the_flag_pays_no_extra_python_graph_read(tmp_path: Path, monkeypatch) -
     assert len(calls) == 1
     render_court(as_json=False, nodes=True)
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# the wake's agreement-free court (x-5f26)
+# ---------------------------------------------------------------------------
+
+
+def test_an_agreement_free_court_skips_the_graph_and_reads_the_same_crowns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP: agree=False never touches the graph; holder, level and scope
+    match the agreeing read, and the rung-2 crown reads agree None."""
+    from fno.agents import court as court_mod
+    from fno.agents.court import gather_court
+
+    rows = [
+        _entry(
+            "king-a",
+            status="busy",
+            crown_level=2,
+            crown_scope="e-1,e-2",
+            crown_grantor="human",
+        ),
+        _entry(
+            "king-b",
+            status="busy",
+            crown_level=1,
+            crown_scope="alpha",
+            crown_grantor="human",
+        ),
+    ]
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        rows,
+        graph_entries=[
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
+            {"id": "e-2", "type": "epic", "project": "alpha", "status": "ready"},
+        ],
+    )
+
+    def _refuse():
+        raise AssertionError("an agreement-free court must not read the graph")
+
+    real_index = court_mod._graph_index
+    monkeypatch.setattr(court_mod, "_graph_index", _refuse)
+    free = gather_court(rows, agree=False)
+    monkeypatch.setattr(court_mod, "_graph_index", real_index)
+    full = gather_court(rows)
+
+    by_free = {c["holder"]: c for c in free["crowns"]}
+    by_full = {c["holder"]: c for c in full["crowns"]}
+    for holder in ("king-a", "king-b"):
+        assert (by_free[holder]["level"], by_free[holder]["scope"]) == (
+            by_full[holder]["level"],
+            by_full[holder]["scope"],
+        )
+    assert by_free["king-a"]["agree"] is None
+    assert by_full["king-a"]["agree"] is True
+    assert by_free["king-b"]["agree"] is True
+
+
+def test_an_agreement_free_court_still_nulls_on_an_unreadable_registry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: agree=False changes nothing about the unreadable-registry
+    posture - crowns stays None, never an empty court."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.court import gather_court
+
+    _prepare(monkeypatch, tmp_path, [])
+
+    def _boom():
+        raise OSError("locked")
+
+    monkeypatch.setattr(registry_mod, "load_registry", _boom)
+    court = gather_court(agree=False)
+    assert court["crowns"] is None
+    assert court["registry_readable"] is False
 
 

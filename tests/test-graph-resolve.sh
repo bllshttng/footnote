@@ -11,10 +11,11 @@
 #   - ab-id prefix ambiguous (soft fail with stderr)
 #   - ab-id prefix no-match (soft fail with stderr)
 #   - RESOLVE_FUZZY=1 title fuzzy match (opt-in)
-#   - missing graph.json (soft fail)
+#   - missing graph.db store (soft fail)
 #
 # Tests run by sourcing graph-resolve.sh in a subshell so each case starts
-# clean, and pointing GRAPH_JSON at tests/fixtures/graph-fuzzy.json. The
+# clean, and pointing GRAPH_JSON at a temporary graph.db anchor seeded from
+# tests/fixtures/graph-fuzzy.json. The
 # `fno` package must be importable for the resolver to call resolve_id;
 # we use `uv run` from the cli/ dir to provide that.
 
@@ -23,7 +24,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOLVER="$REPO_ROOT/scripts/lib/graph-resolve.sh"
-FIXTURE="$SCRIPT_DIR/fixtures/graph-fuzzy.json"
 CLI_DIR="$REPO_ROOT/cli"
 
 PASS=0
@@ -39,6 +39,10 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "SKIP: uv not installed; graph-resolve shell tests require it"
     exit 0
 fi
+
+FIXTURE_HOME=$(mktemp -d -t graph-resolve-store.XXXXXX)
+FIXTURE="$FIXTURE_HOME/graph.json"
+cat "$SCRIPT_DIR/fixtures/graph-fuzzy.json" | uv run --project "$CLI_DIR" python "$CLI_DIR/tests/fixtures/graph_seed.py" "$FIXTURE"
 
 # Run resolve_arg in a subshell so env / sourced state never leaks across
 # tests. The arg and any extra env vars are passed via the environment
@@ -72,7 +76,7 @@ run_resolve() {
 }
 
 STDERR_CAPTURE=$(mktemp -t graph-resolve-stderr.XXXXXX)
-trap 'rm -f "$STDERR_CAPTURE"' EXIT
+trap 'rm -f "$STDERR_CAPTURE"; rm -rf "$FIXTURE_HOME"' EXIT
 
 # 1. Non-ab passthrough: arbitrary feature description echoes unchanged.
 echo "test 1: non-ab passthrough"
@@ -180,8 +184,8 @@ else
     fail "metacharacter input" "expected literal echo, got '$result'"
 fi
 
-# 8. Missing graph.json: soft-fail with warning.
-echo "test 8: missing graph.json soft-fails"
+# 8. Missing graph.db store: soft-fail with warning.
+echo "test 8: missing graph store soft-fails"
 : > "$STDERR_CAPTURE"  # reset
 result=$(
     cd "$CLI_DIR" || exit 99
@@ -189,9 +193,9 @@ result=$(
     uv run --quiet bash -c "source '$RESOLVER' && resolve_arg 'ab-9728b70b'" 2>"$STDERR_CAPTURE"
 )
 if [[ "$result" == "ab-9728b70b" ]]; then
-    pass "missing graph.json echoes arg unchanged"
+    pass "missing graph store echoes arg unchanged"
 else
-    fail "missing graph.json" "expected 'ab-9728b70b', got '$result'"
+    fail "missing graph store" "expected 'ab-9728b70b', got '$result'"
 fi
 
 # 9. Package absent: the resolver has one degradation, not a second
@@ -202,7 +206,7 @@ fi
 # fno.graph.fuzzy fails the same way a host without the package would.
 echo "test 9: package import failure passes the arg through (rc=5)"
 EMPTY_DIR=$(mktemp -d -t graph-resolve-empty.XXXXXX)
-trap 'rm -rf "$STDERR_CAPTURE" "$EMPTY_DIR"' EXIT
+trap 'rm -rf "$STDERR_CAPTURE" "$EMPTY_DIR" "$FIXTURE_HOME"' EXIT
 
 # 9a. Full ab-id with the package absent echoes unchanged.
 : > "$STDERR_CAPTURE"

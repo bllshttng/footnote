@@ -606,10 +606,19 @@ class TestRelease:
         with pytest.raises(ClaimValidationError):
             release_claim("", HOLDER_A, root=tmp_path)
 
-    def test_AC2_FR_release_emits_duration(self, tmp_path):
-        # Just verify the call doesn't raise; duration is best-effort visible in events.jsonl
+    def test_AC2_FR_release_emits_duration(self, tmp_path, monkeypatch):
+        """Release's audit event carries duration_held_ms - the held-window
+        length a retro reads back. The write is best-effort; the field in the
+        built event is not."""
+        import fno.claims.events as claim_events
+
         acquire_claim("k", HOLDER_A, root=tmp_path)
+        captured: dict = {}
+        monkeypatch.setattr(claim_events, "_emit", lambda event: captured.update(event))
         release_claim("k", HOLDER_A, root=tmp_path)
+        assert captured["type"] == "claim_released"
+        assert isinstance(captured["data"]["duration_held_ms"], int)
+        assert captured["data"]["duration_held_ms"] >= 0
 
     def test_strict_release_compares_and_unlinks_under_per_key_mutex(self, tmp_path):
         import fno.claims.core as claims_core

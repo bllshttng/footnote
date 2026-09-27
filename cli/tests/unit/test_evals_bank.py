@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from fno.evals import bank
 
@@ -149,6 +150,29 @@ def test_seed_bank_new_eval_tasks_load() -> None:
     assert growth is not None, "growth-launch-bundle task missing from bank"
     assert growth.tier == "capability"
     assert growth.prompt  # prompt-bearing; the seven requirements live in it
+
+
+def test_seed_bank_failure_fixtures_wall_clock_bound_never_cost() -> None:
+    """AC4-EDGE: every bank fixture declares timeout_minutes and no
+    fixture's grade block reads a cost field. Wall clock is the budget an
+    operator actually feels; exceeding it is the failure."""
+    repo_root = Path(__file__).resolve().parents[3]
+    seed = repo_root / "evals" / "bank"
+    if not seed.is_dir():
+        pytest.skip("seed bank not present in this checkout")
+    for path in sorted(seed.glob("*.yaml")):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "timeout_minutes" in raw, f"{path.name}: missing timeout_minutes"
+        assert "cost" not in raw, f"{path.name}: declares a cost field"
+        for check in raw.get("grade", []):
+            assert "cost" not in check, f"{path.name}: grade check reads cost"
+    by_id = {t.id: t for t in bank.discover_bank(seed)}
+    for fid in (
+        "failure-plan-thrash",
+        "failure-review-poll-stall",
+        "failure-init-phase-stall",
+    ):
+        assert fid in by_id, f"{fid} missing from bank"
 
 
 # --------------------------------------------------------------------------- #

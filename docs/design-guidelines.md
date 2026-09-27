@@ -368,7 +368,7 @@ description: >
 The primary workflow follows a linear chain:
 
 ```
-think -> plan -> do -> review -> ship
+think -> plan -> execute -> review -> ship
 ```
 
 | Phase | Skill | Purpose |

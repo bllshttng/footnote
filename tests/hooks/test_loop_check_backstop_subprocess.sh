@@ -49,6 +49,10 @@ command -v jq   >/dev/null 2>&1 || { skip "jq not on PATH"; exit 77; }
 command -v bash >/dev/null 2>&1 || { skip "bash not on PATH"; exit 77; }
 
 REAL_BIN="${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
+CLI_BIN="${REPO_ROOT}/crates/fno/target/debug/fno"
+if [[ ! -x "$CLI_BIN" ]]; then
+    CLI_BIN="$(command -v fno || true)"
+fi
 if [[ ! -x "$REAL_BIN" ]]; then
     skip "fno-agents debug binary not found at $REAL_BIN; run: cd crates/fno-agents && cargo build"
     exit 77
@@ -83,8 +87,12 @@ STUB
 }
 
 count_lines_matching() {
-    local pattern="$1" file="$2"
-    grep -c "$pattern" "$file" 2>/dev/null || echo 0
+    # The store commit is the write boundary: count committed rows via the
+    # rows verb, never the raw file (the loop_check events leave no bytes).
+    # The verb prints one JSON array line, so count MATCHES, not lines.
+    local pattern="$1" file="$2" rows
+    rows="$("$CLI_BIN" doctor event rows --events "$file" 2>/dev/null || true)"
+    printf '%s' "$rows" | grep -o "$pattern" 2>/dev/null | wc -l | tr -d '[:space:]'
 }
 
 # ── test setup ────────────────────────────────────────────────────────────────
@@ -124,6 +132,7 @@ make_git_stub "${STUB_BIN}/git"
 # The events path is derived from cwd (default: <cwd>/.fno/events.jsonl).
 # Returns the JSON output in FIRE_OUTPUT; sets FIRE_RC.
 fire_subprocess() {
+    local now="${1:-2026-06-05T00:30:00Z}"
     FIRE_OUTPUT=""
     FIRE_RC=0
     FIRE_OUTPUT=$(
@@ -135,7 +144,7 @@ fire_subprocess() {
             --state "$MANIFEST" \
             --transcript "$TRANSCRIPT" \
             --cwd "$TMP_DIR" \
-            --now "2026-06-05T00:30:00Z" \
+            --now "$now" \
             2>/dev/null
     ) || FIRE_RC=$?
 }
@@ -154,16 +163,11 @@ if [[ "$DECISION_1" != "block" ]]; then
     f1_ok=false
 fi
 
-# Events file must now exist with at least 1 loop_check line
-if [[ ! -f "$EVENTS_FILE" ]]; then
-    fail "Fire 1: events.jsonl not created at $EVENTS_FILE"
+# The store beside the journal must hold at least 1 loop_check row
+LINES_AFTER_1=$(count_lines_matching 'loop_check' "$EVENTS_FILE")
+if [[ "$LINES_AFTER_1" -lt 1 ]]; then
+    fail "Fire 1: expected at least 1 loop_check row, got $LINES_AFTER_1"
     f1_ok=false
-else
-    LINES_AFTER_1=$(count_lines_matching 'loop_check' "$EVENTS_FILE")
-    if [[ "$LINES_AFTER_1" -lt 1 ]]; then
-        fail "Fire 1: expected at least 1 loop_check line, got $LINES_AFTER_1"
-        f1_ok=false
-    fi
 fi
 
 [[ "$f1_ok" == "true" ]] && pass "Fire 1: decision=block + 1 loop_check event line"
@@ -172,7 +176,9 @@ fi
 # Fire 2: expect block, 2 loop_check event lines (cross-process accumulation)
 # ─────────────────────────────────────────────────────────────────────────────
 log "Fire 2 (subprocess process 2)"
-fire_subprocess
+# A minute-advanced clock: the store dedupes byte-identical rows, so the
+# second fire must differ from the first for accumulation to be observable.
+fire_subprocess "2026-06-05T00:31:00Z"
 
 f2_ok=true
 
@@ -184,7 +190,7 @@ fi
 
 LINES_AFTER_2=$(count_lines_matching 'loop_check' "$EVENTS_FILE")
 if [[ "$LINES_AFTER_2" -lt 2 ]]; then
-    fail "Fire 2: expected at least 2 loop_check lines after fire 2, got $LINES_AFTER_2"
+    fail "Fire 2: expected at least 2 loop_check rows after fire 2, got $LINES_AFTER_2"
     f2_ok=false
 fi
 

@@ -219,12 +219,14 @@ mod tests {
     }
 
     fn read_events_from(dir: &Path) -> Vec<Value> {
-        let mut text = std::fs::read_to_string(dir.join(".fno/events.jsonl")).unwrap_or_default();
-        text.push_str(
-            &std::fs::read_to_string(dir.join(".fno/events.jsonl.ephemeral")).unwrap_or_default(),
-        );
-        text.lines()
-            .map(|l| serde_json::from_str(l).unwrap())
+        // Committed rows, not journal bytes: the store cutover commits
+        // release events in the store beside the journal.
+        let journal = dir.join(".fno/events.jsonl");
+        crate::event_store::import_all(&journal).ok();
+        crate::event_store::query_events(&journal, &crate::event_store::EventQuery::default())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| serde_json::from_str(&r.line).ok())
             .collect()
     }
 

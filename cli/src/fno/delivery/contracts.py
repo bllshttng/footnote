@@ -138,15 +138,6 @@ class DeliveryEvidenceObservedEvent(_DeliveryModel):
         return self
 
 
-class DeliveryVerdictEvaluatedEvent(_DeliveryModel):
-    """Canonical event envelope for the pure evaluator's derived result."""
-
-    ts: AwareDatetime
-    type: Literal["delivery_verdict_evaluated"]
-    source: NonEmptyStr
-    data: DeliveryVerdict
-
-
 class DeliveryEvaluateResponse(_DeliveryModel):
     """Strict process boundary consumed by loop-check."""
 

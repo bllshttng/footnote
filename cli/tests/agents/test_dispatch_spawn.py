@@ -166,20 +166,28 @@ def test_spawn_once_codex_happy_path(workdir, fake_codex_create_once, monkeypatc
 
 
 def test_spawn_once_codex_normalizes_direct_plugin_command(
-    workdir, fake_codex_create_once
+    workdir, fake_codex_create_once, loop_admission_ready
 ) -> None:
-    """The Python headless fallback is a direct-spawn choke point too."""
+    """The Python headless fallback is a direct-spawn choke point too.
+
+    The payload stays prose: a node-id payload now trips the
+    payload-named-node guard (no readable row, by design), which this file's
+    normalization subject does not touch.
+    """
     from fno.agents.cli import agents_app
 
     result = _make_runner().invoke(
         agents_app,
-        ["spawn", "--name", "tmp-skill", "-H", "codex", "--once", "/fno:target x-81ad"],
+        [
+            "spawn", "--name", "tmp-skill", "-H", "codex", "--once",
+            "/fno:target normalize the direct plugin command",
+        ],
         catch_exceptions=False,
     )
 
     assert result.exit_code == 0, result.output
     prompt = fake_codex_create_once.call_args.kwargs["prompt"]
-    assert prompt.startswith("$fno:target x-81ad\n\n")
+    assert prompt.startswith("$fno:target normalize the direct plugin command\n\n")
     assert prompt.count("<fno_relay_compression>") == 1
 
 

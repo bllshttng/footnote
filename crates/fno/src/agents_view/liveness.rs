@@ -4,7 +4,8 @@
 
 use super::*;
 
-/// A recorded pid is CONFIRMED gone (`kill(pid, 0)` -> ESRCH). Fails toward
+/// A recorded pid is CONFIRMED gone: ESRCH, or reachable but a zombie (dead,
+/// unreaped - it holds no fds and serves nothing). Fails toward
 /// "not confirmed" on any other outcome (alive, or unprobeable/EPERM): a
 /// falsification must be positive, never inferred from an ambiguous errno.
 /// pid 0/1 are never a worker's pid, so a stored 0/1 (corrupt row) also reads
@@ -14,14 +15,13 @@ fn pid_confirmed_dead(pid: u64) -> bool {
     if pid <= 1 || pid > i32::MAX as u64 {
         return false;
     }
-    // SAFETY: signal 0 performs no delivery, only an existence/permission
-    // check (mirrors `server.rs::pid_alive`, inverted for a POSITIVE read).
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    // The shared vocabulary; proto's copy owns the zombie-aware read.
+    crate::proto::pid_confirmed_dead(pid as i32)
 }
 
 /// A recorded pid positively EXISTS: `kill(pid, 0)` succeeds, or fails with
-/// EPERM (the process is there, just not ours). Only ESRCH is an absence, and
+/// EPERM (the process is there, just not ours) - and it is not a zombie,
+/// which is reachable yet gone. Only ESRCH is an absence, and
 /// `pid_confirmed_dead` owns that answer.
 fn pid_confirmed_alive(pid: u64) -> bool {
     if pid <= 1 || pid > i32::MAX as u64 {
@@ -30,7 +30,8 @@ fn pid_confirmed_alive(pid: u64) -> bool {
     // SAFETY: signal 0 performs no delivery, only an existence/permission
     // check.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    (rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+        && !crate::proto::pid_is_zombie(pid as i32)
 }
 
 /// Derive [`Liveness`] for one row. `status` is the raw registry string;
@@ -113,5 +114,32 @@ mod tests {
             derive_liveness("permanent-dead", Some(me), ""),
             Liveness::Unmeasured
         );
+    }
+
+    #[test]
+    fn an_unreaped_zombie_reads_dead_and_not_alive() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as u64;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !crate::proto::pid_is_zombie(pid as i32) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            crate::proto::pid_is_zombie(pid as i32),
+            "fixture: the child must be a zombie"
+        );
+        // Orphaned + zombie pid: Dead (was Unmeasured when a zombie read as
+        // merely unreachable).
+        assert_eq!(
+            derive_liveness("orphaned", Some(pid), "sid"),
+            Liveness::Dead
+        );
+        // Terminal status + a zombie pid: corroborated Dead, not Unmeasured.
+        assert_eq!(derive_liveness("exited", Some(pid), "sid"), Liveness::Dead);
+        child.wait().unwrap();
     }
 }

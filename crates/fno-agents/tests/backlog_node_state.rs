@@ -17,11 +17,7 @@ fn fixture_node(id: &str, details: &str) -> serde_json::Value {
 }
 
 fn write_graph(path: &PathBuf, entries: &[serde_json::Value]) {
-    std::fs::write(
-        path,
-        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(path, entries).unwrap();
 }
 
 fn ws(_graph: &std::path::Path, id: &str, body: &str) -> StateWriteInput {
@@ -36,9 +32,45 @@ fn ws(_graph: &std::path::Path, id: &str, body: &str) -> StateWriteInput {
 }
 
 fn read_graph(path: &PathBuf) -> Vec<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    v["entries"].as_array().unwrap().clone()
+    // graph.db is the only store; the json file is a frozen mirror under it.
+    // Every row a writer landed lives in the store, so the reads go there.
+    fno_agents::graph_store::read_rows(path).unwrap()
+}
+
+#[test]
+fn replace_state_returns_the_view_it_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture_node("t-1", "d")]);
+    let first = node_state::replace_state(&graph, &ws(&graph, "t-1", "body one")).unwrap();
+    assert!(first.replaced.is_none());
+    let second = node_state::replace_state(&graph, &ws(&graph, "t-1", "body two")).unwrap();
+    let prior = second.replaced.expect("the second write replaced a state");
+    assert_eq!(prior.revision, 1);
+    assert_eq!(prior.body, "body one");
+}
+
+#[test]
+fn a_fresh_graph_write_does_not_wait_on_its_own_creation_lock() {
+    // x-94e3: the publication seam holds the store lock; opening the store
+    // must not re-take the creation lock behind it. Before the fix every
+    // replace_state on a fresh graph burned the full 10s timeout, swallowed
+    // the failure, and left no graph.db behind.
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture_node("t-lock", "d")]);
+    let started = std::time::Instant::now();
+    node_state::replace_state(&graph, &ws(&graph, "t-lock", "body")).unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "fresh-graph write waited {:?} on its own creation lock",
+        elapsed
+    );
+    assert!(
+        dir.path().join("graph.db").exists(),
+        "the store was created"
+    );
 }
 
 #[test]
@@ -101,15 +133,18 @@ fn ac2_budget_boundary() {
     assert!(err.contains("total=5001"), "message: {err}");
     assert!(err.contains("limit=5000"), "message: {err}");
     // Multibyte emoji count per scalar (not bytes): details 3000 + 2001
-    // emoji body = 5001 scalars, refused.
+    // emoji body = 5001 scalars, refused. A fresh graph, because the store
+    // holds the earlier row and the json file is a frozen mirror under it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let graph2 = dir2.path().join("graph.json");
     write_graph(
-        &graph,
+        &graph2,
         &[json!({
             "id": "b-1", "slug": "slug-b-1", "title": "n", "type": "feature",
             "status": "ready", "priority": "p1", "details": "x".repeat(3000),
         })],
     );
-    let err = node_state::replace_state(&graph, &ws(&graph, "b-1", &"🌊".repeat(2001)))
+    let err = node_state::replace_state(&graph2, &ws(&graph2, "b-1", &"🌊".repeat(2001)))
         .unwrap_err()
         .to_string();
     assert!(err.contains("total=5001"), "message: {err}");
@@ -287,7 +322,10 @@ fn a_state_write_keeps_a_row_another_writer_landed() {
                         rows.push(json!({
                             "id": id,
                             "slug": format!("slug-{id}"),
-                            "title": format!("appended {id}"),
+                            // Off the leak grammar: the raw id (c-app-0004)
+                            // carries a node-id match the store gate
+                            // refuses at write time.
+                            "title": format!("appended {i:04}"),
                             "type": "feature",
                             "status": "intake",
                             "priority": "p2",

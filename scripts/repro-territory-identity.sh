@@ -3,12 +3,11 @@
 #
 # Builds a fresh throwaway fixture (isolated FNO_HOME + project dir), writes
 # the fixture graph through the store's own writer, then runs the resolver,
-# the territory readout, the blueprinter feed (status -> deliver -> repair
-# marker), and the two cap readers on the shared parity fixture. Every
+# the territory readout, and the two cap readers on the shared parity fixture.
+# Every
 # subprocess is bounded; the fixture is removed on exit. Exits zero only
 # after every named marker asserts:
-#   territory key, cap=4, kingless, blueprinter handle, delivery refusal
-#   recorded as a repair with the idea preserved, and the cross-territory
+#   territory key, cap=4, kingless, and the cross-territory
 #   nominated-review row staying visible on the board.
 set -u
 
@@ -184,37 +183,6 @@ assert t["project"] == "fno", t
 print("MARKER territory-key: scope=fno rung=1 (resolver)")
 print("MARKER kingless: true (resolver)")
 ' || fail "resolver markers"
-
-echo "== 2. blueprinter feed: status =="
-STATUS=$( (cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno) ) || fail "feed status verb"
-echo "$STATUS" | python3 -c '
-import json, sys
-out = json.load(sys.stdin)
-assert out["action"] == "status", out
-assert out["kingless"] is True, out
-assert out["ideas"] and out["ideas"][0]["id"] == "x-idea", out
-assert out["worker"] is None, out
-name = out["worker_name_next"]
-assert name.startswith("blueprinter-fno-"), out
-print("MARKER blueprinter-handle:", name)
-print("MARKER feed-idea: x-idea (design-rung stub selected)")
-' || fail "feed status markers"
-
-echo "== 3. blueprinter feed: deliver refuses with no live worker, idea preserved =="
-( cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno --deliver ) | python3 -c '
-import json, sys
-out = json.load(sys.stdin)
-assert out["action"] == "blocked", out
-assert out["reason"] == "worker_not_live", out
-assert out["kingless"] is True, out
-' || fail "deliver refusal"
-( cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno ) | python3 -c '
-import json, sys
-out = json.load(sys.stdin)
-assert out["worker"] is None and out["worker_name_next"].startswith("blueprinter-fno-"), out
-assert [i["id"] for i in out["ideas"]] == ["x-idea"], out
-print("MARKER delivery-repair: worker_not_live recorded, idea x-idea preserved")
-' || fail "repair marker"
 
 echo "== 4. territory readout =="
 ( cd "$FIXTURE" && fno_py config active-backlog-territories --json ) | python3 -c '

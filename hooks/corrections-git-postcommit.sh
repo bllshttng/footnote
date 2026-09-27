@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # Resolve our shared helpers. The hook is normally invoked from ~/.claude/.git/hooks/post-commit
 # which is a symlink to this file in the fno repo; resolve through the symlink.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || stat -f %Y "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -41,11 +45,36 @@ CHANGED_FILES=$(git show --name-only --pretty=format: HEAD 2>/dev/null | sed '/^
 COMMIT_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || echo "")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# The applied-correction link: which commit carried the change, and which
+# autocorrect proposal it applied (the Autocorrect-Ref trailer triage asks
+# the shipping worker for). A failed read drops the token; the commit never
+# blocks on either.
+COMMIT_SHA=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "")
+COMMIT_REF=$(git log -1 --format='%(trailers:key=Autocorrect-Ref,valueonly,separator=%x2C)' 2>/dev/null | tr -d '\n' || echo "")
+
 # Severity from commit message.
 SEVERITY="S1"
 case "$COMMIT_SUBJECT" in
   urgent:*|revert:*) SEVERITY="S0" ;;
 esac
+
+# SOURCE from the committing repo: the rules corpus in ~/.claude
+# stays git-rule-edit; a shipped skill or rule edited in its own repo is a
+# skill-commit, the row corrections-verify scores a hand-applied correction
+# against. One toplevel comparison, no second hook.
+CLAUDE_REPO="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
+COMMIT_REPO="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+SOURCE_FIELD="skill-commit"
+# pwd -P on both sides: macOS git reports /private/var where the caller
+# wrote /var (same directory, two spellings), and a lexical compare would
+# misfile every row.
+if [[ -n "$COMMIT_REPO" ]]; then
+  COMMIT_REPO="$(cd "$COMMIT_REPO" 2>/dev/null && pwd -P || printf '%s' "$COMMIT_REPO")"
+  CLAUDE_REPO="$(cd "$CLAUDE_REPO" 2>/dev/null && pwd -P || printf '%s' "$CLAUDE_REPO")"
+  if [[ "$COMMIT_REPO" == "$CLAUDE_REPO" ]]; then
+    SOURCE_FIELD="git-rule-edit"
+  fi
+fi
 
 # Filter to instruction-bearing files. The set is intentionally narrow so
 # editing arbitrary files in ~/.claude (e.g. transcripts, caches) doesn't
@@ -64,7 +93,13 @@ emit_for() {
   esac
   local details
   details="$(corrections_escape_details "$COMMIT_SUBJECT")"
-  local line="${TIMESTAMP} | ${SEVERITY} | git-rule-edit | ${file} | ${details}"
+  if [[ -n "$COMMIT_SHA" ]]; then
+    details="${details} sha=${COMMIT_SHA}"
+  fi
+  if [[ -n "$COMMIT_REF" ]]; then
+    details="${details} ref=${COMMIT_REF}"
+  fi
+  local line="${TIMESTAMP} | ${SEVERITY} | ${SOURCE_FIELD} | ${file} | ${details}"
   corrections_lock_append "$LOG_PATH" "$line" || \
     echo "corrections-git-postcommit: failed to write entry for $file" >&2
   return 0

@@ -6,18 +6,16 @@
 # Output (exit 0): one JSON line, identical field-for-field to `fno whoami context --json`:
 #   {"used_tokens": N, "window_tokens": N, "used_pct": N, "model": "..."}
 #
-# Exit 3 ("unreadable") on ANY failure, including no Python CLI (`fno-py`/`fno`) on PATH.
-# Every caller treats nonzero as "no pressure" (fail-safe), so requiring `fno`
-# degrades toward silence rather than a false handoff; both hook callers already
-# shell out to `fno` for other reasons.
+# Exit 3 ("unreadable") on ANY failure, including no native context reader.
+# Every caller treats nonzero as "no pressure" (fail-safe), so a missing binary
+# degrades toward silence rather than a false handoff.
 #
 # This stays a shim rather than being deleted because
 # skills/target/scripts/handoff.sh resolves it as "$_SCRIPT_DIR/context-probe.sh"
 # and that resolution is what skill self-containment requires of a bundled skill.
-# The token math and the model->window allowlist live ONCE, in the CLI
-# (cli/src/fno/context_probe.py); a second copy is the drift this indirection
-# exists to prevent. The untouched tests/test-context-probe.sh suite drives the
-# real path and is the port's regression proof.
+# The token math and the model->window policy live ONCE in
+# crates/fno-agents/src/context_window.rs. The Python CLI is a transport bridge.
+# tests/test-context-probe.sh exercises the shell shim's real CLI path.
 _EXIT_UNREADABLE=3
 
 if [ $# -lt 1 ] || [ -z "$1" ]; then

@@ -33,7 +33,7 @@ A worktree with a built cargo `target/` runs to gigabytes, and git already holds
 
 ### `scripts/lib/worktree-lifecycle.sh` (criterion b)
 
-The cargo sweep deletes whole build-base hash dirs, the same gigabyte scale as a built `target/`. Measured 2026-09-12: an apply-mode sweep "reaped" 118 hash dirs through a trash-aliased `rm` and the Trash held 177 GB - zero bytes were reclaimed. The file carries the sanctioned spelling as one `_srm()` helper, so it is defined once and every delete in the file routes through it.
+The cargo sweep's in-checkout deletes go through `_srm`, the same gigabyte scale as a built `target/`. Measured 2026-09-12: an apply-mode sweep "reaped" 118 hash dirs through a trash-aliased `rm` and the Trash held 177 GB - zero bytes were reclaimed. The file carries the sanctioned spelling as one `_srm()` helper, so it is defined once and every delete in the file routes through it. Build-base hash dirs are deleted by Rust now. `crates/fno-agents/src/cargo_build_dirs.rs` removes them with `std::fs::remove_dir_all`, a syscall no shell alias intercepts. The trash-alias failure mode cannot reach them.
 
 ## The sanctioned spellings
 

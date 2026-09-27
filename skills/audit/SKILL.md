@@ -266,7 +266,7 @@ A plain audit's deliverable is the evidence artifact: the completeness matrix, t
 {plans_path}/staff-wizard.md
 ```
 
-On an operator request to turn gaps into work, file each audited gap as a backlog node (`fno backlog idea`). The audit itself does not create plans or nodes unless asked.
+On a user request to turn gaps into work, file each audited gap as a backlog node (`fno backlog idea`). The audit itself does not create plans or nodes unless asked.
 
 ### 6. Loop Check
 

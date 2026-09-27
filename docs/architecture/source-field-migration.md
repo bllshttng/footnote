@@ -31,8 +31,7 @@ and `_collect_intake_paths_typer` for the same consistency reason.
 ### Writer flip
 
 `_build_intake_node` (formerly `_build_adopt_node`) now emits
-`"source": "intake"` for every newly intaked node. Old graph.json
-rows with `"source": "adopt"` continue to read correctly because
+`"source": "intake"` for every newly intaked node. Old graph rows with `"source": "adopt"` continue to read correctly because
 every reader compares against `INTAKE_SOURCE_VALUES`.
 
 ### Back-compat constant
@@ -53,7 +52,7 @@ single-path success line now reads
 dict (`{"intaked": ..., "already": ...}`), the dry-run preview, and
 the error messages all match the new vocabulary.
 
-## Migration: rewriting old graph.json files
+## Migration: rewriting old graph files
 
 `cli/scripts/migrate_source_field.py` rewrites every node carrying
 `source: "adopt"` to `source: "intake"`. Run it once per machine
@@ -61,10 +60,10 @@ after pulling the rename:
 
 ```bash
 # Preview what would change (recommended first step):
-uv run python cli/scripts/migrate_source_field.py ~/.fno/graph.json --dry-run
+uv run python cli/scripts/migrate_source_field.py <legacy-graph-file> --dry-run
 
 # Apply:
-uv run python cli/scripts/migrate_source_field.py ~/.fno/graph.json
+uv run python cli/scripts/migrate_source_field.py <legacy-graph-file>
 ```
 
 The script:
@@ -80,7 +79,7 @@ The script:
   is preserved verbatim.
 
 It is NOT wired into `postinstall` or any startup hook. The user
-opts in explicitly. Old graph.json files on backup volumes that
+opts in explicitly. Old graph files on backup volumes that
 never get migrated will continue to read correctly forever via
 `INTAKE_SOURCE_VALUES`.
 

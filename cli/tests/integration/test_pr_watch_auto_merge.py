@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fno.pr_watch._dispatch import run_execute_queue
 from fno.pr_watch._discover import PrCandidate
 from fno.pr_watch._state import WatermarkStore
@@ -32,6 +34,15 @@ PR = 7
 SLUG = "owner/repo"
 GRANT = {"source": "config", "recorded_by": "spawner-session",
          "recorded_at": "2026-08-24T10:00:00Z"}
+
+
+@pytest.fixture(autouse=True)
+def _free_gh_budget(monkeypatch):
+    """The drain's fleet-budget read must never answer from the real ledger
+    inside a test."""
+    import fno.pr_watch._dispatch as _dispatch_mod
+
+    monkeypatch.setattr(_dispatch_mod, "_gh_budget_backoff_left", lambda: 0.0)
 
 
 def _grant_verdict():
@@ -56,6 +67,9 @@ def _arm_world(
     monkeypatch.setattr(
         "fno.pr._merge_grant.resolve_durable_grant",
         lambda pr, repo: _grant_verdict(),
+    )
+    monkeypatch.setattr(
+        "fno.pr._review_hold.resolve_pr_worktree", lambda _pr, repo: repo
     )
     monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(merge_mod.shutil, "which", lambda _x: "/usr/bin/gh")
@@ -195,25 +209,3 @@ class TestParkedWorkerJourney:
         assert data["node_id"] == NODE
         assert data["recorded_by"] == "spawner-session"
 
-    def test_dead_observer_reads_unavailable_in_the_status_projection(
-        self, tmp_path, monkeypatch
-    ):
-        """AC12-ERR: a standing grant with a dead watcher is loud, with a
-        repair, from the same receipt a human reads."""
-        from fno.pr import _status
-
-        monkeypatch.setattr(
-            "fno.pr._merge_grant.resolve_durable_grant",
-            lambda pr, repo: _grant_verdict(),
-        )
-        monkeypatch.setattr(
-            "fno.pr_watch._install.liveness_report_live",
-            lambda **kw: {"verdict": "disabled", "detail": "pr_watch.enabled=false",
-                          "fix": ""},
-        )
-
-        projection = _status._merge_execution_projection(str(tmp_path), str(PR))
-
-        assert projection["state"] == "granted"
-        assert projection["observer"]["state"] == "observer_unavailable"
-        assert projection["observer"]["repair"]

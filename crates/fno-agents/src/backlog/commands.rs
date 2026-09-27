@@ -1,8 +1,9 @@
 //! The canonical backlog action catalog (wave 4).
 //!
 //! One table owns the vocabulary: eleven canonical groups, every legacy name
-//! mapped to exactly one `(group, action)` pair, `annotate` named as the
-//! explicit exception it remains until replaces it. The catalog is
+//! mapped to exactly one `(group, action)` pair. `annotate` is retired: the
+//! note group owns findings now, and the old spellings ride a one-release
+//! forwarding shim. The catalog is
 //! the single source both the compatibility help and any future dispatcher
 //! must read - no second handwritten mapping in help or completion.
 use serde_json::{json, Value};
@@ -213,7 +214,7 @@ pub fn catalog_json() -> Value {
         "groups": groups,
         "group_count": GROUPS.len(),
         "mapped_names": GROUPS.iter().map(|g| g.actions.len()).sum::<usize>(),
-        "exception": "annotate remains callable with its existing nested actions until replaces it",
+        "exception": "annotate is retired: its spellings refuse, naming note --blocking as the replacement",
     })
 }
 

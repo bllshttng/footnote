@@ -4,6 +4,7 @@ Covers the two-tier normalization map, in-place status rewrite (body
 byte-intact), signal-gated archiving, and idempotency / never-downgrade.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -312,8 +313,10 @@ def test_AC5_ERR_sweep_leaves_both_vocabularies_untouched(tmp_path: Path):
 def _write_graphs(tmp_path: Path, live: list, archived: list) -> Path:
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text(json.dumps({"entries": live}))
-    (home / "graph-archive.json").write_text(json.dumps({"entries": archived}))
+    # One store, one seed: archive residents are rows carrying archived_at,
+    # not a second file.
+    rows = list(live) + [dict(row, archived_at=row.get("archived_at", "2026-01-01T00:00:00Z")) for row in archived]
+    seed_graph(home / "graph.json", json.dumps({"entries": rows}))
     return home / "graph.json"
 
 
@@ -327,7 +330,6 @@ def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
         archived=[{"id": "x-gone", "status": "done"}],
     )
     monkeypatch.setattr(paths, "graph_json", lambda: graph)
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
     status_map = rs._node_status_map(graph)
@@ -349,9 +351,8 @@ def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
 
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text(json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
+    seed_graph(home / "graph.json", json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
     assert rs._node_status_map(home / "graph.json") == {"x-live": "done"}
@@ -371,7 +372,6 @@ def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
         archived=[{"id": "x-shipped", "status": "done"}],
     )
     monkeypatch.setattr(paths, "graph_json", lambda: graph)
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
 
     plans = tmp_path / "plans"
     plans.mkdir()
@@ -443,7 +443,7 @@ def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
     assert 'status: "done"' in p.read_text()
 
 
-def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
+def test_a_corrupt_working_store_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
     """The stand-down keys on an EMPTY map, so the corrupt working graph must not
     be topped up into a non-empty one by the archive read-through.
 
@@ -457,12 +457,11 @@ def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_pat
 
     home = tmp_path / "fno"
     home.mkdir()
-    (home / "graph.json").write_text("{ not json at all")
+    (home / "graph.db").write_text("not sqlite")
     (home / "graph-archive.json").write_text(
         json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
     )
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
 
     assert rs._node_status_map(paths.graph_json()) == {}  # corruption is absent evidence, not archive-only truth
 

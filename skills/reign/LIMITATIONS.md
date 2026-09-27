@@ -1,5 +1,4 @@
 ## Known Limitations and Deferred Work
 
-- **Codex has no beat.** Codex exposes none of `/goal`, `/loop`, or Monitor. A codex reign's only beat is the wake arm's backstop. The skill says so in its first line. A codex reign plans around it: the check-in body runs on wakes, never on a schedule.
-- **`--once` defers to king-for-a-day** until the one-wave fold lands. The pass posture is not re-implemented here. `--once` prints the pointer and stops.
-- **The one monitor is claude-shaped.** A harness-tracked Monitor with a shell until-loop is the reference arming. A harness without one arms what it has and says so. It never runs a silent, beatless reign.
+- **Harness beats differ.** Claude has the native `/loop` heartbeat. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake in the beat table. An unverified harness says so instead of pretending to have a native timer.
+- A pass abdicates instead of supervising spawned workers. A reign that needs live steering must choose a court or hand off to an heir before exit.

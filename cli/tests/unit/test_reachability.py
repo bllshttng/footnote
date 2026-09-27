@@ -220,8 +220,8 @@ def test_python_surfaces_share_one_derivation() -> None:
     """
     import fno.agents.reachability as reach
 
-    mod = __import__("fno.agents.read", fromlist=["reachability"])
-    assert getattr(mod, "reachability", None) is reach.reachability, (
+    mod = __import__("fno.agents.read", fromlist=["classify_reachability"])
+    assert getattr(mod, "classify_reachability", None) is reach.classify_reachability, (
         "fno.agents.read does not consult the shared derivation"
     )
 
@@ -775,3 +775,83 @@ def test_inference_samples_reports_the_count_or_absence() -> None:
     assert inference_samples({"kind": "not-file-backed"}) is None
     assert inference_samples({"kind": "observed", "model": "x"}) is None
     assert inference_samples(None) is None
+
+
+# ──: a claude row's falsifier yields to claude's session records ──
+
+_SPECIMEN_SID = "bb2731c9-ad46-4303-a80d-152c68e91a4e"
+
+
+def _specimen_row(**overrides):
+    """A stopped claude thread row: pid cleared, exit recorded, session id
+    carried."""
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        pid=None,
+        pid_start_time=None,
+        mux=None,
+        status="exited",
+        harness="claude",
+        harness_session_id=_SPECIMEN_SID,
+    )
+    for key, value in overrides.items():
+        setattr(row, key, value)
+    return row
+
+
+def test_a_proven_holder_cancels_a_claude_row_falsifier(monkeypatch) -> None:
+    """AC3-HP: the exit stamp yields to the resumed process's own record."""
+    from fno.agents import reachability
+    from fno.agents.reachability import classify_reachability, registry_falsifier
+
+    monkeypatch.setattr(reachability, "_claude_holder_proven", lambda sid: True)
+    assert registry_falsifier(_specimen_row()) is None
+
+    # With the falsifier cancelled, a fresh working transcript reads
+    # reachable on the transcript basis - the resumed worker is no longer
+    # condemned mid-turn.
+    verdict = classify_reachability(
+        truth_state="working",
+        age_s=16.0,
+        falsifier=None,
+        last_activity_basis="last-entry",
+        observed_model={"kind": "observed", "model": "claude-opus-5-5"},
+    )
+    assert verdict.verdict == "reachable"
+    assert verdict.basis == "transcript"
+
+
+def test_every_other_holder_answer_keeps_the_falsifier(monkeypatch) -> None:
+    """AC3-ERR: held false, held null, and a broken seam all keep the exit
+    stamp. The seam can only cancel on positive proof."""
+    from fno.agents import reachability
+    from fno.agents.reachability import registry_falsifier
+
+    for probe in (
+        lambda sid: False,  # held false, and held null: the seam maps both to False
+        lambda sid: (_ for _ in ()).throw(RuntimeError("binary gone")),
+    ):
+        monkeypatch.setattr(reachability, "_claude_holder_proven", probe)
+        assert registry_falsifier(_specimen_row()) == "exit-recorded"
+
+
+def test_a_pane_or_codex_row_never_asks_the_holder(monkeypatch) -> None:
+    """AC3-EDGE: the authority swap is claude-only, and a pane outranks it."""
+    from fno.agents import reachability
+    from fno.agents.reachability import registry_falsifier
+
+    def _boom(sid):
+        raise AssertionError("a non-claude row must never reach the holder seam")
+
+    monkeypatch.setattr(reachability, "_claude_holder_proven", _boom)
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda mux: None)
+    # A codex row keeps its falsifier without asking the records.
+    assert registry_falsifier(_specimen_row(harness="codex")) == "exit-recorded"
+    # A claude row whose session id is absent never asks either.
+    assert registry_falsifier(_specimen_row(harness_session_id=None)) == "exit-recorded"
+    # A pane row routes to the pane authority before the claude arm.
+    pane_row = _specimen_row(mux={"session": "s", "pane_id": 7})
+    assert registry_falsifier(pane_row) is None

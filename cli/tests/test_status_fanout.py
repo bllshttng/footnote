@@ -6,6 +6,7 @@ external sinks. This file covers all ACs across the six user stories; the
 ``-k`` filters in the plan's per-task verify lines select the relevant subset.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import os
 import subprocess
@@ -14,6 +15,7 @@ import threading
 import pytest
 
 from fno.config import ConfigBlock, StatusFanoutConfig, StatusSinkConfig
+from fno.graph.store import read_graph_strict
 
 
 # ── shared fixtures/helpers for tick tests ──────────────────────────────────
@@ -839,7 +841,7 @@ def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     for mod in (gc, gs):
@@ -851,7 +853,7 @@ def tmp_graph(tmp_path, monkeypatch):
 
 def _seed(graph_path, entry):
     import json as _json
-    graph_path.write_text(_json.dumps({"entries": [entry]}) + "\n")
+    seed_graph(graph_path, _json.dumps({"entries": [entry]}) + "\n")
 
 
 def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
@@ -863,7 +865,7 @@ def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
     # Second note accumulates (append-only, never replaces).
     append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
     import json as _json
-    entry = _json.loads(tmp_graph.read_text())["entries"][0]
+    entry = read_graph_strict(tmp_graph)[0]
     assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
 
 
@@ -894,11 +896,12 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
     assert payload["routed"] == "state" and payload["revision"] == 1
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     state = node["current_state"]
     assert state["body"] == "shipped wave 1"
     assert state["source_session_id"] == session_id
-    assert state["source_harness"] is None
+    # A null harness exports as an absent key (the store strips nulls).
+    assert state.get("source_harness") is None
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
@@ -928,7 +931,7 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
     assert appended.exit_code == 0, appended.output
     import json as _json
 
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     assert node["details"] == "original rationale"
     # The new note REPLACES current state; the legacy feed is untouched until
     # the explicit migration (x-920a): never grown, never truncated.

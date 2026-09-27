@@ -194,57 +194,14 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness(monkeypatch) -> None
         else:
             pytest.fail(f"worker did not reach idle: {last_receipt}")
 
-        from fno.agents import registry as registry_module
-        from fno.agents import retask as retask_module
-
-        real_run = subprocess.run
-        sends: list[str] = []
-        status_pending = False
-
-        def runtime_run(command, *args, **kwargs):
-            nonlocal status_pending
-            tokens = [str(token) for token in command]
-            if "send" in tokens and "--text" in tokens:
-                text = tokens[tokens.index("--text") + 1]
-                result = real_run(command, *args, **kwargs)
-                sends.append(text)
-                if text == "/status" and result.returncode == 0:
-                    status_pending = True
-                return result
-            if status_pending and "read" in tokens:
-                status_pending = False
-                return subprocess.CompletedProcess(
-                    command,
-                    0,
-                    stdout=f"Model: {model} (reasoning {effort}, summaries auto)",
-                    stderr="",
-                )
-            return real_run(command, *args, **kwargs)
-
+        # The transaction runs inside the fno-agents binary run_retask hands
+        # off to; there are no Python-side pane seams left to patch.
         monkeypatch.setenv("HOME", real_home)
         monkeypatch.setenv("FNO_HOME", str(Path(real_home) / ".fno"))
         monkeypatch.setenv(
             "FNO_AGENTS_HOME", str(Path(real_home) / ".fno" / "agents")
         )
         monkeypatch.delenv("FNO_CONFIG_SEARCH_ROOT", raising=False)
-        monkeypatch.setattr(retask_module.subprocess, "run", runtime_run)
-        monkeypatch.setattr(
-            retask_module,
-            "load_registry",
-            lambda **_kwargs: [
-                SimpleNamespace(name=worker, harness_session_id="smoke-new-session")
-            ],
-        )
-        monkeypatch.setattr(
-            retask_module,
-            "rename_agent",
-            lambda *_args, **_kwargs: SimpleNamespace(name=f"target-{target}"),
-        )
-        monkeypatch.setattr(
-            registry_module,
-            "project_verified_tier",
-            lambda *_args, **_kwargs: None,
-        )
         last_receipt = run_retask(
             worker,
             node=target,
@@ -258,9 +215,6 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness(monkeypatch) -> None
         assert last_receipt.get("switch") == "skipped_same_tier", last_receipt
         assert last_receipt.get("switch_verified") is True, last_receipt
         assert last_receipt.get("target_submit_confirmed") is True, last_receipt
-        assert sends[0] == "/clear"
-        assert sends[1] == "/status"
-        assert sends[-1].endswith(target)
     finally:
         cleanup_receipts = []
         for name in cleanup_names:

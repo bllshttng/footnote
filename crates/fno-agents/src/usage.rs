@@ -30,9 +30,9 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "rename <name> --name <new-label>   -- renames the registry LABEL. The old label keeps resolving as an alias and the harness session is untouched",
-    "stop <name> [--force]",
+    "stop <name> [--force] [--cross-project]   --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
-    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",
+    "rm <name> [--force] [--cross-project]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it; --cross-project lets the store heal resolve a session whose cwd sits outside this project (the store-scan refusal prescribes it)",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
@@ -40,7 +40,11 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "trace [options]",
     "registry-json",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
+    // The `--substrate thread` arm is a LIFECYCLE move, not a re-entry: it
+    // converts a live pane into a persistent thread under the same session
+    // id. The three flags that belong to it are spelled out here because
+    // this line is what `resume --help` prints.
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and crown; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a crowned row). Both need --substrate thread",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
@@ -83,7 +87,7 @@ usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> 
        [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
        [--global-settings <p>] [--ledger <p>] [--gh-budget-ledger <p>] [--now <rfc3339>]
        [--author-harness <h>] [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>]
-       [--fno-bin <p>] [--read-timeout-ms <n>]
+       [--fno-bin <p>] [--read-timeout-ms <n>] [--harness <h>] [--harness-session <id>]
 
 The stop-hook decision verb: it decides whether a driven session may stop,
 and every verdict comes from external truth read fresh on each fire - PR
@@ -95,6 +99,11 @@ session's own claim of done is not an input.
 its one deliverable shipped. king reads a king manifest (frontmatter
 scope) and asks whether the crown scope drained. The arm is chosen by the
 flag, never by sniffing the file, and any other value is refused.
+
+--harness and --harness-session name the harness and harness session id
+of the caller that asked this target to stop. With both set, the
+registry answers who may drive this target before any progress logic
+runs. With either absent, the engine answers exactly as it always has.
 
 Required: --state, --transcript, --cwd. Unknown flags are tolerated for
 shim forward-compat. stdout is one JSON decision; exit 0 = a decision
@@ -122,10 +131,10 @@ mod tests {
     /// source, so a new flag cannot land undocumented.
     #[test]
     fn loop_check_help_covers_every_accepted_flag() {
-        let source = include_str!("loopcheck.rs");
+        let source = include_str!("loopcheck/args.rs");
         let start = source
             .find("fn parse_args(")
-            .expect("parse_args not found in loopcheck.rs");
+            .expect("parse_args not found in loopcheck/args.rs");
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").expect("parse_args has no closing brace")];
 

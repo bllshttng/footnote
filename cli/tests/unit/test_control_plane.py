@@ -1,7 +1,6 @@
 """The Python writer for `control_plane_tick` rows (x-1b88)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from fno.control_plane import emit_tick, scheduler_from_env
@@ -20,7 +19,9 @@ def test_emit_tick_writes_a_schema_valid_row(tmp_path, monkeypatch):
     )
 
     assert ok is True
-    rows = [json.loads(line) for line in journal.read_text().splitlines()]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(journal)
     assert len(rows) == 1
     row = rows[0]
     assert row["type"] == "control_plane_tick"
@@ -41,7 +42,9 @@ def test_emit_tick_omits_null_skip_reason(tmp_path, monkeypatch):
         "king_wake", scheduler="daemon", interval_s=900, skip_reason="no_crowned_target"
     )
 
-    row = json.loads(journal.read_text().splitlines()[0])
+    from tests._event_rows import event_rows
+
+    row = event_rows(journal)[0]
     assert row["data"]["skip_reason"] == "no_crowned_target"
     assert "detail" not in row["data"]
 
@@ -57,12 +60,14 @@ def test_emit_tick_stores_a_long_failure_detail_whole(tmp_path, monkeypatch):
     assert emit_tick("auto_continue", scheduler="session", interval_s=1800,
                      skip_reason="spawn-failed", detail=refusal)
 
-    row = json.loads(journal.read_text().splitlines()[0])
+    from tests._event_rows import event_rows
+
+    row = event_rows(journal)[0]
     assert row["data"]["detail"] == refusal
 
     assert emit_tick("auto_continue", scheduler="session", interval_s=1800,
                      skip_reason="spawn-failed", detail="y" * 5000)
-    capped = json.loads(journal.read_text().splitlines()[1])
+    capped = event_rows(journal)[1]
     assert len(capped["data"]["detail"]) == 4000
 
 

@@ -77,15 +77,22 @@ def _path_binary() -> Optional[Path]:
     return Path(found) if found else None
 
 
+def newest_runnable(candidates: Sequence[Path]) -> Optional[Path]:
+    """The newest runnable candidate, or None when none is runnable."""
+    runnable = [c for c in candidates if c.is_file() and os.access(c, os.X_OK)]
+    return max(runnable, key=lambda c: c.stat().st_mtime_ns, default=None)
+
+
 def _cargo_dev_binary() -> Optional[Path]:
     """Dev fallback: a ``cargo build`` artifact under the repo tree.
 
     ``__file__`` is ``cli/src/fno/rust_binary.py`` so the repo root is
     ``parents[3]``. Checks both a crate-local ``target/`` and a workspace
     ``target/`` so it works whether or not a workspace is introduced later.
-    Release outranks debug so a dev's optimized build wins, but a debug build
-    counts too: the CI smoke lanes build debug and strip ``FNO_*`` env, so
-    this finder is the only reader left for the footprint door there.
+    The newest artifact wins so a fresh build is never shadowed by a stale
+    one, but a debug build counts too: the CI smoke lanes build debug and
+    strip ``FNO_*`` env, so this finder is the only reader left for the
+    footprint door there.
     """
     here = Path(__file__).resolve()
     try:
@@ -103,10 +110,7 @@ def _cargo_dev_binary() -> Optional[Path]:
         repo_root / "crates" / "fno-agents" / "target" / "debug" / BINARY_NAME,
         repo_root / "target" / "debug" / BINARY_NAME,
     )
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return newest_runnable(candidates)
 
 
 def _front_binary() -> Optional[Path]:
@@ -147,7 +151,9 @@ def resolve_binary() -> Optional[Path]:
     return None
 
 
-def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60) -> tuple[Optional[str], Any]:
+def call_binary_json(
+    verb: str, args: Sequence[str] = (), *, timeout: Optional[float] = 60
+) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
@@ -166,7 +172,8 @@ def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60
             [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        return (f"timed out after {timeout:.1f}s", None)
+        bound = f"{timeout:.1f}s" if timeout is not None else "the caller's bound"
+        return (f"timed out after {bound}", None)
     except OSError as exc:
         return (str(exc)[:200], None)
     if proc.returncode != 0:
@@ -215,11 +222,8 @@ def find_dev_binary() -> Optional[Path]:
         return None
     if not (repo_root / "crates" / "fno-agents").is_dir():
         return None
-    for profile in ("release", "debug"):
-        candidate = repo_root / "crates" / "fno-agents" / "target" / profile / BINARY_NAME
-        if candidate.is_file():
-            return candidate
-    return None
+    base = repo_root / "crates" / "fno-agents" / "target"
+    return newest_runnable([base / p / BINARY_NAME for p in ("release", "debug")])
 
 
 class VerbUnavailable(RuntimeError):
@@ -233,7 +237,7 @@ class VerbUnavailable(RuntimeError):
 
 
 def verb_call(
-    verb: str,
+    verb: "str | list[str]",
     payload: dict,
     unavailable: type = VerbUnavailable,
     *,
@@ -265,9 +269,10 @@ def verb_call(
             "the fno-agents binary was not found; reinstall fno,"
             " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
         )
+    verb_display = verb if isinstance(verb, str) else " ".join(verb)
     try:
         proc = subprocess.run(
-            [str(binary), verb],
+            [str(binary), *(verb if isinstance(verb, list) else [verb])],
             input=json.dumps(payload),
             stdout=subprocess.PIPE,
             stderr=None if passthrough_stderr else subprocess.PIPE,
@@ -275,11 +280,11 @@ def verb_call(
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise unavailable(f"fno-agents {verb} failed: {exc}") from exc
+        raise unavailable(f"fno-agents {verb_display} failed: {exc}") from exc
     if proc.returncode != 0:
         # With passthrough_stderr the child owns the real stderr (None here),
         # so name where it went instead of crashing on strip().
-        detail = f"fno-agents {verb} exited {proc.returncode}"
+        detail = f"fno-agents {verb_display} exited {proc.returncode}"
         if passthrough_stderr:
             detail += " (its stderr went to your terminal)"
         else:
@@ -290,7 +295,31 @@ def verb_call(
     try:
         return json.loads(proc.stdout)
     except ValueError as exc:
-        raise unavailable(f"fno-agents {verb} bad output: {exc}") from exc
+        raise unavailable(f"fno-agents {verb_display} bad output: {exc}") from exc
     finally:
         if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
             print(json.dumps({"payload": payload}), flush=True)
+
+def resolve_front_binary() -> Optional[Path]:
+    """The native ``fno`` front binary: this checkout's build, then ``PATH``."""
+    import shutil
+
+    root = Path(__file__).resolve().parents[3] / "crates" / "fno" / "target"
+    for profile in ("debug", "release"):
+        if (root / profile / "fno").exists():
+            return root / profile / "fno"
+    return Path(found) if (found := shutil.which("fno")) else None
+
+def call_front_json(payload: dict, *, timeout: float = 60) -> dict:
+    """One round-trip with the front's law door, fail-closed like verb_call."""
+    import json
+    import subprocess
+
+    binary = resolve_front_binary()
+    if binary is None:
+        raise VerbUnavailable("the native fno binary was not found")
+    done = subprocess.run([str(binary), "inbox", "law", "match"],
+        input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+    if done.returncode != 0:
+        raise VerbUnavailable(f"fno inbox law match exited {done.returncode}: {done.stderr.strip()}")
+    return json.loads(done.stdout)

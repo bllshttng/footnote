@@ -27,6 +27,10 @@ Solo founders building products cannot afford to context-switch between product 
 
 Small teams where every developer is stretched across multiple concerns. The plugin handles the mechanical work - test writing, code review, PR creation - while humans focus on architecture decisions and product direction.
 
+## Alternatives
+
+A solo founder without footnote drives a coding agent by hand: every session is re-briefed, no backlog joins one session's work to the next, and nothing carries a task to a green, reviewed PR unattended. A tracker plus a coding agent keeps the plan somewhere, but nothing joins the ticket to the session that executes it or the gate that ships it. A hosted autonomous agent runs unattended, but it owns neither the plan document nor the merge gate, so the review that decides what ships happens outside the operator's repo.
+
 ### Anti-Targets
 
 - Large enterprise teams with established CI/CD and dedicated QA - they have humans for this

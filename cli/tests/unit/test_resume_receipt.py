@@ -38,7 +38,7 @@ def _receipt(**overrides):
     base = dict(
         node="x-c3a2",
         session="s1",
-        phase="do",
+        phase="execute",
         generation=2,
         repo="footnote",
         worktree="/wt/x-c3a2",
@@ -89,19 +89,19 @@ def test_build_stamps_version_and_candidate_sha():
 def test_build_rejects_bad_identity():
     with pytest.raises(MalformedReceiptError):
         build_receipt(
-            node="x-c3a2", session="", phase="do", generation=2, repo="r",
+            node="x-c3a2", session="", phase="execute", generation=2, repo="r",
             worktree="/w", branch="b", head="h", next_verb="v",
             next_target=None, written_at="2026-07-26T02:00:00Z",
         )
     with pytest.raises(MalformedReceiptError):
         build_receipt(
-            node="x-c3a2", session="s", phase="do", generation=0, repo="r",
+            node="x-c3a2", session="s", phase="execute", generation=0, repo="r",
             worktree="/w", branch="b", head="h", next_verb="v",
             next_target=None, written_at="2026-07-26T02:00:00Z",
         )
     with pytest.raises(MalformedReceiptError):
         build_receipt(
-            node="x-c3a2", session="s", phase="do", generation=2, repo="r",
+            node="x-c3a2", session="s", phase="execute", generation=2, repo="r",
             worktree="/w", branch="b", head="h", next_verb="  ",
             next_target=None, written_at="2026-07-26T02:00:00Z",
         )
@@ -115,7 +115,7 @@ def test_build_rejects_bad_identity():
 def test_write_and_load_round_trip(tmp_path):
     r = _receipt()
     p = write_receipt(r, tmp_path / "artifacts")
-    assert p.name == "receipt-x-c3a2-do-g2-abc123def456.json"
+    assert p.name == "receipt-x-c3a2-execute-g2-abc123def456.json"
     loaded = load_receipt(p)
     assert loaded.identity == r.identity
     assert loaded.head == r.head
@@ -138,8 +138,8 @@ def test_new_head_at_same_phase_is_new_version_not_overwrite(tmp_path):
     write_receipt(_receipt(head="abc123def456"), tmp_path)
     p2 = write_receipt(_receipt(head="ffffff000000"), tmp_path)
     assert p2.exists()
-    assert (tmp_path / "receipt-x-c3a2-do-g2-abc123def456.json").exists()
-    assert (tmp_path / "receipt-x-c3a2-do-g2-ffffff000000.json").exists()
+    assert (tmp_path / "receipt-x-c3a2-execute-g2-abc123def456.json").exists()
+    assert (tmp_path / "receipt-x-c3a2-execute-g2-ffffff000000.json").exists()
 
 
 # ---------------------------------------------------------------------------

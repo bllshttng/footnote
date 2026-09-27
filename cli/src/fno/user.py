@@ -35,7 +35,7 @@ def display_name_at(root: Path) -> str:
     The path is an ARGUMENT, and it is the cache key. A zero-argument cached
     read would be a global keyed on nothing: the first caller in a process
     fixes the answer for every caller after it (R5), so the cache keys
-    on the repo root like ``fleet_has_crown_at`` keys on its registry path.
+    on the repo root.
     """
     from fno.config import load_settings_for_repo
 

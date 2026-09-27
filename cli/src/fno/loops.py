@@ -1,17 +1,18 @@
-"""Loop levels + global pause-all kill switch.
+"""Loop levels and pause control.
 
 Substrate only: no standing loop ships in this module. Every later loop is
 born with a pause button by reading ``loops_paused()`` at tick start (paused
 = log one line, exit 0) and its configured autonomy via ``loop_level(name)``.
-No daemon, no process registry - loops are cron/Actions-triggered CLI ticks;
-the sentinel file is the only coordination point.
+No daemon, no process registry - loops are cron/Actions-triggered CLI ticks.
 """
 from __future__ import annotations
 
 import json
 import logging
 import subprocess
-from typing import Optional
+import sys
+from datetime import datetime, timezone
+from typing import Optional, cast
 
 import typer
 
@@ -20,8 +21,15 @@ from fno.config import LoopEntry, load_settings
 
 _LOG = logging.getLogger(__name__)
 
+
+def _epoch_ms_iso(value: object) -> str:
+    try:
+        return datetime.fromtimestamp(cast(int, value) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, TypeError, ValueError):
+        return "unknown"
+
 loops_app = typer.Typer(
-    name="loops", no_args_is_help=True, help="Loop level config + pause-all kill switch."
+    name="loops", no_args_is_help=True, help="Loop level config + pause control."
 )
 
 
@@ -42,7 +50,7 @@ def loop_level(name: str) -> str:
 
 
 def _rust_loops_call(action: str, args: list[str] | None = None) -> dict:
-    """Call the Rust owner of the global pause sentinel."""
+    """Call the Rust owner of loop pause state."""
     from fno.rust_binary import resolve_binary
 
     binary = resolve_binary()
@@ -78,17 +86,6 @@ def loops_paused() -> bool:
         _LOG.warning("loops-paused check failed closed: %s", exc)
         return True
     return payload.get("paused") is not False
-
-
-def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> dict:
-    args = ["--who", who]
-    if ttl_ms is not None:
-        args += ["--ttl-ms", str(ttl_ms)]
-    return _rust_loops_call("pause-all", args)
-
-
-def resume_all() -> bool:
-    return bool(_rust_loops_call("resume-all").get("resumed"))
 
 
 def refuse_if_paused(*, json_out: bool) -> None:
@@ -130,49 +127,57 @@ def _last_tick(name: str) -> Optional[str]:
     return last
 
 
-_TTL_PATTERN_HELP = "duration like '30m', '2h', '1d' (default: no expiry)"
+def _run_loops_passthrough(action: str, args: list[str]) -> int:
+    """Shell straight through to the Rust owner, argv and exit code unchanged.
+
+    The TTL/reason parsing and the mail leg both live in
+    ``crates/fno-agents/src/loops_pause.rs`` now; this wrapper adds nothing
+    and drops nothing, so its own flags never drift from the Rust ones.
+
+    Captures rather than inherits stdio: Click's test runner (and any other
+    caller that redirects ``sys.stdout``) only sees output written through
+    Python's stream objects, not a child's raw inherited file descriptor.
+    """
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("fno-agents binary is unavailable", err=True)
+        return 1
+    proc = subprocess.run(
+        [str(binary), "loops", action, *args], capture_output=True, text=True, check=False
+    )
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.returncode
 
 
-def _parse_ttl_ms(value: Optional[str]) -> Optional[int]:
-    if not value:
-        return None
-    import re
+@loops_app.command(
+    "pause-all",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def cmd_pause_all(ctx: typer.Context) -> None:
+    """Pause every loop and hold this session's mail for the same window.
 
-    m = re.match(r"^\s*(\d+)\s*([smhd])\s*$", value, re.IGNORECASE)
-    if not m:
-        raise typer.BadParameter(f"invalid TTL format: {value!r} ({_TTL_PATTERN_HELP})")
-    n = int(m.group(1))
-    if n == 0:
-        # A zero TTL is falsy in Python, so `pause_all` would read it as "no
-        # expiry" (ttl_ms=0 -> None) instead of "expires immediately" -
-        # reject it outright rather than silently pausing forever.
-        raise typer.BadParameter(f"TTL must be > 0: {value!r}")
-    unit = m.group(2).lower()
-    seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
-    return n * seconds * 1000
+    Pass-through to the Rust owner: `--who <w> [--ttl <dur>] [--reason <text>]`.
+    """
+    raise typer.Exit(code=_run_loops_passthrough("pause-all", ctx.args))
 
 
-@loops_app.command("pause-all")
-def cmd_pause_all(
-    ttl: Optional[str] = typer.Option(None, "--ttl", help=_TTL_PATTERN_HELP),
-    who: str = typer.Option("operator", "--who", help="Who is pausing (for status display)."),
-) -> None:
-    """Pause every loop: each tick sees loops_paused()==True and exits 0."""
-    state = pause_all(who=who, ttl_ms=_parse_ttl_ms(ttl))
-    expiry = f", expires {state['expires_at']}" if state.get("expires_at") else ""
-    typer.echo(f"paused by {state.get('who', who)}{expiry}")
-
-
-@loops_app.command("resume-all")
-def cmd_resume_all() -> None:
-    """Remove the pause-all sentinel."""
-    was_paused = resume_all()
-    typer.echo("resumed" if was_paused else "was not paused")
+@loops_app.command(
+    "resume-all",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def cmd_resume_all(ctx: typer.Context) -> None:
+    """Clear the pause-all breaker and remove any legacy sentinel."""
+    raise typer.Exit(code=_run_loops_passthrough("resume-all", ctx.args))
 
 
 @loops_app.command("status")
 def cmd_status() -> None:
-    """Show the current pause-all sentinel, including an expired one."""
+    """Show the effective pause-all state, including an expired halt."""
     state = _rust_loops_call("status")
     if state.get("state") == "corrupt":
         typer.echo(
@@ -180,14 +185,22 @@ def cmd_status() -> None:
             "failing closed (treated as paused) - investigate"
         )
         return
+    if state.get("state") == "unavailable":
+        typer.echo(f"pause state unavailable; failing closed: {state.get('error', 'unknown')}")
+        return
     if state.get("state") == "clear":
         typer.echo("not paused")
         return
     if state.get("state") == "expired":
-        typer.echo(f"expired (was paused by {state['who']} at {state['paused_at']})")
+        typer.echo(
+            f"expired (was paused by {state['who']} at {_epoch_ms_iso(state.get('paused_at'))}, "
+            f"expired {_epoch_ms_iso(state.get('expires_at'))})"
+        )
         return
-    expiry = f", expires {state['expires_at']}" if state.get("expires_at") else ""
-    typer.echo(f"paused by {state.get('who', 'unknown')} since {state.get('paused_at', 'unknown')}{expiry}")
+    expires_at = state.get("expires_at")
+    expiry = f", expires {_epoch_ms_iso(expires_at)}" if expires_at is not None else ""
+    paused_at = _epoch_ms_iso(state.get("paused_at"))
+    typer.echo(f"paused by {state.get('who', 'unknown')} since {paused_at}{expiry}")
 
 
 @loops_app.command("ls")

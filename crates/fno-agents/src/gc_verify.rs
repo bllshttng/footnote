@@ -293,12 +293,17 @@ fn audit_receipt(
     if (now - reaped).num_seconds() > since_secs as i64 {
         return; // outside the window: not this report's population
     }
-    // A removal receipt (`removed_by` set) records a deliberate operator
-    // removal, not a reap: it carries no effect records by contract, so
-    // demanding them here would make one plain `fno agents rm` red the
-    // whole window.
-    if receipt.removed_by.is_some() {
-        return; // removal receipt: not a retirement, not this audit's population
+    // The sweep is the only writer that runs the four retirement effects,
+    // so it is the only writer this audit has an opinion about. Any OTHER
+    // non-empty stamp (roster-reap, the argv verb of an `rm` door) is a
+    // removal receipt and skips, exactly as before. An EMPTY stamp is the
+    // pre-stamp tail (every receipt written before `removed_by` was
+    // required) and stays in the population until the retention window
+    // rolls it out.
+    if !receipt.removed_by.is_empty()
+        && receipt.removed_by != crate::receipt::Writer::GcSweep.surface()
+    {
+        return;
     }
     // The pin is the contract the writer promised, never its build: the
     // build moves on every merge that touches crates/, and a build pin
@@ -421,62 +426,61 @@ fn audit_event_cohort(
     now: chrono::DateTime<chrono::Utc>,
     since_secs: u64,
 ) {
-    let active = home.events_jsonl();
-    let rotated = crate::events::rotated_path(&active);
-    for file in [rotated, active] {
-        let raw = match std::fs::read_to_string(&file) {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                report.problems.push(VerifyProblem {
-                    receipt: file.to_string_lossy().to_string(),
-                    reason: format!("events log unreadable: {err}"),
-                });
-                continue;
-            }
+    let file = home.events_jsonl();
+    let raw = match crate::event_store::journal_text_checked(
+        &file,
+        &crate::event_store::EventQuery::of_types(&["agent_row_reaped"]),
+    ) {
+        Ok(raw) => raw,
+        Err(err) => {
+            report.problems.push(VerifyProblem {
+                receipt: file.to_string_lossy().to_string(),
+                reason: format!("events log unreadable: {err}"),
+            });
+            return;
+        }
+    };
+    for line in raw.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
         };
-        for line in raw.lines() {
-            let Ok(event) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") {
-                continue;
-            }
-            let Some(ts) = event
-                .get("ts")
-                .and_then(Value::as_str)
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-            else {
-                continue;
-            };
-            if (now - ts).num_seconds() > since_secs as i64 {
-                continue; // outside the window: not this report's population
-            }
-            report.reaped_events += 1;
-            let Some(data) = event.get("data") else {
-                continue;
-            };
-            if data.get("receipt_staged").is_some() {
-                continue; // roster-reap door: carries its own accounting
-            }
-            let harness = data.get("harness").and_then(Value::as_str).unwrap_or("");
-            let session_id = data
-                .get("harness_session_id")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if harness.is_empty() || session_id.is_empty() {
-                continue;
-            }
-            let name = data.get("name").and_then(Value::as_str).unwrap_or("");
-            if !crate::receipt::reap_receipt_path_for(home, harness, session_id).exists() {
-                report.problems.push(VerifyProblem {
-                    receipt: "events".into(),
-                    reason: format!(
-                        "session {harness}:{session_id} ({name}) reaped at {ts} with no receipt on disk"
-                    ),
-                });
-            }
+        if event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") {
+            continue;
+        }
+        let Some(ts) = event
+            .get("ts")
+            .and_then(Value::as_str)
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+        else {
+            continue;
+        };
+        if (now - ts).num_seconds() > since_secs as i64 {
+            continue; // outside the window: not this report's population
+        }
+        report.reaped_events += 1;
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        if data.get("receipt_staged").is_some() {
+            continue; // roster-reap door: carries its own accounting
+        }
+        let harness = data.get("harness").and_then(Value::as_str).unwrap_or("");
+        let session_id = data
+            .get("harness_session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if harness.is_empty() || session_id.is_empty() {
+            continue;
+        }
+        let name = data.get("name").and_then(Value::as_str).unwrap_or("");
+        if !crate::receipt::reap_receipt_path_for(home, harness, session_id).exists() {
+            report.problems.push(VerifyProblem {
+                receipt: "events".into(),
+                reason: format!(
+                    "session {harness}:{session_id} ({name}) reaped at {ts} with no receipt on disk"
+                ),
+            });
         }
     }
 }
@@ -484,7 +488,9 @@ fn audit_event_cohort(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::receipt::{build_reap_receipt, write_reap_receipt, EffectRecord, ReapReceipt};
+    use crate::receipt::{
+        build_reap_receipt, write_reap_receipt, EffectRecord, ReapReceipt, Writer,
+    };
     use crate::state;
 
     fn temp_home() -> AgentsHome {
@@ -583,7 +589,7 @@ mod tests {
         // contracts' receipts - and the audit fails on empty evidence,
         // with the window itself naming why.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("old"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut receipt,
             Some("native-stop,active-surface,resume-evidence"),
@@ -636,7 +642,7 @@ mod tests {
         // with nothing in `problems` and nothing in `verified` names no
         // reason at all.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("v1"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("v1"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, None);
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -658,7 +664,7 @@ mod tests {
         // build and confirmed effects - and the audit passes.
         let home = temp_home();
         for name in ["a", "b"] {
-            let mut receipt = build_reap_receipt(&row(name), None).unwrap();
+            let mut receipt = build_reap_receipt(&row(name), None, Writer::GcSweep).unwrap();
             stamp(&mut receipt, Some(retirement_contract().as_str()));
             receipt.effects = confirmed_effects();
             write_reap_receipt(&home, &receipt).unwrap();
@@ -680,11 +686,11 @@ mod tests {
         // the current-contract receipt verifies; the audit passes - the
         // rollout tail never holds the probe red for a full window.
         let home = temp_home();
-        let mut old = build_reap_receipt(&row("prev"), None).unwrap();
+        let mut old = build_reap_receipt(&row("prev"), None, Writer::GcSweep).unwrap();
         stamp(&mut old, Some("native-stop,active-surface,resume-evidence"));
         old.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &old).unwrap();
-        let mut cur = build_reap_receipt(&row("live"), None).unwrap();
+        let mut cur = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut cur, Some(retirement_contract().as_str()));
         cur.effects = confirmed_effects();
         write_reap_receipt(&home, &cur).unwrap();
@@ -703,7 +709,7 @@ mod tests {
     #[test]
     fn an_older_build_on_the_current_contract_verifies() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("older"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.writer_build =
             Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
@@ -724,7 +730,7 @@ mod tests {
     #[test]
     fn an_older_build_on_the_current_contract_without_mux_member_refuses() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("older"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.writer_build =
             Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
@@ -754,7 +760,7 @@ mod tests {
         // receipt carries the full op set with one op unconfirmed, so the
         // refusal is the unconfirmed-outcome one, not the missing-op one.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("part"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("part"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -782,7 +788,7 @@ mod tests {
     #[test]
     fn ac1_hp_a_single_op_receipt_is_refused() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("synthetic"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("synthetic"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &receipt).unwrap();
@@ -815,7 +821,7 @@ mod tests {
     #[test]
     fn ac1_edge_full_set_verifies_and_a_failed_op_refuses() {
         let home = temp_home();
-        let mut full = build_reap_receipt(&row("full"), None).unwrap();
+        let mut full = build_reap_receipt(&row("full"), None, Writer::GcSweep).unwrap();
         stamp(&mut full, Some(retirement_contract().as_str()));
         full.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -828,7 +834,7 @@ mod tests {
         assert!(report.passes(), "{:?}", report.problems);
         assert_eq!(report.verified.len(), 1);
 
-        let mut failed = build_reap_receipt(&row("failed"), None).unwrap();
+        let mut failed = build_reap_receipt(&row("failed"), None, Writer::GcSweep).unwrap();
         stamp(&mut failed, Some(retirement_contract().as_str()));
         failed.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -855,7 +861,7 @@ mod tests {
     #[test]
     fn ac2_hp_a_receipt_without_the_mux_member_op_refuses() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("premux"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("premux"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -879,7 +885,7 @@ mod tests {
     #[test]
     fn ac2_edge_not_applicable_mux_member_passes_with_no_events_log() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("nomux"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("nomux"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -909,7 +915,7 @@ mod tests {
         );
         // A live unrelated receipt so the window is not empty-shaped: the
         // assertion targets the events problem specifically.
-        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -929,6 +935,35 @@ mod tests {
             problem
         );
         assert_eq!(report.reaped_events, 1);
+    }
+
+    /// AC3-REAP: a store-committed reaped row counts; an unreadable store
+    /// names itself as an events-log problem.
+    #[test]
+    fn ac3_reap_a_store_committed_reaped_row_counts_and_a_broken_store_names_itself() {
+        let home = temp_home();
+        let line = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "type": "agent_row_reaped",
+            "source": "daemon",
+            "data": {"name": "row-store", "harness": "codex", "harness_session_id": "sess-store"},
+        })
+        .to_string();
+        crate::event_store::append_envelope(&home.events_jsonl(), &line, None).unwrap();
+        let report = verify(&home, 24 * 3600, &[]);
+        assert_eq!(report.reaped_events, 1, "{:?}", report.problems);
+
+        let store = home.events_jsonl().with_extension("db");
+        std::fs::write(&store, b"not a database").unwrap();
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.reason.contains("events log unreadable")),
+            "{:?}",
+            report.problems
+        );
     }
 
     /// AC3-EDGE: a `receipt_staged` event (roster-reap), an
@@ -959,7 +994,7 @@ mod tests {
             }),
         );
         // A stale-build receipt on disk: existence satisfies the cohort.
-        let mut stale = build_reap_receipt(&row("staleholder"), None).unwrap();
+        let mut stale = build_reap_receipt(&row("staleholder"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut stale,
             Some("native-stop,active-surface,resume-evidence"),
@@ -977,7 +1012,7 @@ mod tests {
 
         // A verified receipt keeps the rest of the report green so any
         // failure is attributable to the derived cohort.
-        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1016,7 +1051,7 @@ mod tests {
     #[test]
     fn ac2_hp_the_cohort_names_missing_sessions() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("a"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1045,7 +1080,7 @@ mod tests {
     #[test]
     fn ac2_edge_without_expectations_the_gate_is_unchanged() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("a"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1056,7 +1091,7 @@ mod tests {
     #[test]
     fn a_receipt_outside_the_window_is_not_audited() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("old"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut receipt,
             Some("native-stop,active-surface,resume-evidence"),
@@ -1094,9 +1129,9 @@ mod tests {
         // contract) must not red the window: one plain `fno agents rm` is a
         // deliberate operator removal, not a failed reap.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("rm-row"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("rm-row"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
-        receipt.removed_by = Some("operator".into());
+        receipt.removed_by = "operator".into();
         write_reap_receipt(&home, &receipt).unwrap();
 
         let report = verify(&home, 24 * 3600, &[]);

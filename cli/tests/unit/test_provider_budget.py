@@ -241,16 +241,13 @@ def test_the_stamp_is_cleared_by_whatever_clears_a_route():
     assert ROUTE_PROVIDER_ENV in SCRUB_AUTH_VARS
 
 
+@pytest.mark.dev_build
 def test_a_codex_route_carries_the_same_stamp(tmp_path, monkeypatch):
     # Without it a routed codex worker resolves "unknown" and a shared provider
     # reached through codex still launches the full panel. The stamp is BUILT in
     # Rust now (codex_route.rs appends FNO_ROUTE_PROVIDER to CodexRoute.env);
     # the Python lane relays the builder's answer verbatim, so the parity is
     # asserted on a resolved route, not on Python source (x-3954).
-    from fno.rust_binary import find_dev_binary
-
-    if find_dev_binary() is None:
-        pytest.skip("compiled fno-agents binary not present")
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         "[model_routing]\n"

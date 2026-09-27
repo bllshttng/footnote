@@ -40,3 +40,24 @@ def test_unavailable_freshness_diagnostic_warns_and_continues() -> None:
     assert 'if [ "$FRESHNESS_EXIT" -ne 0 ]' in preflight_text
     assert "review refused" in preflight_text
     assert preflight_text.index("FRESHNESS_EXIT") < preflight_text.index("review refused")
+
+
+def test_review_cap_gate_names_the_budget_and_the_one_checked_path() -> None:
+    text = REVIEW_SKILL.read_text(encoding="utf-8")
+    start = text.index("## Review-cap gate")
+    end = text.index("## Active skill freshness preflight", start)
+    gate = text[start:end]
+
+    for phrase in (
+        "rounds_exhausted",
+        "fno do pr status",
+        "fno-agents review-coverage --cwd . --pr <n>",
+        "request-self-review",
+        "hooks/review-hold.sh",
+        "--verify-fixes",
+    ):
+        assert phrase in gate, f"## Review-cap gate omits {phrase!r}"
+    for path in (REVIEW_SKILL, ROOT / "skills" / "review" / "references" / "peer.md"):
+        content = path.read_text(encoding="utf-8")
+        assert "IMPOSSIBLE" not in content, f"{path} retains IMPOSSIBLE"
+        assert "non-author GitHub approval" not in content, f"{path} retains retired remedy"

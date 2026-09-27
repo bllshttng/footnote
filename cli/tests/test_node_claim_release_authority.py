@@ -68,7 +68,7 @@ ALLOWLIST = {
     "hooks/helpers/init-target-state.sh",
     # graph/store.py release_node_claim_at_closure: the node-CLOSURE release.
     # Fired at the one choke point every closure path funnels through (the
-    # terminal-rung transition inside locked_mutate_graph, plus the tracker
+    # terminal-rung transition inside commit_rows_via_store, plus the tracker
     # seam right after close()) and nowhere else, it is deliberately
     # holder-agnostic: a closed node has no work left to protect, so there is
     # no legitimate holder to verify - the terminal rung IS the authority.

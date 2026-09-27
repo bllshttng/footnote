@@ -288,10 +288,14 @@ for path, source, tree in parsed:
                 continue
             statement = lines[node.lineno - 1].strip()
             rel = path.relative_to(root)
-            violations.append(
-                f"{rel}:{node.lineno}: L{source_layer[0]} {source_layer[1]} -> "
+            edge = (
+                f"L{source_layer[0]} {source_layer[1]} -> "
                 f"L{target_layer[0]} {target_layer[1]} / {statement}"
             )
+            # The baseline keys on file, layer pair and statement; the line
+            # number is display-only, so an edit above an import cannot churn
+            # the baseline the way it churns a line-keyed ratchet.
+            violations.append((f"{rel}: {edge}", f"{rel}:{node.lineno}: {edge}"))
 
 if not positive_control:
     print(
@@ -353,8 +357,8 @@ print(
 )
 if mode == "strict" and (violations or cycle):
     print("check-company-boundaries: prohibited dependencies:", file=sys.stderr)
-    for violation in violations:
-        print(f"  {violation}", file=sys.stderr)
+    for _key, display in violations:
+        print(f"  {display}", file=sys.stderr)
     if rendered_cycle:
         print(f"  layer cycle: {rendered_cycle}", file=sys.stderr)
     print(
@@ -379,7 +383,7 @@ if mode == "baseline":
         if line.strip() and not line.lstrip().startswith("#")
     ]
     violation_pattern = re.compile(
-        r"^cli/src/fno/.+\.py:\d+: L\d+ [a-z]+ -> L\d+ [a-z]+ / .+$"
+        r"^cli/src/fno/.+\.py: L\d+ [a-z]+ -> L\d+ [a-z]+ / .+$"
     )
     cycle_pattern = re.compile(
         r"^layer cycle: L\d+ [a-z]+(?: -> L\d+ [a-z]+)+$"
@@ -398,7 +402,7 @@ if mode == "baseline":
             print(f"  {entry}", file=sys.stderr)
         sys.exit(2)
 
-    current = list(violations)
+    current = [key for key, _display in violations]
     if rendered_cycle:
         current.append(f"layer cycle: {rendered_cycle}")
     new_or_changed = sorted(set(current) - set(baseline))

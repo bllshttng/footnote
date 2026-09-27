@@ -111,27 +111,157 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
         .max(1)
 }
 
-/// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
-/// off-switch. A mission can never hold a session, so an operator who runs no
-/// epics can drop the band entirely rather than dismiss it each session.
-pub fn missions_section_enabled(cwd: &Path) -> bool {
-    mux_bool(cwd, "show_missions", true)
-}
-
-/// `config.mux.show_backlog` (default ON) - the `~ backlog` lane's off-switch.
-pub fn backlog_section_enabled(cwd: &Path) -> bool {
-    mux_bool(cwd, "show_backlog", true)
-}
-
 /// `config.mux.theme`: the chrome palette name, latched once at client
-/// startup. An unset key reads as `None` (meaning "no preference") and resolves
-/// to `terminal`. An UNKNOWN name also resolves to `terminal` but carries a
+/// startup. An unset key reads as `None` (meaning "no preference") and
+/// resolves to the brand default: `footnote-superscript`, or
+/// `footnote-paper` when the terminal reports a light background through
+/// `COLORFGBG`. An UNKNOWN name also resolves to the default but carries a
 /// notice through the same channel a refused keymap rebind uses, because a
-/// config that is quietly ignored is indistinguishable from one never written.
+/// config that is quietly ignored is indistinguishable from one never
+/// written. The `mux.theme.brand` / `mux.theme.needs_you` role overrides
+/// fold in here and at the settings modal's swap, so they hold under every
+/// theme.
 pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
-    match mux_str(cwd, "theme") {
-        Some(name) => crate::theme::Theme::from_name(&name),
-        None => (crate::theme::Theme::default_theme(), None),
+    let resolved = match mux_str(cwd, "theme").as_deref() {
+        // An empty value is "no preference", the same as the unset key: it
+        // rides the light-background ladder instead of pinning the dark
+        // default.
+        Some(name) if !name.trim().is_empty() => crate::theme::Theme::from_name(name),
+        _ => {
+            let env = std::env::var("COLORFGBG").ok();
+            (
+                crate::theme::Theme::default_for(colorfgbg_is_light(env.as_deref())),
+                None,
+            )
+        }
+    };
+    theme_role_overrides(cwd, resolved)
+}
+
+/// Whether `COLORFGBG` reports a light terminal background. The rxvt
+/// convention every terminal that sets the var follows: `fg;bg`, and a bg of
+/// 7 or 15 is white. Absent or unparseable means "no signal" -> dark.
+fn colorfgbg_is_light(v: Option<&str>) -> bool {
+    matches!(
+        v.and_then(|s| s.split(';').next_back())
+            .and_then(|b| b.parse::<u8>().ok()),
+        Some(7) | Some(15)
+    )
+}
+
+/// Parse one theme-role override value: the sideline palette's color
+/// vocabulary (`#rrggbb`, an ANSI-16 name, or `indexed(<n>)`), so an
+/// operator writes the same forms the sideline already accepts.
+fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
+    crate::sideline_color::parse_color(s)
+}
+
+/// Fold the `mux.theme.brand` / `mux.theme.needs_you` role overrides into
+/// `t`: the two roles are config's to pin under ANY theme -
+/// brand recolors selection, the active tab and the focused frame;
+/// needs_you recolors the waiting-on-you accent. The tab-bar mark's stamp
+/// takes NO override - the mark keeps its theme's own label. In TOML the
+/// keys are quoted dotted keys inside `[mux]` (`"theme.brand" =
+/// "#ff3434"`), which coexists with the scalar `theme` name. An unparseable
+/// value is reported, never silently ignored (the keymap-notice channel).
+/// Injectable so tests never touch process env.
+fn apply_overrides_to(
+    t: &mut crate::theme::Theme,
+    brand: Option<&str>,
+    needs_you: Option<&str>,
+) -> Option<crate::keys::KeymapWarning> {
+    let mut bad: Vec<String> = Vec::new();
+    for (raw, role) in [(brand, "brand"), (needs_you, "needs_you")] {
+        let Some(raw) = raw else { continue };
+        match parse_override_color(raw) {
+            Some(c) if role == "brand" => t.brand = c,
+            Some(c) => t.needs_you = c,
+            None => bad.push(format!(
+                "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
+            )),
+        }
+    }
+    (!bad.is_empty()).then(|| crate::keys::KeymapWarning(bad.join("; ")))
+}
+
+/// Read the role overrides through the config ladder and apply them to a
+/// resolved theme. The one fold both the startup latch and the settings
+/// modal's in-memory swap ride, so an override survives a theme switch.
+pub fn theme_role_overrides(
+    cwd: &Path,
+    (mut t, warn): (crate::theme::Theme, Option<crate::keys::KeymapWarning>),
+) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
+    let brand = mux_str(cwd, "theme.brand");
+    let needs_you = mux_str(cwd, "theme.needs_you");
+    let override_warn = apply_overrides_to(&mut t, brand.as_deref(), needs_you.as_deref());
+    let warn = match (warn, override_warn) {
+        (Some(a), Some(b)) => Some(crate::keys::KeymapWarning(format!("{}; {}", a.0, b.0))),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    };
+    (t, warn)
+}
+
+#[cfg(test)]
+mod colorfgbg_tests {
+    use super::colorfgbg_is_light;
+
+    #[test]
+    fn only_a_white_background_is_light() {
+        assert!(!colorfgbg_is_light(None));
+        assert!(!colorfgbg_is_light(Some("")));
+        assert!(!colorfgbg_is_light(Some("15;0")), "black bg is dark");
+        assert!(!colorfgbg_is_light(Some("0;8")));
+        assert!(!colorfgbg_is_light(Some("nonsense")));
+        assert!(colorfgbg_is_light(Some("0;7")), "white bg is light");
+        assert!(colorfgbg_is_light(Some("15;15")));
+    }
+}
+
+#[cfg(test)]
+mod theme_role_override_tests {
+    use super::{apply_overrides_to, parse_override_color};
+    use crate::proto::Color;
+    use crate::theme::Theme;
+
+    #[test]
+    fn override_colors_take_the_sideline_palette_vocabulary() {
+        assert_eq!(
+            parse_override_color("#ff3434"),
+            Some(Color::Rgb(0xff, 0x34, 0x34))
+        );
+        // The sideline names resolve, trimmed and case-insensitive.
+        assert_eq!(parse_override_color(" RED "), Some(Color::Indexed(1)));
+        assert_eq!(parse_override_color("indexed(8)"), Some(Color::Indexed(8)));
+        assert_eq!(parse_override_color("#f34"), None);
+        assert_eq!(parse_override_color("#zzzzzz"), None);
+        assert_eq!(parse_override_color("ff3434"), None, "hex needs its #");
+        assert_eq!(parse_override_color(""), None);
+    }
+
+    #[test]
+    fn overrides_repin_the_two_roles_under_any_theme_and_the_stamp_is_untouched() {
+        for name in crate::theme::THEME_NAMES {
+            let (mut t, _) = Theme::from_name(name);
+            let (stamp, sel) = (t.stamp, t.sel);
+            let warn = apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"));
+            assert!(warn.is_none(), "{name}");
+            assert_eq!(t.brand, Color::Rgb(0x12, 0x34, 0x56), "{name}");
+            assert_eq!(t.needs_you, Color::Rgb(0xab, 0xcd, 0xef), "{name}");
+            assert_eq!(t.stamp, stamp, "{name}: the mark takes no override");
+            assert_eq!(t.sel, sel, "{name}: only the two roles move");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_override_is_reported_not_ignored() {
+        let (mut t, _) = Theme::from_name("terminal");
+        let warn =
+            apply_overrides_to(&mut t, Some("notacolor"), None).expect("a bad value must warn");
+        assert!(warn.0.contains("mux.theme.brand"), "{warn:?}");
+        assert!(warn.0.contains("notacolor"), "{warn:?}");
+        // The untouched role keeps its theme value.
+        assert_eq!(t.brand, Color::Indexed(3));
     }
 }
 
@@ -552,6 +682,17 @@ pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
     global_config_toml().and_then(|g| read_top_file(&g, key))
 }
 
+/// A TOP-LEVEL key read through the FULL ladder: `$FNO_CONFIG` (sole
+/// candidate) else the project tier, else the global config. The reign page
+/// resolver reads through this so the bridge serves the state root Python's
+/// renderer wrote to (`fno.paths.state_dir()` is project-aware); the mux's
+/// sockets and sidecars keep the existing explicit-only reader (see
+/// [`config_explicit_top_str`]) because one machine's fleet is shared
+/// infrastructure invoked from many cwds.
+pub(crate) fn config_top_str(cwd: &Path, key: &str) -> Option<String> {
+    resolve_config_key(cwd, &|path| read_top_file(path, key))
+}
+
 /// The per-user global config.toml: the config.toml SIBLING of
 /// `$FNO_GLOBAL_SETTINGS_PATH` when set, else `$HOME/.fno/config.toml`. One
 /// source for both the explicit tier and the section ladder's last rung, so
@@ -899,6 +1040,9 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dev_profile_dir_recognizes_both_cargo_binary_shapes() {
@@ -972,6 +1116,63 @@ mod tests {
             read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),
             None
         );
+    }
+
+    #[test]
+    fn the_top_ladder_reads_the_project_tier_the_explicit_reader_ignores() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("fno-top-ladder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let proj_state = base.join("proj-state");
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join(".fno")).unwrap();
+        std::fs::create_dir_all(&proj_state).unwrap();
+        std::fs::write(
+            base.join(".fno/config.toml"),
+            format!("state_dir = \"{}\"\n", proj_state.display()),
+        )
+        .unwrap();
+        let global = base.join("global-config.toml");
+        std::fs::write(&global, "state_dir = \"/global/state\"\n").unwrap();
+        let explicit = base.join("explicit-config.toml");
+        std::fs::write(&explicit, "state_dir = \"/explicit/state\"\n").unwrap();
+        // Save the ambient pins; a lib test process runs every module's
+        // tests together, so the walk ends by restoring what it found.
+        let ambient: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["FNO_CONFIG", "FNO_GLOBAL_SETTINGS_PATH", "FNO_REPO_ROOT"]
+                .map(|k| (k, std::env::var_os(k)))
+                .to_vec();
+        for (key, _) in &ambient {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", &global);
+
+        // The project tier answers where the explicit-only reader saw only
+        // the global file: this is the reign-page resolution the bridge owed
+        // Python's renderer.
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some(proj_state.to_str().unwrap())
+        );
+        // No project key: the global leg still answers.
+        std::fs::write(base.join(".fno/config.toml"), "[mux]\n").unwrap();
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some("/global/state")
+        );
+        // The explicit pin is the project-excluding sole candidate when set.
+        std::env::set_var("FNO_CONFIG", &explicit);
+        assert_eq!(
+            config_top_str(&base, "state_dir").as_deref(),
+            Some("/explicit/state")
+        );
+        for (key, value) in &ambient {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

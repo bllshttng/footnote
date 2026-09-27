@@ -651,3 +651,27 @@ def test_serialize_entry_unknown_request_renders_null_not_clean() -> None:
     )
     assert no_transcript["requested_model"] == "glm-5.3[1m]"
     assert no_transcript["model_substituted"] is None
+
+
+def test_serialize_entry_node_receipt_is_three_state() -> None:
+    """x-8d88: node and node_reason carry three distinguishable states - the
+    node bound (reason null), the named node unresolvable (reason set), and
+    no node named at all (both null). The key is always present."""
+    bound = serialize_entry(
+        _claude_entry(node="x-6a50"), live_status=None
+    )
+    assert bound["node"] == "x-6a50"
+    assert bound["node_reason"] is None
+
+    receipt = serialize_entry(
+        _claude_entry(
+            node_reason="x-gone names no readable backlog row (derived from the seed)"
+        ),
+        live_status=None,
+    )
+    assert receipt["node"] is None
+    assert receipt["node_reason"].startswith("x-gone names no readable backlog row")
+
+    silent = serialize_entry(_claude_entry(), live_status=None)
+    assert silent["node"] is None
+    assert silent["node_reason"] is None

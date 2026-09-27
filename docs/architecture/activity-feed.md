@@ -8,8 +8,8 @@ Several stores hold one timeline and nothing joined them. The feed is one projec
 
 | Store | Holds | Contributes |
 |---|---|---|
-| `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision` rows | `question_asked`, `question_closed`, `decision_recorded` |
-| `~/.fno/graph.json` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
+| `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision`, `day_boundary` rows | `question_asked`, `question_closed`, `decision_recorded`, `day_boundary` |
+| `~/.fno/graph.db` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
 | `~/.fno/agents/reap-receipts/` | one durable receipt per removed registry row, each carrying the verbatim resume line | `session_reaped` |
 | `~/.fno/events.jsonl` | telemetry (72% ticks) | nothing - deliberately not read |
 
@@ -33,6 +33,17 @@ The lifecycle kinds derive from the graph at query time, so the graph stays the 
 | `pr_created` | a ship-phase row with `started_at` on a node carrying `pr_number` (ref: PR number) |
 | `node_ended` | a node's `completed_at`, session id from its newest do/ship row |
 | `session_reaped` | a reap receipt, `detail` carrying its verbatim resume line |
+| `day_boundary` | a persisted morning or end-of-day readback (ref: boundary id) |
+
+## Day boundaries
+
+`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The native verb's `--commit` writes one bounded `day_boundary` row to the project journal first. It then writes the same row to `~/.fno/questions.jsonl` for durable cross-rotation recall. The inbox relay only selects the destination, so the operator command lives under the inbox. The row carries ids and counts only. The writer sizes the row against the validated event limit before any write. If the row is over the limit, the writer refuses it and never substitutes.
+
+The permanent question index stores the boundary reference because the project journal rotates at 8 MiB and keeps only one rotated file. The index is recall and provenance, not a second source of question truth. Open questions still come from the existing lifecycle fold, and a failed index append names the boundary id after the project append. The boundary id is stable per kind and local day. A retry after that failure recognizes its own journal row and appends only the index leg, so no orphan row accumulates.
+
+Each boundary uses a half-open interval `[from, to)`. The first boundary starts at local midnight. Later boundaries start at the newest saved cutoff. Repeated `start` or `end` on the same local day returns the saved boundary and does not append a duplicate or advance attention. Up to five question ids are featured. Three come from the shared queue order. The rest are questions that have not appeared in an earlier saved boundary.
+
+An unreadable question store exits 1 and prints no zero-open line. A missing question store is a successful, explicitly incomplete read. The first line says `open questions: unknown` and the receipt names the missing path. A saved boundary is historical evidence. It does not replace current queue or merge authority.
 
 ## An actor is not a session
 
@@ -47,6 +58,10 @@ It does NOT borrow the asking row's session. That session asked the question. It
 ## The verb and the panel
 
 `fno agents feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--kind <k>] [--json]` is the projection. A missing or unreadable store is not fatal. The rows the other stores yielded still emit, with one stderr line naming the store skipped.
+
+## Open questions in the sideline
+
+Open questions also show as a block in the sideline, pinned above the court block. The block reads `fno-agents needs --items`, not the feed: the feed shows a question's history, and the block shows only what is open. An answer picked in the block's overlay records `sink: mux`, and the row shows the delivery rung for 15 minutes. See [attention-items](attention-items.md) for the delivery ladder.
 
 `e` in the mux client toggles the full-height panel on the right edge. Rows render newest first. The border drags to a width that persists.
 

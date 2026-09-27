@@ -14,7 +14,8 @@
 #   handoff-restore-failed <node> reason="..."                     exit 12
 #
 # Environment overrides (for testing):
-#   FNO_DIR      override .fno/ dir (default: .fno relative to cwd)
+#   FNO_DIR      pin the legacy cwd-relative .fno/ layout (production resolves
+#                the manifest and journal through `fno-agents state path`)
 #   HANDOFF_VERIFY_TIMEOUT   seconds to poll for child live status (default: 60)
 #   HANDOFF_VERIFY_INTERVAL  poll interval in seconds (default: 5)
 #
@@ -101,12 +102,62 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# Helper: resolve the fno-agents binary (env pin, then build tree, then PATH)
+# ---------------------------------------------------------------------------
+_handoff_agents_bin() {
+  if [ -n "${FNO_AGENTS_BIN:-}" ] && [ -x "${FNO_AGENTS_BIN}" ]; then
+    printf '%s' "$FNO_AGENTS_BIN"
+    return 0
+  fi
+  local _root _bin
+  _root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+  for _bin in "$_root/crates/fno-agents/target/release/fno-agents" \
+              "$_root/crates/fno-agents/target/debug/fno-agents"; do
+    if [ -x "$_bin" ]; then
+      printf '%s' "$_bin"
+      return 0
+    fi
+  done
+  _bin="$(command -v fno-agents 2>/dev/null || true)"
+  [ -n "$_bin" ] && printf '%s' "$_bin"
+}
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+_FNO_DIR_EXPLICIT="${FNO_DIR+x}"
 FNO_DIR="${FNO_DIR:-.fno}"
 STATE_FILE="$FNO_DIR/target-state.md"
 EVENTS_FILE="$FNO_DIR/events.jsonl"
-ARTIFACTS_DIR="$FNO_DIR/artifacts/handoff"
+
+# The manifest and the journal live in the project space, not the checkout:
+# init writes <space>/worktrees/<name>/target-state.md through fno.paths, and
+# every other reader resolves it with `fno-agents state path`. The bare
+# cwd-relative defaults above parked every self-handoff from a space-keyed
+# worktree ("manifest .fno/target-state.md not found", exit 10). An explicit
+# FNO_DIR is the test override and keeps the cwd-relative layout verbatim; an
+# fno-agents that cannot answer (missing binary, pre-verb install) falls back
+# to the same layout rather than parking blind.
+if [ -z "$_FNO_DIR_EXPLICIT" ]; then
+  _AGENTS_BIN="$(_handoff_agents_bin)"
+  if [ -n "$_AGENTS_BIN" ]; then
+    _RESOLVED="$("$_AGENTS_BIN" state path target-state 2>/dev/null)" \
+      && [ -n "$_RESOLVED" ] && STATE_FILE="$_RESOLVED"
+    _RESOLVED="$("$_AGENTS_BIN" state path events 2>/dev/null)" \
+      && [ -n "$_RESOLVED" ] && EVENTS_FILE="$_RESOLVED"
+  fi
+fi
+# Custody belt for a manifest an older init wrote into the checkout (the
+# paths.target_state_path_or_legacy fallback): handoff follows the file that
+# exists.
+if [ ! -f "$STATE_FILE" ] && [ -f "$FNO_DIR/target-state.md" ]; then
+  STATE_FILE="$FNO_DIR/target-state.md"
+fi
+# Session-keyed siblings live beside the manifest; shared diagnostics beside
+# the journal.
+SESSION_DIR="$(dirname "$STATE_FILE")"
+DIAG_DIR="$(dirname "$EVENTS_FILE")"
+ARTIFACTS_DIR="$SESSION_DIR/artifacts/handoff"
 
 # Poll tuning (env-overridable for tests)
 VERIFY_TIMEOUT="${HANDOFF_VERIFY_TIMEOUT:-60}"
@@ -342,7 +393,7 @@ if [ "$_CLAIM_HOLDER_ACTUAL" != "$CLAIM_HOLDER" ]; then
 fi
 
 # Per-session sentinel: refuse double-handoff
-SENTINEL="$FNO_DIR/.handoff-done-$SESSION_ID"
+SENTINEL="$SESSION_DIR/.handoff-done-$SESSION_ID"
 if [ -f "$SENTINEL" ]; then
   echo "parked $NODE_ID reason=\"handoff already completed for this session (idempotent refusal)\""
   exit "$_EXIT_PARKED"
@@ -913,26 +964,14 @@ _emit_event "session_satisfied" \
 # writes ONLY the ledger row (stamp/graduate/handoff stay the SUCCESSOR's job)
 # and emits session_finalized for observability. Best-effort: failure never
 # blocks the committed delegation. Resolve fno-agents the same way the shim does.
-_ABI_AGENTS_BIN=""
-if [ -n "${FNO_AGENTS_BIN:-}" ] && [ -x "${FNO_AGENTS_BIN}" ]; then
-  _ABI_AGENTS_BIN="$FNO_AGENTS_BIN"
-else
-  _REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-  if [ -x "${_REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]; then
-    _ABI_AGENTS_BIN="${_REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-  elif [ -x "${_REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]; then
-    _ABI_AGENTS_BIN="${_REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-  elif command -v fno-agents >/dev/null 2>&1; then
-    _ABI_AGENTS_BIN="$(command -v fno-agents)"
-  fi
-fi
+_ABI_AGENTS_BIN="$(_handoff_agents_bin)"
 if [ -n "$_ABI_AGENTS_BIN" ]; then
   "$_ABI_AGENTS_BIN" finalize \
     --state "$ARCHIVED_STATE" \
     --cwd "$PWD" \
     --reason delegated \
     --events "$EVENTS_FILE" \
-    >>"$FNO_DIR/finalize.stderr.log" 2>&1 \
+    >>"$DIAG_DIR/finalize.stderr.log" 2>&1 \
     || echo "handoff: WARN: finalize (delegated ledger record) exited non-zero; paper-trail row may be missing (non-blocking)" >&2
 else
   echo "handoff: WARN: fno-agents binary not found; skipping delegated ledger record (non-blocking)" >&2
@@ -1008,7 +1047,7 @@ true  # python3 best-effort; rc ignored
 
 # 8e. Touch per-session sentinel; clear any PreCompact arming marker (guard c).
 touch "$SENTINEL"
-rm -f "$FNO_DIR/.handoff-armed-$SESSION_ID"
+rm -f "$SESSION_DIR/.handoff-armed-$SESSION_ID"
 
 # ---------------------------------------------------------------------------
 # Step 8 complete: print delegated line (step 9 is the calling LLM's job)

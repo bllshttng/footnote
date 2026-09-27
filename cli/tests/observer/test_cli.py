@@ -10,6 +10,7 @@ replay tool-fault path, and the one hard failure: an isolation violation.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 import typer
@@ -54,9 +55,9 @@ def _wire(monkeypatch, tmp_path, items):
 
 
 def _events(path):
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def _good_plan(tmp_path, name):
@@ -168,6 +169,84 @@ def test_sweep_partial_when_an_item_is_unscorable(monkeypatch, tmp_path):
     payload = json.loads(r.output)
     assert payload["state"] == "partial"
     assert payload["coverage_pct"] == 90  # 9 of 10 scored
+
+
+# --------------------------------------------------------------------------- #
+# review sweep reads the attestation evidence
+# --------------------------------------------------------------------------- #
+
+def _wire_review(monkeypatch, tmp_path, items, by_id, stdout, returncode=0):
+    """Redirect events + digest into tmp; inject corpus + stub the binary round-trip."""
+    import fno.paths as paths
+    events_path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(cli, "_events_paths", lambda: [events_path])
+    monkeypatch.setattr(cli, "_load_corpus", lambda skill, since: ({"items": items, "attributed": len(items)}, by_id))
+    monkeypatch.setattr(paths, "observer_reports_dir", lambda *a, **k: tmp_path / "reports")
+    monkeypatch.setattr(cli, "find_dev_binary", lambda: "/fake/fno-agents")
+    captured = {}
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if "review-summary" not in cmd:
+            return real_run(cmd, *a, **k)  # event-store commits keep their real path
+        captured["payload"] = json.loads(k.get("input") or "{}")
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    return captured, events_path
+
+
+def test_sweep_review_reads_evidence_and_digest_names_it(monkeypatch, tmp_path):
+    """One binary round-trip classifies every item; the digest carries the
+    evidence line verbatim after the verdicts line (AC2-HP)."""
+    items = [_item(f"s{i}", f"x-{i}", None) for i in range(10)]
+    by_id = {f"x-{i}": {"id": f"x-{i}", "pr_number": 100 + i} for i in range(10)}
+    states = ["scored", "clean", "no_pr"] + ["no_attestation"] * 7
+    ev_items = [
+        {"node": f"x-{i}", "pr_number": 100 + i, "state": s, "finding_precision": "pass" if s == "scored" else None}
+        for i, s in enumerate(states)
+    ]
+    evidence_line = "evidence: scored=1 clean=1 missing=8 (no_node=0 no_pr=1 no_attestation=7)"
+    captured, events_path = _wire_review(
+        monkeypatch, tmp_path, items, by_id,
+        json.dumps({"items": ev_items, "evidence_line": evidence_line, "counts": {}}),
+    )
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "review"])
+    assert r.exit_code == 0, r.output
+    payload = captured["payload"]
+    assert payload == [{"node": f"x-{i}", "pr_number": 100 + i} for i in range(10)]
+    findings = [e for e in _events(events_path) if e["type"] == "skill_eval_finding"]
+    assert len(findings) == 1
+    assert findings[0]["data"]["dimension"] == "finding_precision"
+    assert findings[0]["data"]["verdict"] == "pass"
+    digest = list((tmp_path / "reports").glob("review-*.md"))[0].read_text()
+    assert evidence_line in digest
+    assert digest.index("verdicts:") < digest.index(evidence_line)
+    assert evidence_line in r.output
+
+
+def test_sweep_review_unread_evidence_names_the_fault(monkeypatch, tmp_path):
+    """A failed binary round-trip leaves every item a gap, names the fault in
+    the digest, and fabricates no verdict (AC2-ERR)."""
+    items = [_item(f"s{i}", f"x-{i}", None) for i in range(10)]
+    by_id = {f"x-{i}": {"id": f"x-{i}", "pr_number": 100 + i} for i in range(10)}
+    captured, events_path = _wire_review(monkeypatch, tmp_path, items, by_id, "{}", returncode=1)
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "review"])
+    assert r.exit_code == 0, r.output
+    assert r.output.startswith("partial:")
+    digest = list((tmp_path / "reports").glob("review-*.md"))[0].read_text()
+    assert "evidence: unread (fno-agents review-summary --evidence failed)" in digest
+    assert not [e for e in _events(events_path) if e["type"] == "skill_eval_finding"]
+
+
+def test_sweep_blueprint_digest_has_no_evidence_line(monkeypatch, tmp_path):
+    """The evidence line is review-only: a blueprint digest never carries one (AC2-EDGE)."""
+    items = [_item(f"s{i}", f"x-{i}", _good_plan(tmp_path, f"p{i}.md")) for i in range(10)]
+    _wire(monkeypatch, tmp_path, items)
+    r = runner.invoke(cli.observer_app, ["sweep", "--skill", "blueprint"])
+    assert r.exit_code == 0, r.output
+    digest = list((tmp_path / "reports").glob("blueprint-*.md"))[0].read_text()
+    assert "evidence:" not in digest
 
 
 # --------------------------------------------------------------------------- #

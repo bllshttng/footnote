@@ -55,9 +55,9 @@ def _subject_node_id(subject: str, entries: Optional[list] = None) -> Optional[s
         # matcher's answer for the same subject.
         subject = subject.strip()
         if entries is None:
-            entries = _graph_entries()
-        return _resolved_node(subject, entries) or _resolved_node(
-            subject.strip().casefold(), entries
+            entries = _graph_entries() or None
+        return _resolved_node(subject, entries or []) or _resolved_node(
+            subject.strip().casefold(), entries or []
         )
     except Exception:  # noqa: BLE001 - an advisory hint is never the answer
         return None
@@ -334,8 +334,8 @@ def _record(
     # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
-            f"decide: recorded {did}; subject names no graph node, so no "
-            f"projection was written (the event and the index are the record). "
+            f"decide: recorded {did}; no projection was written because "
+            f"{result['projection']} (the event and the index are the record). "
             f"Recover with: fno backlog decisions {subject}",
             err=True,
         )
@@ -434,87 +434,57 @@ def backlog_decide(
     )
 
 
-def _retract(
-    *,
-    decision_id: str,
-    reason: Optional[str],
-    authority: Optional[str],
-    origin: Optional[str],
-) -> None:
-    from fno.decide import (
-        AUTHORITY_SOURCES,
-        IndexWriteError,
-        RefusedAuthorityError,
-        UnattributedAuthorityError,
-        UnknownOriginError,
-        retract_decision,
-    )
-
-    if authority is not None and authority not in AUTHORITY_SOURCES:
-        typer.echo(
-            f"backlog decide-retract: --authority '{authority}' is not one of "
-            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was recorded.",
-            err=True,
-        )
-        raise typer.Exit(2)
-    try:
-        result = retract_decision(
-            decision_id=decision_id,
-            reason=reason or "",
-            authority_source=authority,
-            origin=origin,
-        )
-    except OSError as exc:
-        typer.echo(
-            f"backlog decide-retract: cannot read the decision index: {exc}. "
-            "Restore the index or run `fno backlog decide-reindex`; no "
-            "retraction was recorded.",
-            err=True,
-        )
-        raise typer.Exit(1) from exc
-    except (KeyError, ValueError) as exc:
-        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
-        raise typer.Exit(2)
-    except UnknownOriginError as exc:
-        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
-        raise typer.Exit(3)
-    except RefusedAuthorityError as exc:
-        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
-        raise typer.Exit(3)
-    except UnattributedAuthorityError as exc:
-        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
-        raise typer.Exit(3)
-    except IndexWriteError as exc:
-        typer.echo(
-            f"backlog decide-retract: durable retraction for {exc.decision_id} "
-            f"was written, but the recall store append failed: {exc}. Run "
-            "`fno backlog decide-reindex`; do not retry the retraction.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    typer.echo(
-        f"backlog decide-retract: retracted {result['decision_id']}. "
-        "The original decision remains in the append-only history.",
-        err=True,
-    )
-    typer.echo(result["decision_id"])
-
-
-@shim_app.command("retract")
-def retract_cmd(
-    decision_id: str = typer.Argument(..., help="Decision id to retract."),
+def backlog_decide_retract(
+    decision_id: str = typer.Argument(..., help="Subject or decision id to retract."),
     reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Why it no longer counts."),
     authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
     origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
 ) -> None:
-    """Append a durable retraction. Retractions are append-only and have no inverse."""
-    _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
+    """Compatibility forward to the native retract door (fno-agents).
 
+    The retraction logic is native; this leaf exists so the old spellings
+    keep resolving and the pinned surface sets do not shift. Retractions
+    are append-only and have no inverse.
+    """
+    import os
 
-# One body, two registered surfaces: shim `retract` and the hidden legacy
-# `decide-retract` (graph/cli.py). The alias is the second registration.
-backlog_decide_retract = retract_cmd
+    if origin is not None:
+        typer.echo(
+            "backlog decide-retract: --origin is retired: the native door "
+            "takes no origin. Nothing was recorded.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "backlog decide-retract: refused: the fno-agents binary is "
+            "unavailable (set FNO_AGENTS_BIN, or install fno-agents beside "
+            "fno).",
+            err=True,
+        )
+        raise typer.Exit(3)
+    # A binary older than the native arm forwards right back here; break the
+    # cycle with the one line that names the fix instead of exec-spinning.
+    # The sentinel value is one this leaf mints, never a bare truthy flag, so
+    # an unrelated export of the variable cannot trip the guard.
+    if os.environ.get("FNO_BACKLOG_FORWARD") == "backlog-decide-retract":
+        typer.echo(
+            "backlog decide-retract: the resolved fno-agents binary predates "
+            "the native decide-retract arm. Run `fno doctor update --rust` or "
+            "rebuild fno-agents, then retry.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    argv = [str(binary), "backlog", "decide-retract", decision_id]
+    if reason:
+        argv += ["--reason", reason]
+    if authority:
+        argv += ["--authority", authority]
+    os.environ["FNO_BACKLOG_FORWARD"] = "backlog-decide-retract"
+    os.execv(str(binary), argv)
 
 
 @shim_app.command("list")
@@ -710,7 +680,7 @@ def _render_markdown(report: dict) -> str:
         for row in report.get("decisions", []):
             lines.append(
                 f"- `{row.get('decision_id', '')}` **{row.get('lifecycle', '')}** "
-                f"({row.get('lane', '')}, {row.get('ts', '')}): {row.get('decision', '')}"
+                f"({row.get('lane', '')}, {row.get('ts', '')}, {row.get('scope') or 'project:fno'}): {row.get('decision', '')}"
             )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -791,7 +761,7 @@ def _list_decisions(
         if subject:
             from fno.decide import _graph_entries
 
-            entries = _graph_entries()
+            entries = _graph_entries() or None  # strict lifecycle retry for an empty read
         label, found, damaged = list_decisions(
             subject,
             limit=None,
@@ -813,6 +783,12 @@ def _list_decisions(
         typer.echo(f"backlog decisions: {exc}", err=True)
         raise typer.Exit(1)
 
+    if unknown := [row for row in found if row.get("lifecycle") == "unknown"]:
+        typer.echo(
+            f"backlog decisions: {unknown[0].get('lifecycle_reason')}, "
+            f"so {len(unknown)} coord ruling(s) read UNKNOWN, not unscoped.",
+            err=True,
+        )
     decisions = found[:limit] if limit > 0 else found
     truncated = len(decisions) < len(found)
     # Computed for EVERY subject read, not only an empty one. The specimen this
@@ -820,7 +796,7 @@ def _list_decisions(
     # four rulings filed under ` scope`. A near-miss scan that only runs
     # when the answer is empty would have stayed silent on exactly that case,
     # and a partial answer reads as a whole one.
-    near = near_miss_subjects(subject, entries=entries) if subject else []
+    near = near_miss_subjects(subject, entries=entries or []) if subject else []
 
     # Plan rulings: sibling plans whose consolidation.rejected names this
     # node. The index cannot hold them, so this scan is the one surface the
@@ -961,10 +937,12 @@ def _list_decisions(
                 return
 
         from fno import paths
+        from fno.events.store_client import store_db_path
 
+        index_path = Path(paths.decisions_jsonl())
         hint = (
             ""
-            if Path(paths.decisions_jsonl()).exists()
+            if index_path.exists() or store_db_path(index_path).exists()
             else " (no index yet on this machine - run `fno backlog "
             "decide-reindex` to backfill what is already on disk)"
         )

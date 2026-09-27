@@ -183,7 +183,7 @@ fn squad_store_reads_the_legacy_file_under_a_global_state_dir() {
     let out = cmd.args(["mux", "doctor"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
-        stdout.contains("1 orphaned squad(s)"),
+        stdout.contains("1 orphaned workspace(s)"),
         "both legacy squads must load through the fallback; got: {stdout}"
     );
 }

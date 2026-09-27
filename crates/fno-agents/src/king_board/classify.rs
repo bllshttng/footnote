@@ -559,6 +559,30 @@ mod tests {
     }
 
     #[test]
+    fn a_recovered_closed_row_driver_reads_active_through_the_roster() {
+        // The specimen: the drivers feed recovers an unstamped live worker
+        // through a PR-bound entry's closed do row. The verdict must ride the
+        // existing roster fold - no new predicate, no second openness
+        // spelling.
+        let node = json!({"id": "x-cccc", "priority": "p1", "pr_number": 2126});
+        let drivers = drivers_read(json!([driver_row("x-cccc", "uuid-cccc")]));
+        let mut activity = HashMap::new();
+        activity.insert("uuid-cccc".to_string(), probe("working", 30.0));
+        assert_eq!(
+            node_driver(
+                &node,
+                &HashMap::new(),
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "active"
+        );
+    }
+
+    #[test]
     fn an_unknown_reading_without_aged_silence_stays_unmeasured() {
         // The demotion needs BOTH the positive-silence basis and the age past
         // the stall line. A young silence, a dated but non-silent basis, or a

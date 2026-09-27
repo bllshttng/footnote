@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping, NamedTuple
 
@@ -80,6 +81,7 @@ def read_roster(
             "pid": getattr(r, "pid", None),
             "pid_start_time": getattr(r, "pid_start_time", None),
             "mux": getattr(r, "mux", None),
+            "stopped_at": getattr(r, "stopped_at", None),
         }
         if r.node:
             index.setdefault(r.node, []).append(entry)
@@ -144,6 +146,11 @@ def _worker_reachability(worker: dict):
     falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None
     if falsifier is None:
         falsifier = pane_falsifier(worker.get("mux"))
+    stamp = worker.get("stopped_at")
+    try:
+        stop_epoch = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if stamp else None
+    except (AttributeError, ValueError):
+        stop_epoch = None
     if facts is None:
         # No transcript: the supervisor word is the only evidence. An active
         # word stays reachable; a terminal word positively ended the row.
@@ -161,6 +168,8 @@ def _worker_reachability(worker: dict):
     age = int(max(0.0, time.time() - facts.last_event_epoch))
     if falsifier is not None and age <= TRANSCRIPT_EVIDENCE_S:
         falsifier = None
+    if stop_epoch is not None and facts.last_event_epoch <= stop_epoch:
+        falsifier = f"stopped:{worker.get('stopped_at')}"
     if falsifier is None and age > TRANSCRIPT_EVIDENCE_S and state in _finished_row_states():
         # A terminal word with a silent tail is positive evidence of the end.
         falsifier = f"finished-state:{state}"

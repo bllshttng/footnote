@@ -7,15 +7,16 @@ winner parity. Every test points the seam at a contradictory local graph file:
 if selection ever answered from it, the sentinels give the test away.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -82,6 +83,52 @@ class FakeTracker:
     def close(self, id):
         raise AssertionError("close is not part of selection")
 
+    def _call(self, op, id=None):
+        """The door-shaped document: open entries joined with sidecar fields,
+        closed rows as tombstones."""
+        assert op == "snapshot"
+        import fno.tracker.sidecar as sidecar_store
+
+        entries = []
+        for c in self.list_open():
+            try:
+                sc = sidecar_store.load(c.id)
+            except Exception as exc:
+                raise RuntimeError(f"sidecar read failed for {c.id}: {exc}")
+            entries.append({
+                "id": c.id,
+                "title": c.title,
+                "state": "open",
+                "status": _open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
+                "parent": c.parent,
+                "blocked_by": list(c.blocked_by),
+                "priority": c.priority,
+                "rank": c.rank,
+                "created_at": c.created_at,
+                "cwd": sc.cwd,
+                "plan_path": sc.plan_path,
+                "pr_number": sc.pr_number,
+                "pr_url": sc.pr_url,
+                "additional_prs": sc.additional_prs,
+                "batch": sc.batch,
+                "contained_in": sc.contained_in,
+                "sessions": sc.sessions,
+                "claimed_at": sc.claimed_at,
+                "cost_usd": sc.cost_usd,
+            })
+        for r in self._rows:
+            if r.get("state", "open") != "open":
+                entries.append(
+                    {"id": r["id"], "state": "closed", "status": "done", "completed_at": "closed"}
+                )
+        return {"backend": self.name, "entries": entries}
+
+
+def _open_status(*, pr_number, plan_path):
+    if pr_number:
+        return "in_review"
+    return "ready" if plan_path else "idea"
+
 
 def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     """Point tracker, sidecar store, claims, and the local graph at fakes."""
@@ -99,11 +146,11 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
                         lambda i: sidecar_dir / f"{i}.json")
     # The contradictory local graph: every value here must never surface.
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": r["id"], "title": "GRAPH-SENTINEL", "cwd": "/graph-cwd",
          "status": "ready", "priority": "p0"}
         for r in rows
-    ]}), encoding="utf-8")
+    ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
@@ -117,6 +164,23 @@ def _rows_basic():
         {"id": "EXT-lo", "title": "Low prio leaf", "priority": "p3",
          "created_at": _days_ago(1)},
     ]
+
+
+def test_next_never_selects_a_closed_tombstone(tmp_path, monkeypatch):
+    """AC10-HP: a closed row rides the snapshot as a tombstone; selection
+    filters it out even when it ranks first."""
+    rows = [
+        {"id": "EXT-done", "title": "Already closed", "priority": "p0",
+         "state": "closed", "created_at": _days_ago(1)},
+        {"id": "EXT-hi", "title": "High prio leaf", "priority": "p1",
+         "created_at": _days_ago(2)},
+    ]
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+    })
+    r = runner.invoke(app, ["backlog", "next"], catch_exceptions=False)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
 
 
 def test_next_joins_once_and_ranks_over_the_open_set(tmp_path, monkeypatch):
@@ -199,7 +263,7 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
     never crosses in a sidecar."""
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": "ab-aaa00001", "title": "Leaf under epic", "status": "ready",
          "priority": "p2", "parent": "ab-eee00001",
          "created_at": _days_ago(2), "plan_path": "/p/1.md"},
@@ -208,7 +272,7 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
          "plan_path": "/p/2.md"},
         {"id": "ab-eee00001", "title": "The epic", "status": "ready",
          "priority": "p3", "created_at": _days_ago(3)},
-    ]}), encoding="utf-8")
+    ]}))
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -274,7 +338,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
         "EXT-hi": {"plan_path": "/plans/hi.md"},
         "EXT-lo": {"plan_path": "/plans/lo.md"},
     })
-    before = g.read_text()
+    before = read_graph_strict(g)
 
     r = runner.invoke(
         app, ["backlog", "next", "--claim", "sess-ext-1"],
@@ -283,8 +347,7 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     assert r.exit_code == 0, r.output
     doc = json.loads(r.output)
     assert doc["id"] == "EXT-hi"
-    # The graph file is untouched.
-    assert g.read_text() == before
+    assert read_graph_strict(g) == before
     # The claim exists in the claims dir under the opaque id.
     claims_root = tmp_path / "claims"
     locks = list(claims_root.rglob("*EXT-hi*"))

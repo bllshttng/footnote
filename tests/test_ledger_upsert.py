@@ -39,9 +39,25 @@ def test_upsert_creates_minimal_backstop_row(tmp_path):
     assert r["pr_number"] == 101
     assert r["pr_url"] == "http://pr/101"
     assert r["project"] == "fno"
-    assert r["completed"] == "2026-07-18T00:00:00Z"
+    # _utc_iso normalizes every completed stamp to aware UTC +00:00.
+    assert r["completed"] == "2026-07-18T00:00:00+00:00"
     assert r["backstop"] is True
     assert r["termination_reason"] == "reconcile-backstop"
+
+
+def test_upsert_backstop_row_carries_join_key(tmp_path):
+    # The plan-fidelity gate joins on _plan_key(plan_path, project) with the
+    # remote slug; a created backstop without both is invisible to the join
+    # and the planning row stays unjoined.
+    ledger = _point_ledger_at(tmp_path)
+    out = register_task.upsert_ledger_pr(
+        "x-hhhh", 808, "http://pr/808", "footnote", "2026-07-18T00:00:00Z",
+        plan_path="internal/fno/plans/x-hhhh/00-INDEX.md",
+    )
+    assert out == "created"
+    r = _rows(ledger)[0]
+    assert r["plan_path"] == "internal/fno/plans/x-hhhh/00-INDEX.md"
+    assert r["project"] == "footnote"
 
 
 def test_upsert_stamps_null_pr_row_without_clobbering(tmp_path):
@@ -95,6 +111,29 @@ def test_upsert_never_stamps_a_failed_attempt(tmp_path):
     delivery = next(r for r in rows if r.get("backstop"))
     assert failed["pr_number"] is None  # NOT stamped
     assert delivery["pr_number"] == 707
+
+
+# --- project key for the backstop row -------------------------------------
+
+def test_ledger_project_prefers_the_remote_slug(tmp_path, monkeypatch):
+    import fno.graph._intake as intake
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(intake, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(
+        paths_mod, "_slug_from_git_remote",
+        lambda root: "footnote" if str(root) == "/repo" else None,
+    )
+    assert register_task.ledger_project_for({"project": "fno"}) == "footnote"
+
+
+def test_ledger_project_falls_back_to_the_node_field(tmp_path, monkeypatch):
+    import fno.graph._intake as intake
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(intake, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(paths_mod, "_slug_from_git_remote", lambda root: None)
+    assert register_task.ledger_project_for({"project": "fno"}) == "fno"
 
 
 # --- US2: collapse rule in append_to_tasks_json ---------------------------

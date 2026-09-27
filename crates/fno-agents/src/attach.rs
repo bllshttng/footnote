@@ -10,10 +10,10 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::claude_ask::ClaudeHome;
+use crate::claude_resume::claude_attach_pointer;
 use crate::client_verbs::{
-    append_agents_event, claude_attach_pointer, echo_extra, is_codex_thread_row, py_repr_str,
-    read_registry_entries, resolve_entry_with_heal, trace_events_path, validate_lifecycle_name,
-    which_on_path,
+    append_agents_event, echo_extra, is_codex_thread_row, py_repr_str, read_registry_entries,
+    resolve_entry_with_heal, trace_events_path, validate_lifecycle_name, which_on_path,
 };
 use crate::paths::AgentsHome;
 
@@ -629,6 +629,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     for (key, value) in &plan.env {
         command.env(key, value);
     }
+
+    // This client can lazily birth the claude supervisor; make sure a clean
+    // one is up first. The client command is never touched.
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
 
     // Inherit stdio so the claude TUI takes over; mirror its exit code.
     match command.status() {

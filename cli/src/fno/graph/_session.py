@@ -15,6 +15,8 @@ import typer
 from fno.claims.core import BLUEPRINT_HOLDER_PREFIX, HANDOVER_HOLDER_PREFIX
 from fno.config._dispatch_verbs import parse_verb_token
 
+_BLUEPRINT_CLAIM_TTL_MS = 2 * 60 * 60 * 1000
+
 
 def _graph_path():
     """Resolve through fno.graph.cli at call time (same seam as tests patch)."""
@@ -55,6 +57,17 @@ def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
         )
 
 
+def _own_handover_holder(session_id: str) -> str:
+    """The spawn-handover holder fno agents spawn took for this session, or ""."""
+    env = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
+    if env.startswith(HANDOVER_HOLDER_PREFIX):
+        return env
+    from fno.claims.self_identity import _roster_name_for_session
+
+    name = _roster_name_for_session(session_id)
+    return HANDOVER_HOLDER_PREFIX + name if name else ""
+
+
 def _plan_claims(plan_path: str) -> "set[str]":
     """Delegate to the single parser (``_intake.plan_claims``).
 
@@ -79,7 +92,9 @@ def cmd_session_add(
         None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
     phase: str = typer.Option(
-        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
+        ...,
+        "--phase",
+        help="Lifecycle phase: think|blueprint|execute|review|ship (do accepted for one release).",
     ),
     pr: Optional[int] = typer.Option(
         None,
@@ -143,6 +158,9 @@ def cmd_session_add(
         find_nodes_for_pr,
         stamp_session_for_pr,
     )
+    from fno.graph.types import normalize_phase
+
+    phase = normalize_phase(phase)
 
     def _open_row_to_end(node_id: str):
         """The open (phase, session) row an --ended-at append would close,
@@ -458,19 +476,28 @@ def cmd_session_open(
             err=True,
         )
         raise typer.Exit(code=1)
+    own = _own_handover_holder(eff_session)
+    if own and existing.get("holder") == own and existing.get("state") in ("live", "suspect"):
+        # fno agents spawn claimed the node for this worker: plan under that claim.
+        receipt = {"node_id": node_id, "status": "joined", "claim_key": claim_key, "holder": own}
+        typer.echo(json.dumps(receipt) if json_out else f"joined {node_id} holder={own}")
+        return
     try:
         from fno.claims.session_pid import resolve_session_pid
 
         pid = resolve_session_pid()
-    except Exception:  # noqa: BLE001 - degrade to acquire_claim's transient-pid default
+    except Exception:  # noqa: BLE001 - no durable pid; the lease and session witness hold the claim
         pid = None
     try:
         claim = acquire_claim(
             claim_key,
             holder,
             reason=f"blueprint session for {node_id}",
+            ttl_ms=_BLUEPRINT_CLAIM_TTL_MS,
             pid=pid,
+            pid_unavailable=pid is None,
             harness=eff_harness,
+            harness_session_id=eff_session,
             root=claims_root_for(claim_key),
         )
     except ClaimHeldByOther as exc:
@@ -561,7 +588,11 @@ def cmd_session_close(
         claim.get("state") != "free" and claim.get("holder") == blueprint_holder
     )
     acquired_at = claim.get("acquired_at")
-    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+    # A planner that joined its spawn's handover claim started at that claim.
+    own_claim = blueprint_held or (
+        claim.get("state") != "free" and claim.get("holder") == _own_handover_holder(eff_session)
+    )
+    if own_claim and started_at is None and isinstance(acquired_at, int):
         started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
@@ -631,10 +662,7 @@ def cmd_session_close(
         # session may not carry its own handover holder. Resolve the worker
         # name the registry binds to this session and release exactly that
         # holder; any other holder stays held.
-        from fno.claims.self_identity import _roster_name_for_session
-
-        roster_name = _roster_name_for_session(eff_session)
-        handover = HANDOVER_HOLDER_PREFIX + roster_name if roster_name else ""
+        handover = _own_handover_holder(eff_session)
         if handover and claim.get("holder") == handover:
             _release_into(receipt, claim_key, handover)
         else:
@@ -645,6 +673,27 @@ def cmd_session_close(
         typer.echo(f"blueprint closed {node_id} ({eff_harness}:{eff_session})")
         typer.echo(f"summary: {summary}")
         typer.echo(f"launch: {launch}")
+
+
+@session_app.command(
+    "backfill",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def cmd_session_backfill(ctx: typer.Context) -> None:
+    """Fill missing session starts and ends from transcripts and merge commits. Never overwrites a stamp.
+
+    A dry run by default. --apply writes the fills; --json (-J) prints the per-phase counts as JSON.
+    """
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("session backfill: the fno-agents binary was not found.", err=True)
+        raise typer.Exit(code=2)
+    argv = [str(binary), "session-backfill", "--graph", str(_graph_path()), *ctx.args]
+    raise typer.Exit(code=subprocess.run(argv, check=False).returncode)
 
 
 @session_app.command("reap-open")
@@ -659,10 +708,10 @@ def cmd_session_reap_open(
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
     phase: str = typer.Option(
-        "do",
+        "execute",
         "--phase",
         help=(
-            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
+            "Lifecycle phase of the open row. 'execute' removes the row (it wedges "
             "node status); any other phase (a spawn-opened review row) fills "
             "ended_at and keeps the provenance; 'all' settles every open row "
             "carrying the identity (the death-cascade spelling)."
@@ -670,13 +719,15 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open execute row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph import api as graph_api
     from fno.graph.api import wire_rows
     from fno.graph.store import reap_open_session_record
-    from fno.graph.types import SESSION_PHASES
+    from fno.graph.types import SESSION_PHASES, normalize_phase
+
+    phase = normalize_phase(phase)
 
     if node is None:
         try:
@@ -767,4 +818,3 @@ def cmd_session_reap_open(
             f"row_closed={receipt.get('row_closed')} "
             f"status={receipt['status_after']} remaining_open_do={remaining}"
         )
-

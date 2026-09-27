@@ -92,6 +92,27 @@ if [[ -f "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh" ]]; then
     source "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh"
 fi
 
+# The fno-agents binary resolver, shared with the hooks. The canonical copy is
+# hooks/lib/agents-bin.sh; this same-shape inline fallback covers a partial
+# deploy whose hooks tree is not beside the scripts tree.
+if [[ -f "${_WT_LIFECYCLE_DIR}/../../hooks/lib/agents-bin.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/../../hooks/lib/agents-bin.sh"
+else
+    fno_agents_bin() {
+        local root="${1:-.}"
+        if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+            printf '%s' "$FNO_AGENTS_BIN"
+        elif [[ -x "$root/crates/fno-agents/target/release/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/release/fno-agents"
+        elif [[ -x "$root/crates/fno-agents/target/debug/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/debug/fno-agents"
+        else
+            command -v fno-agents || printf ''
+        fi
+    }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? The manifest's `status:` field (legacy era) was once
@@ -398,6 +419,7 @@ _reap_jobs() {
         if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; fi
     } | sort -u | while IFS= read -r job; do
         [[ -z "$job" ]] && continue
+        # retired-ok: the reaper's own shellout to the harness; no reader copies it
         if claude rm "$job" >/dev/null 2>&1; then
             echo "  reaped bg-job record $job (worktree archived)" >&2
         else
@@ -475,27 +497,6 @@ _cargo_target_inventory() {
         done
         shopt -u nullglob
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
-    # Build-base hash dirs: cargo writes intermediates at
-    # <base>/<h2>/<hash> under build.build-dir (the hash dir is one
-    # segment deep: an h2 shard, then the hash itself), outside every
-    # checkout, so the worktree walk above never sees them. Rows carry
-    # wt=build-base; _cargo_target_cleanup protects the dirs live
-    # workspaces resolve to and never deletes here when that resolution
-    # is unverifiable.
-    local base hash
-    base="$(_cargo_build_base)"
-    if [[ -d "$base" ]]; then
-        shopt -s nullglob
-        for hash in "$base"/*/*/; do
-            [[ -d "$hash" ]] || continue
-            hash="${hash%/}"
-            [[ -f "$hash/CACHEDIR.TAG" ]] || continue
-            bytes="$(_cargo_target_bytes "$hash")"
-            mtime="$(_cargo_target_mtime "$hash")"
-            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "-" "build-base" "$hash" >> "$output"
-        done
-        shopt -u nullglob
-    fi
 }
 
 _cargo_target_registered() {
@@ -503,34 +504,8 @@ _cargo_target_registered() {
     git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}' | grep -Fqx "$wanted"
 }
 
-_cargo_live_build_dirs() {
-    # Resolved build_directory (cargo metadata, one call per workspace) of
-    # every live registered worktree, one path per line. cargo >= 1.91
-    # reports the field the tracked config's build-dir lands in. Exit 1 when
-    # any read fails: the caller must then treat EVERY build-base dir as
-    # protected, because a blind sweep is the one mistake this lane cannot
-    # undo.
-    local wt manifest
-    while IFS= read -r wt; do
-        _wt_live "$wt" || continue
-        for manifest in "$wt"/crates/*/Cargo.toml; do
-            [[ -f "$manifest" ]] || continue
-            cargo metadata --format-version 1 --no-deps --manifest-path "$manifest" 2>/dev/null \
-                | grep -o '"build_directory"[[:space:]]*:[[:space:]]*"[^"]*"' \
-                | sed 's/.*:[[:space:]]*"//; s/"$//' || return 1
-        done
-    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
-}
-
 _cargo_target_path_is_owned() {
     local wt="$1" target="$2" resolved=""
-    if [[ "$wt" == "build-base" ]]; then
-        # A hash-dir row: owned iff it still sits under a managed base and
-        # carries cargo's tag. Registration is the base itself.
-        [[ -d "$target" ]] || return 1
-        _cargo_cache_dir_owned "$target" || return 1
-        return 0
-    fi
     case "$target" in
         "$wt/target"|"$wt"/crates/*/target) ;;
         *) return 1 ;;
@@ -623,6 +598,19 @@ _cargo_target_cleanup() {
         return 1
     fi
 
+    # Build-base rows are the Rust lane's answer now: `fno-agents reclaim
+    # cargo-build-dirs` sweeps both bases env-independently, matching by
+    # CACHEDIR.TAG, base, and member fingerprint. A missing binary skips, never
+    # fails: the in-checkout half below still runs.
+    local _build_base_bin
+    _build_base_bin="$(fno_agents_bin "${MAIN_DIR:-$(pwd)}")"
+    if [[ -z "$_build_base_bin" ]]; then
+        printf 'cargo-target build-base skipped reason=fno-agents-missing\n'
+    else
+        # shellcheck disable=SC2086  # one optional flag, by contract
+        "$_build_base_bin" reclaim cargo-build-dirs ${apply:+--apply} || true
+    fi
+
     # The absolute cap alone is a floor the sweep defends on a nearly full
     # disk (measured live: 63 GiB allocated, 4.2 GB free, "ok", 0 reaped).
     # The effective ceiling is min(absolute cap, free-share percent of free
@@ -649,33 +637,12 @@ _cargo_target_cleanup() {
     before_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
     projected_after="$before_bytes"
 
-    # Build-base protection: the hash dirs LIVE workspaces resolve to. An
-    # unreadable resolution (no cargo, a bad manifest) marks every build-base
-    # row unverifiable - protected this run, never deleted blind.
-    local live_build_dirs="" build_dirs_unverifiable=0
-    if ! live_build_dirs="$(_cargo_live_build_dirs)"; then
-        build_dirs_unverifiable=1
-        live_build_dirs=""
-    fi
-
     while IFS=$'\t' read -r mtime bytes protection wt target; do
         [[ -n "$target" ]] || continue
         if [[ "$protection" != "-" ]]; then
             protected=$((protected + 1))
             printf 'cargo-target protected bytes=%s reason=%s path=%s\n' "$bytes" "$protection" "$target"
             continue
-        fi
-        if [[ "$wt" == "build-base" ]]; then
-            if [[ "$build_dirs_unverifiable" == "1" ]]; then
-                protected=$((protected + 1))
-                printf 'cargo-target protected bytes=%s reason=build-dir-unverifiable path=%s\n' "$bytes" "$target"
-                continue
-            fi
-            if printf '%s\n' "$live_build_dirs" | grep -Fqx "$target"; then
-                protected=$((protected + 1))
-                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
-                continue
-            fi
         fi
         printf '%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" >> "$candidates"
     done < "$inventory"
@@ -717,38 +684,10 @@ _cargo_target_cleanup() {
 
     mode="apply"
     _wt_refresh_cwd_snapshot || true
-    # Re-resolve live workspaces' build dirs for the delete pass: selection
-    # and deletion are separate walks over the same inventory, and a session
-    # that went live in between must find its hash dir protected here too.
-    local apply_live_dirs="" apply_unverifiable=0
-    if ! apply_live_dirs="$(_cargo_live_build_dirs)"; then
-        apply_unverifiable=1
-        apply_live_dirs=""
-    fi
     while IFS=$'\t' read -r mtime bytes wt target reason; do
         [[ -n "$target" ]] || continue
         if ! _cargo_target_path_is_owned "$wt" "$target"; then
             printf 'cargo-target kept bytes=%s reason=ownership-recheck path=%s\n' "$bytes" "$target"
-            continue
-        fi
-        if [[ "$wt" == "build-base" ]]; then
-            # Registration recheck does not apply (the base is the registrar)
-            # and there is no cwd to be rooted in; the live guard is the
-            # resolved-dir membership above, re-read for this pass.
-            if [[ "$apply_unverifiable" == "1" ]] \
-                || printf '%s\n' "$apply_live_dirs" | grep -Fqx "$target"; then
-                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
-                protected=$((protected + 1))
-                continue
-            fi
-            _srm -rf -- "$target"
-            if [[ ! -e "$target" ]]; then
-                printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
-                reaped=$((reaped + 1))
-                reclaimed=$((reclaimed + bytes))
-            else
-                printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
-            fi
             continue
         fi
         if ! _cargo_target_registered "$wt"; then
@@ -1145,12 +1084,24 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0; N_DONE=0
+            # The done-node arm is a MERGED-mode authority: a tree
+            # whose node reads done/superseded (or, node-less, whose branch is
+            # merged) with clean tracked content may go, branch kept, untracked
+            # files salvaged first. Other sweep modes and the daemon probes
+            # never set it.
+            WT_REAPABLE_DONE_NODE=1
+            # Every tree git reports minus the canonical checkout, counted
+            # before the --prefix filter: a truncated read must never be
+            # indistinguishable from a partial sweep.
+            N_ENUM=0
 
             _wt_refresh_cwd_snapshot || true
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
                 [[ "$wt" == "$MAIN_DIR" ]] && continue
+
+                N_ENUM=$((N_ENUM + 1))
 
                 branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
                 head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '')"
@@ -1193,6 +1144,15 @@ case "${1:-status}" in
                     fi
                     printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
+                # 1b. The done-node receipt: the gate said yes BECAUSE
+                #     the node reads done/superseded (or the branch is merged)
+                #     and nothing untracked goes unsalvaged. Step 2's merged
+                #     filter is subsumed by the arm's evidence; the live-session
+                #     and process checks below still run.
+                reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                DN_FLAG=""
+                if [[ "$reason" == "done-node" ]]; then
+                    N_DONE=$((N_DONE + 1)); DN_FLAG="--done-node"
                 # 2. merged into origin/main? A detached HEAD is judged by
                 #    content, not by the branch-name proxy: the tree is kept
                 #    only while it holds commits no remote carries
@@ -1201,7 +1161,7 @@ case "${1:-status}" in
                 #    meant the disk-reclaim verb could never reap the
                 #    population that grows. Branched trees keep the
                 #    merged-or-upstream logic below unchanged.
-                if [[ "$branch" == "HEAD" || -z "$head" ]]; then
+                elif [[ "$branch" == "HEAD" || -z "$head" ]]; then
                     if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
                         # The fail-safe count (1) is indistinguishable from a
                         # real one in the status column, so the row names an
@@ -1261,7 +1221,9 @@ case "${1:-status}" in
                 # explicit --dry-run wins even if --apply was also passed
                 # (a safety wrapper appending --dry-run must never be ignored).
                 if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
-                    printf '%-18s %-34s %s\n' "would-archive" "$branch" "$wt"
+                    DN_LABEL="would-archive"
+                    [[ -n "$DN_FLAG" ]] && DN_LABEL="would-archive (done-node)"
+                    printf '%-18s %-34s %s\n' "$DN_LABEL" "$branch" "$wt"
                     [[ -n "$ROWS" ]] && wt_occupancy_print_rows "$ROWS"
                     N_REAP=$((N_REAP + 1)); continue
                 fi
@@ -1274,7 +1236,7 @@ case "${1:-status}" in
                 # names this path in the worktree_removed event row it emits. No
                 # --yes is passed: the removal-time classification re-reads the
                 # tree and only inert rows are signalled.
-                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
+                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $DN_FLAG $YES >&2
                 rc=$?
                 case "$rc" in
                     0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
@@ -1302,8 +1264,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s (%d done-node), %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed, enumerated %d judged %d%s\n' \
+                    "$N_REAP" "$VERB" "$N_DONE" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$N_ENUM" "$N_TOTAL" "$SUFFIX"
             fi
             exit 0
         fi

@@ -14,7 +14,7 @@ from fno.company.campaign import (
 from fno.company.coordinator import CommitResult, commit
 from fno.company.topology import Topology
 from fno.company.contracts import FunctionRef, RoleRef
-from fno.graph.store import read_graph
+from fno.graph.store import read_graph_strict
 from fno.roles import (
     AuthorityCeiling,
     DeliveryPolicy,
@@ -66,7 +66,7 @@ def test_objective_to_committed_campaign_graph(tmp_path: Path) -> None:
     assert proposal.topology is Topology.PIPELINE
     assert len(result.children) == 2
 
-    entries = {e["id"]: e for e in read_graph(graph)}
+    entries = {e["id"]: e for e in read_graph_strict(graph)}
     epic = entries[result.epic_id]
     assert epic["type"] == "epic"
     # Both children are parented under the campaign epic with company_work bound

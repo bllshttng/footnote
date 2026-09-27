@@ -14,15 +14,6 @@ KING_CHECKIN_TEXT = (
     "readings, prints them, diffs the last beat, and journals reign_checkin. "
     "Then act on the printout per the reign skill. When nothing changed and "
     "coverage is full, print 'no change' and stop. This beat is a heartbeat. "
-    "The heartbeat confirms that the settled-PR monitor still runs. If it does "
-    "not, the heartbeat re-arms it."
-)
-KING_GOAL_TEXT = (
-    "reign goal. When every node in the crown scope reads done or "
-    "superseded, the goal is met. An open operator question blocks "
-    "completion. An empty actionable queue is a quiet beat, never a "
-    "finish line. A stand-down order from the operator ends the reign. "
-    "Until then keep reigning. Never /goal clear on NoProgress."
 )
 
 
@@ -51,10 +42,9 @@ class KingBlock(BaseModel):
     # silences it. An unknown value degrades to `refuse`, the deliberate
     # default.
     implementation_guard: str = "refuse"
-    # The monitor and stop hook are the beat; the cron proves they are alive.
-    checkin_interval: str = "4h"
+    write_roots: list[str] = []
+    checkin_interval: str = "55m"
     checkin_text: str = KING_CHECKIN_TEXT
-    goal_text: str = KING_GOAL_TEXT
     # The verdict's compaction bound; default 3 because one crown
     # produced two compaction-caused retractions in one evening.
     compaction_ceiling: int = 3
@@ -62,14 +52,14 @@ class KingBlock(BaseModel):
     @field_validator("checkin_interval", mode="before")
     @classmethod
     def _coerce_checkin_interval(cls, v: object) -> str:
-        """Fail-safe to 4h on anything but ``<digits>[smhd]``.
+        """Fail-safe to 55m on anything but ``<digits>[smhd]``.
 
         A bad value degrades, never raises: the interval arms a self-injected
         /loop, and a typo there must not kill a reign at config load.
         """
         if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
             return v.strip()
-        return "4h"
+        return "55m"
 
     @field_validator("implementation_guard", mode="before")
     @classmethod
@@ -83,10 +73,20 @@ class KingBlock(BaseModel):
             return v.strip()
         return "refuse"
 
-    @field_validator("checkin_text", "goal_text", mode="before")
+    @field_validator("write_roots", mode="before")
+    @classmethod
+    def _coerce_write_roots(cls, v: object) -> list[str]:
+        """A bare string is one root; blanks and non-strings drop, never raise."""
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            return []
+        return [s.strip() for s in v if isinstance(s, str) and s.strip()]
+
+    @field_validator("checkin_text", mode="before")
     @classmethod
     def _coerce_reign_text(cls, v: object, info: ValidationInfo) -> str:
         """Fail-safe to the block default on a non-string or blank value."""
         if isinstance(v, str) and v.strip():
             return v
-        return KING_CHECKIN_TEXT if info.field_name == "checkin_text" else KING_GOAL_TEXT
+        return KING_CHECKIN_TEXT

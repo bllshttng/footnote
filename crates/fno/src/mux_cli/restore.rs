@@ -91,7 +91,7 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
                 for row in &member_rows {
                     match row.outcome.as_str() {
                         "resumed" => println!(
-                            "resumed {}{} pane {} squad {}{}",
+                            "resumed {}{} pane {} workspace {}{}",
                             row.member,
                             row.harness
                                 .as_deref()
@@ -105,7 +105,7 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
                                 .unwrap_or_default(),
                         ),
                         "focused" => println!(
-                            "focused {} pane {} squad {}",
+                            "focused {} pane {} workspace {}",
                             row.member,
                             row.pane.map(|p| p.to_string()).unwrap_or_default(),
                             row.squad,

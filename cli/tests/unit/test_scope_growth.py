@@ -7,6 +7,7 @@ process. So coverage travels with the number and the number is withheld below a
 floor.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -187,7 +188,7 @@ def graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
 
     def seed(entries: list[dict]) -> Path:
-        g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+        seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
         return g
 
     import fno.graph._constants as gc
@@ -274,13 +275,9 @@ def test_scope_growth_reads_through_the_archive(graph, tmp_path, monkeypatch):
     A metric that quietly changes when unrelated grooming runs is exactly the
     kind of number this feature refuses to print.
     """
-    archive = tmp_path / "graph-archive.json"
-    archive.write_text(
-        json.dumps({"entries": [_node("x-swept", parent="x-epic", pr_number=99)]})
-        + "\n"
-    )
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
-    graph([_epic(), _node("x-c1", parent="x-epic", pr_number=1)])
+    swept = _node("x-swept", parent="x-epic", pr_number=99)
+    swept["archived_at"] = "2026-01-01T00:00:00Z"
+    graph([_epic(), _node("x-c1", parent="x-epic", pr_number=1), swept])
 
     payload = json.loads(
         runner.invoke(app, ["backlog", "epic", "status", "x-epic", "--json"]).stdout

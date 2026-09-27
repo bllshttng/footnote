@@ -207,15 +207,12 @@ def _coerce(value: str, ann: Any) -> Any:
         except ValueError as exc:
             raise ConfigSetError(f"expected a number; got {value!r}", 2) from exc
     if base is list or get_origin(base) is list:
-        # Accept a JSON array (`["a","b"]`) or a comma-separated string
-        # (`a,b`). Items are rendered as strings (every modeled list is a
-        # list[str]). Empty value -> empty list. Without this branch the raw
-        # string was stored verbatim, so the wizard could not set
-        # config.review.external_reviewers.
+        # A JSON array (tables kept as tables) or `a,b`; a JSON scalar or
+        # object is refused, never stored as a one-item list.
         s = value.strip()
         if not s:
             return []
-        if s.startswith("["):
+        if s[:1] in '[{"':
             import json as _json
 
             try:
@@ -227,7 +224,7 @@ def _coerce(value: str, ann: Any) -> Any:
                 ) from exc
             if not isinstance(parsed, list):
                 raise ConfigSetError(f"expected a list; got {value!r}", 2)
-            return [str(x) for x in parsed]
+            return [x if isinstance(x, dict) else str(x) for x in parsed]
         return [item.strip() for item in s.split(",") if item.strip()]
     return value
 
@@ -572,6 +569,8 @@ def _resolve_final_value(
         block = None if block_model is not None else (block_parts, parent_cls)
         return _coercer, block
 
+    if leaf_ann is Any and parent_cls.model_fields[leaf].default_factory is list:
+        leaf_ann = list  # a raw-kept list (`lanes`) must not store as a string
     return (lambda value: _coerce(value, leaf_ann)), (block_parts, parent_cls)
 
 

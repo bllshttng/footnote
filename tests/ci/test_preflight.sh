@@ -29,7 +29,12 @@ PREFLIGHT_SRC="$REPO_ROOT/scripts/ci/preflight.sh"
 export PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}"
 # pwd -P: resolve macOS /var -> /private/var so `git worktree list` paths match.
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
-trap 'rm -rf "$TMP"' EXIT
+# Pids the explicit kills can miss: a TERM to the script mid-run skips every
+# straight-path kill, so the trap is the backstop. Unquoted on purpose so it
+# splits into pids; empty is fine under set -u.
+REAP_PIDS=""
+trap 'kill $REAP_PIDS 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'exit 130' INT TERM
 
 FAILS=0
 ok()   { echo "  ok: $1"; }
@@ -40,6 +45,19 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 WT_BASE="$TMP/wtbase"; mkdir -p "$WT_BASE"
 GLOBAL_EVENTS="$TMP/global-events.jsonl"
 : > "$GLOBAL_EVENTS"
+rm -f "$TMP/global-events.db"
+# The store commit is the write boundary: a receipt lands in events.db beside
+# the journal, so every read here goes through the rows verb and a reset
+# removes the sibling store too.
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+    for _profile in debug release; do
+        [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]] && { ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"; break; }
+    done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+rows_lines() { "$ROWS_BIN" doctor event rows --events "$1" 2>/dev/null | jq -r '.[]' 2>/dev/null; }
+export ROWS_BIN
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
@@ -60,13 +78,9 @@ if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
             *) shift ;;
         esac
     done
-    if [[ -s "$GLOBAL_EVENTS" ]]; then
-        jq -sr --arg sha "\$sha" \
-            '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
-            "$GLOBAL_EVENTS"
-    else
-        echo 1
-    fi
+    # A stub subprocess inherits ROWS_BIN but no shell functions: inline the read.
+    "$ROWS_BIN" doctor event rows --events "$GLOBAL_EVENTS" 2>/dev/null | jq -r '.[]' 2>/dev/null | jq -sr --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1'
     exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "pr global-receipt-events-path" ]]; then
@@ -76,11 +90,35 @@ fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     sha="\$(git rev-parse HEAD)"
     events="$GLOBAL_EVENTS"
-    [[ -s "\$events" ]] || exit 1
-    jq -se --arg sha "\$sha" \
-        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' \
-        "\$events" >/dev/null
+    "\$ROWS_BIN" doctor event rows --events "\$events" 2>/dev/null | jq -r '.[]' 2>/dev/null | jq -se --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' >/dev/null
     exit \$?
+fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "doctor event emit-envelope" ]]; then
+    events=''
+    shift 3
+    while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+            --events) events="\$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -z "\$events" ]]; then
+        echo "stub: emit-envelope needs --events" >&2
+        exit 2
+    fi
+    line="\$(cat)"
+    # The real commit creates the directory it needs and fails loud on a
+    # path it cannot write (a directory at the journal path, a missing
+    # parent it may not make), so the stub answers the same way.
+    mkdir -p "\$(dirname "\$events")" 2>/dev/null || true
+    if ! printf '%s\n' "\$line" >> "\$events" 2>/dev/null; then
+        echo "stub: emit-envelope: cannot commit to \$events" >&2
+        exit 1
+    fi
+    seq="\$(wc -l < "\$events" | tr -d ' ')"
+    printf '{"store":"%s.db","event_id":"evt:stub-%s","seq":%s,"inserted":1}\n' "\$events" "\$seq" "\$seq"
+    exit 0
 fi
 exit 0
 EOF
@@ -207,6 +245,29 @@ write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pi
 
 run_pf() { ( cd "$FIX" && bash scripts/ci/preflight.sh "$@" ); }
 
+# The wait-queue sections drive REAL waiters through preflight's ordering,
+# which lives in the deployed fno-agents (crates/fno-agents/src/claim_queue.rs),
+# never in this script. A runner without that binary cannot exercise them:
+# they SKIP, loudly, rather than failing two dozen ways that all read "binary
+# missing". The queue's logic itself is covered by the Rust property tests in
+# rust-ci; these sections cover the integration where the binary exists.
+QUEUE_BIN="$(command -v fno-agents 2>/dev/null || true)"
+QUEUE_OK=0
+if [[ -n "$QUEUE_BIN" ]]; then
+    "$QUEUE_BIN" claim queue front --dir "$TMP/qcap-probe.d" >/dev/null 2>&1
+    # 0/1 = the verb exists (1 is "not at the front"); 2 = an old binary
+    # without the queue verbs. A capable probe read never creates the dir.
+    [[ $? -le 1 ]] && QUEUE_OK=1
+fi
+need_queue() {
+    if [[ $QUEUE_OK -eq 1 ]]; then
+        return 0
+    fi
+    echo "  SKIP: $1 (needs a queue-capable fno-agents on PATH)"
+    echo "        install it: cargo install --path crates/fno-agents"
+    return 1
+}
+
 echo "== AC2-HP-green: clean HEAD, smoke green, rust stubs green -> exit 0 =="
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "exit 0 on green" || fail "expected 0 got $rc: $out"
@@ -214,21 +275,21 @@ grep <<<"$out" -q "GREEN - safe to push" && ok "reports GREEN" || fail "no GREEN
 grep <<<"$out" -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
 grep <<<"$out" -q "cargo test --lib --bins (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 grep <<<"$out" -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "full green emits exact-SHA full/passed evidence" \
     || fail "missing exact-SHA full/passed event receipt"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$GLOBAL_EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.result == "passed"' \
-    "$GLOBAL_EVENTS" >/dev/null \
+    >/dev/null \
     && ok "full green mirrors evidence to the global journal" \
     || fail "missing global exact-SHA receipt"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$GLOBAL_EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] as $r
      | any($r[]; .data.result == "pending")
        and (($r | map(.data.generation) | max) == ($r | last | .data.generation))' \
-    "$GLOBAL_EVENTS" >/dev/null \
+    >/dev/null \
     && ok "canonical pending receipt precedes the final verdict" \
     || fail "missing canonical pending-to-final transition"
 
@@ -323,9 +384,9 @@ out="$(PREFLIGHT_TEST_FAIL_AUDIT=1 run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "advisory audit failure stays non-blocking" || fail "expected green got $rc: $out"
 [[ "$(wc -l < "$PREFLIGHT_AUDIT_LOG" | tr -d ' ')" == "2" ]] \
     && ok "both audit commands executed" || fail "audit short-circuited: $(cat "$PREFLIGHT_AUDIT_LOG")"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha and .data.mode == "advisory")] | last | .data.result == "failed" and .data.steps_executed == 2' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "advisory receipt records failed with two actual executions" \
     || fail "advisory receipt execution count/result wrong"
 
@@ -359,9 +420,9 @@ printf 'rustfmt:fno\n' > "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$(cur_att)" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.result == "passed"' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "subset run records subset evidence distinctly" \
     || fail "subset run did not emit subset/passed evidence"
 # The load-bearing half: a subsequent caller on the same SHA finds no FULL
@@ -390,9 +451,9 @@ grep <<<"$out" -q "cargo test explicit integration targets --test-threads=1 (fno
 grep <<<"$out" -q "=== cargo test explicit integration targets --test-threads=1 (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
 [[ ! -f "$(cur_att)" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
-jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+rows_lines "$EVENTS" | jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.steps_executed < .data.steps_expected' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "leg-scoped retry records subset with partial coverage" \
     || fail "leg-scoped retry receipt is not a partial-coverage subset"
 [[ ! -s "$LEGREC" ]] && ok "green retry truncated the record" || fail "record not truncated: $(cat "$LEGREC")"
@@ -402,9 +463,9 @@ rm -f "$(cur_att)" "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "fallback retry passes" || fail "expected 0 got $rc: $out"
 [[ -f "$(cur_att)" ]] && ok "fallback retry minted the FULL attestation it earned" || fail "no attestation after full-coverage retry"
-jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+rows_lines "$EVENTS" | jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.steps_executed == .data.steps_expected' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "fallback retry receipt is full with equal coverage" \
     || fail "fallback retry receipt is not full"
 
@@ -501,6 +562,7 @@ grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hi
 rm -rf "$LOCKDIR"
 
 echo "== FIFO queue: waiters are served in arrival order, not by chance =="
+need_queue "FIFO queue: waiters served in arrival order" && {
 rm -f "$(cur_att)"
 ( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
 mkdir -p "$LOCKDIR"
@@ -541,7 +603,10 @@ kill "$fifo_holder" 2>/dev/null; wait "$fifo_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 ( cd "$FIX" && git rm -q STUB_FNO_SLOW && git commit -qm "drop slow stub sentinel" )
 
+}
+
 echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
+need_queue "FIFO queue: --wait-timeout expiry" && {
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
 out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "expired wait exits 3" || fail "expected 3 got $rc: $out"
@@ -550,7 +615,10 @@ grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hi
 [[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== FIFO queue: a newcomer allocates above surviving tickets, never a dequeued hole =="
+need_queue "FIFO queue: hole allocation" && {
 mkdir -p "$LOCKDIR" "$LOCKDIR.queue.d/000002"
 printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
 printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR.queue.d/000002/holder"
@@ -567,7 +635,10 @@ wait "$mono_w"; rc=$?
 [[ $rc -eq 3 ]] && ok "the newcomer gave up cleanly" || fail "expected 3 got $rc"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
+need_queue "stall steal" && {
 rm -f "$(cur_att)"   # the prior section minted an attestation for this SHA; reuse would skip the lock
 # The stamp must sit within the recycle slop of the holder process's real age
 # (a genuinely stalled holder wrote its own stamp): 12s old, STALL_MIN_AGE=10.
@@ -586,7 +657,10 @@ fi
 wait "$stall_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== stall guard: a live, non-stale holder is never stolen =="
+need_queue "stall guard" && {
 # Floor 0 makes the stall branch unreachable by arithmetic (delta >= 0 can
 # never be < 0), and the holder is the suite's own pid: it cannot die or be
 # recycled mid-test, so neither dead path can fire either. The old fixture
@@ -606,7 +680,10 @@ grep <<<"$out" -q "stalled holder" && fail "stole from a healthy holder" || ok "
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== orphan steal: a reparented holder is stolen before the stall floor =="
+need_queue "orphan steal" && {
 # Host probe first: a double-fork must reparent to pid 1 for the orphan
 # predicate to be observable. Under a subreaper (systemd --user, some CI
 # wrappers) reparenting lands on the subreaper instead; the code then
@@ -614,6 +691,7 @@ echo "== orphan steal: a reparented holder is stolen before the stall floor =="
 # the orphan lanes skip rather than fail the suite for the host's shape
 # (the Darwin signal-lane skip is the prior idiom for exactly this).
 probe_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $probe_orphan"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$probe_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -627,6 +705,7 @@ fi
 if [[ "$HOST_SEES_ORPHANS" -eq 1 ]]; then
 rm -f "$(cur_att)"   # every steal section clears the attestation or reuse skips the lock
 orphan_pid="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $orphan_pid"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -647,7 +726,10 @@ fi
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 fi
 
+}
+
 echo "== orphan guard: an orphan that is computing keeps its lock =="
+need_queue "orphan guard" && {
 # LD3 pinned: the bypass removes the age floor and never the CPU probe. Floor 0
 # makes condemnation unreachable by arithmetic, so an orphan that spins must be
 # waited on to the timeout like any healthy holder.
@@ -655,6 +737,7 @@ if [[ "$HOST_SEES_ORPHANS" -eq 0 ]]; then
     echo "  ok: orphan guard skipped on this host (no observable orphan to guard)"
 else
 spin_orphan="$(bash -c 'while :; do :; done >/dev/null 2>&1 & echo $!')"
+REAP_PIDS="$REAP_PIDS $spin_orphan"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$spin_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
@@ -672,7 +755,10 @@ kill "$spin_orphan" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 fi
 
+}
+
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
+need_queue "recycled pid" && {
 old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
 rm -f "$(cur_att)"
 mkdir -p "$LOCKDIR"
@@ -687,7 +773,10 @@ kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was 
 kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
+need_queue "phantom ticket" && {
 rm -f "$(cur_att)"   # else attestation reuse skips the lock and the phantom is never walked
 mkdir -p "$LOCKDIR.queue.d/000001"
 sleep 600 & phantom_pid=$!
@@ -698,7 +787,10 @@ out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
 kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears its ticket =="
+need_queue "cancel sentinel" && {
 # Signals are NOT the asserted path: macOS bash 3.2 does not run INT/TERM
 # traps while waiting on a child (verified against foreground sleep,
 # sleep+wait, and a builtin read), so a SIGINT-asserting test fails on this
@@ -729,7 +821,10 @@ wait "$cancel_w"; rc=$?
 kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel guard: a STALE sentinel never cancels a later, innocent waiter =="
+need_queue "cancel guard" && {
 # A sentinel nobody consumed (its wait already ended) must not sit waiting to
 # kill the next queued run: past the one-hour grace the next waiter discards
 # it and keeps waiting.
@@ -744,7 +839,10 @@ echo "$out" | grep -q "cancelled while queued" && fail "reported a cancellation 
 kill "$stale_holder" 2>/dev/null; wait "$stale_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel (signal lane): INT still works where bash runs traps =="
+need_queue "cancel signal lane" && {
 # macOS bash 3.2 never delivers trapped INT while the shell waits on a child,
 # so the signal branch is asserted only on platforms where it can fire (CI's
 # Linux bash 5); the sentinel test above carries the contract everywhere.
@@ -771,6 +869,8 @@ if [[ "$(uname)" != "Darwin" ]]; then
 else
     echo "  ok: signal lane skipped on Darwin (bash 3.2 does not deliver trapped INT while waiting; sentinel lane covers the contract)"
 fi
+
+}
 
 echo "== cputime parse: octal-looking fields sum in base 10 =="
 eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"
@@ -809,7 +909,7 @@ kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b"
 # (measured ~1s per spinner per 20s at load 380); fewer or shorter would
 # truncate to zero on a starved box.
 unit_spin_pids=""
-for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; done
+for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; REAP_PIDS="$REAP_PIDS $!"; done
 unit_sum_start=0
 for _p in $unit_spin_pids; do unit_sum_start=$(( unit_sum_start + $(holder_tree_cpu "$_p") )); done
 sleep 15
@@ -832,6 +932,7 @@ holder_is_orphaned "99999999" && fail "condemned a pid nothing can read" \
     || ok "an unreadable pid reads as not-orphan (waited on, never stolen)"
 if [[ "${HOST_SEES_ORPHANS:-1}" -eq 1 ]]; then
     unit_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+    REAP_PIDS="$REAP_PIDS $unit_orphan"
     for _i in $(seq 1 40); do
         [[ "$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
         sleep 0.2
@@ -882,9 +983,9 @@ lock_sha="$(git -C "$FIX" rev-parse HEAD)"
 GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
 mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
 printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
-before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+before="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 out="$(run_pf --force --wait-timeout 0 2>&1)"; rc=$?
-after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+after="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 [[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
 [[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
@@ -897,11 +998,11 @@ out="$(run_pf --force 2>&1)"; rc=$?
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
 
 echo "== canonical lock signal: cancellation after mkdir cleans both owned locks =="
-before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+before="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 export PREFLIGHT_TEST_SIGNAL_LOCK=1
 out="$(run_pf --force 2>&1)"; rc=$?
 unset PREFLIGHT_TEST_SIGNAL_LOCK
-after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+after="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 [[ $rc -eq 130 ]] && ok "deferred signal exits 130 after ownership is complete" || fail "expected 130 got $rc: $out"
 [[ ! -d "$LOCKDIR" && ! -d "$GLOBAL_RECEIPT_LOCKDIR" ]] \
     && ok "signal cleanup releases both owned locks" || fail "signal left a lock behind"

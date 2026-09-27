@@ -4,14 +4,15 @@
 //! frozen against was the file-reading store in `cli/src/fno/graph/store.py`,
 //! deleted in the same change that flipped this file. The goldens in
 //! `tests/golden/graph_store/` were captured from the PYTHON leg while both
-//! legs lived: the differential stage asserted Rust==Python byte-for-byte
-//! over these exact fixtures and op sequences, then froze Python's output.
+//! legs lived: the differential stage compared the store values over these
+//! exact fixtures and op sequences, then froze Python's output. The SQLite
+//! reader assembles typed rows, so JSON object key order is not part of the
+//! post-cutover contract.
 //!
-//! The only bytes allowed to differ from a golden are the now()-stamps the
-//! pipeline writes (touched_at, deferred_at); they are normalized before the
-//! comparison and their PRESENCE is still asserted by the pipeline steps
+//! The only values normalized are the now()-stamps the pipeline writes
+//! (touched_at, deferred_at); their PRESENCE is still asserted by the steps
 //! that write them. Two behavioral cases (error kinds, concurrent writers)
-//! never had a byte-parity surface and stay as direct Rust assertions.
+//! never had a parity surface and stay as direct Rust assertions.
 //!
 //! The oracle is the flock helper the deletion retired: the symbol is the
 //! identity of the leg, and the provenance gate asserts it is GONE.
@@ -22,7 +23,6 @@
 use base64::Engine as _;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
     use fno_agents::graph_store::StoreError as E;
@@ -72,20 +72,6 @@ fn normalize_volatile(v: &Value) -> Value {
     }
 }
 
-/// Textual normalization for the two stamp shapes at every JSON escaping
-/// layer (file bytes carry one layer; step strings two).
-fn normalize_bytes(text: &str) -> String {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"(\\)?"(touched_at|deferred_at)(\\)?"(\\)?: (\\)?"[^"\\\\]*"#).unwrap()
-    });
-    re.replace_all(text, |caps: &regex::Captures| {
-        let esc = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        format!("{esc}\"{}{esc}\"{esc}: {esc}\"<TS>", &caps[2])
-    })
-    .into_owned()
-}
-
 /// On divergence, dump the live output and the frozen golden to files a
 /// human (or a script) can diff, then panic. The assert message alone wraps
 /// values in escaping layers.
@@ -112,9 +98,11 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     use fno_agents::graph_keeper::apply_op_for_tests;
     use fno_agents::graph_store::{self, MutateInput};
 
-    let mutate = |entries: Vec<Value>, g: &Path| -> graph_store::MutateOutcome {
+    // The last publish's entries come from the store response.
+    let published: std::cell::RefCell<Option<Vec<Value>>> = std::cell::RefCell::new(None);
+    let mutate = |entries: Vec<Value>, g: &Path| {
         // Single-writer probes: no interleaving, so the snapshot is current.
-        let base = graph_store::file_content_version(g);
+        let base = graph_store::base_version(g).expect("rust base version");
         // The map is what the frozen Python leg's client computes: the
         // fixtures ship no plan documents, so ladder.plan_rung answers
         // "none" for every row.
@@ -127,7 +115,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                     .map(|i| (i.to_string(), "none".to_string()))
             })
             .collect();
-        graph_store::locked_mutate(
+        let outcome = graph_store::locked_mutate(
             g,
             MutateInput {
                 entries,
@@ -137,29 +125,28 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
             },
             std::time::Duration::from_secs(5),
         )
-        .expect("rust locked_mutate")
+        .expect("rust locked_mutate");
+        *published.borrow_mut() = Some(outcome.entries);
     };
 
-    // The soft read swallows corruption to [] (read_graph's contract); the
-    // strict read surfaces the error kind. The closure models the Python soft
-    // reader over the soft opts spelling; `read_defaulted` itself is strict.
-    let soft = |g: &Path| -> Result<Vec<Value>, graph_store::StoreError> {
-        match graph_store::read_defaulted_opts(g, false, true) {
-            Ok(v) => Ok(v),
+    // read_rows runs the defaults pipeline whose insertion order the goldens
+    // capture.
+    let read_store = |g: &Path| -> Vec<Value> {
+        match graph_store::read_rows(g) {
+            Ok(rows) => rows,
             Err(
                 e @ graph_store::StoreError::Corrupt(_)
                 | e @ graph_store::StoreError::MalformedRoot(_)
                 | e @ graph_store::StoreError::Unreadable(_, _),
             ) => {
                 eprintln!("{e}");
-                Ok(vec![])
+                vec![]
             }
-            Err(e) => Err(e),
+            Err(e) => panic!("rust read: {e}"),
         }
     };
-
     let read_now = |g: &Path| -> String {
-        let entries = soft(g).expect("rust read");
+        let entries = read_store(g);
         graph_store::serialize_entries(&entries)
     };
 
@@ -167,11 +154,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     let mut json_out = serde_json::Map::new();
     json_out.insert("read".into(), Value::String(read_now(graph)));
 
-    // The STRICT probe: backup_on_corrupt=false is read_graph_strict's
-    // read-only diagnosis contract. The soft variant would swallow a
-    // malformed root to [] and the taxonomy arm below would see no error at
-    // all.
-    match graph_store::read_defaulted_opts(graph, false, false) {
+    match graph_store::read_rows_strict(graph) {
         Ok(strict) => {
             json_out.insert(
                 "strict".into(),
@@ -187,7 +170,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
         let name = op.get("name").and_then(Value::as_str).unwrap_or("");
         match name {
             "set_field" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let node = op.get("node_id").and_then(Value::as_str).unwrap_or("");
                 let field = op.get("field").and_then(Value::as_str).unwrap_or("");
                 let value = op.get("value").cloned().unwrap_or(Value::Null);
@@ -200,12 +183,12 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 mutate(entries, graph);
             }
             "new_node" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 entries.push(op.get("entry").cloned().unwrap_or(Value::Null));
                 mutate(entries, graph);
             }
             "set_related" => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let node = op.get("node_id").and_then(Value::as_str).unwrap_or("");
                 let desired: Vec<String> = op
                     .get("desired")
@@ -230,7 +213,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 steps.push(serde_json::json!({"read_after": read_now(graph)}));
             }
             other => {
-                let mut entries = graph_store::read_defaulted(graph, false).unwrap();
+                let mut entries = read_store(graph);
                 let mut request = serde_json::Map::new();
                 request.insert("name".into(), Value::String(other.to_string()));
                 request.insert("params".into(), op.clone());
@@ -270,7 +253,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     }
 
     json_out.insert("steps".into(), Value::Array(steps));
-    let file = std::fs::read(graph).expect("rust published file");
+    let file = match published.into_inner() {
+        Some(entries) => graph_store::serialize_graph_file(&entries).into_bytes(),
+        None => std::fs::read(graph).expect("rust fixture file"),
+    };
     json_out.insert(
         "file".into(),
         Value::String(base64::engine::general_purpose::STANDARD.encode(&file)),
@@ -361,8 +347,17 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
 
     let dir = tempfile::tempdir().expect("rs dir");
     let graph = dir.path().join("graph.json");
-    std::fs::write(&graph, &fixture).unwrap();
+    let fixture: Value = serde_json::from_str(&fixture).expect("fixture json");
+    let mut entries = fixture
+        .get("entries")
+        .and_then(Value::as_array)
+        .expect("fixture entries")
+        .clone();
+    fno_agents::graph_store::apply_defaults(&mut entries, false);
+    entries.retain(|row| row.get("id").and_then(Value::as_str).is_some());
+    fno_agents::graph_store::seed_rows(&graph, &entries).expect("seed graph.db");
     let rs = rust_probe(&graph, &ops);
+    assert!(!graph.exists(), "parity fixtures seed the database only");
 
     // Schema-change regeneration: with REGENERATE_GOLDENS=1 the live probe
     // output replaces the frozen golden instead of asserting against it. A
@@ -378,26 +373,26 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     assert_frozen(
         name,
         "read",
-        &Value::String(
+        &normalize_volatile(&Value::String(
             rs.get("read")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-        ),
-        &Value::String(
+        )),
+        &normalize_volatile(&Value::String(
             golden
                 .get("read")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-        ),
+        )),
     );
 
     assert_frozen(
         name,
         "strict",
-        &json_pick(&rs, "strict", "strict_error"),
-        &json_pick(&golden, "strict", "strict_error"),
+        &normalize_volatile(&json_pick(&rs, "strict", "strict_error")),
+        &normalize_volatile(&json_pick(&golden, "strict", "strict_error")),
     );
 
     let rs_steps = normalize_volatile(rs.get("steps").unwrap_or(&Value::Null));
@@ -418,18 +413,13 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     .expect("golden file bytes are utf8");
     let rs_root: Value = serde_json::from_str(&rs_file).expect("rs file parses");
     let golden_root: Value = serde_json::from_str(&golden_file).expect("golden file parses");
-    // Byte identity, checked structurally then textually: the structural
-    // compare localizes a divergence; the textual one on normalized bytes
-    // catches ordering the structural compare forgives.
+    // The response is a transient view of SQLite rows, not a persisted
+    // mirror. Compare the JSON meaning without coupling reads to key order.
     assert_frozen(
         name,
         "file-content",
         &normalize_volatile(&rs_root),
         &normalize_volatile(&golden_root),
-    );
-    assert_eq!(
-        normalize_bytes(&rs_file), normalize_bytes(&golden_file),
-        "{name}: the published file must be byte-identical to the golden modulo volatile stamps\n--- live ---\n{rs_file}\n--- golden ---\n{golden_file}"
     );
 }
 
@@ -459,11 +449,11 @@ fn characterization_reads_and_mutations_match_the_frozen_python_leg() {
              "note": {"wave": "1", "text": "wave note"}},
             {"name": "new_node",
              "entry": {"id": "ab-0004", "title": "Delta node the port", "priority": "p2"}},
-            {"name": "session_append", "node_id": "ab-0004", "phase": "do", "harness": "claude",
+            {"name": "session_append", "node_id": "ab-0004", "phase": "execute", "harness": "claude",
              "session_id": "0123abcd-0000-0000-0000-000000000004",
              "started_at": "2026-08-02T04:00:00Z",
              "observed": {"kind": "observed", "model": "test-model", "samples": 3}},
-            {"name": "session_append", "node_id": "ab-0004", "phase": "do", "harness": "claude",
+            {"name": "session_append", "node_id": "ab-0004", "phase": "execute", "harness": "claude",
              "session_id": "0123abcd-0000-0000-0000-000000000004",
              "started_at": "2026-08-02T04:00:00Z", "ended_at": "2026-08-02T05:00:00Z",
              "observed": {"kind": "observed", "model": "test-model", "samples": 5}},
@@ -485,7 +475,7 @@ fn characterization_legacy_rows_and_defer_backfill_match() {
 }
 
 #[test]
-fn characterization_unicode_and_escapes_are_byte_identical() {
+fn characterization_unicode_and_escapes_round_trip() {
     run_case(
         "unicode_exotics",
         fixture_unicode_and_exotics(),
@@ -507,11 +497,11 @@ fn characterization_session_lifecycle_matches() {
         "session_lifecycle",
         fixture,
         serde_json::json!([
-            {"name": "session_append", "node_id": "ab-00aa", "phase": "do", "harness": "claude",
+            {"name": "session_append", "node_id": "ab-00aa", "phase": "execute", "harness": "claude",
              "session_id": "0123abcd-0000-0000-0000-00000000aaaa",
              "started_at": "2026-08-02T04:00:00Z",
              "observed": {"kind": "no-transcript"}},
-            {"name": "session_append", "node_id": "ab-00aa", "phase": "do", "harness": "claude",
+            {"name": "session_append", "node_id": "ab-00aa", "phase": "execute", "harness": "claude",
              "session_id": "0123abcd-0000-0000-0000-00000000aaaa",
              "started_at": "2026-08-02T04:00:00Z", "ended_at": "2026-08-02T05:30:00Z",
              "observed": {"kind": "observed", "model": "later-model", "samples": 9}},
@@ -564,51 +554,14 @@ fn characterization_related_mirror_matches() {
 }
 
 #[test]
-fn corrupt_and_malformed_roots_keep_the_read_failure_taxonomy() {
-    // The soft read swallows corruption to []; the strict read raises, and
-    // the RAISED KIND is the taxonomy the Python strict read fixed. No
-    // golden: the contract is the kind, not bytes.
-    for (name, body, want_kind) in [
-        ("corrupt", "{not json", "GraphUnreadableError"),
-        (
-            "malformed_root",
-            "{\"no_entries\": []}",
-            "GraphMalformedRootError",
-        ),
-        (
-            "entries_not_list",
-            "{\"entries\": \"x\"}",
-            "GraphUnreadableError",
-        ),
-        ("empty_file", "", "GraphUnreadableError"),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, body).unwrap();
-        let ops = serde_json::json!([]);
-        let rs = rust_probe(&graph, &ops);
-        assert_eq!(
-            rs.get("read").and_then(Value::as_str),
-            Some("[]"),
-            "{name}: soft read swallows"
-        );
-        assert_eq!(
-            rs.get("strict_error").and_then(Value::as_str),
-            Some(want_kind),
-            "{name}: strict kind"
-        );
-    }
-}
-
-#[test]
 fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
     // The mutation-under-concurrency property the protocol demands: eight
     // writers each appending a distinct node through the locked cycle. The
     // bounded lock serializes the critical sections, so every completed
-    // publish survives and the final file parses to the union.
+    // publish survives and the final store holds the union.
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &[]).unwrap();
     use fno_agents::graph_store::{self, MutateInput};
     let graph_for_threads = graph.clone();
     let mut handles = Vec::new();
@@ -618,8 +571,8 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
             // The snapshot read runs outside the lock; a stale snapshot
             // answers Conflict and the cycle retries until it lands.
             loop {
-                let base = graph_store::file_content_version(&g);
-                let mut entries = graph_store::read_defaulted(&g, false).unwrap();
+                let base = graph_store::base_version(&g)?;
+                let mut entries = graph_store::read_rows(&g)?;
                 entries.push(serde_json::json!({
                     "id": format!("ab-c0nc{i:04}"),
                     "title": format!("concurrent {i}")
@@ -648,7 +601,7 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
         }
     }
     assert_eq!(landed, 8, "every retried writer eventually lands");
-    let final_entries = graph_store::read_defaulted(&graph, false).unwrap();
+    let final_entries = graph_store::read_rows(&graph).unwrap();
     let ids: Vec<String> = final_entries
         .iter()
         .filter_map(|e| graph_store::entry_id(e).map(str::to_string))
@@ -660,52 +613,4 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
             "writer {i}'s node must survive: {ids:?}"
         );
     }
-}
-
-/// x-786d: the default read is strict, so a starved store can never answer
-/// empty; the soft answers stay reachable only through the explicit opts
-/// spelling the keeper and the rows reader take.
-#[test]
-fn a_starved_read_is_an_error_never_an_empty_answer() {
-    use fno_agents::graph_store::{self, StoreError};
-    let dir = tempfile::tempdir().unwrap();
-    // {} parses but carries no entries key: the MalformedRoot shape.
-    let malformed = dir.path().join("malformed.json");
-    std::fs::write(&malformed, "{}").unwrap();
-    // `{` does not parse at all: the Corrupt shape.
-    let corrupt = dir.path().join("corrupt.json");
-    std::fs::write(&corrupt, "{").unwrap();
-
-    match graph_store::read_defaulted(&malformed, false) {
-        Err(StoreError::MalformedRoot(_)) => {}
-        other => panic!("malformed root must surface, got {other:?}"),
-    }
-    assert!(matches!(
-        graph_store::read_defaulted(&corrupt, false),
-        Err(StoreError::Corrupt(_))
-    ));
-    // The strict read writes nothing.
-    assert!(!dir.path().join("backups").exists());
-
-    // The explicit soft spelling keeps the Python soft reader's answers and
-    // the corrupt-file .bak (AC1-EDGE, the keeper and rows-reader sites).
-    assert_eq!(
-        graph_store::read_defaulted_opts(&malformed, false, true).unwrap(),
-        Vec::<Value>::new()
-    );
-    assert!(matches!(
-        graph_store::read_defaulted_opts(&corrupt, false, true),
-        Err(StoreError::Corrupt(_))
-    ));
-    let bak = dir.path().join("backups").join("corrupt.json.bak");
-    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{");
-
-    assert_eq!(
-        graph_store::read_rows(&malformed).unwrap(),
-        Vec::<Value>::new()
-    );
-    assert!(matches!(
-        graph_store::read_rows(&corrupt),
-        Err(StoreError::Corrupt(_))
-    ));
 }

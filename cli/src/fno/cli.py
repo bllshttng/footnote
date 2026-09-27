@@ -144,11 +144,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Deprecated decision shim; use fno inbox decide / fno inbox decisions.",
         {"hidden": True},
     ),
-    "law": (
-        "fno.law:law_app",
-        "Record durable project law in one call (now `fno inbox law`).",
-        {"hidden": True},
-    ),
     "resume": (
         "fno.resume.cli:cli",
         "Durable typed resume receipts (evidence, never write authority)",
@@ -302,12 +297,12 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "agents": {"ask", "list", "logs", "loop", "loop-check", "needs", "resume", "rm", "spawn"},
     "annotate": {"list"},
     "approvals": set(),
-    "backlog": {"advance", "done", "get", "next", "queued", "reconcile", "update"},
+    "backlog": {"advance", "done", "get", "next", "queued", "reconcile"},
     "bundle": set(),
     "carveout": set(),
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
-    "decide": {"list", "reindex", "retract"},
+    "decide": {"list", "reindex"},
     "do": set(),
     "doctor": set(),
     "evals": set(),
@@ -504,7 +499,6 @@ def _protect_process_path(ctx: typer.Context) -> None:
     """Put the quota proxy in PATH for subprocesses spawned by this command."""
     from fno.setup.github_cli import (
         PROXY_DEPTH_ENV,
-        fallback_proxy_dir,
         worker_environment,
     )
 
@@ -514,7 +508,9 @@ def _protect_process_path(ctx: typer.Context) -> None:
     keys = ("PATH", "FNO_GH_PROXY_DIR", "FNO_REAL_GH", PROXY_DEPTH_ENV)
     original = {key: os.environ.get(key) for key in keys}
     base = dict(os.environ)
-    base["FNO_GH_PROXY_DIR"] = str(fallback_proxy_dir())
+    # Never honor an inherited dir: a requested dir re-raises on a failed
+    # install, and a parent's temp pin would win PATH over the durable home.
+    base.pop("FNO_GH_PROXY_DIR", None)
     protected = worker_environment(base)
     changed = False
     for key in keys:
@@ -579,7 +575,7 @@ lowercase = per-command value flags. -p is "the primary thing this
 command is about" and differs by family:
 
   fno agents ask                        -H harness    (-c cwd, -t timeout)
-  fno backlog add/idea/update/intake    -p priority   (-c cwd, -d details, -t type/title)
+  fno backlog add/idea/intake           -p priority   (-c cwd, -d details, -t type/title)
   fno backlog next/ready/find           -p project    (find: -s status, -d domain)
   fno backlog capture add               -p priority   (-s source, -w where)
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
@@ -920,6 +916,12 @@ def main() -> None:
         ):
             exc.msg = f"{exc.msg or ''}{_reinstall_hint(exc.name)}"
         raise
+    except (RuntimeError, ValueError) as exc:
+        refusal = getattr(exc, "fno_refusal", None)
+        if refusal is None:
+            raise
+        print(f"Error: {refusal}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

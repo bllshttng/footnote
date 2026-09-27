@@ -11,7 +11,7 @@ registration, so this module never imports graph.cli (the cycle would be
 unimportable).
 
 : these verbs are TRANSPORTS over the native patch door
-(`fno-agents backlog-update`). They keep only what is not store logic: the
+(`fno-agents backlog update`). They keep only what is not store logic: the
 batch atomicity pre-check, the dependents WARN, the boundary events, the
 plan-ruling lines, and the plan projection. Every field write rides the
 door, so a receipt can only describe what the store actually committed.
@@ -30,82 +30,6 @@ def _door(task_id: str, args: List[str], graph_path: Callable[[], Path]):
     from fno.graph.note_cli import native_update
 
     return native_update(task_id, args, graph_path=graph_path())
-
-
-#: The legacy cmd_update field flags that cannot ride one call with the door
-#: flags: the two write paths validate differently, and a mixed call could not
-#: say which rules it asked for. Any param whose parsed value differs from its
-#: unset sentinel (None, or False for the two pure switches) counts as passed.
-_LEGACY_UPDATE_PARAMS = (
-    "locked_by", "locked_by_harness", "locked_by_harness_session", "has_brief",
-    "plan_path", "pr_number", "pr_url", "repo", "priority", "blocks_everything",
-    "title", "details", "details_file", "domain", "size", "difficulty", "model",
-    "_model_tier_tombstone", "batch", "orphan_ok", "dispatch_verb",
-    "dispatch_brief", "type_", "public", "project", "cwd", "source_node",
-    "related", "blocked_by", "add_blocker", "remove_blocker",
-    "acknowledge_collisions", "parent", "completion_note", "add_pr",
-    "add_pr_url", "add_pr_note", "remove_pr", "caused_by", "fixes_pr",
-    "reverted", "tag", "untag", "force",
-)
-
-#: The spellings the mechanical `--kebab-of-the-param` rule cannot produce.
-_FLAG_SPELLING_EXCEPTIONS = {"_model_tier_tombstone": "--model-tier", "type_": "--type"}
-
-
-def _flag_spelling(param: str) -> str:
-    return _FLAG_SPELLING_EXCEPTIONS.get(param, "--" + param.replace("_", "-"))
-
-
-#: The door flags `fno backlog update` carries as extra args. ONE copy: the
-#: stray refusal and cmd_update's forward condition both read this.
-DOOR_FLAGS = ("--status", "--leave", "--set")
-
-
-def refuse_stray_update_flags(door_args: List[str]) -> None:
-    """Extra args may only be door flags: ``ignore_unknown_options`` would
-    revive a retired spelling (``--completed``) as a silent no-op."""
-    strays = [a for a in door_args if a.startswith("-") and a.split("=", 1)[0] not in DOOR_FLAGS]
-    if strays:
-        typer.echo(
-            f"Error: no such option: {strays[0]}. `fno backlog update` carries "
-            "one door per call: --status, --leave, and repeatable --set field=value "
-            "(legacy one-flag-per-field spellings are retired).",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-
-def forward_update_door(
-    task_id: str, door_args: List[str], graph_path: Path, values: dict
-) -> None:
-    """`cmd_update`'s forwarding half : relay the door flags to the
-    native backlog-update action, refusing a mixed call. `values` is the
-    caller's `locals()` - the legacy flags' parsed values, screened here
-    against :data:`_LEGACY_UPDATE_PARAMS` so the over-budget cli.py only
-    carries the four-line handoff."""
-    legacy_flags = [
-        _flag_spelling(param)
-        for param in _LEGACY_UPDATE_PARAMS
-        # Identity, not `in (None, False)`: `--fixes-pr 0` means clear, and
-        # `0 == False` would silently drop that flag from the mix refusal.
-        if values.get(param) is not None and values.get(param) is not False
-    ]
-    if legacy_flags:
-        typer.echo(
-            "Error: --status/--leave/--set cannot be mixed with the legacy field flags "
-            f"({', '.join(sorted(legacy_flags))}). Run two calls: one through the door, "
-            "one with the legacy flags.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    exit_code, _ = _door_text(task_id, door_args, graph_path)
-    raise typer.Exit(code=exit_code)
-
-
-def _door_text(task_id: str, args: List[str], graph_path: Path):
-    from fno.graph.note_cli import native_update
-
-    return native_update(task_id, args, graph_path=graph_path, json_out=False)
 
 
 def register_lifecycle_commands(
@@ -151,7 +75,7 @@ def register_lifecycle_commands(
             classify_deferred_reason,
         )
         from fno.graph._intake import _find_dependents
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         if kind is not None and kind not in DEFERRED_KINDS:
             typer.echo(
@@ -174,7 +98,7 @@ def register_lifecycle_commands(
         # Resolve every id and abort naming ALL missing ones before any write,
         # mirroring cmd_queue's all-or-nothing batch atomicity. The door write
         # is per-node, so this pre-check is what keeps the batch atomic.
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         require_nodes(entries, ids)
         for tid in ids:
             dependents = _find_dependents(entries, tid)
@@ -219,11 +143,11 @@ def register_lifecycle_commands(
         # Call-time imports: the verbs must read whatever the running test or
         # caller patched onto the source modules, never a register-time copy.
         from fno.graph._intake import _find_node
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         ids = expand_valid_ids(task_ids)
 
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         require_nodes(entries, ids)
 
         # AC5-HP: on a node carrying BOTH facts the park rides on the
@@ -330,11 +254,11 @@ def register_lifecycle_commands(
         Full contract: docs/architecture/backlog-graph-verb-contracts.md
         """
         from fno.graph._intake import _find_node
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
         # The door resolves id or slug (the read resolver's contract); the
         # receipt names the canonical id either way.
-        entries = read_graph(graph_path())
+        entries = read_graph_strict(graph_path())
         node = _find_node(entries, node_id)
         if node is None:
             typer.echo(f"Error: node {node_id} not found", err=True)
@@ -384,6 +308,6 @@ def register_lifecycle_commands(
         # reporting `ready` and a fail-closed `design` never makes the node
         # non-dispatchable. A no-op mutator still triggers the
         # recompute+write; idempotent on a clean call.
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import commit_rows_via_store
 
-        locked_mutate_graph(graph_path(), lambda e: e)
+        commit_rows_via_store(graph_path(), lambda e: e)

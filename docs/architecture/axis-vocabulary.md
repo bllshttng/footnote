@@ -111,9 +111,22 @@ An unset effort resolves to `max`. fno spawns most workers without one, so a mec
 
 Every spawn-minted registry row holds the model axis twice. `requested_model`, `requested_provider`, and `requested_effort` record the REQUEST verbatim as the flags spelled it, `[1m]` suffix included, stamped once at birth and never overwritten. `model` with `model_basis`, and the transcript-derived `observed_model` reading, carry what the session ACTUALLY answers as.
 
-The comparison is family-wise and suffix-aware. The bracketed suffix names the context window the caller asked for, not a different model, so `glm-5.3[1m]` vs `glm-5.3` is a match. `glm-5.3[1m]` vs `glm-5.3-flash` is a substitution. The spawn path names it instead of printing the request back as the effect. The naming rides three channels: a stderr line, a `model_substituted` event, and a receipt marker. The agent-list row derives `model_substituted` at emission from the observed payload it already carries, so a late substitution is visible on the next list read.
+The comparison is family-wise and suffix-aware. The bracketed suffix names the context window the caller asked for, not a different model, so `glm-5.3[1m]` vs `glm-5.3` is a match. `glm-5.3[1m]` vs `glm-5.3-flash` is a substitution. The bracket suffix is a request. The measured window lives on the dated `[[routing.models]]` row, not the suffix. The spawn path names it instead of printing the request back as the effect. The naming rides three channels: a stderr line, a `model_substituted` event, and a receipt marker. The agent-list row derives `model_substituted` at emission from the observed payload it already carries, so a late substitution is visible on the next list read.
 
 Absence of a `requested_*` stamp means unknown, never a default. Adoption reuses a live session (correct, standing policy) and observed no request, so its row stamps nothing. The verdict helper lives in `fno.agents.row_contradiction.model_substitution` with its Rust twin in `crates/fno-agents/src/state.rs`.
+
+## Account: one axis, two readings
+
+| Reading | Decided by | Moves when |
+|---|---|---|
+| pays | the credential the session holds. Its `CLAUDE_CONFIG_DIR` setting determines which Keychain item it reads. | the item it reads changes and its daemon re-reads it, or a new session starts. The steps live in the rotation doc's switching section. |
+| sees | the remote-control identity the session connected with | the session reconnects |
+
+"Pays" and "sees" move by different steps, so they can split. A reconnect moves "sees". A login moves "pays" only for sessions that read the item it wrote. Those sessions move only after they re-read it. See [Switching claude accounts is manual, by design](../provider-rotation.md#switching-claude-accounts-is-manual-by-design) for the steps. The mobile app shows "sees" and says nothing about billing.
+
+For a spawn, `--account`, `agents.defaults.account`, `agents.profiles.<verb>.account` and a lane's `account` choose "pays". `accounts.active` is not one of them.
+
+An unpinned claude spawn bills whatever login its launching process holds. Read which login that is in the identity column of `fno config accounts list`. See [What chooses the account a spawn bills](../provider-rotation.md#what-chooses-the-account-a-spawn-bills).
 
 ## Resolver authority
 
@@ -156,7 +169,7 @@ A receipt that said a plan was claimed stated a fact about the first sense while
 
 The old spellings stay as deprecated aliases that work and warn: `--session`, `FNO_SESSION`, `--mux-session` on `dispatch next`, and pane-identity `--session-id`. Each prints one stderr line naming the replacement, and the alias will be removed in a future release. Env precedence is: flag, then `FNO_SERVER`, then `FNO_SESSION`, then `main`. When `FNO_SESSION` is the value that decided the server, its warning prints. A pane's writers set `FNO_SERVER` and `FNO_SESSION` to the same value, so new panes never warn and old readers keep working.
 
-Workspace and squad are one object under two names. The ruling lives at `workspace()` in `crates/fno/src/mux_cli.rs`. A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
+Workspace and squad are one object under two names. The ruling and its senses table live in [vocabulary-user-and-operator.md](vocabulary-user-and-operator.md) under "Workspace, squad, project, project group". A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
 
 ## Recognized and unrecognized harness values
 

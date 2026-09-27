@@ -17,10 +17,7 @@ idea
 new
 intake
 decompose
-update
 note
-# notes reads the same graph-resident journal the note writer archives to
-notes
 # encounter appends to a node's graph record, exactly like note
 encounter
 remove
@@ -30,8 +27,7 @@ migrate-updated-at
 reopen
 supersede
 unsupersede
-# board/rank/queue state
-rank
+# board and queue state
 reprioritize
 defer
 undefer
@@ -47,7 +43,6 @@ requeue
 # storage + sweep machinery
 archive
 unarchive
-archive-dedupe-ids
 maintain
 groom
 # graph-row mutation (stamps deferred_kind under the lock)
@@ -69,6 +64,7 @@ join
 # write moves to the sidecar seam)
 cost
 session add
+session backfill
 session close
 session open
 session reap-open
@@ -94,7 +90,6 @@ status
 # reads the store's mutation counter; writes nothing
 version
 view
-find
 next
 ready
 worked

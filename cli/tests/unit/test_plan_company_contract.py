@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -8,9 +9,10 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from fno.company.contracts import CompanyWorkRefs, FunctionRef, RoleRef, WorkOrderRef
-from fno.graph.types import Entry
+from fno.graph.types import Node as Entry
 from fno.plan.cli import plan_app
 from fno.plan.schema import PlanFrontmatter
+from fno.graph.store import read_graph_strict
 
 
 runner = CliRunner()
@@ -189,27 +191,29 @@ def _contradictory_backlinks() -> dict:
 def test_graph_store_rejects_invalid_company_work_without_writing(
     tmp_path, company_work: dict, error: str
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [{"id": "x-owner", "company_work": company_work}]})
-        + "\n"
-    )
-    original = graph.read_bytes()
+    seed_graph(graph, [{"id": "x-owner"}])
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    original = (read_graph_strict(graph), store_export_status(graph))
+
+    def attach_invalid_company_work(entries: list[dict]) -> list[dict]:
+        entries[0]["company_work"] = company_work
+        return entries
 
     with pytest.raises(ValueError, match=error):
-        locked_mutate_graph(graph, lambda entries: entries)
+        commit_rows_via_store(graph, attach_invalid_company_work)
 
-    assert graph.read_bytes() == original
+    assert (read_graph_strict(graph), store_export_status(graph)) == original
 
 
 def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Path) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps(
+    seed_graph(graph, json.dumps(
             {
                 "entries": [
                     {
@@ -220,31 +224,28 @@ def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Pa
                 ]
             }
         )
-        + "\n"
-    )
+        + "\n")
 
-    locked_mutate_graph(graph, lambda entries: entries)
+    commit_rows_via_store(graph, lambda entries: entries)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert saved["company_work"]["work_order"]["node_id"] == "x-e9a3"
     assert saved["future_graph_field"] == {"kept": True}
 
 
 def test_graph_store_persists_normalized_company_work(tmp_path: Path) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     company_work = _refs().model_dump(mode="json")
     company_work["work_order"]["node_id"] = " x-e9a3 "
     company_work["work_order"]["attempt_id"] = " attempt-1 "
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [{"id": "x-e9a3", "company_work": company_work}]})
-        + "\n"
-    )
+    seed_graph(graph, json.dumps({"entries": [{"id": "x-e9a3", "company_work": company_work}]})
+        + "\n")
 
-    locked_mutate_graph(graph, lambda entries: entries)
+    commit_rows_via_store(graph, lambda entries: entries)
 
-    saved = json.loads(graph.read_text())["entries"][0]["company_work"]
+    saved = read_graph_strict(graph)[0]["company_work"]
     assert saved["work_order"]["node_id"] == "x-e9a3"
     assert saved["work_order"]["attempt_id"] == "attempt-1"
 

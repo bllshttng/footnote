@@ -40,22 +40,31 @@ def test_loops_paused_reads_rust_verdict(isolated_home, monkeypatch):
     assert calls == [("paused", None)]
 
 
-def test_resume_and_pause_use_rust_boundary(isolated_home, monkeypatch):
+def test_pause_all_is_a_passthrough_to_the_rust_binary(isolated_home, monkeypatch, tmp_path):
+    """AC8-HP: the stub receives the action + argv unchanged; stdout passes through."""
     from fno import loops
 
-    calls = []
+    stub = tmp_path / "fno-agents-stub"
+    stub.write_text("#!/bin/sh\necho \"got: $@\"\n")
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
 
-    def fake_call(action, args=None):
-        calls.append((action, args))
-        if action == "pause-all":
-            return {"paused": True, "state": "paused", "who": "tester", "expires_at": None}
-        return {"resumed": True, "state": "clear", "paused": False}
+    result = runner.invoke(loops.loops_app, ["pause-all", "--ttl", "30m", "--reason", "talk"])
+    assert result.exit_code == 0, result.output
+    assert "got: loops pause-all --ttl 30m --reason talk" in result.output
 
-    monkeypatch.setattr(loops, "_rust_loops_call", fake_call)
-    state = loops.pause_all(who="tester")
-    assert state["who"] == "tester"
-    assert loops.resume_all() is True
-    assert calls == [("pause-all", ["--who", "tester"]), ("resume-all", None)]
+
+def test_resume_all_is_a_passthrough_to_the_rust_binary(isolated_home, monkeypatch, tmp_path):
+    from fno import loops
+
+    stub = tmp_path / "fno-agents-stub"
+    stub.write_text("#!/bin/sh\necho \"got: $@\"\nexit 7\n")
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
+
+    result = runner.invoke(loops.loops_app, ["resume-all"])
+    assert result.exit_code == 7, result.output
+    assert "got: loops resume-all" in result.output
 
 
 def test_expired_rust_verdict_is_not_paused(isolated_home, monkeypatch):
@@ -103,31 +112,43 @@ def test_cli_status_reports_corrupt_state(isolated_home, monkeypatch):
     assert "treated as paused" in result.output
 
 
-def test_cli_pause_status_resume_round_trip(isolated_home, monkeypatch):
+def test_cli_status_formats_epoch_milliseconds_as_iso(isolated_home, monkeypatch):
     from fno import loops
 
-    state = {"paused": False, "state": "clear"}
-
-    def fake_call(action, args=None):
-        if action == "pause-all":
-            who = args[1]
-            state.update({"paused": True, "state": "paused", "who": who, "expires_at": None})
-            return state
-        if action == "status":
-            return state
-        state.update({"paused": False, "state": "clear", "resumed": True})
-        return state
-
-    monkeypatch.setattr(loops, "_rust_loops_call", fake_call)
-    result = runner.invoke(loops.loops_app, ["pause-all", "--who", "cli-tester"])
-    assert result.exit_code == 0, result.output
-    assert "cli-tester" in result.output
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": True,
+            "state": "paused",
+            "who": "tester",
+            "paused_at": 1_789_261_620_000,
+            "expires_at": 1_789_265_220_000,
+        },
+    )
     result = runner.invoke(loops.loops_app, ["status"])
     assert result.exit_code == 0, result.output
-    assert "cli-tester" in result.output
-    result = runner.invoke(loops.loops_app, ["resume-all"])
+    assert "since 2026-09-13T01:07:00Z" in result.output
+    assert "expires 2026-09-13T02:07:00Z" in result.output
+    assert "1789261620000" not in result.output
+
+
+def test_cli_status_reports_unavailable_breaker(isolated_home, monkeypatch):
+    from fno import loops
+
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": True,
+            "state": "unavailable",
+            "error": "invalid expires_at",
+        },
+    )
+    result = runner.invoke(loops.loops_app, ["status"])
     assert result.exit_code == 0, result.output
-    assert "resumed" in result.output
+    assert "failing closed" in result.output
+    assert "invalid expires_at" in result.output
 
 
 def test_cli_ls_with_no_loops_configured(isolated_home):
@@ -168,14 +189,3 @@ def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch
     from fno.loops import _last_tick
 
     assert _last_tick("my-loop") is None
-
-
-def test_zero_ttl_rejected(isolated_home):
-    import typer
-
-    from fno.loops import _parse_ttl_ms
-
-    with pytest.raises(typer.BadParameter):
-        _parse_ttl_ms("0m")
-    with pytest.raises(typer.BadParameter):
-        _parse_ttl_ms("0s")

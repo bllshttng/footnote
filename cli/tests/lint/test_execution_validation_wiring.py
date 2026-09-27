@@ -125,3 +125,14 @@ def test_raw_prose_and_node_seeded_inputs_keep_discovery() -> None:
     blueprint = _read("skills/blueprint/SKILL.md")
 
     assert "raw prose or a node-seeded path" in blueprint
+
+
+def test_blueprint_collision_gate_adopts_when_nobody_can_answer() -> None:
+    gates = _read("skills/blueprint/references/blueprint-gates.md")
+    section = gates[
+        gates.index("## Collision check"):gates.index("## Cross-project peer heads-up")
+    ]
+
+    assert "no AskUserQuestion tool" in section
+    assert "--acknowledge-collisions" in section
+    assert "fno backlog note" in section

@@ -2752,9 +2752,9 @@ def test_a_watchdog_event_uses_a_source_the_schema_accepts(tmp_path, monkeypatch
         "watchdog_verdict",
         {"row_id": "aaaa1111-0000", "name": "w1", "verdict": WAKE, "basis": "b"},
     )
-    written = (tmp_path / "events.jsonl")
-    assert written.exists(), "the event was swallowed, not written"
-    record = json.loads(written.read_text().splitlines()[-1])
+    from tests._event_rows import event_rows
+
+    record = event_rows(tmp_path / "events.jsonl")[-1]
     assert record["type"] == "watchdog_verdict"
     assert record["source"] == "daemon"
 

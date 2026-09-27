@@ -44,14 +44,11 @@ impl View {
             .map(NeedsOverlayRow::Mine)
             .collect();
 
-        // Questions lead the NEED section (task 2.3): a real operator
-        // question, with an asker to answer back to, outranks a bare
-        // carveout/claims pile. Ranked by the record's own `rank` (
-        // already orders these); an unranked row sorts last within the group
-        // rather than floating to the front on a missing field.
-        let mut questions: Vec<crate::needs_overlay::QuestionItem> =
-            self.questions_fold.clone().unwrap_or_default();
-        questions.sort_by_key(|q| q.rank.unwrap_or(u32::MAX));
+        // Questions lead the NEED section: a real operator question, with an
+        // asker to answer back to, outranks a bare carveout/claims pile. The
+        // projection's order stands (high priority first, then newest).
+        let questions: Vec<crate::needs_overlay::QuestionItem> =
+            self.questions_fold.clone().unwrap_or_default().items;
         let need = self.needs_operator_queue();
         let need_total = questions.len() + need.len();
         let need_shown = need_total.min(NEEDS_CAP);
@@ -151,15 +148,19 @@ pub(crate) fn needs_overlay_lines(
             let marker = if idx == sel { '▸' } else { ' ' };
             match row {
                 NeedsOverlayRow::Question(q) => {
-                    // Render `ask` as the headline (falls back to the prose
-                    // question when the asker gave no one-liner); the prose
-                    // itself appears only when selected, below.
-                    let stale = if q.live == Some(false) { "  STALE" } else { "" };
+                    // Render `title` as the headline (the projection's one-line
+                    // form of the question); the prose body appears only when
+                    // selected, below.
+                    let stale = if q.asker.as_ref().and_then(|a| a.live) == Some(false) {
+                        "  STALE"
+                    } else {
+                        ""
+                    };
                     lines.push(pad_to(
                         &format!(
                             " {marker} {} {}{stale}",
                             need_glyph(NeedKind::Question),
-                            q.ask.as_deref().unwrap_or(&q.question)
+                            q.title
                         ),
                         ANSWER_OVERLAY_W,
                     ));
@@ -203,19 +204,28 @@ pub(crate) fn needs_overlay_lines(
                 }
             }
             Some(NeedsOverlayRow::Question(q)) => {
-                // The prose beneath the headline - only when `ask` was used
-                // as the headline above; if there was no `ask`, the headline
-                // already IS the question and repeating it would be noise.
-                if q.ask.is_some() && !q.question.is_empty() {
+                // The prose body beneath the headline, then each option's text
+                // with its what-happens-next clause.
+                if let Some(body) = q.body.as_deref() {
+                    if !body.is_empty() && q.body.as_deref() != Some(q.title.as_str()) {
+                        lines.push(pad_to(
+                            &format!("   {}", body.replace('\n', " ")),
+                            ANSWER_OVERLAY_W,
+                        ));
+                    }
+                }
+                for opt in q.options.iter() {
                     lines.push(pad_to(
-                        &format!("   {}", q.question.replace('\n', " ")),
+                        &format!(
+                            "     {}. {} -> {}",
+                            opt.n,
+                            opt.text,
+                            opt.next.as_deref().unwrap_or("?")
+                        ),
                         ANSWER_OVERLAY_W,
                     ));
                 }
-                for (i, opt) in q.options.iter().enumerate() {
-                    lines.push(pad_to(&format!("     {}. {opt}", i + 1), ANSWER_OVERLAY_W));
-                }
-                if q.live == Some(false) {
+                if q.asker.as_ref().and_then(|a| a.live) == Some(false) {
                     lines.push(pad_to(
                         "   the answer is recorded but reaches no session",
                         ANSWER_OVERLAY_W,

@@ -154,6 +154,8 @@ fi
 
 # Runnable form, three shapes:
 #   1. an argument placeholder - `claude rm <id>`, `{row}`, `$job`
+#      An opening double quote counts too, so `fno inbox ask "<question>"`
+#      is a hit: the quoted form is how a question verb gets taught.
 #   2. a concrete short id - `claude rm 7c5dcf5d`, which is strictly MORE
 #      copyable than a placeholder and was missed by an earlier draft
 #   3. the command at end of line, which is how a wrapped format string
@@ -189,7 +191,7 @@ fi
 # string under it, so a one-word bound passed it vacuously. Two is the depth
 # the real registry needs; raise it only against a specimen.
 SUBVERB='([[:space:]]+[a-z][a-z-]*){0,2}'
-ARG="(${SUBVERB}"'([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8})|[[:space:]]*"[[:space:]]*$)'
+ARG="(${SUBVERB}"'([[:space:]]+[<{$"]|[[:space:]]+[0-9a-f]{8})|[[:space:]]*"[[:space:]]*$)'
 PATTERN=""
 for cmd in "${CMDS[@]}"; do
     PATTERN="${PATTERN}${PATTERN:+|}${cmd}${ARG}"
@@ -206,7 +208,7 @@ printf '%s\n' "$CANARY" | grep -qE "$PATTERN" ||
 # asserted, because an earlier draft covered only the angle-bracket one and
 # let every f-string instruction under a retired root through.
 for shape in "set <subject> <decision>" "set {subject}" "set 7c5dcf5d" \
-             "worktree ensure <name>"; do
+             "worktree ensure <name>" 'set "subject"'; do
     printf '%s\n' "use \`${CMDS[0]} ${shape}\` instead" | grep -qE "$PATTERN" ||
         fail "pattern misses sub-verb shape '${shape}'; a leaf under a retired root would pass"
 done

@@ -59,7 +59,9 @@ def test_record_appends_one_valid_event_and_reports_it(tmp_path: Path) -> None:
     assert result["recorded"] is True
     assert result["fold"]["distinct_observations"] == 1
     # The journal now holds exactly one schema-valid overlap line.
-    lines = [json.loads(l) for l in journal.read_text().splitlines() if l.strip()]
+    from tests._event_rows import event_rows
+
+    lines = event_rows(journal)
     assert len(lines) == 1
     assert lines[0]["type"] == "worktree_overlap_observed"
     assert lines[0]["data"]["observation_id"] == result["observation_id"]
@@ -130,10 +132,16 @@ def test_missing_journal_is_no_data_and_exits_zero(tmp_path: Path) -> None:
     assert "no worktree overlap" in render_overlaps_text(report)
 
 
-def test_malformed_line_makes_report_partial_and_exits_nonzero(tmp_path: Path) -> None:
+def test_malformed_line_makes_report_partial_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     journal = tmp_path / "events.jsonl"
-    append_event(_overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW), journal)
-    journal.write_text(journal.read_text() + "not-valid-json\n", encoding="utf-8")
+    journal.write_text(
+        json.dumps(_overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW))
+        + "\nnot-valid-json\n",
+        encoding="utf-8",
+    )
     report, code = overlaps_report(journal=journal, now=NOW)
     assert report["state"] == "partial"
     assert code == 1, "partial evidence must not read as zero"
@@ -142,6 +150,7 @@ def test_malformed_line_makes_report_partial_and_exits_nonzero(tmp_path: Path) -
 
 
 def test_unreadable_journal_is_unknown_and_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     journal = tmp_path / "events.jsonl"
     journal.write_text("{}", encoding="utf-8")
     real_read_text = Path.read_text
@@ -157,8 +166,9 @@ def test_unreadable_journal_is_unknown_and_exits_nonzero(tmp_path: Path, monkeyp
     assert code == 1
 
 
-def test_invalid_utf8_journal_is_unknown(tmp_path: Path) -> None:
+def test_invalid_utf8_journal_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid UTF-8 in the journal is a decode failure, not a crash: report unknown."""
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     journal = tmp_path / "events.jsonl"
     journal.write_bytes(b'{"type":"worktree_overlap_observed"}\n\xff\xfe not utf-8\n')
     report, code = overlaps_report(journal=journal, now=NOW)
@@ -166,8 +176,11 @@ def test_invalid_utf8_journal_is_unknown(tmp_path: Path) -> None:
     assert code == 1
 
 
-def test_non_object_json_lines_are_partial(tmp_path: Path) -> None:
+def test_non_object_json_lines_are_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A JSON-valid non-object line (bare scalar/array) is corrupt, not clean."""
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     journal = tmp_path / "events.jsonl"
     valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
     journal.write_text(
@@ -334,9 +347,12 @@ def test_validate_accepts_builder_event_with_matching_digest() -> None:
     assert validate(event) is None
 
 
-def test_schema_invalid_overlap_line_is_partial_not_counted(tmp_path: Path) -> None:
+def test_schema_invalid_overlap_line_is_partial_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A JSON-valid overlap line that fails schema validation reads as a malformed
     line (partial coverage) and is NOT counted toward recurrence."""
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     journal = tmp_path / "events.jsonl"
     valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
     # Same fields, but a 64-hex id that is NOT this tuple's digest -> rejected.
@@ -377,10 +393,18 @@ def test_overlap_record_cli_accepts_carrier_invocation(tmp_path: Path, monkeypat
     parsed = json.loads(result.stdout.strip())
     assert parsed["recorded"] is True
     assert parsed["fold"]["distinct_observations"] == 1
-    # The journal now holds one durable line.
+    # The store beside the journal now holds one durable row; the raw file
+    # may stay absent (the commit is the write boundary). The shared sandbox
+    # journal also carries rows from other tests, so filter by type.
+    from tests._event_rows import event_rows
     from fno.paths import global_events_json
 
-    assert global_events_json().exists()
+    journal = global_events_json()
+    rows = [
+        r for r in event_rows(journal)
+        if r.get("type") == "worktree_overlap_observed"
+    ]
+    assert rows, f"no worktree_overlap_observed row in {journal}"
 
 
 def test_overlaps_cli_reports_and_exits_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

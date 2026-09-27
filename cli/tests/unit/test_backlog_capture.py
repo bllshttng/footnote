@@ -326,8 +326,10 @@ def test_cli_add_emits_event_and_prints_json(
     assert payload["id"].startswith("fu-")
 
     events_path = tmp_path / ".fno" / "events.jsonl"
-    assert events_path.exists()
-    types = [json.loads(l)["type"] for l in events_path.read_text().splitlines() if l.strip()]
+
+    from tests._event_rows import event_rows
+
+    types = [e["type"] for e in event_rows(events_path)]
     assert "capture_add" in types
 
 
@@ -386,7 +388,10 @@ def test_cli_empty_pass_writes_artifact_and_event(
     artifact = tmp_path / ".fno" / "artifacts" / "deferrals-SID9.md"
     assert artifact.exists()
     events_path = tmp_path / ".fno" / "events.jsonl"
-    types = [json.loads(l)["type"] for l in events_path.read_text().splitlines() if l.strip()]
+
+    from tests._event_rows import event_rows
+
+    types = [e["type"] for e in event_rows(events_path)]
     assert "capture_empty_pass" in types
 
 
@@ -546,7 +551,10 @@ def test_cli_empty_pass_succeeds_when_event_lands(tmp_path: Path) -> None:
     )
     assert res.exit_code == 0, res.output
     events_path = tmp_path / ".fno" / "events.jsonl"
-    types = [json.loads(l)["type"] for l in events_path.read_text().splitlines() if l.strip()]
+
+    from tests._event_rows import event_rows
+
+    types = [e["type"] for e in event_rows(events_path)]
     assert "capture_empty_pass" in types
 
 

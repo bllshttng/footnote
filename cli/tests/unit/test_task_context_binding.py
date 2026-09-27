@@ -13,12 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from fno.rust_binary import find_dev_binary, verb_call
+from fno.rust_binary import verb_call
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 def _source_bytes(body: str) -> dict:
@@ -137,7 +134,7 @@ def _minimal_receipt(**kwargs):
     defaults = dict(
         node="x-59b0",
         session="sess-worker",
-        phase="do",
+        phase="execute",
         generation=1,
         repo="footnote",
         worktree="/wt/x-59b0",

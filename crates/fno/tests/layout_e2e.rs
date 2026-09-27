@@ -100,6 +100,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -143,6 +145,8 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -176,26 +180,26 @@ fn layout_e2e_split_h_and_v_yield_three_live_sized_shells() {
     let _server = sh_server(&scratch);
     let (mut c, pane_a) = attach_settled(&scratch, &scratch.dir("w"));
     // The single pane owns the whole 24x80 content area.
-    assert_focused_winsize(&mut c, pane_a, 24, 80);
+    assert_focused_winsize(&mut c, pane_a, 22, 78);
 
     // Split H: 79 usable cols (1 divider), floor half = 39, last child 40.
     c.cmd(Command::SplitH);
     let l = c.wait_layout(10, "2-pane layout", |l| l.panes.len() == 2);
     let pane_b = l.focus;
     assert_ne!(pane_b, pane_a, "the new pane takes focus (AC1-HP)");
-    assert_focused_winsize(&mut c, pane_b, 24, 40);
+    assert_focused_winsize(&mut c, pane_b, 22, 38);
 
     // Split V on the focused right pane: 23 usable rows, 11 top / 12 bottom.
     c.cmd(Command::SplitV);
     let l = c.wait_layout(10, "3-pane layout", |l| l.panes.len() == 3);
     let pane_c = l.focus;
-    assert_focused_winsize(&mut c, pane_c, 12, 40);
+    assert_focused_winsize(&mut c, pane_c, 10, 38);
 
     // All three shells are independently interactive: the first pane still
     // answers after focus returns to it.
     c.cmd(Command::FocusDir(Dir::Left));
     c.wait_layout(10, "focus back on A", |l| l.focus == pane_a);
-    assert_focused_winsize(&mut c, pane_a, 24, 39);
+    assert_focused_winsize(&mut c, pane_a, 22, 37);
 }
 
 // -- item 2: geometric navigation on a 2x2 grid ----------------------------
@@ -255,7 +259,7 @@ fn layout_e2e_resize_propagates_winsize_and_burst_settles_exactly() {
     // Exact tiling survives: widths + divider == 80 (Boundaries).
     let total: u16 = l.panes.iter().map(|(_, r)| r.cols).sum();
     assert_eq!(total + 1, 80, "rects + divider must tile exactly");
-    assert_focused_winsize(&mut c, pane_a, 24, 43);
+    assert_focused_winsize(&mut c, pane_a, 22, 41);
 
     // AC3-FR: a resize-key burst settles on the exact final ratios.
     for _ in 0..4 {
@@ -267,7 +271,7 @@ fn layout_e2e_resize_propagates_winsize_and_burst_settles_exactly() {
     });
     let total: u16 = l.panes.iter().map(|(_, r)| r.cols).sum();
     assert_eq!(total + 1, 80);
-    assert_focused_winsize(&mut c, pane_a, 24, 59);
+    assert_focused_winsize(&mut c, pane_a, 22, 57);
 }
 
 // -- item 4: close redistributes proportionally + geometric re-anchor ------
@@ -296,7 +300,7 @@ fn layout_e2e_close_middle_redistributes_and_focus_survives() {
         "focus re-anchors to a geometric survivor"
     );
     // AC4-ERR half: input still lands (no dangling focus after the close).
-    assert_focused_winsize(&mut c, l.focus, 24, if l.focus == pane_a { 52 } else { 27 });
+    assert_focused_winsize(&mut c, l.focus, 22, if l.focus == pane_a { 50 } else { 25 });
 }
 
 // -- item 5: tabs - inactive tab is wire-silent, grid stays live -----------
@@ -318,7 +322,7 @@ fn layout_e2e_inactive_tab_sends_no_frames_but_grid_updates() {
     });
     let pane_b = l.focus;
     assert_ne!(pane_b, pane_a);
-    assert_focused_winsize(&mut c, pane_b, 24, 80);
+    assert_focused_winsize(&mut c, pane_b, 22, 78);
 
     // AC5-EDGE: while tab 2 is active, tab 1's flooding pane crosses the
     // wire ZERO times...
@@ -662,6 +666,8 @@ fn run_pane_receipt(
 
 fn exact_placement(at: u64, split: Dir) -> PanePlacement {
     PanePlacement {
+        view: false,
+        from: None,
         portal_new: false,
         portal: None,
         tab: None,
@@ -690,6 +696,8 @@ fn exact_current_places_beside_anchor_not_focus() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -739,6 +747,8 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -807,6 +817,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -831,6 +843,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -862,6 +876,8 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -932,6 +948,8 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
         &scratch,
         &cwd,
         PanePlacement {
+            view: false,
+            from: None,
             portal_new: false,
             portal: None,
             tab: None,
@@ -970,12 +988,14 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
                 binding: LayoutBinding::Anchor,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
             LayoutSlot {
                 name: "fresh".into(),
                 binding: LayoutBinding::Shell,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
         ],
     };
@@ -1033,12 +1053,14 @@ fn layout_graft_refuses_unavailable_fno_and_duplicate_binding() {
                 binding: LayoutBinding::Anchor,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
             LayoutSlot {
                 name: "b".into(),
                 binding: LayoutBinding::Fno("no-such-session".into()),
                 cwd: None,
                 portal: None,
+                pane_id: None,
             },
         ],
     };

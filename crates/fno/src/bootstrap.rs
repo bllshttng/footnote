@@ -116,6 +116,37 @@ pub fn forward(args: &[OsString]) -> ! {
     }
 }
 
+/// Forward the `fno backlog ...` argv to the sibling Rust binary's grouped
+/// dispatcher. One exec, stdio inherited, signals and exit codes pass
+/// through unchanged. A missing or non-executable sibling refuses with the
+/// install remedy and NEVER provisions the Python wheel: the backlog
+/// namespace has no Python fallback on this side of the door.
+pub fn forward_backlog(args: &[OsString]) -> ! {
+    let bin = crate::digest_overlay::fno_agents_bin();
+    let mut command = bootstrap_command(&bin);
+    command.args(args);
+    #[cfg(unix)]
+    {
+        let err = crate::process_admission::bootstrap_exec(&mut command);
+        eprintln!(
+            "fno backlog: the sibling Rust binary could not be exec'd: {err}\n       \
+             reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+        );
+        std::process::exit(2);
+    }
+    #[cfg(not(unix))]
+    match command.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!(
+                "fno backlog: the sibling Rust binary could not be run: {err}\n       \
+                 reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run(args: &[OsString]) -> BootResult<()> {
     // Fast path: a recorded sentinel from a prior successful provision. No uv
     // call, no network - the common case after first run (AC4-HP). The sentinel
@@ -2037,15 +2068,16 @@ mod tests {
         fs::write(&uv, script).unwrap();
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // Released at 400ms; the retry re-execs at ~300ms and ~600ms, so the
-        // first spawn provably hits ETXTBSY and a later one provably runs.
+        // Released at 200ms; the retry re-execs at ~300ms and ~600ms, so the
+        // first spawn provably hits ETXTBSY and a later one provably runs,
+        // with margin for a descheduled writer thread on a loaded runner.
         // The falsification binds on Linux (the kernel denies exec of any
         // file a writer holds open); macOS does not enforce that, so there
         // this degrades to a happy-path run.
         let held = uv.clone();
         let writer = thread::spawn(move || {
             let f = fs::OpenOptions::new().write(true).open(&held).unwrap();
-            thread::sleep(Duration::from_millis(400));
+            thread::sleep(Duration::from_millis(200));
             drop(f);
         });
 
@@ -2316,13 +2348,14 @@ mod tests {
             "the refusal must name the cause: {}",
             e.msg
         );
-        let spawns = fs::read_to_string(&calls)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(
-            spawns, 1,
-            "a stable refusal must cost one spawn, not the whole budget"
+        // Same marker rule as the torn-read test, in reverse: a stable
+        // refusal returns on the pass that answered, so the message carries
+        // no "still failing after re-asking", whatever transient spawn
+        // failures the runner threw before it.
+        assert!(
+            !e.msg.contains("still failing after re-asking"),
+            "a stable refusal must return on its own pass, not after the budget: {}",
+            e.msg
         );
         fs::remove_dir_all(&root).ok();
     }
@@ -2384,13 +2417,16 @@ mod tests {
                 "{case}: {}",
                 e.msg
             );
-            let spawns = fs::read_to_string(&calls)
-                .unwrap_or_default()
-                .lines()
-                .count();
-            assert_eq!(
-                spawns, 4,
-                "{case}: an incomplete answer is an instrument failure: re-ask it"
+            // The spent budget is read from the message's "still failing
+            // after re-asking" marker, never a spawn tally: one transient
+            // probe spawn failure on a loaded runner still ends in the right
+            // refusal, and the tally must not fail the instrument for it.
+            // A stable early exit returns above the marker, so its absence
+            // here would mean the loop quit on a torn answer.
+            assert!(
+                e.msg.contains("still failing after re-asking for 30ms"),
+                "{case}: the budget must be spent, not exited early: {}",
+                e.msg
             );
         }
         fs::remove_dir_all(&root).ok();

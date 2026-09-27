@@ -81,6 +81,29 @@ def _stub_recompute(
     )
 
 
+def _stub_owner_from_row(monkeypatch, tmp_path):
+    """The refusal is decide's now: ask the real gate for its line against the
+    seeded row and hand it back as the held receipt the verb renders. The
+    conftest's own autouse stub owns the covered default."""
+    from fno.pr import _coverage_gate
+
+    state, refusal, _covered, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=True
+    )
+    if state == _coverage_gate.COVERED:
+        return None
+    line = _coverage_gate.refusal_line(refusal, note)
+    detail = f"unreviewed merge refused: {line}" if line else (
+        "unreviewed merge refused"
+    )
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {"outcome": "held", "detail": detail},
+    )
+    return detail
+
+
 def test_recompute_unreviewed_still_refuses(enabled, monkeypatch, capsys, tmp_path):  # noqa: F811
     """Plan test 5: an unreviewed PR with a WORKING recompute recomputes to
     uncovered and the merge still exits 2, with the receipt naming the
@@ -90,9 +113,10 @@ def test_recompute_unreviewed_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     # The gate now refuses a head it could not fetch, so pin the head the
     # stubbed rows describe (no real gh call from a hermetic test).
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
     assert "uncovered" in obj["reason"], obj["reason"]
     assert "recomputed" in obj["reason"], obj["reason"]
     assert len(calls) == 1, "exactly one recompute"
@@ -110,8 +134,9 @@ def test_recompute_unavailable_fails_closed(enabled, monkeypatch, capsys, tmp_pa
         lambda pr, repo, head=None: _reviews.review_coverage_for_gate(pr, repo, head),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     # No row AND no instrument: the answer is unmeasurable, the remedy named,
     # never a Python-side freshness (the deleted mirror's old job).
     assert "unmeasurable" in reason, reason
@@ -148,8 +173,9 @@ def test_recompute_current_head_with_rewritten_review_refuses(
         ancestor=False,
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "currenthead")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     assert "uncovered" in reason
     assert "recomputed" in reason
     assert len(calls) == 1
@@ -165,8 +191,9 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     _stub_recompute(
         monkeypatch, tmp_path, coverage="covered", count=2, head="otherhead", calls=calls
     )
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     # The receipt names both heads truncated to 8 chars (its long-standing
     # shape); the heads disagreeing is the point, and so is the recompute
     # clause proving a fresh event was attempted and did not clear it.
@@ -176,7 +203,10 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     # look like a regression - which would push a future author to shorten the
     # message to go green. The next test pins the disclosed form itself.
     assert "[recomputed" in reason, reason
-    assert len(calls) == 1
+    # Two reads, no loop: the stub helper's gate read recomputes once, and the
+    # verb's own (2a) read recomputes once more. The pin is that the second
+    # read does not fire a third.
+    assert len(calls) == 2
 
 
 def test_a_failed_reviews_read_is_disclosed_beside_the_recompute(
@@ -195,8 +225,9 @@ def test_a_failed_reviews_read_is_disclosed_beside_the_recompute(
     _stub_recompute(
         monkeypatch, tmp_path, coverage="covered", count=2, head="otherhead", calls=calls
     )
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     # Both clauses, in one note: what the recompute did, and what the reviews
     # read could not do. Asserting either alone passes on a note that dropped
     # the other.

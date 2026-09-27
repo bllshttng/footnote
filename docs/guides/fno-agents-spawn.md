@@ -20,9 +20,9 @@ A spawn picks three independent things. Confusing them is the mistake this surfa
 | **model** | `--model` | `-m` | `opus`, `glm-5.2[1m]`, ... | The **model**, at whichever vendor is in play. |
 
 ```bash
-fno agents spawn "review this diff" --name worker --harness codex          # binary only
-fno agents spawn "review this diff" --name worker --model opus             # harness-native model
-fno agents spawn "review this diff" bg --provider zai --model glm-5.2     # routed
+fno agents spawn "fix the failing test" --name worker --harness codex          # binary only
+fno agents spawn "fix the failing test" --name worker --model opus             # harness-native model
+fno agents spawn "fix the failing test" bg --provider zai --model glm-5.2     # routed
 ```
 
 `--harness` defaults to the invoking harness, then `claude`. `--provider` + `--model` together name a **route** and are the decomposed spelling of `--route <vendor>,<model>`; passing both spellings exits 2, and `--provider` without `--model` exits 2 (a vendor is not a model).
@@ -40,7 +40,7 @@ A spawn with no `--substrate` seats a **thread** wherever the harness seats one.
 `--provider <vendor> --model <m>` (or the single-string `--route <vendor>,<m>`) points a claude worker at a different model endpoint. The vendor must be a known `model_routing.providers` record with a resolvable key; an unknown, non-anthropic-compatible, or keyless vendor is refused before anything spawns, so the node stays dispatchable.
 
 ```bash
-fno agents spawn "review this diff" --name glm-worker --substrate bg --provider zai --model glm-5.2
+fno agents spawn "fix the failing test" --name glm-worker --substrate bg --provider zai --model glm-5.2
 ```
 
 Routing is claude-only and reaches the `bg` and `headless` substrates only. The route is applied by writing a `0600` claude `--settings` file and passing `--settings <path>`: a `claude --bg` session's serving process is forked by the claude daemon, which drops per-spawn `ANTHROPIC_*` env before the first model request, and a settings file is read by the session process itself so it survives that fork. `pane` is not a routed lane and is refused rather than silently running the primary model.
@@ -74,8 +74,8 @@ Plain `spawn` for codex/gemini creates a PTY-backed hosted worker under the `fno
 Pane-hosted agents can join an existing mux workspace and tile beside its focused pane:
 
 ```bash
-fno agents spawn "review the current diff" --name reviewer \
-  -H codex --workspace reviews --split right
+fno agents spawn "fix the failing test" --name helper \
+  -H codex --workspace helpers --split right
 ```
 
 `--workspace` (short `-s`) selects a workspace by the same visible name shown in the mux sideline. `--split` (short `-x`) accepts `left`, `right`, `up`, or `down`; omit it to create a new tab in that workspace. Omitting both options preserves the cwd-routed new-tab behavior. Placement does not change the worker's cwd, and the options are rejected for `bg` and `headless`, which have no mux geometry.
@@ -111,7 +111,7 @@ A repeated attach focuses the existing pane and reports `already attached`; it n
 
 ## Place a pane next to the calling pane (`--at current`)
 
-`--workspace`/`--split` place a pane relative to the workspace's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
+A bare `--split` anchors on the caller's own pane (FNO_PANE), not on whatever the workspace has focused, so focus races cannot redirect it; a pane-less caller names `--from <cell>` or is refused naming the flag. `--at current` pins the new pane to the calling pane (the one the command runs inside) the same way, and both spellings exist because `--at current` predates the split default.
 
 ```bash
 fno agents spawn "investigate the failing test" --name digger \
@@ -130,29 +130,26 @@ For a multi-pane topology instead of one adjacent pane, `fno mux layout graft` r
 
 ## Place a thread through a portal (`--portal`)
 
-A thread hosts no pane until a portal opens one. Before `--portal`, that took two calls: spawn the worker, then `fno mux thread <name> --portal N`. `--portal N` folds both calls into one, so one command creates the worker and puts it on screen.
+A spawn is a paneless thread: a DEFAULT never opens a view. An explicit placement flag is the ask that creates one, human or agent.
 
 ### Spawn and place in one call
 
 ```bash
-fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1
+fno agents spawn "fix the failing test" --name w2 --substrate thread \
+  --portal 1
 ```
 
-When the command completes, portal 1 is open and already shows the new worker. Outside a mux, omitting `--portal` creates the thread with no portal and nothing appears on screen. From inside a mux, a spawn that takes the default thread substrate opens portal 0 on the new worker automatically. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
+When the command completes, portal 1 is open and already shows the new worker, and the receipt names the index. A bare spawn seats the thread and opens nothing, inside a mux or out. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
 
 ### Choose the geometry
 
 ```bash
-fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1 --tab 2 --split right
+fno mux thread w2 --portal new --split right --from portal 0
 ```
 
-If the portal at index 1 does not exist yet, the worker lands in tab 2, tiled right of that tab's focused pane. `--workspace` and `--split` name the destination the same way they do for a pane.
+`--portal new` opens the next free index. If N is not open, `--portal N` opens it. If N is open, the reach tunes it. A bare `--split DIR` halves the caller's own pane. `--from CELL` names another cell: `portal 0`, a worker name, or `current`. A caller with no pane names it or is refused. When the command runs inside a pane, it resolves `current` itself. Split right from portal 0, then down from portal 0, then down from portal 1: that is the 2x2.
 
-If the portal at index 1 already shows a live viewer, the portal keeps its geometry. The server prints the notice `a portal takes no split, target, or anchor`, so you see the refusal instead of a silent move.
-
-A replacement viewer prefers the remembered tab. If an old portal's seat died but its tab still exists, the new viewer lands in that tab, and your `--tab` loses. This keeps a replacement where the operator last looked.
-
-`--at` is refused for a thread before anything spawns. A thread has no calling pane to anchor to, so strict anchoring has no meaning here.
+If the named portal already shows a live viewer, the reach tunes it. The portal keeps its geometry. The server prints the notice `a portal takes no split, target, or anchor`, so you see the refusal instead of a silent move.
 
 ### What the spawn refuses
 
@@ -168,13 +165,13 @@ Every refusal below exits 2 before the worker starts, and each message names the
 | an index outside 0 to 255 | the index range |
 | `--tab 7` when tab 7 is gone | refuses before any pane exists |
 
-### Give a running worker a portal
+### Give a running thread a portal
 
-A thread that already runs gets a portal later with `fno mux thread <name> --portal N`. Omit the index there and the verb uses portal 0. In the sideline, Enter on a paneless live row opens portal 0, and `P` opens the next free index.
+A thread that already runs gets tuned with `fno mux thread <key>`. No flag focuses the row's open portal. With none open, the door's own portal 0 serves it. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints. A thread-shaped Codex row answers to the full id. Claude answers to its printed `short_id`. The door matches one live row exactly and never creates, resumes, or duplicates a worker. Zero matches, or several rows answering the same key, refuse and spawn no worker. The broad selector tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`, not to this door. In the sideline, Enter on a paneless live row reaches it. `P` opens the next free index. A row already shown through a portal takes focus with Enter. the reseat verb tunes the named portal to that worker: `fno mux thread reseat <name>` with the portal index.
 
-Portals are never persisted. If the mux server restarts, every portal is gone and every thread keeps running. Spawn again with `--portal`, or open a portal by hand.
+Portals persist across a restart as slots, not live panes. The restored screen sits parked on its channel while the thread keeps running. A reach, a focus, or an explicit `fno mux workspace restore` fills it. The model is the whole of [portals.md](../architecture/portals.md).
 
-The index map, the one-row-one-viewer rule, and restore pruning live in [portals.md](../architecture/portals.md).
+The TV model, the transient view, and the restore prune live in [portals.md](../architecture/portals.md).
 
 ## Reasoning effort (`--effort`)
 

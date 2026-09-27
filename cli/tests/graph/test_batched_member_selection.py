@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from tests.fixtures.graph_seed import seed_graph
 
 from fno.graph.cli import cli, _is_batched_member
 
@@ -61,7 +63,7 @@ def graph_file(tmp_path, monkeypatch):
     path = tmp_path / "graph.json"
 
     def write(entries):
-        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(path, entries)
         return path
 
     # The selection decision is served by the keeper now: the graph is pinned
@@ -69,7 +71,7 @@ def graph_file(tmp_path, monkeypatch):
     # `_graph_path`, and claims resolve under a redirected root.
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[paths]\ngraph_json = "{path}"\n', encoding="utf-8"
+        f'state_dir = "{tmp_path}"\n', encoding="utf-8"
     )
     (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_CONFIG", str(config))
@@ -155,11 +157,38 @@ def test_ready_omits_batched_member_lists_sibling(graph_file):
 # ---------------------------------------------------------------------------
 
 
+def _native_update(graph: Path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (FNO_CONFIG's state_dir)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(graph.parent),
+            "FNO_STATE_DIR": str(graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(graph.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 def test_update_batch_marks_node(graph_file):
     """`update --batch <id>` sets node.batch so selection then excludes it."""
-    graph_file([_node("ab-cccc3333")])
-    r = runner.invoke(cli, ["update", "ab-cccc3333", "--batch", "batch-ffff9999"])
-    assert r.exit_code == 0, r.stdout
+    graph = graph_file([_node("ab-cccc3333")])
+    code, out = _native_update(graph, "ab-cccc3333", "--batch", "batch-ffff9999")
+    assert code == 0, out
     # The mark now hides it from `next`.
     picked = runner.invoke(cli, ["next", "--all"]).stdout.strip()
     assert picked == "null"
@@ -167,9 +196,9 @@ def test_update_batch_marks_node(graph_file):
 
 def test_update_batch_null_clears_mark(graph_file):
     """`update --batch null` requeues a member (resurfaces in selection)."""
-    graph_file([_node("ab-cccc3333", batch="batch-ffff9999")])
-    r = runner.invoke(cli, ["update", "ab-cccc3333", "--batch", "null"])
-    assert r.exit_code == 0, r.stdout
+    graph = graph_file([_node("ab-cccc3333", batch="batch-ffff9999")])
+    code, out = _native_update(graph, "ab-cccc3333", "--batch", "null")
+    assert code == 0, out
     picked = json.loads(runner.invoke(cli, ["next", "--all"]).stdout)
     assert picked is not None
     assert picked["id"] == "ab-cccc3333"

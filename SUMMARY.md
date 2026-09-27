@@ -1,19 +1,27 @@
-# SUMMARY - the answerer gate walks each changed symbol into every language tree
+# Summary: a claude reap receipt pins model or route
 
-## Deviations from the plan
+## What landed
 
-- The plan said "wire it like kill-check", which is a routable `fno agents` verb with a Python help entry in `cli/src/fno/agents/rust_runtime.py`. Routing surface-check would contradict the plan's own "no new user verb" and "cli/src/fno has no change" constraints, so the verb is binary-first like `canonical-check`: a plain `==` dispatch arm plus one exclusion in `test_rust_client_verbs_match_client_rs` (cli/tests/agents/test_rust_runtime.py) so the parity guard keeps it out of `RUST_CLIENT_VERBS`. The Python CLI surface is unchanged.
-- AC3-ERR's graceful path grew one U line the heredoc could not emit (a non-mapping frontmatter document crashed Python and the shell warned "failed to run"); the Rust verb prints `U frontmatter is not a YAML mapping` instead. Same shell outcome, no crash.
-- The AC7a semantic fixture gained an `at:` symbol token (`_semantic_validate`) so the new no-symbol warning does not fire on it; the walk's same-language drop makes the fixture walk-clean.
-- `git grep -o` prints no line numbers, so the hit parser splits `sha:path:match` (two fields), not `sha:path:line:match`.
+- `crates/fno-agents/src/receipt.rs`: a claude receipt's resume line now asks resume_pin (`claude_resume_recipe`). It pins `--model`/`--effort` from the row. When a non-Anthropic route served the row, the line names `fno agents spawn --resume <sid> -P <provider> -m <model>` instead. The claude `resume` string is shell-quoted. `receipt_file_name` was extracted. `decide_reap_receipt` answers the spawn-axes `reap_receipt` field.
+- `crates/fno-agents/src/resume_receipt.rs`: the preserved-session hint prints the receipt's own rendered line (`resume:`). When the line is the route door, the hint adds a new-session note.
+- `crates/fno-agents/src/spawn_axes.rs`: the `reap_receipt` field routes to `decide_reap_receipt` (same field-on-a-verb shape as `resume_pin`).
+- `cli/src/fno/agents/registry.py`: `_stage_removal_receipt` asks the Rust builder and writes the answered file (14 added lines).
+- `cli/src/fno/agents/resume_cli.py`: the claude exact-predecessor lane refuses with exit 13 and names the spawn door (10 added lines).
+- Docs: `retirement-receipts.md` gained the recipe paragraph and the Python door row. `dual-implementation-inventory.md` marks the removal-receipt-writers row builder-retired.
 
-## Fixes found by the differential run
+## Deviation from the plan
 
-- `is_test_path` compiled its regex per grep hit line; a plan whose symbols hit thousands of lines spun the walk for minutes. The three walk regexes are now `OnceLock`-hoisted.
-- The `at:` second token skipped the six-char underscore keep-rule, so a wordy note (`run and collect`) turned the prose word `and` into a grep target over the whole tree. `at_symbol` now applies the same keep-rule as `reads_calls`.
+The plan's codex expectation ("keeps `codex resume <sid> --remote unix://` in both fields") assumed no pre_exec composition. The codex capability form composes a `sh -c '<pre>; exec …'` wrapper, so per-token shlex quoting re-quotes an already-quoted script and corrupts it. Fix: quoting applies to the claude branch only. Non-claude harnesses keep the raw `argv.join(" ")`.
 
-## Measured facts for the PR body
+## Verification
 
-- Differential over /Users/bb16/c3po/internal/fno/plans (origin/main heredoc vs surface-check): E/O/U lines identical except U-line YAML-error WORDING on malformed frontmatter (PyYAML vs serde_yaml_ng describe the same failure differently; both are U, both NOT CHECKED). Counts recorded by the differential run (logged in the session).
-- AC5-HP replayed: the x-6418 plan at base 2742c122 produces `X is_open_phase_row ... crates/fno-agents/src/graph_keeper.rs, crates/fno-agents/src/graph_store.rs`, exactly the readers the review round found by hand.
-- The plan itself validates through the bundle copy with receipt `cross-language walk at ...: 2 symbol(s), readers by tree shell 3; 0 unlisted`.
+- `cargo test --lib` filters `receipt`, `resume_receipt`, `gc_receipts`, `spawn_axes`: green. `the_live_eighteen_split_fifteen_and_three` passes in isolation. Its one broad-filter failure is the documented lock-free env race in `paths.rs`, not this diff.
+- `--test retirement_e2e`: 9 passed.
+- `cargo fmt --check`: clean. `clippy --all-targets`: zero findings in the touched files. The 690 crate-wide findings are pre-existing under local clippy 1.94, and CI's pinned toolchain arbitrates.
+- Python: `test_registry.py` + `test_lineage_resolution.py` + `test_agents_history.py`: 121 passed. `check-python-static.sh`: clean.
+- `check-file-budget.sh`: cli/src/fno +24 against the 30 budget and the 26 grant cap. No over-budget file grew. `check-no-internal-refs.sh`: clean.
+- Live binary probe with planted rows: the zai row prints `fno agents spawn --resume <sid> -P zai -m 'glm-5.3-flash[1m]'` with `removal_trigger: session`. The anthropic row prints `claude --resume <sid> --model claude-opus-5`.
+
+## Plan note
+
+- The address guard now expands directory arguments to tracked Markdown files. Its prior file-only behavior rejected the plan's `skills/reign` acceptance. That acceptance now passes across 11 files.

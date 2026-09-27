@@ -5,8 +5,8 @@ set -euo pipefail
 # server, SIGKILLed; that exact pid, still alive with parent 1; a fresh
 # server, re-adopting the SAME pid; and the pane, ANSWERING a prompt after
 # all of it. No assertion here trusts an exit code or a survivor count.
-# A plain (non-worker) pane is carried along as the control: it must die
-# with the server, exactly as it always has.
+# A plain (non-worker) pane is carried along as the control: it is
+# keeper-hosted too now, so it must survive the kill by the same road.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MUX_BIN="${FNO_MUX_BIN:-$REPO_ROOT/crates/fno/target/debug/fno}"
@@ -29,6 +29,9 @@ export FNO_AGENTS_WORKER_BIN="$WORKER_BIN"
 SESSION="fk-$$"
 export SESSION
 SERVER_PID=""
+# Set before the EXIT trap can fire: cleanup sweeps these, and under `set -u`
+# a failure before the first assignment would otherwise mask the real error.
+SURVIVOR_PIDS=""
 
 # The worker needs a durable session identity: a harness-stub `claude` whose
 # resume form carries a real session id, so the pane is ADDRESSABLE - a
@@ -48,6 +51,38 @@ WORKER_SESSION="01a0f1ce-0000-4c1e-8a1c-2d3e4f5a6b7c"
 export WORKER_SESSION
 
 cleanup() {
+    # Keepers FIRST, while the server can still list them: the plain pane's
+    # keeper is never in SURVIVOR_PIDS, and kill-server spares keepers by
+    # design, so without this sweep every run leaked one keeper and its
+    # child (measured).
+    "$MUX_BIN" mux pane keeper list --json 2>/dev/null | python3 -c '
+import json, os, subprocess, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows:
+    if r.get("session") != os.environ["SESSION"]:
+        continue
+    for field in ("keeper_pid", "child_pid"):
+        pid = r.get(field)
+        if pid:
+            subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+' || true
+    sleep 0.3
+    # The argv sweep: anything this run minted carries the run's unique temp
+    # prefix in its argv. A missed keeper probe must not strand the process.
+    ps -axo pid=,command= | python3 -c '
+import subprocess, sys
+needle = sys.argv[1]
+needles = ("fno-agents-worker", "stubbin")
+for ln in sys.stdin:
+    pid, _, rest = ln.strip().partition(" ")
+    if "ps -axo" in ln or "python3 -c" in ln:
+        continue
+    if needle in rest and any(n in rest for n in needles):
+        subprocess.run(["kill", "-9", pid], capture_output=True)
+' "$TMP_DIR" || true
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -9 "$SERVER_PID" 2>/dev/null || true
@@ -151,10 +186,10 @@ else
     exit 1
 fi
 if alive "$PLAIN_PID"; then
-    echo "FAIL: plain pane child $PLAIN_PID survived the server kill; plain panes must die with it (AC4)" >&2
-    exit 1
+    echo "[after kill] plain pane child $PLAIN_PID is ALIVE (keeper-held, like every pane)"
 else
-    echo "[after kill] plain pane child $PLAIN_PID is dead, as it always was"
+    echo "FAIL: plain pane child $PLAIN_PID died with the server; every pane is kept now" >&2
+    exit 1
 fi
 
 # The re-adoption: a fresh server on the same session binds the SAME child.
@@ -214,4 +249,4 @@ else
     exit 1
 fi
 
-echo "PASS: worker child $CHILD_PID outlived the killed server $SESSION, was re-adopted by a fresh server, and answered a prompt; the plain pane died with it"
+echo "PASS: worker child $CHILD_PID outlived the killed server $SESSION, was re-adopted by a fresh server, and answered a prompt; the plain pane survived by the same road"

@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 
 import pytest
+from fno.graph.store import read_graph_strict
+from tests.fixtures.graph_seed import seed_graph
 
 
 # -- fixtures --
@@ -184,12 +186,12 @@ def _graph(tmp_path: Path, rows: list[dict] | None = None) -> Path:
             "type": "feature", "priority": "p2", "status": "idea",
             "cost_usd": None,
             "cost_sessions": rows if rows is not None else []}
-    path.write_text(json.dumps({"entries": [node]}))
+    seed_graph(path, [node])
     return path
 
 
 def _node(graph_path: Path) -> dict:
-    return json.loads(graph_path.read_text())["entries"][0]
+    return read_graph_strict(graph_path)[0]
 
 
 def test_cost_update_replaces_an_existing_session_row(tmp_path):
@@ -397,7 +399,7 @@ def test_cost_update_says_so_when_there_is_no_graph(tmp_path, capsys):
     from fno.cost import _update_graph_node
 
     assert _update_graph_node(tmp_path / "absent.json", "ab-12345678", "S1", 4.0) is False
-    assert "no graph at" in capsys.readouterr().err
+    assert "node ab-12345678 not found" in capsys.readouterr().err
 
 
 # -- AC9: a contained node projects no rollup at all (x-e957 task 1.4) --

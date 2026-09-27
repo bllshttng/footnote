@@ -140,8 +140,7 @@ def test_yard_cli_json_emits_citizens(tmp_path, monkeypatch):
         "load_registry",
         lambda: [_row(name="cli-cat", sid="cli-id", crown=1)],
     )
-    archive = tmp_path / "graph-archive.json"
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: archive)
+    monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     # The canonical spelling: the root `fno yard` is a VERB_MOVES shim whose
     # move notice rides stderr, which CliRunner mixes into `output` and would
     # trail the JSON document. Forwarding itself is covered in test_verb_moves.
@@ -163,7 +162,7 @@ def test_yard_cli_text_lists_citizens(tmp_path, monkeypatch):
         "load_registry",
         lambda: [_row(name="cli-cat", sid="cli-id")],
     )
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     r = runner.invoke(app, ["yard"])
     assert r.exit_code == 0, r.output
     assert "cli-cat" in r.output
@@ -182,9 +181,9 @@ def test_yard_cli_corrupt_archive_fails_the_fold_not_fabricates(tmp_path, monkey
         "load_registry",
         lambda: [_row(name="cli-cat", sid="cli-id")],
     )
+    monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
     archive = tmp_path / "graph-archive.json"
     archive.write_text("{not json")
-    monkeypatch.setattr(paths, "graph_archive_json", lambda: archive)
     r = runner.invoke(app, ["yard", "--json"])
     assert r.exit_code == 1, r.output
     assert "archive unreadable" in (r.stderr or r.output)

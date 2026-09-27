@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -126,6 +127,102 @@ def test_force_with_lease_ref_value_to_feature_allowed():
     _on_main("feature/x")
     assert git_protection.is_push_to_protected_branch(
         "git push --force-with-lease=origin/main origin feature/x") == (False, None)
+
+
+# ===========================================================================
+# Push debounce: the stamp covers registration, then the real fno probe covers
+# a check that is already visible. Probe failures always allow the push.
+# ===========================================================================
+
+class _DebounceHarness:
+    def __init__(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(git_protection, "PUSH_STAMP_DIR", tmp_path / "push-stamps")
+        self.bypass_events = []
+        monkeypatch.setattr(
+            git_protection, "_emit_push_bypass_event", self.bypass_events.append
+        )
+        monkeypatch.delenv("FNO_PUSH_NOW", raising=False)
+
+
+def _old_stamp():
+    stamp = git_protection._push_stamp_path("feature/x")
+    old = time.time() - git_protection.PUSH_DEBOUNCE_SECONDS - 1
+    os.utime(stamp, (old, old))
+
+
+def _fake_fno(tmp_path, monkeypatch, body):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "fno"
+    fake.write_text("#!/bin/sh\n" + body)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+
+
+def test_fno_push_now_bypasses_and_records(tmp_path, monkeypatch):
+    h = _DebounceHarness(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_PUSH_NOW", "1")
+    monkeypatch.setattr(
+        git_protection, "_read_in_flight", lambda branch: (_ for _ in ()).throw(AssertionError())
+    )
+    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
+    assert h.bypass_events == ["feature/x"]
+
+
+def test_a_fresh_stamp_refuses_without_running_the_probe(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    git_protection._stamp_push("feature/x")
+    monkeypatch.setattr(
+        git_protection, "_read_in_flight", lambda branch: (_ for _ in ()).throw(AssertionError())
+    )
+    reason = git_protection.push_debounce_refusal("git push origin feature/x", "feature/x")
+    assert reason is not None
+    assert "pushed 0s ago" in reason
+
+
+def test_an_expired_stamp_allows_when_the_probe_is_clear(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    git_protection._stamp_push("feature/x")
+    _old_stamp()
+    monkeypatch.setattr(git_protection, "_read_in_flight", lambda branch: {"in_flight": False})
+    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
+
+
+def test_a_probe_true_refuses_and_names_the_supersede_doors(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    git_protection._stamp_push("feature/x")
+    _old_stamp()
+    _fake_fno(
+        tmp_path,
+        monkeypatch,
+        'echo \'{"in_flight": true, "check": "rust e2e concurrency stress (20 trials)", "job": "106470248875", "head": "f4d1732d"}\'\nexit 2\n',
+    )
+    reason = git_protection.push_debounce_refusal("git push origin feature/x", "feature/x")
+    assert reason is not None
+    assert "rust e2e concurrency stress" in reason
+    assert "106470248875" in reason
+    assert "fno do pr wait" in reason
+    assert "--force-ci-cancel" in reason
+    assert "FNO_PUSH_NOW=1" in reason
+
+
+def test_a_probe_false_allows_and_stamps(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    _fake_fno(tmp_path, monkeypatch, 'echo \'{"in_flight": false}\'\nexit 0\n')
+    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
+
+
+def test_a_probe_usage_error_allows_and_stamps(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    _fake_fno(tmp_path, monkeypatch, 'echo usage error >&2\nexit 2\n')
+    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
+
+
+def test_a_probe_timeout_allows_and_stamps(tmp_path, monkeypatch):
+    _DebounceHarness(tmp_path, monkeypatch)
+    monkeypatch.setattr(git_protection, "_PUSH_PROBE_TIMEOUT", 0.01)
+    _fake_fno(tmp_path, monkeypatch, "sleep 1\n")
+    assert git_protection.push_debounce_refusal("git push origin feature/x", "feature/x") is None
 
 
 # ===========================================================================
@@ -343,6 +440,30 @@ def test_singleline_substitution_hiding_a_push_is_caught():
 def test_substitution_inside_single_quotes_is_not_executed():
     # No expansion in single quotes, so this really is inert prose.
     assert _git_segments('fno agents mail send x \'see "$(git push origin main)"\'') == []
+
+
+# --- `git grep` carrying a guarded pattern is an allowlisted READ -------------
+# Segments arrive shlex-rejoined with quotes stripped, so `git grep -n -E
+# 'git push' -- .` used to read as a push to main: token[1] was `grep`, which
+# was never added to the positional allowlist, and the pattern TEXT then
+# matched the push regex. git grep cannot write; commit and log got this fix
+# for the same class, grep was simply missed.
+
+
+def test_git_grep_carrying_a_push_pattern_is_allowed():
+    out = _run_hook("git grep -n -E 'git push' -- .")
+    assert out.get("permissionDecision") != "deny", out
+
+
+def test_git_grep_is_positionally_allowlisted():
+    assert git_protection.is_allowed_git_command("git grep -n -E 'git push' -- .")
+
+
+def test_push_to_main_still_denied_beside_the_grep_allow():
+    _on_main("feature/x")
+    assert _git_segments("git push origin main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push origin main") == (True, "main")
 
 
 if __name__ == "__main__":

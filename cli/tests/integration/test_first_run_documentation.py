@@ -13,10 +13,12 @@ bundled-install fixture to reuse, so the packaged front door on PATH is the
 install under test.
 """
 
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,29 @@ def _documented_commands():
     return cmds, skipped
 
 
+def _fno_on_path() -> str:
+    """The front door under test: this checkout's fno when available, else PATH.
+
+    A dev machine's installed fno can lag this source (fno doctor reports the
+    lag); the docs under test describe THIS source. The Rust front build of
+    this checkout wins first (mux verbs exec it), then the venv entrypoint,
+    then whatever PATH offers.
+    """
+    import sys
+
+    candidates = (
+        REPO_ROOT / "crates" / "fno" / "target" / "release" / "fno",
+        REPO_ROOT / "target" / "release" / "fno",
+        REPO_ROOT / "crates" / "fno" / "target" / "debug" / "fno",
+        REPO_ROOT / "target" / "debug" / "fno",
+        Path(sys.executable).parent / "fno",
+    )
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return "fno"
+
+
 def _probe(argv):
     """(ok, detail) for a documented command; --help short-circuits any run.
 
@@ -96,7 +121,7 @@ def _probe(argv):
     """
     probe = argv if "--version" in argv else argv + ["--help"]
     try:
-        run = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+        run = subprocess.run([_fno_on_path(), *probe[1:]], capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         return False, "timed out"
     out = (run.stderr or run.stdout).strip()

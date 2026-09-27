@@ -143,10 +143,15 @@ def test_peek_mux_pane_ref_without_session_prints_bare_id(tmp_path):
     assert "mux pane=:33" not in out.getvalue()
 
 
-def test_peek_mux_pane_refusal_names_working_surface(tmp_path):
+def test_peek_mux_pane_refusal_names_working_surface(tmp_path, monkeypatch):
     """When the mux cannot answer, the refusal names `fno mux pane read <id>`
     instead of listing unrelated peers (the 2026-08-04 false-liveness incident
     where an empty resolver result was read as proof three live workers were wedged)."""
+    # Keep the refusal deterministic: an unclassifiable read (falsifier None)
+    # is the only shape that refuses; a real gone pane falls through instead.
+    monkeypatch.setattr(
+        "fno.agents.reachability.pane_falsifier", lambda mux: None
+    )
     out, err = io.StringIO(), io.StringIO()
     rc = peek(
         "boardsort-b63a",
@@ -164,6 +169,33 @@ def test_peek_mux_pane_refusal_names_working_surface(tmp_path):
     assert "boardsort-b63a" in msg
     # Unrelated peers must not be listed as "did you mean" for a pane worker.
     assert "board-survey" not in msg
+
+
+def test_peek_gone_pane_names_the_exit_and_the_resume(tmp_path, monkeypatch):
+    """A read failure the falsifier classifies as pane-gone is a DEAD pane:
+    say so, name the resume command, and fall through to the registry row
+    instead of claiming the mux did not answer."""
+    monkeypatch.setattr(
+        "fno.agents.reachability.pane_falsifier", lambda mux: "pane-gone"
+    )
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "king-4d9b-delivery",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["someone-else"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("main", 2277, "king-4d9b-delivery"),
+        mux_reader=lambda sess, pane, n: (1, ""),
+    )
+    msg = err.getvalue()
+    assert "pane 2277 is gone" in msg
+    assert "fno agents resume king-4d9b-delivery" in msg
+    assert "the mux did not answer" not in msg
+    # The fall-through continues past the pane read, so the not-found shape
+    # (no registry row in this test) is the expected exit here, not 1.
+    assert rc == 13
+    assert "peer not found in the registry: king-4d9b-delivery" in msg
 
 
 def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):
@@ -1684,3 +1716,82 @@ def test_peek_all_without_grep_reads_every_session(tmp_path, monkeypatch):
     assert rc == 0
     assert "alpha" in out.getvalue() and "beta" in out.getvalue()
     assert "2 session(s) read" in err.getvalue()
+
+
+# --------------------------------------------------------------------------
+# the record reader's bounded tail (x-5f26)
+# --------------------------------------------------------------------------
+
+
+def _num(rec):
+    return rec["n"]
+
+
+def _numbered_jsonl(tmp_path, records):
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_records_reader_tail_returns_the_records_a_full_pass_returns(
+    tmp_path, monkeypatch
+):
+    # AC4-HP: a transcript larger than the tail window answers identically
+    # while parsing only the window.
+    from fno.agents import peek as peek_mod
+
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", 4096)
+    path = _numbered_jsonl(tmp_path, [{"n": i, "pad": "x" * 64} for i in range(500)])
+    assert path.stat().st_size > 4096
+
+    seen: list = []
+
+    def parse(rec):
+        seen.append(rec["n"])
+        return rec["n"]
+
+    tail = peek_mod._records_from_jsonl(path, 40, parse)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40 and tail[-1] == 499
+    assert len(seen) < 500, "the tail read must not parse every record"
+
+
+def test_records_reader_falls_back_to_the_whole_file_when_the_tail_is_thin(
+    tmp_path, monkeypatch
+):
+    # AC4-EDGE: the window holds one oversized record; the fallback answers
+    # exactly what a whole-file read answers.
+    from fno.agents import peek as peek_mod
+
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", 4096)
+    records = [{"n": i, "pad": "x" * 64} for i in range(499)]
+    records.append({"n": 499, "pad": "x" * 8192})
+    path = _numbered_jsonl(tmp_path, records)
+
+    tail = peek_mod._records_from_jsonl(path, 40, _num)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40 and tail[-1] == 499
+
+
+def test_records_reader_tolerates_a_seek_inside_a_line_or_character(tmp_path, monkeypatch):
+    # AC4-ERR: the seek lands mid-line and mid-multibyte-character; the
+    # fragment parses as nothing and the answer is unchanged.
+    from fno.agents import peek as peek_mod
+
+    records = [{"n": i, "pad": "x" * 32} for i in range(50)]
+    records.insert(25, {"n": -1, "pad": "é" * 40})
+    path = _numbered_jsonl(tmp_path, records)
+    raw = path.read_bytes()
+    # Seek onto the SECOND byte of the two-byte é: a torn, undecodable fragment.
+    landing = raw.index("é".encode()) + 1
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", len(raw) - landing)
+
+    tail = peek_mod._records_from_jsonl(path, 40, _num)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40

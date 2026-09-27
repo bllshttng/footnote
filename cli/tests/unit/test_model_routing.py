@@ -21,7 +21,6 @@ import pytest
 
 from fno.agents import model_routing as mr
 from fno.config import ConfigBlock, ModelRoutingBlock, SettingsModel
-from fno.rust_binary import find_dev_binary
 
 
 def _settings(**block_kwargs: object) -> SettingsModel:
@@ -132,30 +131,6 @@ def test_disabled_block_returns_none_even_for_routed_role() -> None:
         )
         is None
     )
-
-
-def test_pr_create_is_a_known_lane_that_fails_safe_unconfigured() -> None:
-    # PR creation ships on the pr-create role, not a hardcoded tier: it is a
-    # known lane (rendered by `fno route ls`) that routes nothing by default and
-    # resolves to None - the invoking harness's primary model - unconfigured.
-    assert "pr-create" in mr.KNOWN_LANE_ROLES
-    assert "pr-create" not in mr.DEFAULT_ROUTED_ROLES
-    assert (
-        mr.resolve_route("pr-create", settings=_settings(), env={"ZAI_API_KEY": "k"})
-        is None
-    )
-
-
-def test_pr_create_routes_when_configured() -> None:
-    # An explicit config.model_routing.roles.pr-create route wins and selects
-    # that provider/model at the spawn boundary.
-    route = mr.resolve_route(
-        "pr-create",
-        settings=_settings(roles={"pr-create": "zai,glm-4.7"}),
-        env={"ZAI_API_KEY": "k"},
-    )
-    assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-4.7"
 
 
 def test_extra_env_is_merged_and_can_override_a_tier() -> None:
@@ -657,10 +632,7 @@ def _pin_codex_config(
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
 
 
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 
 @requires_rust

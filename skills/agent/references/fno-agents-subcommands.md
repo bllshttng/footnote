@@ -42,7 +42,7 @@ Out of scope for the `/agent` router by design - naming one is not a gap. Rust-o
 | `kill-check` | kill-criteria evaluation. |
 | `verify-evidence` / `digest` / `report` / `wait` / `trace` / `ping` | evidence audit, catch-up fold, progress report, blocking wait, tracing, liveness. |
 | `spawn-guard` **(typer, hidden)** | atomic node-claim probe used by the spawn path. |
-| `drive-authority` **(typer, hidden)** | reports whether an operator holds a drive window. |
+| `drive-authority` **(typer, hidden)** | reports whether a user holds a drive window. |
 | `gate` **(typer, hidden)** | retired at G4; kept for back-compat, hidden from help. |
 
 The three **(typer, hidden)** subcommands are the only machine subcommands that used to show in `fno agents --help`; they carry `hidden=True` now. The rest are Rust-only and were never listed.

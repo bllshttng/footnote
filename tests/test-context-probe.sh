@@ -33,6 +33,14 @@ fail=0
 TMPDIR_FIXTURES="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_FIXTURES"' EXIT
 
+# Hermetic config: the probe's Rust reader resolves [[routing.models]] rows for
+# dated context windows. Pin $FNO_CONFIG to an empty file so a developer's own
+# rows cannot change the window assertions below; the AC1 case swaps in its own
+# dated row.
+FNO_CONFIG="$TMPDIR_FIXTURES/empty-config.toml"
+: > "$FNO_CONFIG"
+export FNO_CONFIG
+
 check_eq() {
   local desc="$1"
   local expected="$2"
@@ -225,6 +233,30 @@ no_arg_output=$(bash "$SCRIPT" 2>/dev/null)
 no_arg_exit=$?
 set -e
 check_exit "No argument exits 3" "3" "$no_arg_exit"
+
+# ---------------------------------------------------------------------------
+# AC1-HP: a dated [[routing.models]] row overrides the ladder. The row model
+# carries the [1m] suffix while the transcript model does not (AC6), and the
+# window reads 1310720, not the ladder's 1000000 for glm-5.3.
+# ---------------------------------------------------------------------------
+AC1_CONFIG="$TMPDIR_FIXTURES/dated-config.toml"
+cat > "$AC1_CONFIG" <<'EOF'
+[[routing.models]]
+name = "flash-measured"
+harness = "claude"
+model = "glm-5.3-flash[1m]"
+context = 1310720
+context_measured_at = "2026-09-17"
+context_source = "vendor doc"
+EOF
+FIXTURE_AC1="$TMPDIR_FIXTURES/transcript_ac1.jsonl"
+cat > "$FIXTURE_AC1" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","model":"glm-5.3-flash","usage":{"input_tokens":100000,"cache_creation_input_tokens":200000,"cache_read_input_tokens":20000},"content":[]}}
+EOF
+FNO_CONFIG="$AC1_CONFIG" run_probe "$FIXTURE_AC1"
+check_exit "AC1-HP: dated row exits 0" "0" "$probe_exit"
+check_eq "AC1-HP: dated row window_tokens=1310720" "1310720" "$(printf '%s' "$output" | jq -r '.window_tokens' 2>/dev/null)"
+check_eq "AC1-HP: dated row used_pct=24 (320000/1310720)" "24" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # Results

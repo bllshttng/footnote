@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 /// Write an executable stub script.
 ///
-/// Published atomically: the body is written to a temp sibling, chmod'd,
-/// then renamed onto the final path (same fix as tests/loop_check.rs). The
-/// published path is complete and closed from birth, so an exec can never
-/// hit ETXTBSY (needs a write-open fd on the inode, including via a fork
-/// that inherited one) or a partial file - no probe-exec loop required.
+/// The temp sibling plus rename does NOT make ETXTBSY unreachable: a sibling
+/// thread that forks while the temp fd is open copies it, and the copied fd
+/// follows the inode the rename publishes. These integration binaries run
+/// with `--test-threads=1` in CI (cli-ci.yml), so no sibling thread forks in
+/// that window; under local parallel runs the lib helper
+/// `write_exec_stub` (child-writer) is the race-free form.
 pub fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
@@ -73,6 +74,23 @@ pub fn wait_for_path(path: &Path, budget: std::time::Duration) {
     panic!("path never appeared within {budget:?}: {}", path.display());
 }
 
+/// Budget for every wait on the startup sweep's outcome event. One value for
+/// the class: a per-site bump leaves the siblings flaking. A wait returns as
+/// soon as the event lands, so a generous budget costs a green run nothing.
+pub const RECONCILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub fn event_text(home: &fno_agents::paths::AgentsHome) -> String {
+    let journal = home.events_jsonl();
+    match fno_agents::event_store::query_events(&journal, &Default::default()) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| row.line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(_) => fs::read_to_string(journal).unwrap_or_default(),
+    }
+}
+
 /// Wait until the daemon's event log carries `needle`.
 ///
 /// The startup reconcile sweep runs CONCURRENTLY with the accept loop, so a
@@ -87,10 +105,7 @@ pub fn wait_for_event(
 ) {
     let start = std::time::Instant::now();
     while start.elapsed() < budget {
-        if fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
-            .contains(needle)
-        {
+        if event_text(home).contains(needle) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
@@ -129,10 +144,15 @@ pub fn absence_verdict(
 }
 
 fn absence_evidence(journal: &Path, stderr: &Path) -> String {
-    let journal_lines = fs::read_to_string(journal)
-        .unwrap_or_default()
-        .lines()
-        .count();
+    let rows = fno_agents::event_store::query_events(journal, &Default::default());
+    // Committed rows are the count the reader sees; a raw pre-store fixture
+    // with no store rows still answers its own line count.
+    let journal_lines = match rows {
+        Ok(listed) if !listed.is_empty() => listed.len(),
+        _ => fs::read_to_string(journal)
+            .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0),
+    };
     let mut out = format!(
         "journal read: {} ({journal_lines} lines)\n",
         journal.display()
@@ -180,6 +200,7 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
         fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = std::process::Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("HOME", home.root())
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         // The claim-audit journal resolves through this pin before the
@@ -197,11 +218,12 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
 
 /// How many lines of the daemon's event log carry `needle`.
 pub fn count_events(home: &fno_agents::paths::AgentsHome, needle: &str) -> usize {
-    fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.contains(needle))
-        .count()
+    // The store commit is the write boundary: the daemon's rows live in the
+    // store, so the count reads committed rows, never raw journal bytes.
+    let journal = home.events_jsonl();
+    let rows = fno_agents::event_store::query_events(&journal, &Default::default());
+    let Ok(rows) = rows else { return 0 };
+    rows.iter().filter(|row| row.line.contains(needle)).count()
 }
 
 /// Wait until `needle` has been written at least `at_least` times.

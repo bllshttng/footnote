@@ -6,7 +6,6 @@ use super::*;
 
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn base_args(tmp: &TempDir, extra: &[&str]) -> Vec<String> {
@@ -63,9 +62,7 @@ fn write_fixture(tmp: &TempDir, rows: &[String], history: &Path, notify_log: &Pa
     script += "    ;;\n  inbox/notify)\n    echo \"$*\" >> '";
     script += &notify_log.to_string_lossy();
     script += "'\n    ;;\nesac\n";
-    let p = tmp.path().join("fno-bin.sh");
-    fs::write(&p, script).unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_exec_stub(tmp.path(), "fno-bin.sh", &script);
 }
 
 /// The injected spawner: re-parses the child argv (the same contract the real
@@ -83,14 +80,17 @@ fn thread_spawner() -> impl Fn(&[String]) -> Result<u32, String> {
 }
 
 fn wait_for_row(events: &Path, kind: &str, timeout: Duration) -> Option<Value> {
+    // Committed rows, not journal bytes: the store cutover commits ticks in
+    // the store beside the journal.
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok(text) = fs::read_to_string(events) {
-            for line in text.lines().rev() {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    if v.get("type").and_then(Value::as_str) == Some(kind) {
-                        return Some(v);
-                    }
+        let rows =
+            crate::event_store::query_events(events, &crate::event_store::EventQuery::default())
+                .unwrap_or_default();
+        for r in rows.iter().rev() {
+            if let Ok(v) = serde_json::from_str::<Value>(&r.line) {
+                if v.get("type").and_then(Value::as_str) == Some(kind) {
+                    return Some(v);
                 }
             }
         }
@@ -100,14 +100,15 @@ fn wait_for_row(events: &Path, kind: &str, timeout: Duration) -> Option<Value> {
 }
 
 fn count_kind(events: &Path, kind: &str) -> usize {
-    fs::read_to_string(events)
-        .map(|text| {
-            text.lines()
-                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-                .filter(|v| v.get("type").and_then(Value::as_str) == Some(kind))
-                .count()
+    crate::event_store::query_events(events, &crate::event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| {
+            serde_json::from_str::<Value>(&r.line)
+                .map(|v| v.get("type").and_then(Value::as_str) == Some(kind))
+                .unwrap_or(false)
         })
-        .unwrap_or(0)
+        .count()
 }
 
 fn claim_state(root: &Path) -> claims::ClaimState {
@@ -132,6 +133,20 @@ fn full_gate() -> GateReading {
     }
 }
 
+/// The clear verdict as a closure run_tick_mode reads; the incident test
+/// passes `armed` instead.
+fn clear() -> crate::loops_pause::DispatchPause {
+    crate::loops_pause::DispatchPause::Clear
+}
+
+fn armed() -> crate::loops_pause::DispatchPause {
+    crate::loops_pause::DispatchPause::FleetIncident {
+        generation: 9,
+        reason: "rustc storm".to_string(),
+        holds: vec!["spawns".to_string(), "tests".to_string()],
+    }
+}
+
 // AC2-HP: summary 9 days old, schedule 7, gate headroom, fixture appends 3
 // rows -> one evals_scheduled_run with task_count 3, claim free at the end.
 #[test]
@@ -148,7 +163,7 @@ fn fires_past_window_journals_run_and_frees_claim() {
     let args = base_args(&tmp, &["--summary-json", summary]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &thread_spawner());
+    run_tick_mode(&o, &ok_gate, &clear, &thread_spawner());
 
     let row = wait_for_row(&events, "evals_scheduled_run", Duration::from_secs(20))
         .expect("scheduled-run row within 20s");
@@ -165,12 +180,48 @@ fn skips_when_fresh() {
     let tmp = TempDir::new().unwrap();
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 2.0}"#]);
     let o = parse_args(&args).unwrap();
-    let code = run_tick_mode(&o, &ok_gate, &|_argv| panic!("spawner must not run"));
+    let code = run_tick_mode(&o, &ok_gate, &clear, &|_argv| {
+        panic!("spawner must not run")
+    });
     assert_eq!(code, 0);
     assert_eq!(
         count_kind(&tmp.path().join("events.jsonl"), "evals_stale"),
         0
     );
+}
+
+// The durable stop outranks the capacity counters: an armed incident holds
+// the arm with fleet_stop even with gate headroom, and a clear verdict in
+// the same world still reads the fleet_full case.
+#[test]
+fn incident_outranks_the_capacity_gate() {
+    let tmp = TempDir::new().unwrap();
+    let notify_log = tmp.path().join("notify.log");
+    let events = tmp.path().join("events.jsonl");
+    write_fixture(&tmp, &[], &tmp.path().join("history.jsonl"), &notify_log);
+    let summary = r#"{"age_days": 15.0, "never_ran": false}"#;
+    let args = base_args(&tmp, &["--summary-json", summary]);
+    let o = parse_args(&args).unwrap();
+    let never = |_argv: &[String]| -> Result<u32, String> {
+        panic!("spawner must not run under an armed incident")
+    };
+
+    let code = run_tick_mode(&o, &ok_gate, &armed, &never);
+
+    assert_eq!(code, 0);
+    // The skip token rides the stdout receipt; the journal row carries the
+    // pause detail.
+    let text = crate::events::committed_journal_text(&events);
+    assert!(
+        text.contains("fleet incident stopped at generation 9"),
+        "{text}"
+    );
+    assert!(!text.contains("fleet_full"), "{text}");
+
+    // Positive control: a clear verdict and a full gate still read fleet_full.
+    run_tick_mode(&o, &full_gate, &clear, &never);
+    let text = crate::events::committed_journal_text(&events);
+    assert!(text.contains("spawn gate refused: fleet_full"), "{text}");
 }
 
 // AC2-ERR: refusing gate twice inside one window -> no child, two evals_stale
@@ -188,8 +239,8 @@ fn refusing_gate_journals_stale_and_notice_deduped() {
         panic!("spawner must not run under a refusing gate")
     };
 
-    run_tick_mode(&o, &full_gate, &never);
-    run_tick_mode(&o, &full_gate, &never);
+    run_tick_mode(&o, &full_gate, &clear, &never);
+    run_tick_mode(&o, &full_gate, &clear, &never);
 
     assert_eq!(count_kind(&events, "evals_stale"), 2);
     let notices = fs::read_to_string(&notify_log).unwrap_or_default();
@@ -201,16 +252,17 @@ fn no_notice_when_emit_fails() {
     let tmp = TempDir::new().unwrap();
     let notify_log = tmp.path().join("notify.log");
     write_fixture(&tmp, &[], &tmp.path().join("history.jsonl"), &notify_log);
-    // The events path IS a directory: the emitter's append fails, so the
-    // journal cannot carry the receipt and no notice may ride.
+    // The STORE path is a directory: the emitter's commit cannot open it, so
+    // the journal cannot carry the receipt and no notice may ride.
     let mut args = base_args(&tmp, &["--summary-json", r#"{"age_days": 15.0}"#]);
     let idx = args.iter().position(|a| a == "--events").unwrap();
     let events_dir = tmp.path().join("events-dir");
     std::fs::create_dir(&events_dir).unwrap();
+    std::fs::create_dir(tmp.path().join("events-dir.db")).unwrap();
     args[idx + 1] = events_dir.to_string_lossy().into_owned();
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &full_gate, &|_a| panic!("must not spawn"));
+    run_tick_mode(&o, &full_gate, &clear, &|_a| panic!("must not spawn"));
 
     assert!(!notify_log.exists(), "no notice without its journal row");
 }
@@ -253,7 +305,7 @@ fn rows_attributed_by_timestamp_not_count() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &thread_spawner());
+    run_tick_mode(&o, &ok_gate, &clear, &thread_spawner());
 
     let row = wait_for_row(&events, "evals_scheduled_run", Duration::from_secs(20)).unwrap();
     assert_eq!(row["data"]["task_count"], Value::from(3));
@@ -295,7 +347,7 @@ fn live_holder_skips_in_flight() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &|_a| panic!("must not spawn"));
+    run_tick_mode(&o, &ok_gate, &clear, &|_a| panic!("must not spawn"));
 
     assert_eq!(
         count_kind(&tmp.path().join("events.jsonl"), "evals_stale"),
@@ -318,7 +370,7 @@ fn dead_holder_journals_stale_releases_and_continues() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &|argv: &[String]| {
+    run_tick_mode(&o, &ok_gate, &clear, &|argv: &[String]| {
         // Record that the tick reached the launch step, then decline so the
         // claim's post-release state stays observable.
         fs::write(tmp.path().join("launched"), "1").unwrap();
@@ -349,9 +401,7 @@ fn run_timeout_kills_group_journals_timeout() {
     let mut script = String::from("#!/bin/sh\ncase \"$1/$2\" in\n  doctor/evals)\n    sleep 30\n    ;;\n  inbox/notify)\n    echo \"$*\" >> '");
     script += &notify_log.to_string_lossy();
     script += "'\n    ;;\nesac\n";
-    let bin = tmp.path().join("fno-bin.sh");
-    fs::write(&bin, script).unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_exec_stub(tmp.path(), "fno-bin.sh", &script);
     let args = base_args(
         &tmp,
         &[

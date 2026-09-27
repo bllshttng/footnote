@@ -13,20 +13,9 @@ use std::time::Duration;
 use super::{EXIT_OK, EXIT_USAGE};
 use crate::proto;
 
-pub fn web(args: &[OsString], _env_session: Option<&str>) -> i32 {
-    let verb = args.first().and_then(|a| a.to_str()).unwrap_or("");
-    match verb {
-        "reap" => web_reap(&args[1..]),
-        "-h" | "--help" | "" => {
-            eprintln!(
-                "usage: fno mux web reap [--json] (stopping a live bridge is: fno mux serve --web --stop)"
-            );
-            EXIT_USAGE
-        }
-        other => {
-            eprintln!("fno mux web: unknown verb {other:?} (verb: reap)");
-            EXIT_USAGE
-        }
+pub fn web(op: crate::cli_args::WebOp, args: &[OsString], _env_session: Option<&str>) -> i32 {
+    match op {
+        crate::cli_args::WebOp::Reap(_) => web_reap(args),
     }
 }
 
@@ -188,10 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_verb_and_bare_web_are_usage() {
-        assert_eq!(web(&[], None), EXIT_USAGE);
-        assert_eq!(web(&[OsString::from("explode")], None), EXIT_USAGE);
-        assert_eq!(web(&[OsString::from("--help")], None), EXIT_USAGE);
+    fn bare_reap_and_unexpected_arguments_are_usage() {
+        // Unknown verbs and a bare `mux web` refuse at the classifier now;
+        // what reaches this parser is a well-formed reap, and its own flag
+        // grammar still refuses the junk.
+        // A bare reap is the happy empty answer, not a usage error.
+        assert_eq!(web_reap(&[]), EXIT_OK);
+        assert_eq!(web_reap(&[OsString::from("explode")]), EXIT_USAGE);
+        assert_eq!(web_reap(&[OsString::from("--help")]), EXIT_USAGE);
     }
 
     #[test]
@@ -208,7 +201,7 @@ mod tests {
         );
         std::fs::write(proto::mux_dir().join("web-reapjunk.json"), "not json").unwrap();
 
-        assert_eq!(web(&[OsString::from("reap")], None), EXIT_OK);
+        assert_eq!(web_reap(&[]), EXIT_OK);
         assert!(!marker_path("reapdead").exists(), "refused port = corpse");
         assert!(marker_path("reaplive").exists(), "live port = keep");
         assert!(
@@ -247,9 +240,6 @@ mod tests {
             "jsonflag",
             "{\"bind\":\"127.0.0.1\",\"port\":1,\"token\":\"b\",\"pid\":1}",
         );
-        assert_eq!(
-            web(&[OsString::from("reap"), OsString::from("-J")], None),
-            EXIT_OK
-        );
+        assert_eq!(web_reap(&[OsString::from("-J")]), EXIT_OK);
     }
 }

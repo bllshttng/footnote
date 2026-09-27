@@ -22,6 +22,10 @@
 
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
 # Project state files resolve through the owning verb (the repo's space under
@@ -225,6 +229,8 @@ detect_provider() {
     echo "codex"
   elif [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "gemini"
+  elif [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "opencode"
   elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     echo "codex"
   elif [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
@@ -1865,11 +1871,23 @@ PYEOF
     # null arm that used to sit here could never run.
     echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
 
+    # Stale plan: notes newer than the plan's last commit (else its mtime)
+    # mean the plan lags its node. Advisory and silent on any failure.
+    if [[ "$_NODE_OWNED" -eq 1 && -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
+      _stale_json="$(fno backlog notes stale "$_NODE_ID" --plan "${INITIAL_PLAN_PATH%%#*}" --json 2>/dev/null)" || _stale_json=""
+      if [[ "$_stale_json" == *'"stale":true'* ]]; then
+        _stale_n="$(printf '%s' "$_stale_json" | sed -n 's/.*"newer_notes":\([0-9]*\).*/\1/p')"
+        _stale_ts="$(printf '%s' "$_stale_json" | sed -n 's/.*"newest_note_at":"\([^"]*\)".*/\1/p')"
+        _stale_basis="$(printf '%s' "$_stale_json" | sed -n 's/.*"basis":"\([^"]*\)".*/\1/p')"
+        echo "target: plan ${INITIAL_PLAN_PATH%%#*} predates ${_stale_n} notes on $_NODE_ID (newest ${_stale_ts}, basis ${_stale_basis}); read them before trusting the plan" >&2
+      fi
+    fi
+
     # ── join: auto - fire join or park ───────────────────────────────────
     # `join: auto` in the plan frontmatter hands the plan's remaining waves
     # to `fno backlog join` here, at init: this session is the holder (one
     # worker) and join spawns the remainder into this worktree. The key is
-    # opt-in - absent or `manual` waits for a person or a /king-for-a-day
+    # opt-in - absent or `manual` waits for a person or a king
     # session to run the verb and does nothing here, so plans written before
     # the key keep their behavior. Both facts come from the canonical probes
     # in fno.backlog.join_trigger: bash re-implementing the auto-continue
