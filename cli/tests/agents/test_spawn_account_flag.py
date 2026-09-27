@@ -434,6 +434,9 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", "/real/home")
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    # The fabricated HOME is the point: the seal must resolve roots through
+    # it, so the sandbox pin steps aside for this ambient-on-purpose test.
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
 
     captured = {}
