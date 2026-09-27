@@ -124,8 +124,9 @@ pub(super) fn block_layout(
     if items.is_empty() && fold.answered.is_empty() {
         return (vec![], vec![], false);
     }
-    let open_count = open_items(fold).len();
-    let ready = open_items(fold).iter().filter(|q| q.ready).count();
+    let opens = open_items(fold);
+    let open_count = opens.len();
+    let ready = opens.iter().filter(|q| q.ready).count();
     let mut lines: Vec<Vec<Seg>> = Vec::new();
     lines.push(vec![(
         format!(" questions {open_count} \u{b7} {ready} ready"),
@@ -392,10 +393,11 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
     s.push_str(&format!("# {title}\n\n"));
     let asker = item.asker.as_ref();
     s.push_str(&format!(
-        "{} \u{b7} {} \u{b7} node {} \u{b7} {}{}\n\n",
+        "{} \u{b7} {} \u{b7} node {} \u{b7} {} {}{}\n\n",
         asker.map(|a| a.handle.as_str()).unwrap_or("?"),
         asker.and_then(|a| a.harness.as_deref()).unwrap_or("?"),
         item.node.as_deref().unwrap_or("none"),
+        age_short(&item.created_at, now),
         item.state,
         if item.ready {
             String::new()
@@ -499,7 +501,6 @@ fn question_page(item: &crate::needs_overlay::QuestionItem, d: &Detail, now: u64
             .filter(|v| !v.is_empty())
             .unwrap_or(not_recorded)
     ));
-    let _ = now;
     if let Some(notes) = &d.notes {
         s.push_str(&format!("## answer\n\nnotes: {notes}\n\n"));
     }

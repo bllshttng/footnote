@@ -449,7 +449,7 @@ pub enum Event {
     /// mode (text filter, Tab state pane focus, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
-    /// Toggle the questions sideline block on/off (prefix+Q). Hidden means
+    /// Toggle the questions sideline block on/off (prefix+q). Hidden means
     /// fully gone (zero rows); the choice persists in the view store.
     ToggleQuestionsBlock,
     /// Grow/shrink the questions block by a row (prefix+} / prefix+{).

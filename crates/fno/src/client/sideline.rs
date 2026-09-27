@@ -121,12 +121,15 @@ impl View {
         // menu/add-workspace row pins directly above the questions block, so
         // a click or hover there is the footer's row even though its display
         // row has scrolled away. Checked ahead of the offset path: the
-        // covered display row must never win.
-        let region = (self.term.0 as usize)
+        // covered display row must never win. The pinned test reads the same
+        // raw region `sideline_visible_rows` starts from, so a list that
+        // exactly fits never reads as pinned here.
+        let list_rows = (self.term.0 as usize)
             .saturating_sub(self.court_block_rows())
             .saturating_sub(self.questions_block_rows());
-        let pinned = self.painted_rows().len() > self.sideline_visible_rows();
-        if pinned && row as usize >= top && row as usize == top + region.saturating_sub(1) {
+        let pinned = self.painted_rows().len()
+            > list_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        if pinned && row as usize >= top && row as usize == top + list_rows.saturating_sub(1) {
             return self
                 .painted_rows()
                 .iter()
