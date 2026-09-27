@@ -183,6 +183,10 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if let Some(p) = &req.permission_mode {
         argv.extend(["--permission-mode".to_string(), p.clone()]);
     }
+    // Explicit placement rides ANY substrate: an explicit flag creates a
+    // portal, human or agent, so the door forwards what the caller named
+    // and the spawn CLI opens it after the receipt. A bare launch names
+    // none (the fields are Option) and stays a paneless thread.
     if let Some(t) = &req.placement {
         argv.extend(["--tab".to_string(), t.clone()]);
     }
@@ -845,8 +849,9 @@ mod tests {
                 "-",
             ]
         );
-        // Empty substrate omits the flag so the door's default decides; a
-        // thread placed through a portal carries --portal and its geometry.
+        // Empty substrate omits the flag so the door's default decides.
+        // Explicit placement rides anyway: the flag is the ask, any
+        // substrate, and the spawn CLI opens the portal after the receipt.
         let thread = AgentLaunchRequest {
             request_id: 2,
             revision: 1,
@@ -886,6 +891,49 @@ mod tests {
                 "-",
             ]
         );
+        // A PANE launch keeps the tab/split spellings: that lane honors
+        // them, and --portal is not a pane flag.
+        let pane = AgentLaunchRequest {
+            request_id: 6,
+            revision: 1,
+            cwd: "/tmp/p6".into(),
+            harness: "claude".into(),
+            substrate: "pane".into(),
+            model: None,
+            provider: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: Some("3".into()),
+            portal: None,
+            split: Some("down".into()),
+            node: None,
+            message: String::new(),
+            extra_flags: Vec::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &pane, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/p6",
+                "--substrate",
+                "pane",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--tab",
+                "3",
+                "--split",
+                "down",
+                "--prompt-file",
+                "-",
+            ]
+        );
         // AC5-HP: a routing-row pick omits --harness, so the door resolves
         // the row's harness, route, account and effort from the model alone.
         let row_pinned = AgentLaunchRequest {
@@ -916,8 +964,8 @@ mod tests {
                 && argv.contains(&"glm-5.3-flash[1m]".to_string()),
             "the model id rides: {argv:?}"
         );
-        // Thread new tab: the placement rides --tab new through the
-        // request's portal, beside the explicit thread lane.
+        // Thread new tab: the explicit ask rides the argv like any
+        // substrate; the spawn CLI opens the portal after the receipt.
         let new_tab = AgentLaunchRequest {
             request_id: 4,
             revision: 1,
