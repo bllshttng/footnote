@@ -93,8 +93,7 @@ ADD_DIR_PROVIDERS = ("claude", "codex", "agy", "cursor-agent")
 
 
 def strip_remote_add_dirs(argv: list[str]) -> list[str]:
-    """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``.
-
+    """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``:
     codex >= 0.156.1 refuses the pair, so an unstripped pane dies unpainted;
     the resume lanes already made this trade. Tokens survive verbatim.
     """
@@ -107,6 +106,8 @@ def strip_remote_add_dirs(argv: list[str]) -> list[str]:
             drop = False
         elif tok == "--add-dir":
             drop = True
+        elif tok.startswith("--add-dir="):
+            continue
         else:
             out.append(tok)
     if len(out) != len(argv):

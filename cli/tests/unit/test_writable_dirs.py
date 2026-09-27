@@ -235,6 +235,7 @@ def test_strip_remote_add_dirs_keeps_order_and_seed() -> None:
         "workspace-write",
         "--add-dir",
         "/state",
+        "--add-dir=/fused",
         "--model",
         "gpt-6-luna",
         "--",
@@ -253,6 +254,16 @@ def test_strip_remote_add_dirs_keeps_order_and_seed() -> None:
         "--",
         "seed text",
     ]
+
+
+def test_strip_remote_add_dirs_drops_the_fused_form() -> None:
+    """An operator passthrough can spell the grant fused (`--add-dir=/x`), and
+    codex refuses that form beside --remote exactly like the split one, so the
+    strip drops it too."""
+    from fno.agents.writable_dirs import strip_remote_add_dirs
+
+    argv = ["codex", "--remote", "unix://", "--add-dir=/fused", "--", "seed"]
+    assert strip_remote_add_dirs(argv) == ["codex", "--remote", "unix://", "--", "seed"]
 
 
 def test_claude_bg_lane_carries_the_grant(one_grant: str, tmp_path: Path) -> None:
