@@ -2400,8 +2400,8 @@ mod tests {
 
     #[test]
     fn scoped_checkin_survives_live_journal_rotation() {
-        // The x-4068 acceptance: the check-in lives in the store, so a
-        // rotated-away live journal never blanks the reign history.
+        // The durable-history acceptance: the check-in lives in the store,
+        // so a rotated-away live journal never blanks the reign history.
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("events.jsonl");
         let checkin = json!({
