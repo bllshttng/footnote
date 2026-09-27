@@ -179,17 +179,19 @@ impl Core {
         }
     }
 
-    /// (v72) Re-seat a live pane-hosted worker into a portal seat: the ONE
-    /// existing viewer moves, none is minted. The pane keeps its PTY and child
-    /// (the harness process never restarts); it stops being persisted as a
-    /// squad member, so restore never rebuilds it - being a thread means the
-    /// row binds the session, not the geometry. The registry `mux` flip is the
-    /// CALLER's half, on this receipt: the server is a reader of the registry,
-    /// never its writer.
+    /// (v72) Re-seat a live pane-hosted worker into a portal: under the TV
+    /// model this is a TUNE. The pane keeps its PTY and child (the harness
+    /// process never restarts); it stops being persisted as a squad member,
+    /// so restore never rebuilds it - being a thread means the row binds the
+    /// session, not the geometry. A named index whose portal is live gets its
+    /// screen swapped to the worker pane (`tree::replace_leaf`, reap-last):
+    /// the portal keeps its index and placement, only its channel changes.
+    /// Any other index opens the worker as a fresh portal there. The registry
+    /// `mux` flip is the CALLER's half, on this receipt: the server is a
+    /// reader of the registry, never its writer.
     ///
     /// Refuses before any mutation: a dead or unknown pane, a pane no unique
-    /// live row answers, a full portal space, or a named slot whose seat is
-    /// live (a re-seat never displaces a viewer). Idempotent: a pane already
+    /// live row answers, or a full portal space. Idempotent: a pane already
     /// seated answers where it sits without touching the tree.
     pub(super) fn reseat_pane_into_portal(
         &mut self,
@@ -259,21 +261,18 @@ impl Core {
             }
         };
         let key = row.attach_id.clone().unwrap_or_else(|| row.name.clone());
-        // Slot: caller index or the next free one; a live seat is never
-        // displaced, a full space refuses (the texts).
+        // Slot: a caller index is tuned when its portal is live (the TV
+        // rule) and reused when its entry is stale; no index takes the next
+        // free one (an explicit gesture may create). A full space refuses.
+        let tuning = portal_idx.and_then(|idx| {
+            self.portals.get(&idx).and_then(|occupied| {
+                let seat_live = self.panes.contains_key(&occupied.seat)
+                    && self.session.find_pane(occupied.seat).is_some();
+                seat_live.then_some((idx, occupied.seat, occupied.tab))
+            })
+        });
         let slot = match portal_idx {
-            Some(idx) => {
-                if let Some(occupied) = self.portals.get(&idx) {
-                    let seat_live = self.panes.contains_key(&occupied.seat);
-                    if seat_live {
-                        return ServerMsg::Err {
-                            code: err_code::BAD_REQUEST,
-                            msg: format!("portal {idx} is live; close it or name another"),
-                        };
-                    }
-                }
-                idx
-            }
+            Some(idx) => idx,
             None => match self.next_free_portal() {
                 Some(idx) => idx,
                 None => {
@@ -348,6 +347,40 @@ impl Core {
             let tab = &mut self.session.squads[si].tabs[tab_index];
             tab.root = Node::Leaf(shell);
             tab.focus = shell;
+        }
+        // The tune arm: the worker pane becomes the named portal's screen.
+        // The portal keeps its index and its tab; only the channel changes.
+        // The old screen is reaped last (the repoint arm's ordering), and a
+        // replace that cannot land falls through to the fresh graft below.
+        if let Some((_, old_seat, old_tid)) = tuning {
+            let replaced = self.session.find_pane(old_seat).is_some_and(|(sid2, ti2)| {
+                let tab = self.session.squad_mut(sid2).expect("find_pane live");
+                tree::replace_leaf(&mut tab.tabs[ti2], old_seat, pane)
+            });
+            if replaced {
+                self.reap_pane(old_seat);
+                if let Some(worker_ctx) = worker_ctx {
+                    self.reconcile_worker_member_close(&worker_ctx, false);
+                }
+                if let Some(id) = row.attach_id.clone() {
+                    self.attached.insert(id, pane);
+                }
+                self.portals.insert(
+                    slot,
+                    Portal {
+                        row_key: key.clone(),
+                        seat: pane,
+                        tab: old_tid,
+                    },
+                );
+                self.claim_eligible.insert(pane);
+                self.push_layout(true);
+                return ServerMsg::Notice {
+                    text: format!("reseat -> {key} (portal {slot}, pane {pane})"),
+                };
+            }
+            // The portal's cell left the tree mid-reseat: land the pane on
+            // its own tab instead of losing it.
         }
         // The graft: a fresh tab in the owner-routed squad (the
         // reattach_detached_pane shape), so the pane keeps rendering while
