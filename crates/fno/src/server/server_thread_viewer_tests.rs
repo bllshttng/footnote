@@ -19,7 +19,14 @@ fn pane_send_accepts_the_dedicated_thread_viewer_identity() {
     thread.session_id = Some("thread-id".into());
 
     assert!(matches!(
-        core.pane_send(pane, b"payload", false, Some("thread-id"), Ok(vec![thread]),),
+        core.pane_send(
+            pane,
+            b"payload",
+            false,
+            Some("thread-id"),
+            Ok(vec![thread]),
+            false,
+        ),
         ServerMsg::Ok
     ));
 }
@@ -139,7 +146,7 @@ fn the_send_gate_refuses_a_claude_portal_seat_that_left_its_worker() {
     let rows = vec![claude_portal_row()];
 
     for expected in [Some("worker-id"), None] {
-        match core.pane_send(pane, b"probe", false, expected, Ok(rows.clone())) {
+        match core.pane_send(pane, b"probe", false, expected, Ok(rows.clone()), false) {
             ServerMsg::Err { code, msg } => {
                 assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH, "{msg}");
                 assert!(

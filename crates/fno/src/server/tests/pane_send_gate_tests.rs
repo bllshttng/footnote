@@ -14,7 +14,7 @@ fn pane_send_refuses_an_unreconciled_pane_and_names_the_label() {
         entry.name = Some("bp-f8b1-unplanned".into());
         entry.unreconciled = true;
     }
-    match core.pane_send(pane, b"payload", false, None, Ok(Vec::new())) {
+    match core.pane_send(pane, b"payload", false, None, Ok(Vec::new()), false) {
         ServerMsg::Err { code, msg } => {
             assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
             assert!(
@@ -40,12 +40,40 @@ fn pane_send_refuses_a_labelled_pane_whose_identity_resolves_nothing() {
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("drifter".into());
     let elsewhere = agent_in("sess", pane + 500, Some(AgentBadge::Done), false);
-    match core.pane_send(pane, b"payload", false, None, Ok(vec![elsewhere])) {
+    match core.pane_send(pane, b"payload", false, None, Ok(vec![elsewhere]), false) {
         ServerMsg::Err { code, msg } => {
             assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
             assert!(msg.contains("drifter"), "names the label: {msg}");
             assert!(msg.contains("fno mux where"), "names the way out: {msg}");
         }
         other => panic!("expected unresolved-identity refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn pane_send_dnd_refuses_plain_and_accepts_hold_pass() {
+    // AC17-EDGE: a held pane refuses a plain PaneSend with TARGET_DND and
+    // accepts the same send when the caller carries the hold gate's pass.
+    let (mut core, pane) = template_core();
+    core.session_name = "sess".into();
+    core.panes.get_mut(&pane).unwrap().name = Some("held".into());
+    let mut held = agent_in("sess", pane, None, false);
+    held.name = "held".into();
+    held.harness_session_id = Some("target-id".into());
+    held.dnd = true;
+    let rows = vec![held];
+
+    match core.pane_send(pane, b"payload", false, None, Ok(rows.clone()), false) {
+        ServerMsg::Err { code, msg } => {
+            assert_eq!(code, err_code::TARGET_DND);
+            assert!(msg.contains("DND"), "the refusal names the hold: {msg}");
+        }
+        other => panic!("expected DND refusal, got {other:?}"),
+    }
+    // The same write with the gate's pass lands (identity unaddressed, so
+    // the remaining guards pass a clean row).
+    match core.pane_send(pane, b"payload", false, None, Ok(rows), true) {
+        ServerMsg::Ok => {}
+        other => panic!("a hold-passed send must land, got {other:?}"),
     }
 }

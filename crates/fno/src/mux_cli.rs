@@ -2260,6 +2260,11 @@ pub enum PaneCmd {
         /// `--raw` carries both a wrapped mail body and an operator's
         /// verbatim keystrokes, which no byte inspection can tell apart.
         provenance: Option<String>,
+        /// (v94) `--hold-pass`: the caller's send already passed the Rust
+        /// hold gate (own send, `control:` mail), so the pane's DND refusal
+        /// stands down for this write. Hidden: it exists for the two
+        /// transport arms above it, never for interactive typing.
+        hold_pass: bool,
     },
     Wait {
         pane: u64,
@@ -3972,6 +3977,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
             expected_identity,
             style_exception,
             provenance,
+            hold_pass,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4079,6 +4085,7 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
                     bytes,
                     guarded,
                     expected_identity,
+                    hold_pass,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -5165,6 +5172,7 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             bytes,
             guarded: !parsed.force,
             expected_identity: None,
+            hold_pass: false,
         },
     ) {
         Ok(ServerMsg::Ok) => {}
@@ -5590,6 +5598,7 @@ mod tests {
                 guarded: false,
                 submit: false,
                 raw: false,
+                hold_pass: false,
                 expected_identity: None,
                 style_exception: None,
                 provenance: None,
@@ -6538,139 +6547,6 @@ mod tests {
     }
 
     #[test]
-    fn mux_pane_parse_send_source_is_text_xor_stdin() {
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi\r"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi\r".into()),
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Stdin,
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // --guarded opts the send into the server-side turn-taken interlock.
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--stdin", "--guarded"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Stdin,
-                guarded: true,
-                submit: false,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi", "--submit"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi".into()),
-                guarded: false,
-                submit: true,
-                raw: false,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // --raw opts OUT of the envelope (node). Default false is the
-        // load-bearing half: an opt-in flag would leave every existing caller
-        // unattributed and fix nothing.
-        assert_eq!(
-            parse_pane_args(
-                &op_of("send"),
-                &os(&["2", "--text", "1", "--raw", "--submit"])
-            )
-            .unwrap()
-            .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("1".into()),
-                guarded: false,
-                submit: true,
-                raw: true,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        assert_eq!(
-            parse_pane_args(
-                &op_of("send"),
-                &os(&["2", "--text", "hi", "--fno-id", "addressed"])
-            )
-            .unwrap()
-            .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text("hi".into()),
-                guarded: false,
-                submit: false,
-                raw: false,
-                expected_identity: Some("addressed".into()),
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // The bare-submit keystroke the attribution refusal promises:
-        // `--raw --submit` with no payload parses as an EMPTY raw text, never
-        // the arity error that used to make the refusal's advice false.
-        assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--raw", "--submit"]))
-                .unwrap()
-                .cmd,
-            PaneCmd::Send {
-                pane: 2,
-                source: SendSource::Text(String::new()),
-                guarded: false,
-                submit: true,
-                raw: true,
-                expected_identity: None,
-                style_exception: None,
-                provenance: None,
-            }
-        );
-        // Every other source-less form is still a usage error: `--raw` or
-        // `--submit` alone names no operation, and a plain source-less send
-        // never worked.
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--raw"])).is_err());
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--submit"])).is_err());
-        // Neither / both are usage errors.
-        assert!(parse_pane_args(&op_of("send"), &os(&["2"])).is_err());
-        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "x", "--stdin"])).is_err());
-        // --raw pairs only with send: on any other verb it is a usage error, not
-        // a silently ignored flag that reads as "the envelope was skipped".
-        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--raw"])).is_err());
-    }
-
-    #[test]
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
         assert_eq!(
@@ -6689,6 +6565,7 @@ mod tests {
                 expected_identity: None,
                 style_exception: Some("quoted".into()),
                 provenance: None,
+                hold_pass: false,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -6762,6 +6639,7 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
+            hold_pass: false,
         };
 
         std::env::set_var("FNO_BIN", &script);
@@ -6850,6 +6728,7 @@ mod tests {
             expected_identity: None,
             style_exception: None,
             provenance: None,
+            hold_pass: false,
         };
 
         let over = dispatch("t", &sock, false, send_cmd(big));

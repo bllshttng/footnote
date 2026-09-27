@@ -44,6 +44,7 @@ fn proto_v4_control_verbs_roundtrip() {
             bytes: b"hello\r".to_vec(),
             guarded: true,
             expected_identity: None,
+            hold_pass: true,
         },
         ControlVerb::PaneWait {
             pane: 5,
