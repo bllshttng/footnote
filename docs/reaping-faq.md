@@ -91,7 +91,7 @@ These five move or remove state around sessions. None stops or removes a session
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
 8. policy `gc_decide`, open node: planning lane, then the open-PR and dead-worker keeps, then the four releases, then the open-work window
-9. the grace gate: an unresolved transcript keeps, and a transcript written inside the grace window keeps - recency outranks a terminal harness state and a dead pid, and a live work-claim outranks both
+9. the grace gate: an unresolved transcript keeps, and so does one written inside the grace window. Recency outranks a terminal harness state and a dead pid. A live work-claim outranks both
 10. live descendant: `kept {id} (live descendant: {child})`, skipped for a terminal row
 11. apply freshness re-check: `kept {id} (active: ...)` or `kept {id} (probe unread: ...)`
 12. the stop gate and receipt stage: `held {id} (needs live stop: {reason})`, `kept {id} (stop refused: {reason})`, `kept {id} (no resumable receipt: {reason})`
@@ -260,11 +260,11 @@ The asymmetry matters (`gc.rs` `gc_decide`). A recorded status that is not `merg
 
 ### active
 
-The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs` `DEFAULT_RETIRE_GRACE_SECS`, `gc.rs` `grace_gate`). The session is live in the only sense the law allows. Wait past the window. Since the 2026-09-25 unattended reaps nothing overrides recency inside the window - not a terminal harness state, not a dead pid. The sweeps retired two thread workers seconds after their transcripts moved, on a terminal roster reading the transcript proved wrong, and one worker lost its claim mid-node. The row retires when the writing stops. A fresh timestamped entry has a writer seconds behind it.
+The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs` `DEFAULT_RETIRE_GRACE_SECS`, `gc.rs` `grace_gate`). The session is live in the only sense the law allows. Wait past the window. Since the 2026-09-25 unattended reaps nothing overrides recency inside the window - not a terminal harness state, not a dead pid. The sweeps retired two thread workers seconds after their transcripts moved. The terminal roster reading was wrong, and one worker lost its claim mid-node. When the writing stops, the row retires. A fresh timestamped entry has a writer seconds behind it.
 
 ### live claim
 
-The line reads `kept {id} (live claim held: {detail})`, where detail is `{claim key} (holder {holder})`. A live or suspect work-claim names this session as its holder (`claims.rs` `list`, joined through the record's `session_id` stamp). The claim's holder process answered the pid probe, which is the strongest liveness fact the machine holds, so the row keeps past quiet whatever the work verdict says. The remedy for a stuck claim is `fno agents claim release`, never a reap.
+The line reads `kept {id} (live claim held: {detail})`, where detail is `{claim key} (holder {holder})`. A live or suspect work-claim names this session as its holder (`claims.rs` `list`, joined through the record's `session_id` stamp). The claim's holder process answered the pid probe. That is the strongest liveness fact the machine holds. The row keeps past quiet, whatever the work verdict says. The remedy for a stuck claim is `fno agents claim release`, never a reap.
 
 ### probe unread
 
