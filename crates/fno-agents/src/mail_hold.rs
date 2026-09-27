@@ -635,6 +635,26 @@ fn gate_json(verdict: &GateVerdict) -> String {
     .to_string()
 }
 
+/// The `--gate --park-on-hold` answer for a held body (C15): park the
+/// payload and answer the `parked` JSON line with the park receipt. A
+/// deliver or pass verdict, an empty body, or a failed park answers None
+/// and the caller prints the plain verdict instead.
+fn gate_parked_line(verdict: &GateVerdict, session_id: &str, body: &str) -> Option<String> {
+    if body.trim().is_empty() || verdict.deliver || verdict.pass.is_some() {
+        return None;
+    }
+    let receipt = park_payload_inner(session_id, body).ok()?;
+    Some(
+        serde_json::json!({
+            "verdict": "parked",
+            "pass": serde_json::Value::Null,
+            "receipt": receipt,
+            "until": verdict.until.map(|u| u.to_rfc3339()),
+        })
+        .to_string(),
+    )
+}
+
 /// The parked raw payloads for one held session, beside its clock in the one
 /// hold store.
 fn parked_dir(handle: &str) -> PathBuf {
@@ -674,15 +694,28 @@ fn park_receipt(session_id: &str, payload_first_line: &str, name: &str) -> Strin
 /// inherits this process's environment, so the replayed send is stamped
 /// with the original sender.
 fn park_payload(session_id: &str, payload: &str) -> i32 {
+    match park_payload_inner(session_id, payload) {
+        Ok(receipt) => {
+            println!("{receipt}");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// The body of [`park_payload`]: park one payload and answer the receipt
+/// line, or the caller verb's exit code on failure. Shared with the
+/// `--gate --park-on-hold` arm, which answers the receipt in JSON instead.
+fn park_payload_inner(session_id: &str, payload: &str) -> Result<String, i32> {
     let Some((matched, name, _)) = lookup_gate_row(session_id) else {
         eprintln!("mail-hold: no registry row carries session {session_id}");
-        return 3;
+        return Err(3);
     };
     let handle = identity_key(&matched);
     let dir = parked_dir(&handle);
     if std::fs::create_dir_all(&dir).is_err() {
         eprintln!("mail-hold: could not create the park directory under the hold store");
-        return 1;
+        return Err(1);
     }
     let file = dir.join(format!(
         "{}-{}.txt",
@@ -691,7 +724,7 @@ fn park_payload(session_id: &str, payload: &str) -> i32 {
     ));
     if std::fs::write(&file, payload).is_err() {
         eprintln!("mail-hold: could not write the parked payload");
-        return 1;
+        return Err(1);
     }
     // One runner per held session: a live pid in `runner.pid` stands.
     let pid_file = dir.join("runner.pid");
@@ -706,7 +739,7 @@ fn park_payload(session_id: &str, payload: &str) -> i32 {
     if spawn {
         let Ok(exe) = std::env::current_exe() else {
             eprintln!("mail-hold: parked the payload but could not resolve this binary");
-            return 1;
+            return Err(1);
         };
         let mut cmd = Command::new(exe);
         cmd.args(["mail-hold", "--run-parked", "--session", session_id])
@@ -724,13 +757,12 @@ fn park_payload(session_id: &str, payload: &str) -> i32 {
             }
             Err(exc) => {
                 eprintln!("mail-hold: parked the payload but the runner did not start: {exc}");
-                return 1;
+                return Err(1);
             }
         }
     }
     let first_line = payload.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    println!("{}", park_receipt(session_id, first_line, &name));
-    0
+    Ok(park_receipt(session_id, first_line, &name))
 }
 
 /// One runner poll (C15): with the hold still live it does nothing and
@@ -878,9 +910,12 @@ pub(crate) fn tidy_lapsed_holds(home: &AgentsHome, now: chrono::DateTime<chrono:
 /// no clock (the never-lapses state). No row for the session: exit 3,
 /// nothing written.
 /// `--gate`: the delivery gate (C15, C16). Reads the optional body on
-/// stdin, prints one JSON verdict line, exits 0. Never writes: it runs
-/// inside callers that may hold the registry lock, and its answer is the
-/// single authority every Python injector consults.
+/// stdin, prints one JSON verdict line, exits 0. It never writes the
+/// REGISTRY: it runs inside callers that may hold the registry lock, and
+/// its answer is the single authority every Python injector consults.
+/// With `--park-on-hold`, a held non-empty body is also parked (C15) and
+/// the verdict comes back `parked` with the park receipt; a failed park
+/// falls through to the plain hold verdict.
 /// `--park` / `--run-parked` (C15): a raw send to a held session parks the
 /// payload in the hold store; one detached runner polls the gate every 5 s
 /// and replays it through the normal raw door when the hold ends.
@@ -890,6 +925,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
     let mut gate_mode = false;
     let mut iter = args.iter();
     let mut park = false;
+    let mut park_on_hold = false;
     let mut run_parked_mode = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -897,6 +933,7 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             "--off" => off = true,
             "--gate" => gate_mode = true,
             "--park" => park = true,
+            "--park-on-hold" => park_on_hold = true,
             "--run-parked" => run_parked_mode = true,
             other => {
                 eprintln!("mail-hold: unknown argument {other:?}");
@@ -918,6 +955,12 @@ pub fn run_mail_hold(args: &[String]) -> i32 {
             let _ = std::io::stdin().read_to_string(&mut body);
         }
         let verdict = gate(session_id, Some(&body), chrono::Utc::now());
+        if park_on_hold {
+            if let Some(line) = gate_parked_line(&verdict, session_id, &body) {
+                println!("{line}");
+                return 0;
+            }
+        }
         println!("{}", gate_json(&verdict));
         return 0;
     }
@@ -1736,6 +1779,54 @@ pub(crate) mod tests {
             assert_eq!(parked.len(), 1, "one parked file");
             let pid_text = std::fs::read_to_string(pdir.join("runner.pid")).unwrap();
             assert_eq!(pid_text.trim(), std::process::id().to_string());
+        });
+    }
+
+    #[test]
+    fn gate_park_on_hold_parks_the_body_and_answers_parked() {
+        with_hold_env(|dir| {
+            write_registry(dir, serde_json::json!([stamped_row("worker", SID)]));
+            write_clock(
+                &identity_key(SID),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                600,
+                "wall",
+                None,
+                None,
+            )
+            .unwrap();
+            // A live runner is on duty, so the park spawns nothing.
+            let pdir = parked_dir_for(dir);
+            std::fs::create_dir_all(&pdir).unwrap();
+            std::fs::write(pdir.join("runner.pid"), std::process::id().to_string()).unwrap();
+
+            let verdict = gate(SID, Some("/compact"), chrono::Utc::now());
+            let line = gate_parked_line(&verdict, SID, "/compact").expect("held body parks");
+            let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(parsed["verdict"], "parked");
+            let receipt = parsed["receipt"].as_str().unwrap();
+            assert!(
+                receipt.contains("runs on worker when the hold ends"),
+                "{receipt}"
+            );
+            let parked: Vec<_> = std::fs::read_dir(&pdir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+                .collect();
+            assert_eq!(parked.len(), 1, "the body sits in the hold store");
+
+            // A control pass and an empty body never park.
+            let control = gate(SID, Some("control: stop"), chrono::Utc::now());
+            assert!(gate_parked_line(&control, SID, "control: stop").is_none());
+            assert!(gate_parked_line(&verdict, SID, "   ").is_none());
+            let files_after: usize = std::fs::read_dir(&pdir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "txt"))
+                .count();
+            assert_eq!(files_after, 1, "no extra park");
         });
     }
 

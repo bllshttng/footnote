@@ -212,6 +212,38 @@ def test_gate_maps_deliver_to_none_and_fails_closed_on_a_broken_gate(monkeypatch
 
     monkeypatch.setattr(dispatch.subprocess, "run", _boom)
     assert dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+
+
+def test_the_raw_door_parks_through_the_gate_and_relays_the_receipt(monkeypatch):
+    """With ``park=True`` the raw door's gate call carries ``--park-on-hold``
+    and the parked receipt rides back in place of the refusal; without it the
+    same held row answers the plain refusal.
+    """
+    import json
+
+    calls: list = []
+
+    def _fake_run(argv, input="", capture_output=True, text=True, timeout=10, **_kw):
+        calls.append((list(argv), input))
+        if "--park-on-hold" in argv:
+            out = {
+                "verdict": "parked",
+                "pass": None,
+                "receipt": f"held: {input} runs on {HANDLE} when the hold ends",
+                "until": None,
+            }
+        else:
+            out = {"verdict": "hold", "pass": None, "receipt": None, "until": None}
+        return SimpleNamespace(stdout=json.dumps(out) + "\n", returncode=0)
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _fake_run)
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: "/bin/true")
+    assert (
+        dispatch._delivery_policy_refusal(_entry(), "/compact", park=True)
+        == f"held: /compact runs on {HANDLE} when the hold ends"
+    )
+    assert any("--park-on-hold" in argv for argv, _ in calls)
+    assert dispatch._delivery_policy_refusal(_entry(), "/compact") == dispatch.BUS_ONLY_POLICY
     monkeypatch.setattr(dispatch, "load_registry", lambda: [])
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
@@ -467,6 +499,41 @@ def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
 
     assert hold_mod.release(HANDLE)["outcome"] == "delivered"
     assert seen["entry"] is not None, "the dispatcher needs the resolved row"
+    assert seen["from_name"] == "fno-mail-hold"
+
+
+def test_the_drain_delivers_a_multi_line_digest_on_the_live_lane(monkeypatch):
+    """C17 evidence (x-9008, crown ruling d-9187ccf6).
+
+    The crown's held-mail drain lost three messages when the raw door
+    refused the multi-line digest with "an unframed payload must be a
+    single line". That refusal's premise died with C17: the Rust typing
+    layer flattens every payload into ONE submitted line (pinned by
+    ``multi_line_unwrapped_types_flattened_after_c17`` in mail_inject.rs),
+    so the drain hands the digest to the live lane unchanged and it
+    delivers.
+    """
+    seen: dict = {}
+
+    def _fake_deliver(entry, body, from_name, **kwargs):
+        seen["body"] = body
+        seen["from_name"] = from_name
+        return True
+
+    messages = [_msg("m1", "peer", "line one\nline two\nline three")]
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: messages)
+    monkeypatch.setattr("fno.bus.cursor.advance_cursor", lambda *a, **k: True)
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _fake_deliver)
+
+    result = hold_mod.release(HANDLE, held_for_s=300)
+
+    assert result["outcome"] == "delivered"
+    body = seen["body"]
+    assert "\n" in body, "the digest is genuinely multi-line"
+    assert "line two" in body, "the held body rides the digest intact"
     assert seen["from_name"] == "fno-mail-hold"
 
 

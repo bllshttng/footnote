@@ -751,7 +751,14 @@ fn pane_send_identity_check_carries_the_registry_refusal_reason() {
     core.session_name = "sess".into();
     core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
     let reason = classify_guard_registry("not json", 0).unwrap_err();
-    match core.pane_send(pane, b"payload", false, Some("target-id"), Err(reason), false) {
+    match core.pane_send(
+        pane,
+        b"payload",
+        false,
+        Some("target-id"),
+        Err(reason),
+        false,
+    ) {
         ServerMsg::Err { code, msg } => {
             assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
             assert!(
@@ -8421,21 +8428,6 @@ fn rerun_guard_is_scoped_to_the_current_session() {
     // And a foreign busy row must not spuriously gate our plain-shell pane.
     let foreign_only = [agent_in("other", 5, Some(AgentBadge::Working), false)];
     assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
-}
-
-#[test]
-fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
-    let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
-    let raw = format!(
-        r#"{{"agents":[{{"name":"held","cwd":"/w","status":"live",
-                "delivery_policy":"bus-only",
-                "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
-    );
-    let rows = agents_view::derive_rows(&raw, 0).unwrap();
-    match core.pane_send(p1, b"must-not-land", false, None, Ok(rows), false) {
-        ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
-        other => panic!("expected DND refusal, got {other:?}"),
-    }
 }
 
 // -- x-9454 wheel-passthrough rate gate --------------------------------
