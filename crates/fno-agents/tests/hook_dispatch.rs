@@ -1,5 +1,4 @@
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -53,12 +52,12 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
         .contains("[fno pipe guard]"));
 
     let rows = std::fs::read_to_string(events).expect("guard events");
-    let mut guards: BTreeMap<String, usize> = BTreeMap::new();
-    rows.lines()
+    let guards: Vec<String> = rows
+        .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row["data"]["guard"].as_str().map(str::to_owned))
-        .for_each(|guard| *guards.entry(guard).or_default() += 1);
-    let expected: BTreeMap<String, usize> = [
+        .collect();
+    let expected = [
         "bg-process-guard",
         "bin-install-guard",
         "git-protection",
@@ -67,10 +66,10 @@ fn bash_pretooluse_dispatch_preserves_guard_refusal_and_events() {
         "test-run-guard",
     ]
     .into_iter()
-    .map(|guard| (guard.to_string(), 1))
+    .map(str::to_owned)
     .collect();
     assert_eq!(
         guards, expected,
-        "each guard must record exactly one decision for the payload"
+        "every guard must run once, in its former registration order"
     );
 }
