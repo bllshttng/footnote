@@ -173,6 +173,51 @@ impl SubmitIndex {
     }
 }
 
+/// Whether one `operator_submit` row names `session_id` with `submit_ms` in
+/// `[since_ms, now_ms + SUBMIT_WINDOW_BEFORE_MS]`. The store's `since_ms`
+/// pre-filter does not reach live-file lines, so the window is checked
+/// here, on the row's own `submit_ms`. A read error answers false: no
+/// witnessed submit, no arm.
+pub(crate) fn submitted_since(
+    journal: &Path,
+    session_id: &str,
+    since_ms: i64,
+    now_ms: i64,
+) -> bool {
+    let query = crate::event_store::EventQuery {
+        since_ms: Some(since_ms - 1_000),
+        ..crate::event_store::EventQuery::of_types(&["operator_submit"])
+    };
+    let Ok(text) = crate::event_store::journal_text_checked(journal, &query) else {
+        return false;
+    };
+    let wanted = crate::mail_hold::identity_key(session_id);
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("operator_submit") {
+            continue;
+        }
+        if v.pointer("/data/resolution").and_then(|r| r.as_str()) != Some("ok") {
+            continue;
+        }
+        let Some(session) = v.pointer("/data/harness_session").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        if crate::mail_hold::identity_key(session) != wanted {
+            continue;
+        }
+        let Some(ms) = v.pointer("/data/submit_ms").and_then(|m| m.as_i64()) else {
+            continue;
+        };
+        if (since_ms..=now_ms + SUBMIT_WINDOW_BEFORE_MS).contains(&ms) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +303,43 @@ mod tests {
         write_journal(&journal, &[submit_row(Some("s1"), 1_000)]);
         let mut index = SubmitIndex::load(&journal);
         assert_eq!(index.bind("s1", 32_000), None, "31s is past the +30s bound");
+    }
+
+    /// One edge per bound: at `since_ms` (in), just below (out), inside the
+    /// before-window (in), past it (out), and another session (never).
+    /// Each edge row gets its own session, so one row's hit cannot mask
+    /// another edge's miss.
+    #[test]
+    fn submitted_since_window_edges() {
+        let dir = test_dir("submitted-since");
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = dir.join("events.jsonl");
+        let now = 1_000_000i64;
+        let since = now - SUBMIT_WINDOW_AFTER_MS;
+        write_journal(
+            &journal,
+            &[
+                submit_row(Some("s_at_bound"), since),
+                submit_row(Some("s_below"), since - 1),
+                submit_row(Some("s_inner"), now + 1_000),
+                submit_row(Some("s_past"), now + SUBMIT_WINDOW_BEFORE_MS + 1),
+                submit_row(Some("s_other"), now - 1_000),
+            ],
+        );
+        assert!(submitted_since(&journal, "s_at_bound", since, now));
+        assert!(
+            !submitted_since(&journal, "s_below", since, now),
+            "the row one ms below the window never binds"
+        );
+        assert!(submitted_since(&journal, "s_inner", now, now));
+        assert!(
+            !submitted_since(&journal, "s_past", now + 1_001, now),
+            "a row past now + the before-window never binds"
+        );
+        assert!(
+            !submitted_since(&journal, "s_at_bound", now - 2_000, now),
+            "another session's in-window row never binds"
+        );
+        assert!(!submitted_since(&journal, "missing", since, now));
     }
 }

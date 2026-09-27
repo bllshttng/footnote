@@ -40,43 +40,6 @@ fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> 
     }
 }
 
-/// The attended hold refresh throttle: an arm older than this re-arms on
-/// the next keystroke, so a burst that outlasts the five-minute clock gets
-/// its deadline moved before the release timer can lift the hold under a
-/// still-typing operator. One spawn a minute under continuous typing; a
-/// sub-minute burst stays one spawn.
-const ATTENDED_HOLD_REFRESH: Duration = Duration::from_secs(60);
-
-/// Arm now? Pure so tests drive the burst arithmetic: the first keystroke
-/// ever, or one past the refresh throttle since the last arm.
-fn hold_arm_due(last: Option<Instant>, now: Instant) -> bool {
-    match last {
-        None => true,
-        Some(t) => now.saturating_duration_since(t) >= ATTENDED_HOLD_REFRESH,
-    }
-}
-
-/// One detached `fno-agents mail-hold --session <id>` per window (the arm
-/// the Python verb cannot run for another session; see mail_hold.rs). Off
-/// the core loop, stdio null, never awaited; a dropped Child handle leaves
-/// the child running (no kill_on_drop). Test builds skip the spawn: the
-/// arm decision and the pane-session bind are what the tests assert.
-fn spawn_hold_arm(session: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let mut cmd = crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
-    cmd.args(["mail-hold", "--session", session, "--minutes", "5"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    tokio::spawn(async move {
-        if let Err(exc) = crate::process_admission::tokio_spawn(&mut cmd) {
-            eprintln!("fno mux: attended-hold arm spawn failed: {exc}");
-        }
-    });
-}
-
 /// A human submit inside one input chunk: a CR (0x0d) that is neither the
 /// meta-Enter escape (ESC CR, a newline inside the composers) nor inside a
 /// bracketed paste (`ESC[200~` .. `ESC[201~`). ponytail: a paste split
@@ -378,56 +341,20 @@ impl Core {
         }
     }
 
-    /// Arm (or, on a submit, re-arm) the pane session's mail hold.
-    /// The one arm source that sees the keystrokes: a session the registry
-    /// carries holds delivery while its operator types and drains as one
-    /// digest at the idle clock. The arm re-arms past the refresh throttle
-    /// (`hold_arm_due`), so a long burst keeps its clock ahead of the
-    /// release timer; a pane with no session mapping does nothing. The
-    /// spawn runs off-loop and never blocks the keystroke.
-    pub(super) fn arm_attended_hold(&mut self, pane: u64, force: bool) {
-        let now = Instant::now();
-        if !force && !hold_arm_due(self.hold_arm_last.get(&pane).copied(), now) {
-            return;
-        }
-        let bound = super::agent_rows_join::bind_agent_to_pane(
-            &self.agents,
-            &self.session_name,
-            pane,
-            &self.attached,
-            &|a| self.worker_pane_for_agent(a),
-        )
-        .map(|i| &self.agents[i]);
-        // A portal-hosted thread has no mux/attach mapping; the same
-        // fallback the submit witness uses resolves it.
-        let portal_bound = bound
-            .is_none()
-            .then(|| crate::thread_viewer::row_for_pane(&self.portals, pane, &self.agents))
-            .flatten();
-        let Some(session) = bound
-            .or(portal_bound)
-            .and_then(|a| a.harness_session_id.clone())
-        else {
-            return;
-        };
-        self.hold_arm_last.insert(pane, now);
-        spawn_hold_arm(&session);
-    }
-
     /// The tail of the `CoreMsg::Input` arm, one call from `handle_msg` so
-    /// server.rs only shrinks: touch telemetry, the attended hold, the
-    /// submit witness. A keystroke here is past the relay guard - PaneSend
-    /// and relay writes never reach this - and past the reply classifier:
-    /// terminal-generated loopback (focus reports, query replies, mouse
-    /// encodings) is not steering, so a viewed row arms nothing.
+    /// server.rs only shrinks: touch telemetry and the submit witness. The
+    /// mux arms no hold - a keystroke only witnesses a human Enter, and the
+    /// conversation hold is armed by the harness prompt hook. A keystroke
+    /// here is past the relay guard - PaneSend and relay writes never reach
+    /// this - and past the reply classifier: terminal-generated loopback
+    /// (focus reports, query replies, mouse encodings) is not steering, so
+    /// a viewed row witnesses nothing.
     pub(super) fn input_tail(&mut self, focus: u64, bytes: &[u8]) {
         if !has_human_keystroke(bytes) {
             return;
         }
         self.touch(focus, "inject", true);
-        let submitted = is_submit(bytes);
-        self.arm_attended_hold(focus, submitted);
-        if submitted {
+        if is_submit(bytes) {
             self.witness_submit(focus);
         }
     }
@@ -436,20 +363,6 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hold_arm_window_and_submit_force_the_burst_arithmetic() {
-        let t0 = Instant::now();
-        assert!(hold_arm_due(None, t0), "the first keystroke ever arms");
-        assert!(
-            !hold_arm_due(Some(t0), t0 + Duration::from_secs(30)),
-            "a keystroke inside the throttle coalesces into the burst the arm covers"
-        );
-        assert!(
-            hold_arm_due(Some(t0), t0 + ATTENDED_HOLD_REFRESH),
-            "one past the refresh throttle a new burst re-arms"
-        );
-    }
 
     #[test]
     fn touch_coalesce_per_pane() {
@@ -746,79 +659,13 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_arms_the_hold_once_and_a_submit_re_arms() {
-        use crate::server::CoreMsg;
-        // The final submit fires a real witness append: pin the journal like
-        // every other Input-driving test (the FNO_AGENTS_HOME guard), or the
-        // append races the guarded tests' env swaps.
-        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "fno-hold-burst-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("FNO_AGENTS_HOME", &dir);
-        let mut core = witness_test_core(7);
-        core.clients.push(crate::server::Client {
-            id: 1,
-            reliable_tx: tokio::sync::mpsc::channel(1).0,
-            dirty: Default::default(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            synced_modes: Default::default(),
-            view: (1, 1),
-            visible: Default::default(),
-            dims: (24, 80),
-            passive: false,
-            last_press: None,
-        });
-        core.handle(CoreMsg::Input {
-            id: 1,
-            bytes: b"ship".to_vec(),
-        });
-        let first = *core
-            .hold_arm_last
-            .get(&7)
-            .expect("the first keystroke armed the hold");
-        // Ten more bytes inside the window: no re-arm (one spawn per window).
-        for _ in 0..10 {
-            core.handle(CoreMsg::Input {
-                id: 1,
-                bytes: b"x".to_vec(),
-            });
-        }
-        assert_eq!(
-            *core.hold_arm_last.get(&7).unwrap(),
-            first,
-            "no re-arm inside the window: one spawn per burst"
-        );
-        // A submit forces the re-arm the plan gives notify-self's job.
-        core.handle(CoreMsg::Input {
-            id: 1,
-            bytes: b" it\r".to_vec(),
-        });
-        assert!(
-            *core.hold_arm_last.get(&7).unwrap() > first,
-            "a submit re-armed the hold"
-        );
-        std::env::remove_var("FNO_AGENTS_HOME");
-        drop(guard);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn terminal_replies_arm_nothing_and_a_keystroke_still_arms() {
+    fn a_focus_report_writes_no_witness_row_and_a_typed_enter_writes_one() {
         use crate::server::CoreMsg;
         let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
-            "fno-hold-replies-{}-{}",
+            "fno-witness-replies-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -858,16 +705,18 @@ mod tests {
             });
         }
         assert!(
-            core.hold_arm_last.is_empty(),
-            "terminal-generated replies never arm the attended hold"
+            journal_submits(&dir).is_empty(),
+            "terminal-generated replies witness nothing"
         );
         core.handle(CoreMsg::Input {
             id: 1,
-            bytes: b"a".to_vec(),
+            bytes: b"hello\r".to_vec(),
         });
-        assert!(
-            core.hold_arm_last.contains_key(&7),
-            "a typed keystroke still arms the hold"
+        let rows = journal_submits(&dir);
+        assert_eq!(
+            rows.len(),
+            1,
+            "one typed line with Enter writes exactly one witness row"
         );
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
@@ -908,9 +757,22 @@ mod tests {
     }
 
     #[test]
-    fn a_portal_bound_pane_arms_through_the_portal_fallback() {
+    fn a_portal_seated_panes_enter_writes_the_thread_witness_row() {
         use crate::server::CoreMsg;
         use crate::thread_viewer::Portal;
+        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fno-witness-portal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let mut core = witness_test_core(7);
         core.agents = vec![crate::agents_view::RegistryAgent {
             name: "thread".into(),
@@ -918,7 +780,7 @@ mod tests {
             mux: None,
             harness: Some("codex".into()),
             session_id: Some("thread-id".into()),
-            harness_session_id: Some("dddddddd-1111-2222-3333-444455556666".into()),
+            harness_session_id: Some("dddddddd-1112-2222-3333-444455556666".into()),
             ..Default::default()
         }];
         core.portals.insert(
@@ -943,54 +805,20 @@ mod tests {
         });
         core.handle(CoreMsg::Input {
             id: 1,
-            bytes: b"x".to_vec(),
+            bytes: b"hello\r".to_vec(),
         });
-        assert!(
-            core.hold_arm_last.contains_key(&7),
-            "a portal-seated pane arms its row's hold through the same fallback the witness uses"
+        let rows = journal_submits(&dir);
+        assert_eq!(rows.len(), 1, "one Enter, one witness row");
+        let data = &rows[0]["data"];
+        assert_eq!(data["via"], "portal");
+        assert_eq!(data["resolution"], "ok");
+        assert_eq!(
+            data["harness_session"], "dddddddd-1112-2222-3333-444455556666",
+            "the thread's harness_session joins the portal seat"
         );
-    }
 
-    #[test]
-    fn an_unmapped_pane_arms_no_hold() {
-        use crate::server::CoreMsg;
-        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        // Pane 9: a squad tab focuses it, but no registry row binds it.
-        let mut core = witness_test_core(7);
-        core.agents.clear();
-        core.session.add_squad(
-            2,
-            vec!["/fixture".into()],
-            None,
-            crate::tree::Tab {
-                name: None,
-                id: 2,
-                root: crate::tree::Node::Leaf(9),
-                focus: 9,
-            },
-        );
-        core.clients.push(crate::server::Client {
-            id: 1,
-            reliable_tx: tokio::sync::mpsc::channel(1).0,
-            dirty: Default::default(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            synced_modes: Default::default(),
-            view: (2, 2),
-            visible: Default::default(),
-            dims: (24, 80),
-            passive: false,
-            last_press: None,
-        });
-        core.handle(CoreMsg::Input {
-            id: 1,
-            bytes: b"hello".to_vec(),
-        });
-        assert!(
-            core.hold_arm_last.is_empty(),
-            "a pane no registry row binds arms nothing"
-        );
+        std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

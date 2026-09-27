@@ -1,7 +1,7 @@
 ---
 name: dnd
-description: "Do-not-disturb (DND) for this session: hold incoming agent mail on a fixed wall clock while the user talks to you, then deliver it as one digest. Use when: 'turn on DND', 'do not disturb', 'do not interrupt me', 'hold my mail', 'quiet window', 'I need your time for 20 minutes', or 'DND off'."
-argument-hint: "[minutes | off | status | idle <minutes>]"
+description: "Do-not-disturb (DND) for this session: hold incoming agent mail on a fixed wall clock while the user talks to you, then deliver it as one digest. Use when: 'turn on DND', 'do not disturb', 'do not interrupt me', 'hold my mail', 'quiet window', 'I need your time for 20 minutes', 'DND off', 'cancel DND', or 'allow mail'."
+argument-hint: "[minutes | off | cancel | status | idle <minutes>]"
 metadata:
   internal: false
   requires:
@@ -21,10 +21,12 @@ Do-not-disturb for this session. Mail addressed to this session never pastes int
 | A range: "10-15 minutes" | `fno agents mail hold --for 15` (the upper bound, so the hold cannot lift inside the window) |
 | No duration | `fno agents mail hold --for 20` |
 | "Until I go idle", with a duration | `fno agents mail hold --minutes <N>` |
-| "Off", "release", "I'm done" | `fno agents mail hold --off` |
+| "Off", "cancel", "stop", "release", "done", "allow mail" | `fno agents mail hold --off` |
 | "Is DND on?" | `fno agents mail hold --status` |
 
 "Until I go idle" arms the idle clock, not the wall clock. Say in the report that this clock restarts on every prompt and ends at twice the window. Every other route arms the wall clock: a fixed deadline that never moves.
+
+A real message (not a slash command, a `!` line, or a raw send) starts the conversation hold by itself. It lasts while the session answers plus the configured grace (2 minutes by default) and restarts with each message. `Off` or `cancel` ends it now. A DND you set with a duration keeps its full length. The conversation rules never shorten or replace it.
 
 ## Report the real receipt
 

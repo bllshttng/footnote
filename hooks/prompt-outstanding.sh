@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The open list where the user types: a UserPromptSubmit hook reading the
-# daemon's projection cache. The skip rules (mail envelope, machine-shaped
-# prompts) live in `fno-agents hook prompt`; a wrapped or machine turn
-# renders nothing.
+# daemon's projection cache and arming the conversation hold when a real
+# message arrives. The skip rules (mail envelope, machine-shaped prompts)
+# live in `fno-agents hook prompt`; a wrapped or machine turn renders
+# nothing and arms nothing.
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
