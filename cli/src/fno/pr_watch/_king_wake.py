@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -458,6 +459,8 @@ def _dispatch_walk(
 
 #: A pass stops under 15s left rather than be cut mid-step and lose every crown after it.
 _KING_STEP_FLOOR_S = 15.0
+#: Wait bound on one truth read: a slower read yields its crown to the rest of the pass.
+_KING_TRUTH_WAIT_S = 10.0
 
 _GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 
@@ -554,9 +557,20 @@ def run_king_wake(
 
     _step = on_step or (lambda _s: None)
 
-    def _under_floor() -> bool:
-        left = seconds_left_fn() if seconds_left_fn is not None else None
-        return left is not None and left < _KING_STEP_FLOOR_S
+    def _wait_cap(left):
+        cap = _KING_TRUTH_WAIT_S
+        return cap if left is None else min(cap, max(0.0, left - _KING_STEP_FLOOR_S))
+
+    def _bounded(fn, *args, wait_s: float):
+        # Returns (value, timed_out); the reader runs on past a timeout: a join would spend the bound.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(fn, *args)
+            return future.result(timeout=wait_s), False
+        except TimeoutError:  # the reads never raise it themselves
+            return None, True
+        finally:
+            pool.shutdown(wait=False)
 
     def _budget_stop() -> dict[str, Any]:
         budget_note = (
@@ -630,10 +644,14 @@ def run_king_wake(
         first_observation = False
         if reason is None:
             if entries is None:
-                if _under_floor():
+                left = seconds_left_fn() if seconds_left_fn is not None else None
+                if left is not None and left < _KING_STEP_FLOOR_S:
                     return _budget_stop()
                 _step("graph")
-                entries = entries_fn()
+                entries, cut = _bounded(entries_fn, wait_s=_wait_cap(left))
+                if cut:
+                    summary["note"] = "graph read timed out; crowns wait for the next tick"
+                    return _budget_stop()
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
             _step("board")
@@ -656,10 +674,15 @@ def run_king_wake(
                 _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
             summary["evaluated"] += 1
             continue
-        if _under_floor():
+        left = seconds_left_fn() if seconds_left_fn is not None else None
+        if left is not None and left < _KING_STEP_FLOOR_S:
             return _budget_stop()
         _step(f"truth:{target.scope}")
-        truth = truth_fn(target.holder)
+        truth, truth_timed_out = _bounded(truth_fn, target.holder, wait_s=_wait_cap(left))
+        if truth_timed_out:
+            # Yields to the rest; triggers stay armed, so the next rotation retries it first.
+            summary["refused"].append({"scope": target.scope, "refusal": "truth-timeout"})
+            continue
         summary["truth_reads"] += 1
         refusal = _holder_absent(truth)
         if refusal is not None:

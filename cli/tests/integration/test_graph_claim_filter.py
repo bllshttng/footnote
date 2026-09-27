@@ -255,48 +255,9 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
     assert len(set(selected)) == max_lanes
 
 
-def test_rank_uses_stored_status_board_lane(tmp_graph, tmp_path):
-    entries = [
-        {"id": "ab-claimed1", "title": "Claimed", "status": "ready",
-         "priority": "p3", "project": "p"},
-        {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
-         "priority": "p3", "project": "p", "rank": 5.0},
-    ]
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-    acquire_claim(
-        key="node:ab-claimed1",
-        holder="target-session:other",
-        ttl_ms=3_600_000,
-        root=tmp_path,
-    )
-
-    result = _invoke(
-        "backlog", "rank", "ab-claimed1", "--before", "ab-anchor1"
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "Later/p" in result.output
-    persisted = {entry["id"]: entry for entry in _store_entries(tmp_graph)}
-    assert persisted["ab-anchor1"]["rank"] == 5.0
-    assert persisted["ab-claimed1"]["rank"] < persisted["ab-anchor1"]["rank"]
-
-
-def test_rank_does_not_need_live_claim_state(tmp_graph):
-    entries = [
-        {"id": "ab-target01", "title": "Target", "status": "ready",
-         "priority": "p3", "project": "p"},
-        {"id": "ab-anchor01", "title": "Anchor", "status": "ready",
-         "priority": "p3", "project": "p", "rank": 5.0},
-    ]
-    seed_graph(tmp_graph, json.dumps({"entries": entries}) + "\n")
-
-    result = _invoke(
-        "backlog", "rank", "ab-target01", "--before", "ab-anchor01"
-    )
-
-    assert result.exit_code == 0, result.output
-    persisted = {entry["id"]: entry for entry in _store_entries(tmp_graph)}
-    assert persisted["ab-target01"]["rank"] < persisted["ab-anchor01"]["rank"]
+# `backlog rank` retired from the Python surface: its lane pin answers
+# natively in the binary now, and the two integration tests that pinned the
+# python leg went with it.
 
 
 def test_released_claim_does_not_block(tmp_graph, tmp_path):
