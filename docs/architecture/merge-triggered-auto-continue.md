@@ -38,6 +38,7 @@ The terminal path (`/pr merged <pr>`) is the same minus the SessionStart hook.
 |------|-----------|---------|-------|
 | 1 | not armed | skip | `advance_skipped{disabled}` |
 | 2 | `walker:<root>` claim live | skip (the live walk owns it) | `advance_skipped{walker-live}` |
+| 3 | `fno backlog next` does not answer inside `[auto_continue] select_timeout_s` (default 120), or the store refuses | skip; the heal lane retries | `advance_skipped{select-unmeasured}` |
 | 3 | `fno backlog next` errors | skip (never guess a node) | `advance_skipped{next-error}` |
 | 3 | no ready node | skip | `advance_skipped{no-work}` |
 | 4 | `node:<id>` or `dispatch:<id>` already live | skip (already being worked) | `advance_skipped{already-claimed}` |
@@ -47,6 +48,8 @@ The terminal path (`/pr merged <pr>`) is the same minus the SessionStart hook.
 | 7 | spawned | dispatched | `advance_dispatched{node,short_id}` |
 
 `advance` is strictly **non-fatal**: any failure resolves to `advance_failed` / `advance_skipped` and the host op (reconcile / post-merge) still completes (Locked Decision 7). It never merges anything (Locked Decision 6): it dispatches no-merge workers only; auto-merge stays an independent opt-in.
+
+The selection bound is read by the Rust `fno-agents select-read` verb. Raise it with `[auto_continue] select_timeout_s = 240` in `.fno/config.toml`. Zero, negative, and malformed values use the 120-second default. The post-merge ritual caps the whole advance leg at 180 seconds. A larger selection bound can still hit that outer limit. The heal lane retries from the recorded `select-unmeasured` row.
 
 ## Claim choreography (the LD#11 / AC1-CLAIM problem)
 

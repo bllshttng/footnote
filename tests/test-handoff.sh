@@ -186,8 +186,24 @@ check_log_absent() {
 TMPDIR_BASE="$(mktemp -d)"
 # A keeper spawned inside a scenario can still be writing its store files when
 # the last assertion lands, and one late sqlite WAL write makes the cleanup rm
-# fail the whole step. Kill every process rooted in the tree first.
-trap 'pkill -9 -f "$TMPDIR_BASE" 2>/dev/null; sleep 0.5; rm -rf "$TMPDIR_BASE"' EXIT
+# fail the whole step. Kill every process rooted in the tree first. The trap
+# pins the status before cleaning: the observed failure shape is the script
+# exiting nonzero from INSIDE its own EXIT trap after a green summary, which
+# the fail-fast runner then reports as a step red with no failing assertion.
+cleanup_handoff() {
+  rc=$?
+  # A scenario whose set -e / set +e pair straddles an early return leaves
+  # errexit on at exit: the first failing cleanup command (pkill with no
+  # match) would then abort the trap and red a green summary.
+  set +e
+  if [[ -n "${TMPDIR_BASE:-}" ]]; then
+    pkill -9 -f "$TMPDIR_BASE" 2>/dev/null
+    sleep 0.5
+    rm -rf "$TMPDIR_BASE"
+  fi
+  exit "$rc"
+}
+trap cleanup_handoff EXIT
 
 NODE_ID="ab-12345678"
 SESSION_ID="20260605T120000Z-12345-abc"
@@ -493,6 +509,10 @@ STUBEOF
 run_handoff() {
   # run_handoff <sandbox> <boundary> [extra-args...]
   # Runs script from sandbox cwd so relative PLAN_PATH resolves correctly.
+  # A hard wall-clock bound wraps every case: the script's own poll loops are
+  # timeout-bounded, but a case that wedges anywhere else (a stub that blocks,
+  # a binary that never answers) once ran away unbounded and grew a 20 GB
+  # set -x trace. 180s covers the slowest legitimate case many times over.
   local sbx="$1" boundary="$2"
   shift 2
 
@@ -512,7 +532,7 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --harness claude --model opus "$@" 2>&1
+      timeout 180 bash "$SCRIPT" --harness claude --model opus "$@" 2>&1
     )
   else
     output=$(
@@ -529,7 +549,7 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --harness claude --model opus 2>&1
+      timeout 180 bash "$SCRIPT" --harness claude --model opus 2>&1
     )
   fi
   handoff_rc=$?

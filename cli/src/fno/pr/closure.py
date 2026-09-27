@@ -1,4 +1,4 @@
-"""Exact `Backlog-Closure:` trailer: parse, render, and bind PR-to-node closure.
+"""The PR-body closure line: parse, render, and bind PR-to-node closure.
 
 A merged PR's body may name several backlog nodes, but only the ONE node
 stamped into `.fno/target-state.md` at creation ever gets its `pr_number`
@@ -9,66 +9,36 @@ the reverse branch-name map only carries the primary node's id.
 Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") are
 measurement-only (see `scripts/metrics/pr-node-closure-audit.py`) and must
 NEVER become a closure claim - a dependency note or a follow-up filing reads
-identically to a close claim to a prose scanner. The exact trailer is the
-only runtime-recognized closure grammar, so a claim is either the literal
-line or it does not exist.
+identically to a close claim to a prose scanner. The exact line is the only
+runtime-recognized closure grammar, so a claim is either the literal line or
+it does not exist.
+
+The LINE FORMAT lives in one leg: the Rust parser `king_board/pr_closure.rs` (verbs
+`pr-closure-parse` / `pr-closure-render`); the forwarders below speak for Python.
+Writers emit only `Fixes`; readers accept the retired `Backlog-Closure:` spelling.
 """
 from __future__ import annotations
 
 import copy
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
-
-TRAILER_KEY = "Backlog-Closure"
-
-# Anchored to the START of a line (MULTILINE): a sentence merely containing
-# "the Backlog-Closure trailer is..." mid-paragraph must never parse as the
-# trailer itself, matching git trailer convention.
-_TRAILER_LINE_RE = re.compile(
-    rf"^{re.escape(TRAILER_KEY)}:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE
-)
+from fno.rust_binary import VerbUnavailable, verb_call
 
 
 def parse_closure_trailer(body: str) -> list[str]:
-    """Well-formed node ids named on the LAST exact ``Backlog-Closure:`` line.
-
-    Order-preserved, deduplicated. Only a line that starts exactly with the
-    trailer key counts (AC2-EDGE) - prose in a Dependencies/Follow-ups/
-    Collisions section never becomes a claim, however it phrases a mention.
-    Multiple trailer lines (e.g. after a rebase carried a stale one forward):
-    only the LAST wins, mirroring git trailer semantics. A malformed token on
-    an otherwise-good line (typo, stray punctuation) is silently dropped here;
-    the CI backstop (``check-pr-node-closure.sh``) is what enforces
-    well-formedness at PR-open time, not this runtime parser refusing an
-    otherwise-legitimate merge over one bad token.
-    """
+    """Forward to the Rust leg: ids on the LAST closure line of ``body``."""
     if not isinstance(body, str) or not body:
         return []
-    lines = _TRAILER_LINE_RE.findall(body)
-    if not lines:
-        return []
-    ids: list[str] = []
-    seen: set[str] = set()
-    for token in lines[-1].replace(",", " ").split():
-        if is_wellformed_node_id(token) and token not in seen:
-            seen.add(token)
-            ids.append(token)
-    return ids
+    return verb_call("pr-closure-parse", {"body": body}, VerbUnavailable)["ids"]
 
 
 def render_closure_trailer(node_ids: list[str]) -> str:
-    """The one place a trailer LINE is built, so parse<->render round-trips.
-
-    Drops malformed/duplicate ids; returns "" (no line) when nothing well-formed
-    remains, so a caller can safely append the result to a body unconditionally.
-    """
-    ids = [n for n in dict.fromkeys(node_ids) if is_wellformed_node_id(n)]
-    return f"{TRAILER_KEY}: {' '.join(ids)}" if ids else ""
+    """Forward to the Rust leg: the one ``Fixes`` line ("" when nothing well-formed)."""
+    return verb_call("pr-closure-render", {"ids": list(node_ids)}, VerbUnavailable)["line"]
 
 
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:
@@ -136,39 +106,33 @@ def branch_node_ids(head_ref: str) -> list[str]:
 
 
 def known_node_ids() -> frozenset[str]:
-    """Every id the graph actually carries; empty when it cannot be read.
+    """Every id the graph actually carries; raises when the graph cannot be read.
 
-    Empty is the SAFE direction. With nothing verified, no branch-derived
-    candidate is claimed and the CI gate reds loudly, which a human can see and
-    act on. The alternative is a trailer naming an id the graph does not carry:
-    that PASSES CI, and then ``bind_closure_claims`` refuses the WHOLE binding
-    at merge, so the real node never closes and nothing says so.
+    A read failure propagates, it never reads as empty. Measured 2026-09-16:
+    empty looked safe because a trailer-less PR reds the CI gate loudly, but
+    three PRs went red with no named cause and the dead reader answered exactly
+    like a missing node. Now the exception stops the ``gh pr create`` path and
+    names the read. Empty is reserved for the one safe case: an external
+    tracker backend, where graph.json is not the delivery record and nothing is
+    claimed.
     """
-    try:
-        from fno.graph import api as graph_api
-        from fno.paths import graph_json
-        from fno.tracker import active_backend_name
+    from fno.graph import api as graph_api
+    from fno.paths import graph_json
+    from fno.tracker import active_backend_name
 
-        if active_backend_name() != "graph":
-            # graph.json is not the delivery record of truth under an external
-            # tracker, which is the same posture `fno do pr closure-trailer` takes
-            # there. Nothing to verify against, so nothing is claimed.
-            return frozenset()
-        return frozenset(
-            e["id"]
-            for e in (
-                n.model_dump(by_alias=True)
-                for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
-            )
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        )
-    except Exception as exc:
-        # Say so. Returning empty silently turns the producer into a no-op:
-        # no trailer is written, the PR opens, and the only symptom is a red
-        # gate that names the branch rather than the read that failed.
-        print(f"fno: closure trailer cannot read the graph ({exc}); "
-              f"claiming no branch-derived node", file=sys.stderr)
+    if active_backend_name() != "graph":
+        # graph.json is not the delivery record of truth under an external
+        # tracker, which is the same posture `fno do pr closure-trailer` takes
+        # there. Nothing to verify against, so nothing is claimed.
         return frozenset()
+    return frozenset(
+        e["id"]
+        for e in (
+            n.model_dump(by_alias=True)
+            for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
+        )
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    )
 
 
 class BranchResolutionError(Exception):
@@ -245,7 +209,9 @@ def ensure_closure_trailer(
     The one call a `gh pr create` path makes so the CI gate never reds a PR over
     a line the generator could have written. Returns the body unchanged when the
     ref names no node or the last trailer already claims them all, so a caller
-    applies it unconditionally and a re-run changes nothing.
+    applies it unconditionally and a re-run changes nothing. A graph read that
+    fails RAISES (through ``known_node_ids``): a dead reader stops the PR, it
+    never opens one untrailered.
 
     Appends rather than rewrites: ``parse_closure_trailer`` and the gate both
     read the LAST trailer line, so a new final line wins without touching what

@@ -83,10 +83,19 @@ def _isolate(
     # rather than AttributeError-ing on a bare namespace. Empty stdout => the
     # rev is undeterminable for the fake source, so the marker chain is skipped.
     fake_result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _fake_run(cmd, *a, **kw):
+        # Native event commits answer through the real store; a stubbed empty
+        # receipt would turn every best-effort audit emit into a hard failure.
+        parts = [str(p) for p in (cmd if isinstance(cmd, (list, tuple)) else [cmd])]
+        if {"doctor", "event"} <= set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_result
+
     monkeypatch.setattr(
         update_mod.subprocess,
         "run",
-        lambda *a, **kw: fake_result,
+        _fake_run,
     )
     yield
 
@@ -395,6 +404,8 @@ def test_cargo_failure_preserves_python_update_and_refuses_freshness(
     def _fake_run(cmd, *a, **kw):
         if cmd and cmd[0] == "cargo":
             return types.SimpleNamespace(returncode=2, stdout="", stderr="")
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
         return fake_ok
 
     monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
@@ -409,8 +420,9 @@ def test_cargo_failure_preserves_python_update_and_refuses_freshness(
     # Partial success: the Python install still exec'd, --refresh riding along.
     assert captured.get("file") == "/bin/sh"
     assert "--refresh" in captured["args"][2]
-    # No convergence claim without a verdict: the transport says it cannot prove.
-    assert "component verdict unavailable" in result.output
+    # No convergence claim without a verdict: the transport names the dead
+    # path and its repair instead.
+    assert "install-exec-dead" in result.output
 
 
 @pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
@@ -418,8 +430,8 @@ def test_malformed_version_output_halts_the_rust_leg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A deploy whose landed binary emits unparseable `version --json` output
-    cannot prove convergence: the post-deploy verify halts the leg loudly and
-    no installer runs."""
+    cannot answer the verdict: the leg refuses with install-exec-dead naming
+    the path and the repair, and no installer runs."""
     import types
 
     import fno.update as update_mod
@@ -432,7 +444,12 @@ def test_malformed_version_output_halts_the_rust_leg(
     monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: garbage_bin)
 
     fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_ok
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
@@ -440,10 +457,9 @@ def test_malformed_version_output_halts_the_rust_leg(
 
     result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 1
-    assert "post-deploy verify FAILED" in result.output
-    # The deployed binary cannot answer the verdict, and the receipt says so
-    # instead of claiming freshness.
-    assert "component verdict unavailable" in result.output
+    # The deployed binary cannot answer the verdict; the refusal names the
+    # path and the three-command repair instead of claiming freshness.
+    assert "install-exec-dead" in result.output
     assert not captured, "a halt must never reach the installer exec"
 
 
@@ -474,7 +490,12 @@ def test_missing_cargo_names_component_evidence_and_still_installs_python(
         lambda name, **kw: None if name == "cargo" else real_which(name),
     )
     fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_ok
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
@@ -483,7 +504,7 @@ def test_missing_cargo_names_component_evidence_and_still_installs_python(
     result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0, result.output
     assert "cargo is not on PATH" in result.output
-    assert "component verdict unavailable" in result.output
+    assert "install-exec-dead" in result.output
     assert captured.get("file") == "/bin/sh"
 
 
@@ -496,6 +517,9 @@ def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
     import fno.update as update_mod
 
     monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
+    # Hermetic on any machine: a real cargo-installed triad would engage the
+    # rust leg (real verdicts, real cargo) instead of testing the pip exec.
+    monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: None)
     import fno.pr_watch.cli as pw_cli
     monkeypatch.setattr(
         pw_cli, "_resolve_fno_binary",
@@ -567,7 +591,13 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
 
     import types
     fake_result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: fake_result)
+
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_result
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
 
     execvp_calls: list[tuple] = []
 

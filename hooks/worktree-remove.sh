@@ -14,6 +14,10 @@
 # points at it anymore.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # The build hash dir outlives git's removal; reclaim it while the manifest
 # can still answer. A partial deploy without the lib leaves the dir to the
 # sweep.

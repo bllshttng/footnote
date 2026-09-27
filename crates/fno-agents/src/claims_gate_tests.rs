@@ -1,6 +1,7 @@
 //! The short-lived holder arm: `gate:` keys and `holder-process` leases name
 //! the short-lived process that held them, so the recorded pid IS the verdict
-//! at expiry and a live writing session never heals a dead process's claim.
+//! and a live writing session never heals a dead process's claim. Gate keys
+//! read it at any age; `holder-process` leases read it at expiry.
 //! Split from claims.rs to keep the over-budget file shrinking.
 
 use super::*;
@@ -90,15 +91,54 @@ fn a_live_spawning_session_never_heals_a_dead_gate_claim() {
 }
 
 #[test]
-fn an_unexpired_gate_claim_with_a_dead_pid_stays_suspect() {
-    // Only the expired arm changes; the unexpired arm keeps its
-    // TTL-protected Suspect, matching the dispatch: precedent.
+fn an_unexpired_gate_claim_with_a_dead_pid_reads_stale() {
+    // The gate pid holds the mutex for the whole hold, so a dead pid frees
+    // it at once instead of queueing every spawner behind the TTL.
     let now = now_ms();
-    let (state, _cause) = classify_with_basis(
+    let (state, cause) = classify_with_basis(
         &gate_record(-1, now, Some(now + 60_000)),
         Some(now),
         &probe_pid,
     );
+    assert_eq!(state, ClaimState::Stale);
+    assert_eq!(cause, basis::PID_ABSENT);
+}
+
+#[test]
+fn an_unexpired_gate_claim_with_a_live_pid_stays_live() {
+    let now = now_ms();
+    let me = std::process::id() as i32;
+    let (state, cause) = classify_with_basis(
+        &gate_record(me, now, Some(now + 60_000)),
+        Some(now),
+        &probe_pid,
+    );
+    assert_eq!(state, ClaimState::Live);
+    assert_eq!(cause, basis::LIVE);
+}
+
+#[test]
+fn an_unexpired_gate_claim_with_a_refused_probe_stays_suspect() {
+    // A refusal is not proof of death.
+    let now = now_ms();
+    let (state, _cause) = classify_with_basis(
+        &gate_record(-1, now, Some(now + 60_000)),
+        Some(now),
+        &|_| PidProbe::Refused,
+    );
+    assert_eq!(state, ClaimState::Suspect);
+}
+
+#[test]
+fn an_unexpired_dispatch_claim_with_a_dead_pid_stays_suspect() {
+    // A dispatch pid can predate the worker's exec, so only the gate arm
+    // reads the pid inside the TTL.
+    let now = now_ms();
+    let rec = ClaimRecord {
+        key: "dispatch:x-0000".into(),
+        ..gate_record(-1, now, Some(now + 60_000))
+    };
+    let (state, _cause) = classify_with_basis(&rec, Some(now), &probe_pid);
     assert_eq!(state, ClaimState::Suspect);
 }
 
@@ -163,14 +203,29 @@ fn an_unstamped_expired_lease_still_heals_through_its_session() {
 }
 
 #[test]
-fn an_unexpired_holder_process_lease_with_a_dead_pid_stays_suspect() {
-    // Only the expired arm changes; inside the TTL the lease stays
-    // protected, matching the gate: precedent.
+fn an_unexpired_holder_process_lease_with_a_dead_pid_is_reclaimable() {
+    // The holder is ONE SHORT-LIVED PROCESS, so its recorded pid is
+    // the lease's whole life. A provably dead pid frees the lease inside the
+    // TTL window instead of refusing every acquirer until expiry - a killed
+    // sync used to hold post-merge-sync for its full 30-minute TTL.
     let now = now_ms();
     let (state, _cause) = classify_with_basis(
         &lease_record(-1, now, Some(now + 60_000), "holder-process"),
         Some(now),
         &probe_pid,
+    );
+    assert_eq!(state, ClaimState::Stale);
+}
+
+#[test]
+fn an_unexpired_holder_process_lease_with_an_unreadable_pid_stays_suspect() {
+    // A refused probe is not proof of death: the process exists and refuses
+    // inspection, so the TTL window keeps protecting the lease.
+    let now = now_ms();
+    let (state, _cause) = classify_with_basis(
+        &lease_record(-1, now, Some(now + 60_000), "holder-process"),
+        Some(now),
+        &|_pid| PidProbe::Refused,
     );
     assert_eq!(state, ClaimState::Suspect);
 }

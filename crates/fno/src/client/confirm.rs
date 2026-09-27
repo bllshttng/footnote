@@ -53,8 +53,6 @@ pub(crate) struct ConfirmAction {
 
 /// What a confirmed [`ConfirmAction`] sends on Enter.
 pub(crate) enum ConfirmKind {
-    /// Start a targeted session on a work-queue card's node.
-    Dispatch { node: String },
     /// Close a whole workspace. `panes` is the blast radius named in
     /// the prompt; `last` warns that removing the session's only squad ends it.
     RemoveSquad {
@@ -117,12 +115,11 @@ pub(crate) enum ConfirmKind {
 
 impl ConfirmKind {
     /// The one command a confirmed kind commits. `None` for the kinds whose
-    /// commit is not a plain one-command send: `Dispatch` carries the view's
-    /// active account, `ClearDead` re-folds the dead set at Enter, `CloseTab`
-    /// re-resolves the tab at Enter. The commit path keeps those three arms.
+    /// commit is not a plain one-command send: `ClearDead` re-folds the dead
+    /// set at Enter, `CloseTab` re-resolves the tab at Enter. The commit path
+    /// keeps those two arms.
     pub(crate) fn command(self) -> Option<Command> {
         match self {
-            ConfirmKind::Dispatch { .. } => None,
             ConfirmKind::RemoveSquad { squad, .. } => Some(Command::RemoveSquad(squad)),
             ConfirmKind::StopAgent { name, sid, pane_id } => Some(Command::StopAgent {
                 name,

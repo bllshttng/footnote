@@ -6,22 +6,18 @@ followup and the reconcile out-of-band close.
 """
 from __future__ import annotations
 
-import json
 import types
 from pathlib import Path
 
+from tests.fixtures.graph_seed import seed_graph
 from fno.graph._reconcile import MergeDriftRecord, emit_human_touch_for_record
 from fno.pr import _merge
 
 
 def _events(path: Path) -> list[dict]:
-    from fno.paths import journal_and_ephemeral_sibling
+    from tests._event_rows import event_rows
 
-    lines: list[str] = []
-    for candidate in journal_and_ephemeral_sibling(path):
-        if candidate.exists():
-            lines.extend(candidate.read_text().splitlines())
-    return [json.loads(ln) for ln in lines if ln.strip()]
+    return event_rows(path)
 
 
 def _fake_graph(tmp_path: Path, entries: list[dict]) -> Path:
@@ -35,7 +31,7 @@ def _fake_graph(tmp_path: Path, entries: list[dict]) -> Path:
             e["status"] = "in_review"
         e.setdefault("status", "idea")
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}))
+    seed_graph(p, entries)
     return p
 
 

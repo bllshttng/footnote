@@ -5,10 +5,11 @@ it declines rather than the case it permits. A correction verb that permits
 everything is a hand-edit with a nicer name, and hand-editing the graph is what
 the PreToolUse hook already forbids.
 
-Graph fixture follows test_done.py: a temp graph.json routed through the
+Graph fixture follows test_done.py: a temporary SQLite graph routed through the
 monkeypatchable `_constants` module, with gh stubbed so no test touches GitHub.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -24,7 +26,6 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -56,11 +57,11 @@ def no_plan_projection(monkeypatch, request):
 
 
 def _write(graph: Path, *entries: dict) -> None:
-    graph.write_text(json.dumps({"entries": list(entries)}))
+    seed_graph(graph, json.dumps({"entries": list(entries)}))
 
 
 def _read(graph: Path) -> dict[str, dict]:
-    return {e["id"]: e for e in json.loads(graph.read_text())["entries"]}
+    return {e["id"]: e for e in read_graph_strict(graph)}
 
 
 def _node(nid: str, **over) -> dict:
@@ -402,11 +403,11 @@ def test_a_routing_refusal_does_not_reopen_the_node(tmp_graph, monkeypatch):
 def test_a_node_that_is_not_done_warns_and_changes_nothing(tmp_graph):
     """Idempotent in the safe direction, matching unsupersede's shape."""
     _write(tmp_graph, _node("ab-11111111", completed_at=None, status="ready"))
-    before = tmp_graph.read_text()
+    before = read_graph_strict(tmp_graph)
     res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
     assert res.exit_code == 0
     assert "not done" in res.output
-    assert tmp_graph.read_text() == before
+    assert read_graph_strict(tmp_graph) == before
 
 
 def test_a_blank_reason_is_a_usage_error(tmp_graph):
@@ -558,7 +559,7 @@ def test_the_marker_clears_when_the_reopened_child_closes_again(tmp_graph):
         ),
         _node("ab-c0000000", parent="ab-e0000000", completed_at=None, status="in_progress"),
     )
-    live = list(json.loads(tmp_graph.read_text())["entries"])
+    live = list(read_graph_strict(tmp_graph))
     child = next(e for e in live if e["id"] == "ab-c0000000")
     _apply_completion_fields(child)
     _cascade_close_parents(live, "ab-c0000000")
@@ -616,7 +617,7 @@ def test_a_close_reopen_close_cycle_re_annotates_the_epic(tmp_graph):
     runner.invoke(app, ["backlog", "reopen", "ab-c0000000", "--reason", "wrong"])
 
     # Re-close the child the way `done` does, then let the cascade run.
-    live = list(json.loads(tmp_graph.read_text())["entries"])
+    live = list(read_graph_strict(tmp_graph))
     child = next(e for e in live if e["id"] == "ab-c0000000")
     _apply_completion_fields(child)
     _cascade_close_parents(live, "ab-c0000000")
@@ -699,8 +700,8 @@ def test_update_difficulty_reaches_the_plan_doc(tmp_graph, tmp_path):
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "high"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--difficulty", "high")
+    assert code == 0, out
     assert "difficulty: high" in plan.read_text()
 
 
@@ -711,8 +712,8 @@ def test_update_difficulty_null_clears_the_plan_doc(tmp_graph, tmp_path):
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: high\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "null"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--difficulty", "null")
+    assert code == 0, out
     assert "difficulty" not in plan.read_text()
 
 
@@ -724,6 +725,34 @@ def test_update_priority_keeps_a_persisted_null_band_off_the_doc(tmp_graph, tmp_
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: medium\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, difficulty=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--priority", "p1"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--priority", "p1")
+    assert code == 0, out
     assert "difficulty: medium" in plan.read_text()
+
+
+def _native_update(graph: Path, tmp_path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FNO_STATE_DIR": str(tmp_path),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_path),
+    )
+    return proc.returncode, proc.stdout + proc.stderr

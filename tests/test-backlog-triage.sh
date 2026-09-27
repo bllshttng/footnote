@@ -6,7 +6,7 @@
 #   2. After intake of 2 plans, context returns both candidates
 #   3. context --deep includes plan_excerpt for each candidate
 #   4. validate accepts a clean proposal; rejects one with a cycle
-#   5. apply mutates graph.json + re-renders graph.md exactly once
+#   5. apply mutates graph.db + re-renders graph.md exactly once
 #   6. propose --dry-run emits a valid proposal template
 #   7. projects emits an alphabetical JSON list
 
@@ -22,7 +22,7 @@ export HOME="$TMP/home"
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
 GRAPH_MD="$HOME/.fno/graph.md"
-echo '{"entries": []}' > "$GRAPH_JSON"
+printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
 
 PASS=0
 FAIL=0
@@ -131,25 +131,24 @@ else
 fi
 
 # Build a cycle: add blocker edge A -> B, then propose B -> A
-node_a=$(python3 -c "
-import json
-d = json.load(open('$GRAPH_JSON'))
+node_a=$(uv run --project "$REPO_ROOT/cli" python -c "
+from fno.graph.store import read_graph_strict
+d = {'entries': read_graph_strict(__import__('pathlib').Path('$GRAPH_JSON'))}
 print(d['entries'][0]['id'])
 ")
-node_b=$(python3 -c "
-import json
-d = json.load(open('$GRAPH_JSON'))
+node_b=$(uv run --project "$REPO_ROOT/cli" python -c "
+from fno.graph.store import read_graph_strict
+d = {'entries': read_graph_strict(__import__('pathlib').Path('$GRAPH_JSON'))}
 print(d['entries'][1]['id'])
 ")
 # Seed a direct blocked_by on B so any edge from A already traverses back
-python3 -c "
-import json
-p = '$GRAPH_JSON'
-d = json.load(open(p))
-for e in d['entries']:
-    if e['id'] == '$node_b':
-        e['blocked_by'] = ['$node_a']
-json.dump(d, open(p, 'w'))
+uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import commit_rows_via_store
+commit_rows_via_store(Path('$GRAPH_JSON'), lambda rows: [
+    dict(row, blocked_by=['$node_a']) if row['id'] == '$node_b' else row
+    for row in rows
+])
 "
 
 cycle_prop="$TMP/cycle.json"
@@ -175,15 +174,12 @@ else
     fail "validate output missing 'cycle' rejection message"
 fi
 
-# --- Scenario 5: apply mutates graph.json + re-renders graph.md exactly once
+# --- Scenario 5: apply mutates graph.db + re-renders graph.md exactly once
 # Reset blocked_by so a fresh apply has somewhere to go.
-python3 -c "
-import json
-p = '$GRAPH_JSON'
-d = json.load(open(p))
-for e in d['entries']:
-    e['blocked_by'] = []
-json.dump(d, open(p, 'w'))
+uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import commit_rows_via_store
+commit_rows_via_store(Path('$GRAPH_JSON'), lambda rows: [dict(row, blocked_by=[]) for row in rows])
 "
 
 apply_prop="$TMP/apply.json"
@@ -211,11 +207,12 @@ else
     fail "apply failed with exit $applied_rc"
 fi
 
-# Check graph.json now has the blocker and priority
-applied_check=$(python3 -c "
-import json
-d = json.load(open('$GRAPH_JSON'))
-by_id = {e['id']: e for e in d['entries']}
+# Check graph.db now has the blocker and priority
+applied_check=$(uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+entries = read_graph_strict(Path('$GRAPH_JSON'))
+by_id = {e['id']: e for e in entries}
 a = by_id.get('$node_a', {})
 b = by_id.get('$node_b', {})
 if a.get('priority') != 'high':
@@ -256,14 +253,12 @@ fi
 
 # --- Scenario 7: projects emits an alphabetical JSON list ------------------
 # Seed two projects manually so the list is non-trivial.
-python3 -c "
-import json
-p = '$GRAPH_JSON'
-d = json.load(open(p))
-d['entries'][0]['project'] = 'zeta'
-d['entries'][1]['project'] = 'alpha'
-# Both still need completed_at == None to count as pending
-json.dump(d, open(p, 'w'))
+uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import commit_rows_via_store
+def assign_projects(rows):
+    return [dict(row, project=('zeta' if i == 0 else 'alpha')) for i, row in enumerate(rows)]
+commit_rows_via_store(Path('$GRAPH_JSON'), assign_projects)
 "
 run_fno --json backlog triage projects 2>/dev/null > "$TMP/projects.json"
 projects_check=$(python3 -c "

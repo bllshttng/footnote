@@ -7,6 +7,7 @@
   blocks the close.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -16,6 +17,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph._intake import VALID_NODE_TYPES, normalize_size, normalize_type
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -25,7 +27,7 @@ def _route_graph(tmp_path, monkeypatch) -> tuple[Path, Path]:
     import fno.graph.store as gs
 
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -37,7 +39,7 @@ def _route_graph(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
 
 def _entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text())["entries"]
+    return read_graph_strict(g)
 
 
 # -- normalize_size --------------------------------------------------------
@@ -104,9 +106,27 @@ def test_normalize_type(value, expected):
 def test_valid_node_types_is_the_one_vocabulary():
     """`backlog update --type` validates against this same set, not a copy."""
     assert VALID_NODE_TYPES == frozenset({"feature", "epic", "bug", "roadmap"})
-    result = runner.invoke(app, ["backlog", "update", "ab-nope0001", "--type", "banana"])
-    assert result.exit_code == 1
-    assert "invalid type 'banana'" in result.output
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", "ab-nope0001", "--type", "banana"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    assert "invalid type 'banana'" in out
 
 
 def test_intake_copies_type_from_frontmatter(tmp_path, monkeypatch):
@@ -164,7 +184,7 @@ def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
 
 
 def _seed_node(g: Path, plan_path: str) -> None:
-    g.write_text(json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Costed node",
         "slug": "ab-cost0001",
@@ -174,6 +194,7 @@ def _seed_node(g: Path, plan_path: str) -> None:
         "plan_path": plan_path,
         "cost_usd": None,
         "cost_sessions": [],
+        "artifact_url": "https://example.test/artifact",
     }]}) + "\n")
 
 
@@ -208,7 +229,7 @@ def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
     """Fill-only: a node that already carries cost (e.g. from `fno done`) keeps
     it; backlog done never clobbers a richer prior stamp (codex P2)."""
     g, ledger = _route_graph(tmp_path, monkeypatch)
-    g.write_text(json.dumps({"entries": [{
+    seed_graph(g, json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Pre-costed",
         "slug": "ab-cost0001",
@@ -218,6 +239,7 @@ def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
         "plan_path": "internal/plans/costed.md",
         "cost_usd": 9.99,
         "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],
+        "artifact_url": "https://example.test/artifact",
     }]}) + "\n")
     ledger.write_text(json.dumps({"entries": [{
         "plan_path": "internal/plans/costed.md", "cost_usd": 1.20,

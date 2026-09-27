@@ -90,7 +90,7 @@ def test_a_listed_closed_row_is_skipped_with_a_reason(tmp_path, monkeypatch):
     assert [e for e in events if e["type"] == "merge_grant_execution"] == [], events
     skips = [e for e in events if e["type"] == "pr_watch_skipped"]
     assert [s["data"]["reason"] for s in skips] == ["not-open"], events
-    assert counts == {"executed": 0, "held": 0, "failed": 0, "skipped": 1}
+    assert counts == {"executed": 0, "held": 0, "failed": 0, "skipped": 1, "budget": 0}
 
 
 def test_a_held_row_records_the_merge_reason(tmp_path, monkeypatch):
@@ -168,6 +168,71 @@ def test_an_already_closed_reply_stamps_not_open_and_the_next_drain_skips(
     assert counts["skipped"] == 1
 
 
+def test_an_attempt_starts_with_exactly_the_merge_floor_left(tmp_path, monkeypatch):
+    events, calls = [], []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    key = "owner/repo#150"
+    _open_row(store, key)
+    now = [100.0]
+    monkeypatch.setattr(d.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(d, "_phase_deadline", now[0] + d._MERGE_FLOOR_S)
+    monkeypatch.setattr(
+        _merge, "run_merge", lambda argv, cwd=None, **kw: calls.append(argv) or 0)
+    counts = _drain([(_cand(tmp_path, 150, "x-floor"), key, _grant_fields())],
+                    events, store_path=store_path)
+    assert calls == [["150"]]
+    assert counts["executed"] == 1 and counts["budget"] == 0
+
+
+def test_under_the_merge_floor_is_refused_without_spending_retry(tmp_path, monkeypatch):
+    events, calls = [], []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    key = "owner/repo#149"
+    _open_row(store, key)
+    now = [100.0]
+    monkeypatch.setattr(d.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(d, "_phase_deadline", now[0] + d._MERGE_FLOOR_S - 1)
+    monkeypatch.setattr(
+        _merge, "run_merge", lambda argv, cwd=None, **kw: calls.append(argv) or 0)
+    counts = _drain([(_cand(tmp_path, 149, "x-under-floor"), key, _grant_fields())],
+                    events, store_path=store_path)
+    assert calls == []
+    assert _store(tmp_path).get(key)["retries"] == 0
+    assert counts["budget"] == 1 and counts["skipped"] == 0
+    assert [e["data"]["reason"] for e in events if e["type"] == "pr_watch_skipped"] == ["execute-budget"]
+
+
+def test_the_next_row_prepares_under_merge_prepare(tmp_path, monkeypatch):
+    events, calls = [], []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    key1, key2 = "owner/repo#1", "owner/repo#2"
+    _open_row(store, key1)
+    _open_row(store, key2)
+
+    class _PhaseClaim(_NoLockClaim):
+        def __init__(self):
+            self.phases = []
+
+        def acquire_pr_lock(self, key, holder):
+            self.phases.append(d.current_tick_phase())
+
+    claim = _PhaseClaim()
+    now = [100.0]
+    monkeypatch.setattr(d.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(d, "_phase_deadline", now[0] + 400.0)
+    monkeypatch.setattr(
+        _merge, "run_merge", lambda argv, cwd=None, **kw: calls.append(argv) or 0)
+    c1, c2 = _cand(tmp_path, 1, "x-first"), _cand(tmp_path, 2, "x-second")
+    counts = _drain([(c1, key1, _grant_fields()), (c2, key2, _grant_fields())],
+                    events, claim=claim, store_path=store_path)
+    assert calls == [["1"], ["2"]]
+    assert claim.phases == ["merge:prepare", "merge:prepare"]
+    assert counts["executed"] == 2
+
+
 def test_a_slow_attempt_raises_the_floor_for_the_next_row(tmp_path, monkeypatch):
     events = []
     merge_calls = []
@@ -185,12 +250,12 @@ def test_a_slow_attempt_raises_the_floor_for_the_next_row(tmp_path, monkeypatch)
     def _slow_then_fast(argv, cwd=None, **kw):
         merge_calls.append(int(argv[0]))
         _merge.LAST_RECEIPT.clear()
-        took = 80.0 if merge_calls == [1] else 0.0
+        took = 220.0 if merge_calls == [1] else 0.0
         now[0] += took
         return 0
 
     monkeypatch.setattr(d.time, "monotonic", _clock)
-    monkeypatch.setattr(d, "_phase_deadline", _clock() + 150.0)
+    monkeypatch.setattr(d, "_phase_deadline", _clock() + 400.0)
     monkeypatch.setattr(_merge, "run_merge", _slow_then_fast)
     c1, c2 = _cand(tmp_path, 1, "x-slow"), _cand(tmp_path, 2, "x-next")
     counts = _drain([(c1, key1, _grant_fields()), (c2, key2, _grant_fields())],
@@ -198,7 +263,7 @@ def test_a_slow_attempt_raises_the_floor_for_the_next_row(tmp_path, monkeypatch)
     assert merge_calls == [1], "second row never starts an attempt"
     skips = [e for e in events if e["type"] == "pr_watch_skipped"]
     assert [s["data"]["reason"] for s in skips] == ["execute-budget"], events
-    assert counts == {"executed": 1, "held": 0, "failed": 0, "skipped": 1}
+    assert counts == {"executed": 1, "held": 0, "failed": 0, "skipped": 0, "budget": 1}
 
 
 def test_every_granted_row_is_counted_once(tmp_path, monkeypatch):
@@ -233,8 +298,90 @@ def test_every_granted_row_is_counted_once(tmp_path, monkeypatch):
         (_cand(tmp_path, 10, "x-e"), key_e, _grant_fields()),
     ]
     counts = _drain(queue, events, claim=claim, store_path=store_path)
-    total = counts["executed"] + counts["held"] + counts["failed"] + counts["skipped"]
+    total = (counts["executed"] + counts["held"] + counts["failed"]
+             + counts["skipped"] + counts["budget"])
     assert total == 4, counts
     locked = [e for e in events if e["type"] == "pr_watch_skipped"
               and e["data"].get("reason") == "locked"]
     assert locked and locked[0]["data"]["pr"] == 13, events
+
+
+def test_a_gh_budget_backoff_holds_every_grant_without_attempting_it(
+    tmp_path, monkeypatch
+):
+    """A fleet gh-budget backoff must not burn the merge slice.
+
+    One PR waiting out a 50s+ local hold per grant is how merge:execute
+    spent its whole 240s slice with acted=0 and starved every arm after
+    merge. The drain must hold each granted row fast, touch no store
+    state, and never reach the merge core.
+    """
+    events = []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    keys = ["owner/repo#31", "owner/repo#32"]
+    for key in keys:
+        _open_row(store, key)
+    monkeypatch.setattr(d, "_gh_budget_backoff_left", lambda: 42.0)
+
+    def _boom(argv, cwd=None, **kw):
+        raise AssertionError("merge core must not run during a budget backoff")
+
+    monkeypatch.setattr(_merge, "run_merge", _boom)
+    queue = [(_cand(tmp_path, 31, "x-hold1"), keys[0], _grant_fields()),
+             (_cand(tmp_path, 32, "x-hold2"), keys[1], _grant_fields())]
+    counts = _drain(queue, events, store_path=store_path)
+
+    assert counts == {"executed": 0, "held": 2, "failed": 0,
+                      "skipped": 0, "budget": 0}, counts
+    holds = [e for e in events if e["type"] == "merge_grant_execution"]
+    assert [e["data"]["phase"] for e in holds] == ["held", "held"], events
+    for event in holds:
+        assert "backoff 42s" in event["data"]["reason"], event
+    for key in keys:
+        entry = store.get(key)
+        assert entry["retries"] == 0, "a budget hold never spends retries"
+        assert not entry.get("parked"), entry
+
+
+def test_a_short_gh_budget_backoff_still_attempts_the_merge(
+    tmp_path, monkeypatch
+):
+    """A hold under the skip threshold waits out inside the call as before."""
+    events = []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    key = "owner/repo#33"
+    _open_row(store, key)
+    monkeypatch.setattr(d, "_gh_budget_backoff_left", lambda: 5.0)
+    calls = []
+    monkeypatch.setattr(
+        _merge, "run_merge", lambda argv, cwd=None, **kw: calls.append(argv) or 0)
+    counts = _drain([(_cand(tmp_path, 33, "x-hold3"), key, _grant_fields())],
+                    events, store_path=store_path)
+
+    assert counts["executed"] == 1, counts
+    assert calls, "a short backoff belongs inside the merge call"
+
+
+def test_gh_budget_backoff_left_reads_the_status_verb(monkeypatch):
+    """The reader mirrors the fleet-incident status snapshot and fail-opens
+    to free on anything unreadable."""
+    import fno.rust_binary as rust_binary
+    from fno.pr_watch._dispatch import _gh_budget_backoff_left
+
+    monkeypatch.setattr(
+        rust_binary, "verb_call",
+        lambda verb, payload, timeout=5: {"backoff_remaining_s": 42})
+    assert _gh_budget_backoff_left() == 42.0
+
+    monkeypatch.setattr(
+        rust_binary, "verb_call",
+        lambda verb, payload, timeout=5: {"backoff_remaining_s": -3})
+    assert _gh_budget_backoff_left() == 0.0
+
+    def _dead(verb, payload, timeout=5):
+        raise rust_binary.VerbUnavailable("no binary")
+
+    monkeypatch.setattr(rust_binary, "verb_call", _dead)
+    assert _gh_budget_backoff_left() == 0.0

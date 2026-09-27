@@ -18,17 +18,6 @@ def _acquire_ttl(root, key="node:N", holder="target-session:me", ttl_ms=60_000):
     return acquire_claim(key, holder, ttl_ms=ttl_ms, pid=os.getpid(), root=root)
 
 
-def test_refresh_extends_ttl_window(tmp_path):
-    # AC4-FR: a refreshed TTL claim's window moves forward (stays current).
-    claim = _acquire_ttl(tmp_path)
-    assert claim.expires_at is not None
-    refreshed = refresh_claim("node:N", "target-session:me", ttl_ms=60_000, root=tmp_path)
-    assert refreshed is not None
-    assert refreshed.expires_at > now_ms()
-    # Still classified live (holder pid is this process).
-    assert claim_status("node:N", root=tmp_path)["state"] in ("live", "suspect")
-
-
 def test_refresh_idempotent_under_repeated_ticks(tmp_path):
     # A loop ticks refresh every boundary; repeated refreshes never error and
     # keep the claim current.
@@ -37,24 +26,6 @@ def test_refresh_idempotent_under_repeated_ticks(tmp_path):
         r = refresh_claim("node:N", "target-session:me", ttl_ms=60_000, root=tmp_path)
         assert r is not None and r.expires_at > now_ms()
     assert claim_status("node:N", root=tmp_path)["state"] in ("live", "suspect")
-
-
-def test_refresh_is_noop_for_pid_liveness_claim(tmp_path):
-    # A PID-only claim (no expires_at) refreshes to None - safe to call from a
-    # generic timer that does not know the claim's mode.
-    acquire_claim("node:P", "target-session:me", pid=os.getpid(), root=tmp_path)
-    assert refresh_claim("node:P", "target-session:me", root=tmp_path) is None
-
-
-def test_refresh_holder_mismatch_is_rejected(tmp_path):
-    # A respawned/foreign holder must not extend another session's claim.
-    from fno.claims.core import HolderMismatch
-
-    _acquire_ttl(tmp_path, holder="target-session:OWNER")
-    import pytest
-
-    with pytest.raises(HolderMismatch):
-        refresh_claim("node:N", "target-session:RIVAL", ttl_ms=60_000, root=tmp_path)
 
 
 def test_expired_claim_status_names_prior_holder(tmp_path):

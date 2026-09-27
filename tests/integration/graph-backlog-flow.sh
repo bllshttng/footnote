@@ -66,14 +66,16 @@ assert 'candidates' in p and len(p['candidates']) == 3, 'expected 3 candidates'
 " || fail "dry-run proposal schema check"
 
 # Step 4: Apply a synthetic proposal (billing blocked_by auth).
-AUTH_ID=$(python3 -c "
-import json
-g = json.load(open('$TEST_HOME/.fno/graph.json'))
+AUTH_ID=$(uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+g = {'entries': read_graph_strict(Path('$TEST_HOME/.fno/graph.json'))}
 print(next(e['id'] for e in g['entries'] if e['title'] == 'Auth'))
 ")
-BILLING_ID=$(python3 -c "
-import json
-g = json.load(open('$TEST_HOME/.fno/graph.json'))
+BILLING_ID=$(uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+g = {'entries': read_graph_strict(Path('$TEST_HOME/.fno/graph.json'))}
 print(next(e['id'] for e in g['entries'] if e['title'] == 'Billing'))
 ")
 
@@ -88,14 +90,15 @@ EOF
 HOME="$TEST_HOME" python3 scripts/triage.py apply "$TEST_HOME/apply.json" > /dev/null \
     || fail "triage apply"
 
-# Step 5: graph.json reflects the new blocked_by edge, graph.md re-rendered.
-python3 -c "
-import json
-g = json.load(open('$TEST_HOME/.fno/graph.json'))
+# Step 5: graph.db reflects the new blocked_by edge, graph.md re-rendered.
+uv run --project "$REPO_ROOT/cli" python -c "
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+g = {'entries': read_graph_strict(Path('$TEST_HOME/.fno/graph.json'))}
 billing = next(e for e in g['entries'] if e['title'] == 'Billing')
 assert '$AUTH_ID' in billing['blocked_by'], 'billing not blocked by auth'
 assert billing['status'] == 'blocked', f'billing status wrong: {billing[\"status\"]}'
-" || fail "apply did not update graph.json"
+" || fail "apply did not update graph.db"
 
 grep -q "blocked by:" "$GRAPH_MD" || fail "graph.md did not re-render with blocked-by hint"
 

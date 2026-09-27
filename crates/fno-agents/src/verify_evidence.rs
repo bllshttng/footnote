@@ -84,8 +84,20 @@ fn verify_child_promise(session_id: &str, nonce: &str, events_file: &Path) -> Ch
         stderr: String::new(),
     };
 
-    // `[[ ! -r "$events_file" ]]` -> rc=2.
-    let content = match std::fs::read_to_string(events_file) {
+    // `[[ ! -r "$events_file" ]]` -> rc=2: neither the live file nor its
+    // store exists, or an existing one cannot be read.
+    if !events_file.exists() && !crate::event_store::store_path(events_file).exists() {
+        res.stderr = format!(
+            "verify_child_promise: events file unreadable: {}\n",
+            events_file.display()
+        );
+        res.code = 2;
+        return res;
+    }
+    let content = match crate::event_store::journal_text_checked(
+        events_file,
+        &crate::event_store::EventQuery::of_types(&["child_promise"]),
+    ) {
         Ok(c) => c,
         Err(_) => {
             res.stderr = format!(
@@ -564,9 +576,11 @@ fn receipt_decision_all(candidate_sha: &str, paths: &[String]) -> Value {
     let mut malformed = 0u64;
     let mut unreadable = 0u64;
     for path in paths {
-        let content = match std::fs::read_to_string(path) {
+        let content = match crate::event_store::journal_text_checked(
+            std::path::Path::new(path),
+            &crate::event_store::EventQuery::of_types(&["verification_receipt"]),
+        ) {
             Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => {
                 unreadable += 1;
                 continue;
@@ -700,9 +714,15 @@ fn receipt_decision(candidate_sha: &str, paths: &[String]) -> Value {
     let mut readable = vec![canonical_path.clone()];
     let mut unavailable_mirrors = 0u64;
     for path in &paths[1..] {
-        match std::fs::read_to_string(path) {
-            Ok(_) => readable.push(path.clone()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let mirror = std::path::Path::new(path);
+        match crate::event_store::journal_text_checked(
+            mirror,
+            &crate::event_store::EventQuery::of_types(&["verification_receipt"]),
+        ) {
+            Ok(_) if mirror.exists() || crate::event_store::store_path(mirror).exists() => {
+                readable.push(path.clone())
+            }
+            Ok(_) => {}
             Err(_) => unavailable_mirrors += 1,
         }
     }
@@ -1495,16 +1515,11 @@ mod tests {
         // Hermetic git_common_dir: the FNO_VERIFY_GIT_BIN seam answers the
         // one rev-parse the receipt verb makes, pointing at the temp dir.
         let bin = tempfile::tempdir().unwrap();
-        let script = bin.path().join("git");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho {}\n", common.path().display()),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script = crate::write_exec_stub(
+            bin.path(),
+            "git",
+            &format!("#!/bin/sh\necho {}\n", common.path().display()),
+        );
 
         let mut journal = tempfile::NamedTempFile::new().unwrap();
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1612,5 +1627,42 @@ mod tests {
             hosted_workflow_state(dir.path()),
             WorkflowState::Unavailable
         );
+    }
+
+    #[test]
+    fn child_promise_reads_a_store_committed_row() {
+        // AC10-CHILD: store-only row matches; absent file+store is rc 2.
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let line = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "child_promise", "source": "hook",
+            "data": {"session_id": "s1", "nonce": "n1"}
+        })
+        .to_string();
+        crate::event_store::append_envelope(&events, &line, None).unwrap();
+        assert_eq!(verify_child_promise("s1", "n1", &events).code, 0);
+        assert_eq!(verify_child_promise("s1", "wrong", &events).code, 1);
+
+        let missing = dir.path().join("nope.jsonl");
+        assert_eq!(verify_child_promise("s1", "n1", &missing).code, 2);
+    }
+
+    #[test]
+    fn receipt_decision_counts_a_store_committed_receipt() {
+        // AC10-RCPT
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        let receipt = receipt_event(
+            "2026-07-26T01:00:00Z",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "subset",
+            "passed",
+        );
+        crate::event_store::append_envelope(&events, &receipt.to_string(), None).unwrap();
+        let out = receipt_decision_all(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &[events.display().to_string()],
+        );
+        assert_eq!(out["coverage"]["deduped_events"], 1, "{out}");
     }
 }

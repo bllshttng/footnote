@@ -179,17 +179,19 @@ impl Core {
         }
     }
 
-    /// (v72) Re-seat a live pane-hosted worker into a portal seat: the ONE
-    /// existing viewer moves, none is minted. The pane keeps its PTY and child
-    /// (the harness process never restarts); it stops being persisted as a
-    /// squad member, so restore never rebuilds it - being a thread means the
-    /// row binds the session, not the geometry. The registry `mux` flip is the
-    /// CALLER's half, on this receipt: the server is a reader of the registry,
-    /// never its writer.
+    /// (v72) Re-seat a live pane-hosted worker into a portal: under the TV
+    /// model this is a TUNE. The pane keeps its PTY and child (the harness
+    /// process never restarts); it stops being persisted as a squad member,
+    /// so restore never rebuilds it - being a thread means the row binds the
+    /// session, not the geometry. A named index whose portal is live gets its
+    /// screen swapped to the worker pane (`tree::replace_leaf`, reap-last):
+    /// the portal keeps its index and placement, only its channel changes.
+    /// Any other index opens the worker as a fresh portal there. The registry
+    /// `mux` flip is the CALLER's half, on this receipt: the server is a
+    /// reader of the registry, never its writer.
     ///
     /// Refuses before any mutation: a dead or unknown pane, a pane no unique
-    /// live row answers, a full portal space, or a named slot whose seat is
-    /// live (a re-seat never displaces a viewer). Idempotent: a pane already
+    /// live row answers, or a full portal space. Idempotent: a pane already
     /// seated answers where it sits without touching the tree.
     pub(super) fn reseat_pane_into_portal(
         &mut self,
@@ -259,21 +261,18 @@ impl Core {
             }
         };
         let key = row.attach_id.clone().unwrap_or_else(|| row.name.clone());
-        // Slot: caller index or the next free one; a live seat is never
-        // displaced, a full space refuses (the texts).
+        // Slot: a caller index is tuned when its portal is live (the TV
+        // rule) and reused when its entry is stale; no index takes the next
+        // free one (an explicit gesture may create). A full space refuses.
+        let tuning = portal_idx.and_then(|idx| {
+            self.portals.get(&idx).and_then(|occupied| {
+                let seat_live = self.panes.contains_key(&occupied.seat)
+                    && self.session.find_pane(occupied.seat).is_some();
+                seat_live.then_some((idx, occupied.seat, occupied.tab))
+            })
+        });
         let slot = match portal_idx {
-            Some(idx) => {
-                if let Some(occupied) = self.portals.get(&idx) {
-                    let seat_live = self.panes.contains_key(&occupied.seat);
-                    if seat_live {
-                        return ServerMsg::Err {
-                            code: err_code::BAD_REQUEST,
-                            msg: format!("portal {idx} is live; close it or name another"),
-                        };
-                    }
-                }
-                idx
-            }
+            Some(idx) => idx,
             None => match self.next_free_portal() {
                 Some(idx) => idx,
                 None => {
@@ -349,12 +348,47 @@ impl Core {
             tab.root = Node::Leaf(shell);
             tab.focus = shell;
         }
-        // The graft: a fresh tab in the owner-routed squad (the
+        // The tune arm: the worker pane becomes the named portal's screen.
+        // The portal keeps its index and its tab; only the channel changes.
+        // The old screen is reaped last (the repoint arm's ordering), and a
+        // replace that cannot land falls through to the fresh graft below.
+        if let Some((_, old_seat, old_tid)) = tuning {
+            let replaced = self.session.find_pane(old_seat).is_some_and(|(sid2, ti2)| {
+                let tab = self.session.squad_mut(sid2).expect("find_pane live");
+                tree::replace_leaf(&mut tab.tabs[ti2], old_seat, pane)
+            });
+            if replaced {
+                self.reap_pane(old_seat);
+                if let Some(worker_ctx) = worker_ctx {
+                    self.reconcile_worker_member_close(&worker_ctx, false);
+                }
+                if let Some(id) = row.attach_id.clone() {
+                    self.attached.insert(id, pane);
+                }
+                self.portals.insert(
+                    slot,
+                    Portal {
+                        row_key: key.clone(),
+                        seat: pane,
+                        tab: old_tid,
+                    },
+                );
+                self.claim_eligible.insert(pane);
+                self.push_layout(true);
+                return ServerMsg::Notice {
+                    text: format!("reseat -> {key} (portal {slot}, pane {pane})"),
+                };
+            }
+            // The portal's cell left the tree mid-reseat: land the pane on
+            // its own tab instead of losing it.
+        }
+        // The graft: a fresh tab in the owner-routed workspace (the
         // reattach_detached_pane shape), so the pane keeps rendering while
-        // owning no squad membership. `find_by_cwd` answers a live squad id by
-        // construction; the fallback is the squad the pane came from, live
-        // since `find_pane` and untouched in between (no await points).
-        let dest = self.session.find_by_cwd(&cwd).unwrap_or(squad);
+        // owning no squad membership. The one thread-workspace resolver
+        // answers (member, then spawner, then the row's cwd); the fallback
+        // is the workspace the pane came from, live since `find_pane` and
+        // untouched in between (no await points).
+        let dest = self.thread_workspace(&row).unwrap_or(squad);
         let tid = self.session.mint_tab_id();
         self.session
             .squad_mut(dest)
@@ -387,6 +421,109 @@ impl Core {
         self.push_layout(true);
         ServerMsg::Notice {
             text: format!("reseat -> {key} (portal {slot}, pane {pane})"),
+        }
+    }
+
+    /// Hand a keeper-hosted pane off to the thread lane: rename its keeper
+    /// socket to `target`, drop the pane from the layout and the persisted
+    /// squad, and release the server's connection WITHOUT a Kill frame.
+    ///
+    /// The child never stops. A renamed unix socket still reaches the same
+    /// listener (measured on macOS 25.3: the new path answers, the old path
+    /// refuses with ENOENT), so the daemon's keeper sweep finds the same
+    /// keeper at the thread socket and rebinds the row to it.
+    ///
+    /// This is a different operation from a reseat, which moves the VIEWER
+    /// and leaves the server hosting the process. Here the server stops
+    /// hosting anything.
+    ///
+    /// Ordering is the whole safety argument. Every refusal happens before
+    /// the first mutation, the rename is undone if the detach fails, and the
+    /// release runs last - so no failure leaves a pane whose keeper the
+    /// server can no longer name.
+    pub(super) fn hand_off_pane(&mut self, pane: u64, target: &str) -> ServerMsg {
+        let target = std::path::PathBuf::from(target);
+        let source = match self.panes.get(&pane) {
+            None => {
+                return ServerMsg::Err {
+                    code: err_code::NOT_FOUND,
+                    msg: format!("no such pane: {pane}"),
+                }
+            }
+            Some(entry) if !entry.pty.is_child_alive() => {
+                return ServerMsg::Err {
+                    code: err_code::DEAD_PANE,
+                    msg: format!("pane {pane} is no longer live; there is nothing to hand off"),
+                }
+            }
+            // An inline pane has no keeper: the server itself holds the
+            // master, so releasing the entry would orphan the pty and kill
+            // the child with it. Refusing names the relaunch that fixes it.
+            Some(entry) => match entry.pty.keeper_socket_path() {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    return ServerMsg::Err {
+                        code: err_code::BAD_REQUEST,
+                        msg: format!(
+                            "pane {pane} is hosted inline, not by a keeper, so its process cannot \
+                             outlive this server; stop and resume the session to relaunch it \
+                             keeper-hosted, then convert"
+                        ),
+                    }
+                }
+            },
+        };
+        if let Some(parent) = target.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return ServerMsg::Err {
+                    code: err_code::BAD_REQUEST,
+                    msg: format!(
+                        "hand-off target dir {} is unusable: {error}",
+                        parent.display()
+                    ),
+                };
+            }
+        }
+        // The first mutation, and the one that can fail for ordinary reasons
+        // (a target on another filesystem, an unwritable dir). Nothing has
+        // been touched yet, so a failure here leaves the pane exactly as it
+        // was.
+        if let Err(error) = std::fs::rename(&source, &target) {
+            return ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!(
+                    "hand-off refused: {} could not be renamed to {}: {error}",
+                    source.display(),
+                    target.display()
+                ),
+            };
+        }
+        if let Err(error) = self.detach_worker_pane(pane) {
+            // Put the socket back. The pane is still seated and still
+            // served, so leaving it under the thread name would hand the
+            // daemon's sweep a socket whose pane the server still owns.
+            let _ = std::fs::rename(&target, &source);
+            return ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!("hand-off refused: pane {pane} could not leave the layout: {error}"),
+            };
+        }
+        // The pane left the layout, so the squad must forget it outright.
+        // `detach_worker_pane` persists it as DETACHED, which is the portal
+        // story: restore would rebuild a pane for a session that now lives
+        // on the thread lane, and two writers would be pointed at one child.
+        if let Some(detached) = self.detached_panes.get(&pane).cloned() {
+            self.reconcile_worker_member_close(&detached, false);
+        }
+        // Last: drop the entry without a Kill frame. The keeper reads the
+        // closed socket as a hangup, which it survives with its child.
+        self.release_pane(pane);
+        self.push_layout(true);
+        ServerMsg::Notice {
+            text: format!(
+                "handed off: pane {pane} keeper socket -> {} (child still running)",
+                target.display()
+            ),
         }
     }
 }

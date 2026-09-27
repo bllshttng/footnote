@@ -4,7 +4,7 @@ The three sideline-adjacent actions sit on three different keys, and their names
 
 | Key | Action id | Event | What opens |
 |---|---|---|---|
-| `prefix+f` | `find` | OpenNav | The navigator: a global goto picker over every squad, tab, pane, agent and work-queue card. Text-filter by label, pane id, node id, title-slug or workspace. |
+| `prefix+f` | `find` | OpenNav | The navigator: a global goto picker over every workspace, tab, pane, agent and work-queue card. Text-filter by label, pane id, node id, title-slug or workspace. |
 | `prefix+w` | `selector` | OpenSelector | The sideline row selector: cursor over the sideline's own rows. |
 | `prefix+b` | `toggle-sideline` | TogglePanel | Sideline panel visibility. |
 

@@ -15,7 +15,7 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     """Return the held/invalid plan ancestry for a PR, or None when unheld.
 
     Checks BOTH the ref-stamped node (``_find_pr_node_id``) and every node
-    named on the PR's exact ``Backlog-Closure`` trailer - a trailer-only
+    named on the PR's exact closure line - a trailer-only
     claim (a node never individually stamped at creation) was invisible to
     the ref-based match alone, so a held node named only on the trailer
     passed this gate and closed post-merge via ``bind_closure_claims``,

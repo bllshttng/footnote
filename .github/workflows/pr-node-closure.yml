@@ -34,7 +34,7 @@ jobs:
         if: failure() && steps.closure.outcome == 'failure'
         run: |
           cat closure.log >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::PR node closure: the PR body needs the exact Backlog-Closure trailer. Generate it with: fno do pr closure-trailer <node-id>, then EDIT the PR body. Do not rerun this failed run."
+          echo "::error::PR node closure: the PR body needs the exact closure line (Fixes <id> [<id> ...]). Generate ONE line with: fno do pr closure-trailer <node-id> [--extra <id> ...], then EDIT the PR body: replace every closure line with that one line (the gate reads only the last). Do not rerun this failed run."
 
   self-test:
     runs-on: ubuntu-latest

@@ -107,7 +107,7 @@ fn cancel_sentinel_interrupted_names_author_and_reason() {
         "an attributed fired sentinel is consumed like any other"
     );
 
-    let events_content = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events_content = fno_agents::event_store::journal_text(&project_events(&cwd), &[]);
     assert!(
         events_content.contains("\"cancel_author\":\"operator\"")
             && events_content.contains("\"cancel_reason\":\"wrong direction\""),

@@ -1,0 +1,24 @@
+{
+  "id": "external-workflow-pack",
+  "version": "1.0.0",
+  "footnote_compat": {"minimum": "0.1.0"},
+  "roles": [
+    {
+      "role": {"id": "external-demo", "function_id": "external-workflows"},
+      "function": {"id": "external-workflows"},
+      "mission": "demonstrate an externally authored workflow pack",
+      "deliverable_kinds": ["demo-report"],
+      "authority_ceiling": "internal",
+      "review_policy": {"required": true, "minimum_reviewers": 1, "required_review_kinds": []},
+      "delivery_policy": {"required_evidence": ["delivery-eval"], "require_all_deliverables": true},
+      "default_topology": "loop",
+      "approval_floor": "founder"
+    }
+  ],
+  "workflows": [{"id": "handoff", "source": "workflows/handoff.md"}],
+  "evaluators": [{"id": "delivery-eval", "command": "python3 evaluate.py", "required": true}],
+  "scenarios": [{"id": "pack-selfcheck", "command": "python3 evaluate.py", "recorded_result": "passed"}],
+  "permissions": [
+    {"effect_class": "external.publication", "destination": "external-demo-destination"}
+  ]
+}

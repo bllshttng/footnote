@@ -13,8 +13,6 @@ payload is untouched, and the provenance is carried and cleared as a whole group
 """
 from __future__ import annotations
 
-import pytest
-
 from types import SimpleNamespace
 
 from fno.agents.mux_spawn import SEED_PROVENANCE_KEYS, _mesh_env_wrapper
@@ -86,8 +84,7 @@ def test_render_quotes_the_seed_verbatim_and_says_not_to_run_it():
     assert SEED in rendered
     assert "do not execute this copy" in rendered
     assert rendered.rstrip().endswith("</fno_mail>")
-    # D2: `from` IS the full session id; the retired from_session
-    # attribute renders nowhere.
+    # The envelope carries the full current session; its lookup field is absent.
     assert f'from="{SENDER_SESSION}"' in rendered
     assert "from_session" not in rendered
 

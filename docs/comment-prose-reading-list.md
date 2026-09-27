@@ -349,7 +349,6 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.36x | 15 | 11 | `cli/src/fno/inbox/settings.py:31` | `_load_inbox_config` |
 | 1.36x | 15 | 11 | `cli/src/fno/inbox/store.py:224` | `inbox_dir_for` |
 | 1.36x | 19 | 14 | `cli/src/fno/plan/cli.py:410` | `rung` |
-| 1.36x | 15 | 11 | `cli/src/fno/review_capability.py:399` | `preship_review_plan` |
 | 1.35x | 23 | 17 | `cli/src/fno/backlog/advance.py:1339` | `_seed_lane_local_settings` |
 | 1.35x | 23 | 17 | `cli/src/fno/review_capability.py:176` | `detect_session` |
 | 1.35x | 23 | 17 | `cli/src/fno/update.py:858` | `_install_then_mark` |

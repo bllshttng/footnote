@@ -230,6 +230,38 @@ fn a_serve_below_the_bound_is_not_archive_capable() {
 }
 
 #[test]
+fn a_serve_between_the_floor_and_opencode_2_is_archive_capable() {
+    let serve = ArchiveServe::start(ServeShape {
+        version: "1.18.31".to_string(),
+        ..Default::default()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let home = AgentsHome::at(dir.path());
+    write_serve_state(&home, &serve.base_url());
+    let handle = archive_capable_serve(&home).expect("1.18.31 carries the archive op");
+    assert_eq!(handle.token, "tok");
+}
+
+#[test]
+fn a_serve_at_or_above_opencode_2_is_not_archive_capable() {
+    // 2.0.0 is the boundary itself: at the ceiling means above the measured
+    // range, never inside it.
+    for version in ["2.0.0", "2.0.12"] {
+        let serve = ArchiveServe::start(ServeShape {
+            version: version.to_string(),
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(dir.path());
+        write_serve_state(&home, &serve.base_url());
+        assert!(
+            archive_capable_serve(&home).is_none(),
+            "{version} sits above the measured range; the 1.x-shaped PATCH must not reach it"
+        );
+    }
+}
+
+#[test]
 fn a_missing_serve_state_is_not_archive_capable() {
     let dir = tempfile::tempdir().unwrap();
     let home = AgentsHome::at(dir.path());

@@ -1,0 +1,13 @@
+# Failure-mode tier: init-phase stall. A session wedges between claim and
+# manifest (claim held, no target-state.md progress), which the postmortem
+# detector `phase_stall` names. The init-phase shell tests are the pin: if
+# the init machinery stalls, the suite fails rather than hangs, and the
+# fixture's tight timeout turns a hang into a graded failure.
+id: failure-init-phase-stall
+tier: regression
+grade:
+  - kind: exit
+    command: "bash tests/hooks/test_init_budget_lines.sh"
+    expect: 0
+timeout_minutes: 5
+tags: [failure-mode, phase_stall]

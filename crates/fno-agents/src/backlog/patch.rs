@@ -1,4 +1,4 @@
-//! `fno-agents backlog-update` : the one patch door for stored node
+//! `fno-agents backlog update` : the one patch door for stored node
 //! fields, status included. Status is never a stored input - the derivation
 //! ladder rewrites it from facts on every write - so `--status X` changes the
 //! facts that derive X, recomputes, and refuses unless the readback agrees.
@@ -119,6 +119,7 @@ enum Kind {
     Float,
     Flag,
     DeferredKind,
+    ClearOnly,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,7 +242,7 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
     ("pr_number", Policy::Owned("--pr-number")),
     ("pr_url", Policy::Owned("--pr-number")),
     ("additional_prs", Policy::Owned("--pr-number")),
-    ("merge_status", Policy::Owned("--pr-number")),
+    ("merge_status", Policy::Settable(Kind::ClearOnly)),
     ("parent", Policy::Owned("--parent")),
     (
         "blocked_by",
@@ -370,6 +371,11 @@ fn coerce(id: &str, field: &str, kind: Kind, raw: &str) -> Result<Value, PatchRe
                     DEFERRED_KINDS.join(", ")
                 )));
             }
+        }
+        Kind::ClearOnly => {
+            return Err(refused(format!(
+                "merge_status is written from forge state by fno do pr merge and reconcile; only --set merge_status=null clears it"
+            )));
         }
     })
 }
@@ -1108,13 +1114,13 @@ pub fn render_text(receipt: &PatchReceipt) -> String {
     lines.join("\n")
 }
 
-/// `fno-agents backlog-update`: exit 0 applied or unchanged, 2 refused, 1
+/// `fno-agents backlog update`: exit 0 applied or unchanged, 2 refused, 1
 /// usage or store error.
 pub fn run_update(args: &[String]) -> i32 {
     let (req, graph, json_out) = match parse_args(args) {
         Ok(parsed) => parsed,
         Err((code, message)) => {
-            eprintln!("fno-agents backlog-update: {message}");
+            eprintln!("fno-agents backlog update: {message}");
             return code;
         }
     };
@@ -1144,7 +1150,7 @@ pub fn run_update(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{read_defaulted, CANONICAL_FIELD_ORDER};
+    use crate::graph_store::CANONICAL_FIELD_ORDER;
     use std::io::Write;
 
     #[test]
@@ -1179,8 +1185,7 @@ mod tests {
     fn write_graph(entries: &[Value]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("graph.json");
-        let mut f = std::fs::File::create(&path).expect("create graph.json");
-        write!(f, "{}", serde_json::json!({ "entries": entries })).expect("write graph.json");
+        crate::graph_store::seed_rows(&path, entries).expect("seed graph.db");
         (dir, path)
     }
 
@@ -1240,7 +1245,8 @@ mod tests {
     }
 
     fn status_of(graph: &Path, id: &str) -> String {
-        let rows = read_defaulted(graph, false).expect("read back");
+        // graph.db is the only store: read the store, not the frozen mirror.
+        let rows = crate::graph_store::read_rows(graph).expect("read back");
         rows.iter()
             .find(|e| field_eq(e, "id", id))
             .and_then(|e| e.get("status"))
@@ -1280,7 +1286,7 @@ mod tests {
             .expect("backref change");
         assert_eq!(backref.id, "x-aaaa");
         assert_eq!(status_of(&graph, "x-bbbb"), "idea");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let repl = rows.iter().find(|e| field_eq(e, "id", "x-aaaa")).unwrap();
         assert_eq!(repl.get("supersedes"), Some(&json!([])));
     }
@@ -1330,9 +1336,10 @@ mod tests {
         let receipt = apply(&graph, &req("x-2", Some("ready"), &[])).expect("applied");
         assert_eq!(receipt.status.to, "ready");
         assert_eq!(status_of(&graph, "x-2"), "ready");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-2")).unwrap();
-        assert_eq!(row.get("deferred_at"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("deferred_at").map_or(true, Value::is_null));
     }
 
     // AC3-HP
@@ -1354,6 +1361,44 @@ mod tests {
         assert!(children.contains("--parent"), "{children}");
         let completed = refusal_of(&graph, &req("x-1", None, &[("completed_at", "2026-09-13")]));
         assert!(completed.contains("fno backlog done"), "{completed}");
+    }
+
+    #[test]
+    fn merge_status_can_be_cleared_without_changing_pr_identity_or_status() {
+        let victim = node(
+            "x-1",
+            json!({
+                "pr_number": 1060,
+                "pr_url": "https://github.com/o/r/pull/1060",
+                "merge_status": "merged",
+            }),
+        );
+        let (_d, graph) = write_graph(&[victim]);
+
+        let receipt =
+            apply(&graph, &req("x-1", None, &[("merge_status", "null")])).expect("clear applied");
+        assert_eq!(receipt.status.from, "in_review");
+        assert_eq!(receipt.status.to, "in_review");
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
+        let row = rows.iter().find(|e| field_eq(e, "id", "x-1")).unwrap();
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("merge_status").map_or(true, Value::is_null));
+        assert_eq!(row.get("pr_number"), Some(&json!(1060)));
+        assert_eq!(
+            row.get("pr_url"),
+            Some(&json!("https://github.com/o/r/pull/1060"))
+        );
+    }
+
+    #[test]
+    fn merge_status_refuses_any_value_other_than_null() {
+        let (_d, graph) = write_graph(&[node("x-1", json!({}))]);
+        let message = refusal_of(&graph, &req("x-1", None, &[("merge_status", "merged")]));
+        assert!(
+            message.contains("fno do pr merge and reconcile"),
+            "{message}"
+        );
+        assert!(message.contains("--set merge_status=null"), "{message}");
     }
 
     // AC3-EDGE
@@ -1445,10 +1490,11 @@ mod tests {
         )
         .expect("applied");
         assert_eq!(receipt.status.to, "deferred");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = crate::graph_store::read_rows(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-3")).unwrap();
-        assert_eq!(row.get("locked_by"), Some(&Value::Null));
-        assert_eq!(row.get("locked_at"), Some(&Value::Null));
+        // Canonical store form: a cleared field is absent or null, never stale.
+        assert!(row.get("locked_by").map_or(true, Value::is_null));
+        assert!(row.get("locked_at").map_or(true, Value::is_null));
         assert!(row.get("deferred_at").and_then(Value::as_str).is_some());
     }
 
@@ -1496,8 +1542,7 @@ mod tests {
     fn a_slug_resolves_and_an_ambiguous_token_refuses_naming_candidates() {
         let a = node("x-1", json!({ "slug": "same-slug" }));
         let b = node("x-2", json!({ "slug": "same-slug" }));
-        let (_d, graph) = write_graph(&[a, b]);
-        let message = refusal_of(&graph, &req("same-slug", Some("ready"), &[]));
+        let message = resolve_index(&[a, b], "same-slug").unwrap_err().message;
         assert!(
             message.contains("x-1") && message.contains("x-2"),
             "{message}"
@@ -1570,11 +1615,7 @@ mod tests {
                 "status": "deferred",
             }),
         );
-        std::fs::write(
-            &graph,
-            serde_json::json!({ "entries": [target] }).to_string(),
-        )
-        .unwrap();
+        graph_store::seed_rows(&graph, &[target]).expect("seed graph.db");
         // Hold the store's own lock well past three 100ms deadlines.
         let holder = {
             let graph = graph.clone();

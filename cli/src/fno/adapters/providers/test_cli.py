@@ -1410,8 +1410,8 @@ class TestEffectiveActive:
 
 
 class TestDoctor:
-    """Reconstructs the live store defect: one credential under two ids, both
-    blobs expired, slot tainted. Each of those otherwise surfaces only as an
+    """Reconstructs the live store defect: one credential under two ids and a
+    tainted slot. Each of those otherwise surfaces only as an
     `unknown` somewhere downstream."""
 
     @pytest.fixture()
@@ -1438,7 +1438,7 @@ class TestDoctor:
         managed._set_slot_taint("claude", root, True)
         return tmp_path
 
-    def test_names_duplicate_expiry_and_taint_and_exits_nonzero(
+    def test_names_duplicate_and_taint_but_not_stored_expiry(
         self, sick_store: Path
     ) -> None:
         result = _invoke(["doctor"], cwd=sick_store, home=sick_store)
@@ -1446,7 +1446,7 @@ class TestDoctor:
         assert "duplicate-credential" in result.output
         # The pair is named in both directions, so either row points at the other.
         assert "readyrule" in result.output and "makers" in result.output
-        assert result.output.count("expired-credential") == 2
+        assert "expired-credential" not in result.output
         assert "tainted-slot" in result.output
         assert "one-shared-token" not in result.output
 
@@ -1464,9 +1464,10 @@ class TestDoctor:
 
         for rid, tok in (("readyrule", "tok-a"), ("makers", "tok-b")):
             (root / rid).mkdir(parents=True)
+            # A stored access token past expiresAt is normal: the harness refreshes it in place.
             (root / rid / "blob").write_text(
                 _json.dumps({
-                    "claudeAiOauth": {"accessToken": tok, "expiresAt": 4102444800000}
+                    "claudeAiOauth": {"accessToken": tok, "expiresAt": 1783352000000}
                 })
             )
             # A shared-slot account with no proven identity is no longer
@@ -1870,6 +1871,8 @@ class TestReconcileSlot:
 
         assert result.exit_code != 0, result.output
         assert "ambiguous-slot" in result.output
+        assert "no `/logout`" in result.output
+        assert managed._claude_scoped_service(store / ".claude") in result.output
         assert "fno config accounts reconcile-slot claude" in result.output
 
     def test_doctor_names_an_out_of_band_login_as_drift(
@@ -2362,8 +2365,13 @@ class TestUsageNamesTheServingAccount:
 
         result = _invoke(["usage", "--refresh"], cwd=tmp_path, home=tmp_path)
 
-        assert "manual switch: sign out of claude" in result.output
-        assert "remote control re-enabled" in result.output
+        assert "no `/logout`" in result.output
+        assert "claude /login" in result.output
+        assert "CLAUDE_CONFIG_DIR=" in result.output
+        assert "sign out" not in result.output
+        assert "accounts use" not in result.output
+        assert "daemon stop" not in result.output
+        assert "respawn" not in result.output
 
     def test_an_account_whose_dir_serves_someone_else_is_not_named_as_served(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2552,10 +2560,10 @@ class TestListIdentityColumn:
         assert result.exit_code == 0, result.output
         assert "shared-identity" not in result.output
 
-    def test_expired_snapshot_is_appended_to_the_row(
+    def test_doctor_findings_ride_the_row_but_stored_expiry_does_not(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Per-record doctor findings ride the row as ` !<problem>`."""
+        """Per-record doctor findings ride the row as ` !<problem>`; a stored copy's past expiresAt is not one."""
         import json as _json
 
         self._pair_env(tmp_path, monkeypatch)
@@ -2568,7 +2576,8 @@ class TestListIdentityColumn:
             (root / rid / "blob").write_text(blob)
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0, result.output
-        assert result.output.count("!expired-credential") == 2
+        assert result.output.count("!duplicate-credential") == 2
+        assert "!expired-credential" not in result.output
 
     def test_json_without_the_flag_stays_byte_compatible_and_offline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

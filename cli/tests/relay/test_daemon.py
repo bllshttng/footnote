@@ -30,9 +30,9 @@ def events(tmp_path) -> Path:
 
 
 def _read_events(p: Path) -> list[dict]:
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(p)
 
 
 def _idx(provider="claude", handle="pty:42"):

@@ -47,8 +47,8 @@ Verdict = namedtuple(
 #: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
 Row = namedtuple(
     "Row",
-    "row_id name state node cwd agent pid pid_start_time mux",
-    defaults=(None, "", "claude", None, None, None),
+    "row_id name state node cwd agent pid pid_start_time mux stopped_at",
+    defaults=(None, "", "claude", None, None, None, None),
 )
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -1394,6 +1394,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             node=node,
             cwd=cwd,
             agent="claude",
+            stopped_at=(getattr(match, "stop", None) or {}).get("at"),
         ))
     from fno.agents.spawn_gate import LIVE_STATUSES
 

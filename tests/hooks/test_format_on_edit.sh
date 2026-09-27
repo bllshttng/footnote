@@ -118,5 +118,33 @@ else
   fail "T7 rc=$RC out='$OUT' file=$(cat "$P")"
 fi
 
+# T8: a codex apply_patch payload carries the path in tool_input.command
+# patch headers, not tool_input.file_path; the hook formats that file the
+# same way, resolving the relative header path against the payload cwd.
+C="${REPO}/crates/demo/src/patched.rs"
+printf '%s\n' "$UGLY" > "$C"
+CODEX_PAYLOAD="$(cd "${REPO}" && python3 -c '
+import json, sys
+print(json.dumps({
+    "tool_name": "apply_patch",
+    "cwd": sys.argv[1],
+    "tool_input": {"command": "*** Begin Patch\n*** Update File: crates/demo/src/patched.rs\n@@\n"},
+}))' "$REPO")"
+OUT="$(printf '%s' "$CODEX_PAYLOAD" | bash "$HOOK")"; RC=$?
+if [[ $RC -eq 0 && "$OUT" == *"format-on-edit: rewrote crates/demo/src/patched.rs"* ]] \
+   && ! grep -q 'fn  main' "$C"; then
+  pass "T8 a codex apply_patch payload formats the header path"
+else
+  fail "T8 rc=$RC out='$OUT' file=$(cat "$C")"
+fi
+
+# T9: a payload with neither file_path nor a patch header does nothing.
+OUT="$(printf '%s' '{"tool_name": "Bash", "tool_input": {"command": "echo hi"}}' | bash "$HOOK")"; RC=$?
+if [[ $RC -eq 0 && -z "$OUT" ]]; then
+  pass "T9 a payload with no write target exits 0 silently"
+else
+  fail "T9 rc=$RC out='$OUT'"
+fi
+
 printf '[format-on-edit] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

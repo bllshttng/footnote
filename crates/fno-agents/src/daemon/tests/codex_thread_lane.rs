@@ -62,9 +62,14 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let yolo = build_codex_thread_entry(
         "t",
@@ -72,7 +77,6 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -80,18 +84,78 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
     );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
+    assert_eq!(
+        yolo.requested_permission_mode, None,
+        "a bare yolo bool names no mode; unset stays unset"
+    );
     assert!(
-        entry_posture_is_full_access(&yolo)
+        crate::codex_posture::entry_posture_is_full_access(&yolo)
             && yolo.fno_id.as_deref() == Some("thread-p")
             && yolo.mux.is_none()
     );
+    // A typed mode on the request rides the row verbatim (v35): the entry
+    // reads the DRIVER's posture, which the lane resolved from that string.
+    let second = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
+            );
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::from_record(
+                    Some("read-only:on-request"),
+                    None,
+                ),
+                None,
+            )
+            .await
+            .expect("read-only thread starts")
+        });
+    let read_only = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &second,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &serde_json::value::Value::Null,
+        None,
+    );
+    assert_eq!(read_only.sandbox_posture.as_deref(), Some("read-only"));
+    assert_eq!(
+        read_only.requested_permission_mode.as_deref(),
+        Some("read-only:on-request"),
+        "the operator's exact string is on the row"
+    );
+    let third = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
+            );
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::bounded(),
+                None,
+            )
+            .await
+            .expect("bounded thread starts")
+        });
     let bounded = build_codex_thread_entry(
         "t",
         worktree.path(),
-        &start,
+        &third,
         None,
         None,
-        false,
         None,
         None,
         &[],
@@ -99,17 +163,19 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
-    assert!(!entry_posture_is_full_access(&bounded));
+    assert!(!crate::codex_posture::entry_posture_is_full_access(
+        &bounded
+    ));
     // A requested model stamps its basis on the row; an absent one
     // leaves the basis absent with it.
+    let muted = None;
     let modeled = build_codex_thread_entry(
         "t",
         worktree.path(),
         &start,
         Some("gpt-5.6-sol"),
         None,
-        false,
-        None,
+        muted,
         None,
         &[],
         &serde_json::Value::Null,
@@ -159,13 +225,13 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
                 crate::codex_thread::CodexThread::start_with_state_dirs(
                     cwd,
                     None,
-                    false,
+                    &crate::codex_posture::CodexPosture::full_access(),
                     None,
                     &[granted_s],
                     None,
                 )
                 .await
-                .expect("bounded thread starts")
+                .expect("full-access thread starts")
             }
         });
     let entry = build_codex_thread_entry(
@@ -174,7 +240,6 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -208,9 +273,14 @@ fn build_codex_thread_entry_stamps_the_request_node() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-node"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let entry = build_codex_thread_entry(
         "t",
@@ -218,7 +288,6 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         &start,
         None,
         None,
-        true,
         Some("x-535c"),
         None,
         &[],
@@ -242,9 +311,14 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-acct"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let pinned = build_codex_thread_entry(
         "t",
@@ -252,7 +326,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         Some("codex-main"),
         &[],
@@ -266,7 +339,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -280,7 +352,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         Some("   "),
         &[],
@@ -305,9 +376,14 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-lineage"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let linked = build_codex_thread_entry(
         "t",
@@ -315,7 +391,6 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -334,7 +409,6 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -389,18 +463,13 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// A resume writes what it actually resolved onto the row, not a stale
-/// echo of what the ORIGINAL spawn recorded. Caught in review: the schema
-/// this node adds (`resolved_sandbox`/`granted_writable_roots`) was wired
-/// on the spawn path only, leaving exactly the gap the pre-existing
-/// comment on `ensure_codex_thread_handle` named as its own durable fix -
-/// "the sibling node that owns that schema" is this one.
-///
-/// `resume()` carries no state_dirs, so `granted_writable_roots` goes
-/// empty here even though the row was seeded non-empty: that emptiness IS
-/// the loss `codex_thread_resumed_without_state_grant` announces, not a
-/// missed write. A row still showing the spawn-time roots after a resume
-/// would look granted while actually ungranted.
+/// A resume re-applies the recorded grant (AC3-HP/EDGE) and writes back what
+/// it actually resolved, WITHOUT erasing the spawn-time record: the recorded
+/// roots are read before the resume and unioned back after, so a narrowed
+/// resume cannot destroy the only durable copy of the grant and a second
+/// resume can still restore them. The old lane did the opposite: it resumed
+/// with no state dirs and overwrote the row with the narrowed result, which
+/// is the loss `codex_thread_resumed_without_state_grant` used to announce.
 #[tokio::test(flavor = "current_thread")]
 async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
     // CODEX_HOME is process-global: hold the same guard every other fake
@@ -408,9 +477,9 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
     let _guard = crate::path_test_guard();
     let home = tmp_home("codex-resume-records-posture");
     let cwd = tempfile::tempdir().unwrap();
-    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
-        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed"),
-    );
+    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed");
+    let received = std::sync::Arc::clone(&behavior.received);
+    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
     // Must match the fake's configured thread_id: `resume()` refuses when
     // `thread/resume` confirms a different id than requested.
     let session_id = "thread-resumed".to_string();
@@ -420,8 +489,8 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         entry.project_root = entry.cwd.clone();
         entry.harness_session_id = Some(session_id.clone());
         entry.codex_session_id = Some(session_id.clone());
-        // Seeded as if a prior spawn had granted a root - the exact value
-        // a stale write would leave behind uncorrected.
+        // Seeded as a prior spawn left it: roots recorded, bounded posture.
+        entry.sandbox_posture = Some("workspace-write".into());
         entry.resolved_sandbox = Some("workspaceWrite".into());
         entry.granted_writable_roots = vec!["/stale/spawn-time/root".into()];
         registry.entries.push(entry);
@@ -437,6 +506,18 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         .await
         .expect("the fake daemon answers thread/resume");
 
+    // AC3-HP: the resume frame carries the recorded posture (the fake saw
+    // the frame; roots ride the TURN, not the resume).
+    let resume = received
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|f| f["method"] == "thread/resume")
+        .and_then(|f| f.get("params").cloned())
+        .expect("a thread/resume frame");
+    assert_eq!(resume["sandbox"], "workspace-write");
+    assert_eq!(resume["approvalPolicy"], "never");
+
     let after = state::load_registry(&home.registry_json())
         .unwrap()
         .find("t-resume")
@@ -448,12 +529,16 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         after.resolved_sandbox.as_deref(),
         Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
     );
+    // AC3-EDGE: the recorded grant survives the write-back.
     assert!(
-        after.granted_writable_roots.is_empty(),
-        "a resume carries no state_dirs, so the stale spawn-time root must \
-         not survive: {:?}",
+        after
+            .granted_writable_roots
+            .contains(&"/stale/spawn-time/root".to_string()),
+        "the recorded roots must survive the write-back: {:?}",
         after.granted_writable_roots
     );
+    // AC6: the v35 columns are stamped.
+    assert_eq!(after.turn_policy_source.as_deref(), Some("requested"));
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -474,7 +559,7 @@ async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
         registry.entries.push(entry);
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     recover_codex_threads(&ctx).await;
     let registry = load_registry_offloaded(home.registry_json())
         .await
@@ -502,7 +587,7 @@ async fn recovery_refuses_a_codex_thread_row_whose_cwd_is_gone() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-recover-live-cwd");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         state::update_registry(&home.registry_json(), |registry| {
@@ -549,7 +634,7 @@ async fn recovery_refuses_a_codex_thread_row_whose_cwd_is_gone() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-recover-gone-cwd");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         state::update_registry(&home.registry_json(), |registry| {
             let mut entry = thread_entry("t-gone", AgentStatus::Live, None);
             entry.cwd = "/nonexistent-cwd-for-gone-f313".into();
@@ -779,7 +864,7 @@ async fn codex_thread_lane_refuses_a_provider_it_cannot_serve() {
 async fn handle_spawn_thread_absent_provider_defaults_to_codex_lane() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("spawn-thread-default-provider");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(
@@ -830,7 +915,7 @@ async fn spawn_codex_thread_for_test(ctx: &Ctx, home: &AgentsHome, seed: &str) -
 async fn codex_thread_ask_while_driving_steers_instead_of_queueing() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-steer");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -871,7 +956,7 @@ async fn a_seedless_codex_thread_spawn_takes_the_warmup_turn() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-warmup");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         // Seedless: the spawn request carries no message at all.
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
@@ -918,7 +1003,7 @@ async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-real-seed");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "do the actual work").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -965,7 +1050,7 @@ async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
 async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daemon() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
         let home = tmp_home("codex-stop");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         let registry = load_registry_offloaded(home.registry_json())
@@ -1056,7 +1141,7 @@ async fn codex_thread_stop_refuses_over_a_turn_the_interrupt_never_settled() {
         std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
         let _bound = BoundGuard;
         let home = tmp_home("codex-zombie-stop");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1102,7 +1187,7 @@ async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
         std::env::set_var("FNO_CODEX_ASK_WAIT_MS", "200");
         let home = tmp_home("codex-inflight");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1145,7 +1230,7 @@ async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
 async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-mail");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         let registry = load_registry_offloaded(home.registry_json())
@@ -1211,7 +1296,7 @@ async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
 async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-mail-idle");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         // No seed: the row is idle at mail time.
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
@@ -1254,7 +1339,7 @@ async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
 async fn codex_thread_row_reports_working_then_done_with_no_pane() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-inside-leg-e2e");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1309,7 +1394,7 @@ async fn codex_thread_working_report_refreshes_while_the_turn_drives() {
         std::env::set_var("FNO_THREAD_TURN_REFRESH_MS", "100");
         let _refresh = RefreshGuard;
         let home = tmp_home("codex-inside-leg-refresh");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1369,7 +1454,7 @@ async fn codex_thread_resume_writes_above_the_row_seq() {
         registry.entries.push(entry);
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     let entry = state::load_registry(&home.registry_json())
         .unwrap()
         .find("t-seq")
@@ -1610,7 +1695,7 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-harness-args");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(
@@ -1708,7 +1793,7 @@ async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-no-harness-args");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -1754,7 +1839,7 @@ async fn recovery_resume_carries_the_stored_config() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-resume-config");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(
@@ -1793,6 +1878,470 @@ async fn recovery_resume_carries_the_stored_config() {
             "startup recovery re-parses the stored tokens onto thread/resume: {resume}"
         );
         ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Node-backed hosted Codex target threads start in their node worktree
+// (x-ecf4). The fixture gives the lane a REAL canonical checkout (its git
+// common dir lives inside it) plus a fake `fno-py` whose worktree ensure
+// answers `answer` and exits `exit`; FNO_PY is what the ensure resolves, so
+// the fake IS the ensure.
+// ---------------------------------------------------------------------------
+
+/// A canonical-checkout fixture: a real git repo plus a fake `fno-py`. The
+/// tempdir must stay bound for the fixture's lifetime; the returned path is
+/// the binary to publish on FNO_PY under the crate's env lock.
+fn codex_target_launch_cwd_fixture(answer: &str, exit: i32) -> (tempfile::TempDir, PathBuf) {
+    let repo = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    let bin = crate::write_exec_stub(
+        repo.path(),
+        "fno-py",
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\necho '{answer}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {exit}\n"
+        ),
+    );
+    (repo, bin)
+}
+
+/// The Nth `thread/start` frame the lane ended up sending, waited for
+/// rather than raced: the seed submit is async in the actor.
+async fn codex_target_launch_cwd_thread_start(
+    received: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    nth: usize,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let frame = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|f| f["method"] == "thread/start")
+            .nth(nth)
+            .cloned();
+        if frame.is_some() || std::time::Instant::now() >= deadline {
+            return frame.expect("thread/start never arrived");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn codex_target_launch_cwd_registry_row(home: &AgentsHome, name: &str) -> serde_json::Value {
+    let Ok(raw) = std::fs::read_to_string(home.registry_json()) else {
+        return serde_json::Value::Null;
+    };
+    let registry: serde_json::Value = serde_json::from_str(&raw).expect("registry json");
+    registry["agents"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["name"] == name).cloned())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// AC1: a node-backed target seeded from the canonical checkout is born in
+/// the node's worktree - the SAME path on the thread/start frame, the
+/// registry row, and the agent_spawned birth event.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_binds_a_canonical_node_target_to_its_worktree() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-bind");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(commit.success(), "fixture commit failed: {commit}");
+        let worktree = repo.path().join("node-wt");
+        let add_worktree = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "feature/x-ecf4"])
+            .arg(&worktree)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(add_worktree.success(), "fixture worktree failed: {add_worktree}");
+        let worktree = worktree.to_string_lossy().into_owned();
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho '{worktree}'\necho 'worktree ensure: reusing node worktree created=false' >&2\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(
+            frame["params"]["cwd"], worktree,
+            "thread/start is born in the node worktree: {frame}"
+        );
+        let row = codex_target_launch_cwd_registry_row(&home, "t");
+        assert_eq!(
+            row["cwd"], worktree,
+            "the registry row names the node worktree: {row}"
+        );
+        let birth = read_events(&home)
+            .into_iter()
+            .find(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t")
+            .expect("birth event");
+        assert_eq!(
+            birth["data"]["cwd"], worktree,
+            "the birth event names the node worktree: {birth}"
+        );
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC2: a refused ensure refuses the WHOLE spawn - no thread, no registry
+/// row, no birth event, and the error names the node and the failing ensure
+/// condition. Starting on canonical as a fallback would be the exact
+/// outcome this lane exists to prevent.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_refusal_starts_nothing() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-refusal");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target seed",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        let message = match &spawned.payload {
+            crate::protocol::ResponsePayload::Err(e) => e.message.clone(),
+            _ => panic!("spawn should refuse: {spawned:?}"),
+        };
+        assert!(
+            message.contains("x-ecf4") && message.contains("worktree ensure"),
+            "refusal names the node and the failing ensure condition: {message}"
+        );
+        assert_eq!(
+            codex_target_launch_cwd_registry_row(&home, "t"),
+            serde_json::Value::Null,
+            "no registry row for a refused spawn"
+        );
+        let events = read_events(&home);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t"),
+            "no birth event for a refused spawn: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (unchanged seed): a non-target seed with a node keeps the requested
+/// cwd - the ensure is never consulted, which the refusing fake proves: a
+/// consult would have refused the spawn.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_non_target_seed() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-keep");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "node": "x-1",
+                "message": "plain prose, no verb",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "non-target keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (unchanged seed): a node-less target keeps the requested cwd.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_node_less_target() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-nodeless");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "message": "$fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "node-less keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (already a worktree): a target seeded from a LINKED worktree keeps
+/// that worktree - the canonical check reads false, the ensure is never
+/// consulted (the refusing fake proves it), and no second worktree is
+/// minted.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_cwd_that_already_is_a_worktree() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-linked");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        let linked = repo.path().join("linked");
+        std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "lb", "linked"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": linked.to_string_lossy(),
+                "node": "x-1",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(
+            frame["params"]["cwd"],
+            linked.to_string_lossy().to_string(),
+            "a linked-worktree cwd is preserved verbatim"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (policy `never`): the ensure answers the canonical path itself, so
+/// the requested cwd is preserved without minting a worktree. The fake
+/// models exactly that: exit 0, answer = the repo path.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_policy_never_keeps_the_requested_cwd() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-never");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+        // Make the fake answer the repo path like policy `never` does.
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho '{canonical}'\necho 'worktree ensure: policy never' >&2\nexit 0\n"
+            ),
+        )
+        .unwrap();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "node": "x-1",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "policy never keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC4: if the ensured node worktree disappears before thread creation, the
+/// spawn refuses without starting or registering a thread on that missing cwd.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_refuses_a_worktree_removed_after_ensure() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-removed");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        let worktree = repo.path().join("node-wt");
+        std::fs::create_dir(&worktree).unwrap();
+        let worktree = worktree.to_string_lossy().to_string();
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\ncat >/dev/null\necho '{worktree}'\nrmdir '{worktree}'\nexit 0\n"),
+        )
+        .unwrap();
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(
+            !std::path::Path::new(&worktree).exists(),
+            "the fake ensure removed its returned node worktree"
+        );
+        let message = match &spawned.payload {
+            crate::protocol::ResponsePayload::Err(error) => error.message.clone(),
+            _ => panic!("spawn should refuse a removed worktree: {spawned:?}"),
+        };
+        assert!(
+            message.contains("x-ecf4") && message.contains("worktree"),
+            "refusal names the node and missing worktree: {message}"
+        );
+        assert!(
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .all(|frame| frame["method"] != "thread/start"),
+            "removed worktree must be rejected before thread/start"
+        );
+        assert_eq!(
+            codex_target_launch_cwd_registry_row(&home, "t"),
+            serde_json::Value::Null,
+            "no registry row for a refused spawn"
+        );
+        assert!(
+            !read_events(&home)
+                .iter()
+                .any(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t"),
+            "no birth event for a refused spawn"
+        );
         std::fs::remove_dir_all(home.root()).ok();
     })
     .await;

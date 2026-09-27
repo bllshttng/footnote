@@ -307,6 +307,24 @@ def test_worktree_activity_writer_is_carried_by_both_posttooluse_manifests() -> 
         assert sum("claim-heartbeat.sh" in command for command in commands) == 1
 
 
+def test_edit_integrity_wired_on_both_posttooluse_manifests() -> None:
+    """Both harnesses run the edit-integrity shim once, under Edit|Write."""
+    for manifest_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))["hooks"][
+            "PostToolUse"
+        ]
+        # law-stage-inject also rides Edit|Write by design, so the count of
+        # registrations is incidental; the shim must appear exactly once.
+        commands = [
+            hook["command"]
+            for registration in manifest
+            if registration.get("matcher") == "Edit|Write"
+            for hook in registration.get("hooks", [])
+        ]
+        assert sum("edit-integrity.sh" in command for command in commands) == 1, manifest_path
+        assert (REPO_ROOT / "hooks" / "edit-integrity.sh").is_file()
+
+
 def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
@@ -518,12 +536,14 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     refusal it already owns is never re-decided here.
     """
     guards = [
-        "hooks/git-protection.py",
-        "hooks/bg-process-guard.py",
-        "hooks/truncation-guard.py",
-        "hooks/recursive-grep-guard.py",
+        ("hooks/git-protection.py", "python3"),
+        ("hooks/bin-install-guard.sh", "bash"),
+        ("hooks/bg-process-guard.py", "python3"),
+        ("hooks/pipe-guard.sh", "bash"),
+        ("hooks/recursive-grep-guard.py", "python3"),
+        ("hooks/test-run-guard.sh", "bash"),
     ]
-    for guard in guards:
+    for guard, _interp in guards:
         assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
 
     for path, root_var, matcher in (
@@ -544,7 +564,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        expected = [f"python3 ${{{root_var}}}/{guard}" for guard in guards]
+        expected = [f"{interp} ${{{root_var}}}/{guard}" for guard, interp in guards]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )

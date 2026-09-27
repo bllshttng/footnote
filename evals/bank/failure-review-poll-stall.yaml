@@ -1,0 +1,17 @@
+# Failure-mode tier: stuck at review on rate-limited polling. The review
+# wait's secondary-limit classifier is the code under test; this pins the
+# measured 2026-08-24 verbatim 403 body so a regression in the classifier
+# reads as a graded failure, not folklore. Grade-only: no worker step, the
+# fixture already exists in the tree.
+#
+# Stale-citation note: the plan cited loopcheck.rs:15912 for the
+# stub; the verbatim body now lives at loopcheck.rs:15795 (const VERBATIM_403)
+# with the classifier test beside it.
+id: failure-review-poll-stall
+tier: regression
+grade:
+  - kind: exit
+    command: "cargo test -p fno-agents refusal_is_secondary_classifies_the_verbatim_body_by_the_live_bucket"
+    expect: 0
+timeout_minutes: 15
+tags: [failure-mode, no_gate_progress]

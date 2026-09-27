@@ -6,6 +6,7 @@ The writer resolves the url with the reader's own origin-then-gh chain and
 refuses the stamp when neither leg resolves.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -21,7 +23,7 @@ runner = CliRunner()
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -32,7 +34,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
         (gs, "GRAPH_JSON", g),
     ):
         monkeypatch.setattr(mod, attr, val)
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": "ab-00000001", "title": "t", "slug": "ab-00000001",
          "type": "feature", "priority": "p2", "status": "idea",
          "domain": "code", "project": "p"},
@@ -59,7 +61,7 @@ def merged_pr(monkeypatch):
 
 
 def _first(g: Path) -> dict:
-    return json.loads(g.read_text())["entries"][0]
+    return read_graph_strict(g)[0]
 
 
 def _runner(remote: str):

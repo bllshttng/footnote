@@ -7,6 +7,7 @@ Covers:
        Default (fill-if-null) behavior is the control case.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 import re
@@ -27,7 +28,7 @@ runner = CliRunner()
 def tmp_graph(tmp_path, monkeypatch) -> Path:
     """Fresh graph.json + ledger.json routed via monkeypatch."""
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
@@ -73,11 +74,15 @@ def _make_append_event_to(events_file: Path):
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    seed_graph(g, json.dumps({"entries": entries}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _seed_ledger(ledger: Path, entries: list[dict]) -> None:
@@ -94,7 +99,16 @@ def _stub_subprocess_no_git(monkeypatch):
             self.returncode = rc
             self.stderr = ""
 
-    monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
+    real_run = done_cli.subprocess.run
+
+    def fake_run(*a, **kw):
+        cmd = a[0] if a else kw.get("cmd")
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; the real binary answers.
+            return real_run(*a, **kw)
+        return _Res()
+
+    monkeypatch.setattr(done_cli.subprocess, "run", fake_run)
 
     # `--pr` now demands gh-resolved merge evidence; without a stub
     # these collision tests would exit 4 on the gh outage instead of reaching
@@ -258,7 +272,7 @@ def test_done_named_repo_overrides_a_disagreeing_recorded_url(
 ):
     """A named --repo is an assertion: it stamps the url for THAT repo even
     when the node's recorded pr_url names a different one (the repair flow
-    that previously required locked_mutate_graph)."""
+    that previously required commit_rows_via_store)."""
     _seed(tmp_graph, [{
         "id": "ab-repo0001",
         "title": "cross-repo repair",
@@ -487,7 +501,7 @@ def test_done_collision_without_force_overwrite_skips_rollup(
     }])
     _stub_subprocess_no_git(monkeypatch)
 
-    result = runner.invoke(app, ["done", "ab-bare-collide-001", "--link", "https://example.com/z"])
+    result = runner.invoke(app, ["backlog", "done", "ab-bare-collide-001", "--link", "https://example.com/z"])
     assert result.exit_code == 0, f"Exit {result.exit_code}: {result.output}"
 
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-bare-collide-001")

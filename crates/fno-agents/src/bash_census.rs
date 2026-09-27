@@ -84,7 +84,7 @@ fn classify_one(command: &str, census: &mut Census) {
 /// Every `input.command` off a `{"type":"tool_use","name":"Bash",...}` content
 /// entry on one transcript line. A malformed line yields nothing rather than
 /// aborting the fold - one bad row must not blank the whole census.
-fn commands_in_line(line: &str) -> Vec<String> {
+pub(crate) fn commands_in_line(line: &str) -> Vec<String> {
     let Ok(row) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };

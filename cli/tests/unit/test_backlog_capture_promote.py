@@ -65,8 +65,8 @@ def test_promote_creates_node_and_strikes_checkbox(tmp_path: Path) -> None:
     assert f"-> {res['node_id']}" in text
 
     # The graph node really exists in the graph promote wrote to.
-    from fno.graph.store import read_graph
-    nodes = read_graph(gp)
+    from fno.graph.store import read_graph_strict
+    nodes = read_graph_strict(gp)
     assert any(n["id"] == res["node_id"] for n in nodes)
 
 
@@ -107,18 +107,18 @@ def test_promote_unknown_id_raises(tmp_path: Path) -> None:
 def test_promote_is_idempotent(tmp_path: Path) -> None:
     """AC4-EDGE: re-promoting reports the existing node, creates no duplicate."""
     from fno.backlog.capture import promote_item
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
     item = _seed_item(tmp_path)
     inbox = tmp_path / "inbox.md"
     gp = tmp_path / "graph.json"
 
     first = promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
-    count_after_first = len(read_graph(gp))
+    count_after_first = len(read_graph_strict(gp))
 
     second = promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
     assert second["node_id"] == first["node_id"]
     assert second["status"] == "already_promoted"
-    assert len(read_graph(gp)) == count_after_first  # no duplicate node
+    assert len(read_graph_strict(gp)) == count_after_first  # no duplicate node
 
 
 # --------------------------------------------------------------------------
@@ -198,6 +198,8 @@ def test_cli_promote_emits_event(tmp_path: Path) -> None:
     fu = json.loads(add.stdout)["id"]
     res = runner.invoke(cli, ["promote", fu, "--difficulty", "medium"])
     assert res.exit_code == 0, res.output
-    events = (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-    types = [json.loads(l)["type"] for l in events if l.strip()]
+    from tests._event_rows import event_rows
+
+    events = (tmp_path / ".fno" / "events.jsonl")
+    types = [e["type"] for e in event_rows(events)]
     assert "capture_promote" in types

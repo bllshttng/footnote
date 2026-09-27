@@ -13,10 +13,27 @@ use crate::mux_cli::{BASH_SHELL_INIT, ZSH_SHELL_INIT};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// One event on a pane's `out_tx` channel: real bytes to feed the VT, or a
+/// resize that already took effect and must be applied to the VT at this
+/// exact point in the ordered per-pane stream. A keeper-hosted pane's resize
+/// is a round trip (server -> socket -> keeper -> socket -> server), so
+/// applying it to the VT the instant the server ISSUES it would race
+/// trailing output the child produced before the round trip lands: that
+/// output is still ahead of the resize in this same channel, so feeding it
+/// after an eager VT resize corrupts the grid. Routing the resize through
+/// this channel instead - as `Resized`, sent only once the keeper's
+/// `KEEPER_TAG_RESIZE_ACK` confirms it applied - keeps the two in the one
+/// order that already governs everything else on the channel: arrival order.
+pub enum PaneChunk {
+    Output(Vec<u8>),
+    Resized(u16, u16),
+}
 
 /// Serializes every PTY fork in this process.
 ///
@@ -164,6 +181,56 @@ fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
     FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Detect a full descriptor table and return its typed diagnostic, or `None`
+/// while spawn headroom remains. Duplicating an owned fd allocates a slot
+/// without opening anything, so the probe reads the table's true state; two
+/// probes refuse typed when only one slot remains, before a mid-spawn EMFILE
+/// can surface as some other subsystem's failure.
+pub(crate) fn fd_ceiling_refusal() -> Option<PtyError> {
+    let dup_probe = || i32::from(unsafe { libc::dup(2) });
+    let first = dup_probe();
+    if first < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EMFILE) {
+            let limit = nofile_limit();
+            return Some(PtyError::SpawnFdLimit {
+                open: usize::try_from(limit).unwrap_or(0),
+                limit,
+                detail: "dup probe hit EMFILE at the descriptor table's ceiling".into(),
+            });
+        }
+        return None;
+    }
+    let second = dup_probe();
+    unsafe { libc::close(first) };
+    if second < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EMFILE) {
+            let limit = nofile_limit();
+            return Some(PtyError::SpawnFdLimit {
+                open: usize::try_from(limit.saturating_sub(1)).unwrap_or(0),
+                limit,
+                detail: "dup probe hit EMFILE one slot short of the ceiling".into(),
+            });
+        }
+        return None;
+    }
+    unsafe { libc::close(second) };
+    None
+}
+
+/// The soft `RLIMIT_NOFILE` for this process. A read failure answers 0, which
+/// the caller's formatting tolerates (the diagnostic still names the remedy).
+pub(crate) fn nofile_limit() -> libc::rlim_t {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain rlimit read, no pointers beyond the caller-owned struct.
+    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+    rl.rlim_cur
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("failed to open pty: {0}")]
@@ -254,6 +321,53 @@ pub enum PtyShell {
     Keeper(KeeperPty),
 }
 
+/// The kill and reap steps every child here needs, so one bounded
+/// implementation covers the pty child and the plain keeper child alike.
+trait KillableChild {
+    /// Deliver SIGKILL; an already-dead child is fine, so errors are dropped.
+    fn signal_kill(&mut self);
+    /// One non-blocking reap poll. True once the child is reaped or was
+    /// never reapable by us (already reaped elsewhere).
+    fn poll_reap(&mut self) -> bool;
+}
+
+impl KillableChild for Box<dyn portable_pty::Child + Send + Sync> {
+    fn signal_kill(&mut self) {
+        let _ = self.as_mut().kill();
+    }
+    fn poll_reap(&mut self) -> bool {
+        !matches!(self.as_mut().try_wait(), Ok(None))
+    }
+}
+
+impl KillableChild for std::process::Child {
+    fn signal_kill(&mut self) {
+        let _ = std::process::Child::kill(self);
+    }
+    fn poll_reap(&mut self) -> bool {
+        !matches!(std::process::Child::try_wait(self), Ok(None))
+    }
+}
+
+/// Kill and reap a child without ever blocking in `wait`.
+///
+/// A blocking `wait` after SIGKILL is not safe here: on macOS a
+/// session-leader pty child can die between the kill and the wait's
+/// registration on the wait channel, and the wakeup for that exit is lost.
+/// The call then sleeps forever while the child sits in the child list as a
+/// zombie no one reaps - the teardown hang every pane test is exposed to.
+/// `try_wait` re-scans the child list on every poll, so it reaps the moment
+/// the exit lands; the deadline only bounds a child that survives SIGKILL,
+/// leaving its zombie to the process-exit reaping rather than wedging the
+/// core loop. The bound mirrors the keeper close's 2s wait.
+fn kill_and_reap(child: &mut impl KillableChild) {
+    child.signal_kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !child.poll_reap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// The inline form: the server holds the master. The pre-keeper body,
 /// moved wholesale.
 pub struct LocalPty {
@@ -276,8 +390,9 @@ pub struct LocalPty {
 /// The keeper-hosted form: the master lives in a `fno-agents-worker --pane`
 /// process; this side holds the single-client unix socket to it.
 pub struct KeeperPty {
-    // The socket path, for diagnostics and the keeper list.
-    _sock_path: PathBuf,
+    // The socket path, for diagnostics, the keeper list, and the
+    // pane-to-thread hand-off, which renames it into the thread dir.
+    sock_path: PathBuf,
     // The CHILD's pid (answered by the keeper's Identify), never the
     // keeper's: a fleet count and any later kill must aim at the process
     // the user sees.
@@ -310,7 +425,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
         let permit =
@@ -330,7 +445,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<LocalPty, PtyError> {
@@ -363,8 +478,7 @@ impl LocalPty {
         let mut child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
         if let Some(pid) = child.process_id() {
             if let Err(error) = permit.record_child(pid) {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap(&mut child);
                 return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
             }
         }
@@ -383,7 +497,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
         let permit =
@@ -402,7 +516,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<LocalPty, PtyError> {
@@ -512,14 +626,13 @@ impl LocalPty {
     }
 
     /// Kill and reap the child (explicit ClosePane / CloseTab). Idempotent:
-    /// killing an already-dead child errors harmlessly and the wait reaps
+    /// killing an already-dead child errors harmlessly and the reap polls
     /// either way, so a close racing a natural exit never double-reaps or
-    /// leaves a zombie. SIGKILL makes the post-kill wait effectively
-    /// immediate, so this is safe on the core loop.
+    /// leaves a zombie. The reap is bounded, so this is safe on the core
+    /// loop.
     pub fn kill(&self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_reap(&mut *child);
         }
     }
 }
@@ -533,7 +646,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
         LocalPty::spawn(
@@ -550,7 +663,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<PtyShell, PtyError> {
@@ -568,7 +681,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
         LocalPty::spawn_cmd(argv, rows, cols, cwd, session, pane_id, out_tx, exit_tx)
@@ -583,7 +696,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<PtyShell, PtyError> {
@@ -611,12 +724,20 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<(PtyShell, Vec<u8>), PtyError> {
         if argv.is_empty() {
             return Err(PtyError::Spawn("empty argv".into()));
+        }
+        // The keeper road needs only one descriptor (the socket), so unlike
+        // the openpty road it would otherwise walk one slot from the wall,
+        // where every later measurement EMFILEs first and the operator sees
+        // the wrong diagnostic. Refuse typed while there is still headroom
+        // to say so.
+        if let Some(err) = fd_ceiling_refusal() {
+            return Err(err);
         }
         let dir = keeper_dir();
         std::fs::create_dir_all(&dir)
@@ -625,16 +746,9 @@ impl PtyShell {
         let keeper_child = launch_keeper(
             keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
         )?;
-        // Only the failure paths below consume this; a success leaves the
-        // keeper to its own lifecycle (it unlinks its socket and exits when
-        // the child does).
-        let cleanup = |mut child: std::process::Child| {
-            // SAFETY: SIGKILL to a process we just spawned and are refusing.
-            unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
-            }
-            let _ = child.wait();
-        };
+        // The failure paths below kill and reap the keeper; a success hands
+        // it to a waiter thread that reaps it when it exits.
+        let cleanup = |mut child: std::process::Child| kill_and_reap(&mut child);
         let (stream, reply, ring, seed_buf) =
             match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
                 Ok(found) => match found {
@@ -679,7 +793,15 @@ impl PtyShell {
         let pty = wire_keeper(
             stream, child_pid, sock_path, pane_id, seed_buf, out_tx, exit_tx,
         );
-        drop(keeper_child);
+        // setsid() leaves the keeper this server's child. Only a wait reaps
+        // it; without one it stays a zombie for the server's whole life.
+        std::thread::Builder::new()
+            .name("fno-mux-keeper-waiter".into())
+            .spawn(move || {
+                let mut keeper_child = keeper_child;
+                let _ = keeper_child.wait();
+            })
+            .expect("spawn keeper waiter thread");
         Ok((PtyShell::Keeper(pty), ring))
     }
 
@@ -692,6 +814,18 @@ impl PtyShell {
 
     pub fn is_keeper_hosted(&self) -> bool {
         matches!(self, PtyShell::Keeper(_))
+    }
+
+    /// The keeper socket this pane is served through, or `None` for an
+    /// inline pane. The hand-off renames exactly this path, so it is read
+    /// from the shell that holds the connection rather than rebuilt from
+    /// the session and pane id: a re-adopted keeper keeps the stem it was
+    /// born with, and a rebuilt path would name a socket nobody is behind.
+    pub fn keeper_socket_path(&self) -> Option<&std::path::Path> {
+        match self {
+            PtyShell::Local(_) => None,
+            PtyShell::Keeper(keeper) => Some(keeper.sock_path.as_path()),
+        }
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
@@ -769,9 +903,14 @@ const KEEPER_TAG_IDENTIFY: u8 = 4;
 pub(crate) const KEEPER_TAG_IDENTIFY_REPLY: u8 = 5;
 pub(crate) const KEEPER_TAG_OUTPUT: u8 = 6;
 const KEEPER_TAG_EXITED: u8 = 7;
+/// Mirrors `pane_keeper::TAG_RESIZE_ACK`: sent after the keeper's
+/// `master.resize()` applies, carrying the same dims the outgoing Resize
+/// frame asked for. See [`spawn_keeper_reader`] for why the client applies
+/// its VT resize on receipt of this frame instead of when it sends Resize.
+const KEEPER_TAG_RESIZE_ACK: u8 = 8;
 
 /// The keeper protocol version this client speaks.
-pub const KEEPER_PROTOCOL_VERSION: u32 = 1;
+pub const KEEPER_PROTOCOL_VERSION: u32 = 2;
 
 fn keeper_frame_input(bytes: &[u8]) -> Vec<u8> {
     keeper_encode(KEEPER_TAG_INPUT, bytes)
@@ -823,6 +962,14 @@ pub(crate) fn keeper_decode(buf: &[u8]) -> KeeperRead {
 /// docs/state-root-inventory.md for the owner + lifetime row.
 pub fn keeper_dir() -> PathBuf {
     crate::proto::mux_dir().join("panes")
+}
+
+/// `<state-root>/mux/threads/`: keeper sockets that a pane-to-thread
+/// conversion moved out of the pane tree. Same keeper, same child, new
+/// address. A reader that walks only [`keeper_dir`] goes blind to every
+/// converted session.
+pub fn thread_keeper_dir() -> PathBuf {
+    crate::proto::mux_dir().join("threads")
 }
 
 /// The pane key a keeper socket stem carries, when the stem belongs to
@@ -911,7 +1058,7 @@ fn reply_holds_seat(reply: &serde_json::Value) -> bool {
 pub fn adopt_keeper_socket(
     sock: &std::path::Path,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> Result<KeeperAdopt, String> {
     let mut held = 0u32;
@@ -953,11 +1100,13 @@ pub fn adopt_keeper_socket(
     }))
 }
 
-/// Launch the keeper process for one pane. Plain pipes (the conversation
-/// lives on the keeper's OWN pty); the keeper setsid's itself out of this
-/// process group before anything else.
+/// Build the keeper command for one pane: argv and stdio, unspawned. Split
+/// from `launch_keeper` so tests can inspect the command shape (the
+/// cfg(test) owner env) without forking a process. Plain pipes (the
+/// conversation lives on the keeper's OWN pty); the keeper setsid's itself
+/// out of this process group before anything else.
 #[allow(clippy::too_many_arguments)]
-fn launch_keeper(
+fn keeper_command(
     keeper_bin: &std::path::Path,
     sock_path: &std::path::Path,
     session: &str,
@@ -966,7 +1115,7 @@ fn launch_keeper(
     cols: u16,
     cwd: Option<&std::path::Path>,
     argv: &[String],
-) -> Result<std::process::Child, PtyError> {
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(keeper_bin);
     cmd.args([
         "--pane",
@@ -987,11 +1136,34 @@ fn launch_keeper(
         "--",
     ]);
     cmd.args(argv);
+    // stderr inherits: a keeper startup failure reaches the server's log.
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    // stderr inherits: a keeper startup failure reaches the server's log.
-    // Same fork discipline as the portable-pty path: never overlap a fork
-    // with another spawn's fork window.
+    // In-process unit tests reach this builder directly (Core::run_pane):
+    // stamp the test owner so the keeper's watchdog reaps it when the test
+    // process exits, instead of orphaning it at ppid 1. The shipped server
+    // and the integration binaries skip this arm.
+    #[cfg(test)]
+    cmd.envs(crate::test_owner::self_owner_env());
+    cmd
+}
+
+/// Launch the keeper for one pane: build the command, then spawn under the
+/// fork guard (never overlap a fork with another spawn's fork window).
+#[allow(clippy::too_many_arguments)]
+fn launch_keeper(
+    keeper_bin: &std::path::Path,
+    sock_path: &std::path::Path,
+    session: &str,
+    pane_id: u64,
+    rows: u16,
+    cols: u16,
+    cwd: Option<&std::path::Path>,
+    argv: &[String],
+) -> Result<std::process::Child, PtyError> {
+    let mut cmd = keeper_command(
+        keeper_bin, sock_path, session, pane_id, rows, cols, cwd, argv,
+    );
     let _fork = fork_guard();
     cmd.spawn().map_err(|e| {
         PtyError::Spawn(format!(
@@ -1133,7 +1305,7 @@ fn wire_keeper(
     sock_path: PathBuf,
     pane_id: u64,
     seed_buf: Vec<u8>,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> KeeperPty {
     let exited = Arc::new(AtomicBool::new(false));
@@ -1165,7 +1337,7 @@ fn wire_keeper(
         })
         .expect("spawn keeper writer thread");
     KeeperPty {
-        _sock_path: sock_path,
+        sock_path,
         child_pid,
         exited,
         reader_done,
@@ -1184,7 +1356,7 @@ fn spawn_keeper_reader(
     mut reader: std::os::unix::net::UnixStream,
     pane_id: u64,
     seed_buf: Vec<u8>,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     exited: Arc<AtomicBool>,
     reader_done: Arc<AtomicBool>,
@@ -1202,7 +1374,25 @@ fn spawn_keeper_reader(
                             buf.drain(..used);
                             match tag {
                                 KEEPER_TAG_OUTPUT => {
-                                    if out_tx.blocking_send((pane_id, payload)).is_err() {
+                                    if out_tx
+                                        .blocking_send((pane_id, PaneChunk::Output(payload)))
+                                        .is_err()
+                                    {
+                                        break 'outer; // consumer gone
+                                    }
+                                }
+                                KEEPER_TAG_RESIZE_ACK if payload.len() == 4 => {
+                                    let rows = u16::from_le_bytes([payload[0], payload[1]]);
+                                    let cols = u16::from_le_bytes([payload[2], payload[3]]);
+                                    // Same channel as Output above, so this
+                                    // lands after any already-sent trailing
+                                    // pre-resize bytes and before whatever
+                                    // the child produces once the resize is
+                                    // visible to it (see `PaneChunk`).
+                                    if out_tx
+                                        .blocking_send((pane_id, PaneChunk::Resized(rows, cols)))
+                                        .is_err()
+                                    {
                                         break 'outer; // consumer gone
                                     }
                                 }
@@ -1224,7 +1414,16 @@ fn spawn_keeper_reader(
             }
             exited.store(true, Ordering::Release);
             reader_done.store(true, Ordering::Release);
-            let _ = exit_tx.blocking_send(pane_id);
+            // The lost-exit fault seam, mirrored from the Local reader: a
+            // keeper pane's exit is a notification too, so the defensive
+            // reaper's sweep is exercisable for it the same way.
+            if std::env::var_os("FNO_E2E").is_some()
+                && std::env::var_os("FNO_E2E_DROP_PTY_EXIT").is_some()
+            {
+                eprintln!("fno mux e2e: deliberately dropped exit for pane {pane_id}");
+            } else {
+                let _ = exit_tx.blocking_send(pane_id);
+            }
         })
         .expect("spawn keeper reader thread");
 }
@@ -1319,7 +1518,7 @@ impl KeeperPty {
             })
             .expect("spawn keeper test writer thread");
         KeeperPty {
-            _sock_path: PathBuf::from("/fno-test/keeper.sock"),
+            sock_path: PathBuf::from("/fno-test/keeper.sock"),
             child_pid,
             exited,
             reader_done,
@@ -1663,6 +1862,7 @@ fn base_command(
 }
 
 /// A shell the mux knows how to inject OSC 133 block markers into.
+#[derive(Clone, Copy)]
 enum ShellKind {
     Zsh,
     Bash,
@@ -1723,6 +1923,101 @@ impl Drop for ShellRc {
     }
 }
 
+/// Probe one keeper socket with a short timeout and return its Identify
+/// reply (keeper pid, child pid, argv, cwd). `None` = nothing lives behind
+/// the socket, or it never answered inside the bound. Shared by
+/// `pane keeper list` and the kill policy's kept/unkept measurement.
+pub fn keeper_identify(sock: &std::path::Path) -> Option<serde_json::Value> {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
+    stream.write_all(&keeper_frame_identify()).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut read_buf = [0u8; 4096];
+    loop {
+        loop {
+            match keeper_decode(&buf) {
+                KeeperRead::NeedMore => break,
+                KeeperRead::Frame(tag, payload, used) => {
+                    buf.drain(..used);
+                    if tag == KEEPER_TAG_IDENTIFY_REPLY {
+                        return serde_json::from_slice(&payload).ok();
+                    }
+                }
+            }
+        }
+        match stream.read(&mut read_buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
+        }
+    }
+}
+
+/// The per-pane shell-integration rc dir: under the private mux dir, 0700,
+/// unique per (session, pane id). Shared by the inline pty (`apply_shell_integration`)
+/// and the keeper spawn (`keeper_shell_argv`).
+pub fn shell_rc_dir(session: &str, pane_id: u64) -> PathBuf {
+    crate::proto::mux_dir()
+        .join("shell-rc")
+        .join(format!("fno-mux-{session}-{pane_id}"))
+}
+
+/// Write the rc files for `kind` into a fresh per-pane dir and return it.
+/// The caller owns the dir's lifetime: an inline pty wraps it in a
+/// [`ShellRc`] (removed with the pane); a keeper shell carries the path in
+/// its argv instead and the SERVER cleans it up on pane close, because a
+/// keeper child outlives the server that spawned it.
+fn write_shell_rc(kind: ShellKind, session: &str, pane_id: u64) -> Option<PathBuf> {
+    let dir = shell_rc_dir(session, pane_id);
+    let _ = fs::remove_dir_all(&dir);
+    crate::proto::ensure_private_dir(&dir).ok()?;
+    match kind {
+        ShellKind::Zsh => {
+            fs::write(dir.join(".zshenv"), ZSH_ZSHENV).ok()?;
+            fs::write(dir.join(".zshrc"), zsh_zshrc()).ok()?;
+        }
+        ShellKind::Bash => {
+            fs::write(dir.join("bashrc"), bash_rcfile_body()).ok()?;
+        }
+    }
+    Some(dir)
+}
+
+/// The keeper-shell spawn argv for one shell candidate: the same shell
+/// integration [`apply_shell_integration`] gives an inline pty, carried as an
+/// `env NAME=VALUE` argv prefix (the wrapper shape `run_pane` uses for
+/// `FNO_AGENT_SELF`), because the argv runs inside a keeper process the
+/// server cannot reach into. bash keeps `--rcfile` as an argv tail - no env
+/// var redirects bash's rc the way `ZDOTDIR` does zsh's. `None` when the
+/// candidate is not a shell or the knob is off or the rc write failed: the
+/// caller falls back to an inline spawn (fail-open, no integration).
+pub fn keeper_shell_argv(
+    cand: &OsStr,
+    session: &str,
+    pane_id: u64,
+) -> Option<(Vec<String>, PathBuf)> {
+    if integration_disabled(std::env::var_os("FNO_MUX_SHELL_INTEGRATION").as_deref()) {
+        return None;
+    }
+    let kind = shell_kind(cand)?;
+    let cand_str = cand.to_str()?.to_string();
+    let dir = write_shell_rc(kind, session, pane_id)?;
+    let mut argv = vec!["env".to_string()];
+    if matches!(kind, ShellKind::Zsh) {
+        argv.push(format!("ZDOTDIR={}", dir.display()));
+        if let Some(z) = std::env::var_os("ZDOTDIR") {
+            argv.push(format!("USER_ZDOTDIR={}", z.to_string_lossy()));
+        }
+    }
+    argv.push(cand_str);
+    if matches!(kind, ShellKind::Bash) {
+        argv.push("--rcfile".to_string());
+        argv.push(dir.join("bashrc").to_string_lossy().into_owned());
+    }
+    Some((argv, dir))
+}
+
 /// Inject the OSC 133 snippet into a mux-spawned shell, and ONLY that shell -
 /// never the user's global rc. zsh: a temp `ZDOTDIR` whose `.zshenv` /
 /// `.zshrc` source the user's real files (`USER_ZDOTDIR`, or `$HOME` when
@@ -1747,23 +2042,18 @@ fn apply_shell_integration(
         return None;
     }
     let kind = shell_kind(program)?;
-    // Under the per-user 0700 mux dir, NOT world-writable /tmp: a shell that
-    // sources these rc files is an RCE surface, so a predictable path in a
-    // shared temp dir (where an attacker could pre-create the dir and swap the
-    // rc) is CWE-377. `ensure_private_dir` forces 0700 on both levels, and no
-    // other uid can enter the parent, so the per-pane name being predictable is
-    // safe. Unique per pane (session + id); a crashed server's leftover of the
-    // same name is removed first, never appended to.
-    let dir = crate::proto::mux_dir()
-        .join("shell-rc")
-        .join(format!("fno-mux-{session}-{pane_id}"));
-    let _ = fs::remove_dir_all(&dir);
-    crate::proto::ensure_private_dir(&dir).ok()?;
+    // The rc dir lives under the per-user 0700 mux dir, NOT world-writable
+    // /tmp: a shell that sources these rc files is an RCE surface, so a
+    // predictable path in a shared temp dir (where an attacker could
+    // pre-create the dir and swap the rc) is CWE-377. `ensure_private_dir`
+    // forces 0700 on both levels, and no other uid can enter the parent, so
+    // the per-pane name being predictable is safe. Unique per pane (session
+    // + id); a crashed server's leftover of the same name is removed first,
+    // never appended to.
+    let dir = write_shell_rc(kind, session, pane_id)?;
     let rc = ShellRc { dir };
     match kind {
         ShellKind::Zsh => {
-            fs::write(rc.dir.join(".zshenv"), ZSH_ZSHENV).ok()?;
-            fs::write(rc.dir.join(".zshrc"), zsh_zshrc()).ok()?;
             cmd.env("ZDOTDIR", &rc.dir);
             // Preserve the user's real ZDOTDIR for the temp rc to source; unset
             // -> the in-shell `${USER_ZDOTDIR:-$HOME}` falls back to $HOME.
@@ -1773,7 +2063,6 @@ fn apply_shell_integration(
         }
         ShellKind::Bash => {
             let rcfile = rc.dir.join("bashrc");
-            fs::write(&rcfile, bash_rcfile_body()).ok()?;
             cmd.arg("--rcfile");
             cmd.arg(rcfile);
         }
@@ -1788,7 +2077,7 @@ fn wire(
     pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     shell_rc: Option<ShellRc>,
 ) -> Result<LocalPty, PtyError> {
@@ -1849,7 +2138,7 @@ fn spawn_writer(
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     reader_done: Arc<AtomicBool>,
 ) -> Result<(), PtyError> {
@@ -1880,7 +2169,10 @@ fn spawn_reader(
                         }
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
-                        if out_tx.blocking_send((pane_id, buf[..n].to_vec())).is_err() {
+                        if out_tx
+                            .blocking_send((pane_id, PaneChunk::Output(buf[..n].to_vec())))
+                            .is_err()
+                        {
                             break; // consumer gone; nothing to drain for
                         }
                     }
@@ -1908,6 +2200,42 @@ fn spawn_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeper_command_carries_the_test_owner_env() {
+        // AC7: under cfg(test) the builder stamps the owner identity the
+        // worker watchdog reads, so the keeper reaps when the test process
+        // exits. No keeper binary is needed to assert the command shape.
+        let cmd = keeper_command(
+            std::path::Path::new("fno-agents-worker"),
+            std::path::Path::new("/tmp/keeper-command-test.sock"),
+            "test",
+            7,
+            24,
+            80,
+            None,
+            &["/bin/cat".to_string()],
+        );
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get("FNO_TEST_OWNER_PID").map(String::as_str),
+            Some(std::process::id().to_string()).as_deref(),
+        );
+        assert!(
+            envs.contains_key("FNO_TEST_OWNER_BIRTH"),
+            "the birth token rides beside the pid"
+        );
+    }
 
     /// Kills and reaps a spawned pane on every exit path, panic and
     /// early-return included. The echo-probe tests used to drop the
@@ -2102,6 +2430,53 @@ mod tests {
             shell_candidates(Some(OsStr::new("/bin/sh"))),
             vec![OsString::from("/bin/sh")]
         );
+    }
+
+    #[test]
+    fn keeper_shell_argv_zsh_carries_the_rc_dir_as_env() {
+        let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/zsh"), "sess", 7) else {
+            panic!("zsh candidate must produce a keeper argv");
+        };
+        assert_eq!(argv[0], "env");
+        let z = argv
+            .iter()
+            .find(|a| a.starts_with("ZDOTDIR="))
+            .expect("zsh argv carries a ZDOTDIR prefix");
+        assert_eq!(
+            z,
+            &format!("ZDOTDIR={}", dir.display()),
+            "ZDOTDIR prefix names the written rc dir: {argv:?}"
+        );
+        assert_eq!(
+            std::path::Path::new(argv.last().unwrap()).file_name(),
+            Some(std::ffi::OsStr::new("zsh")),
+            "the shell itself is the command: {argv:?}"
+        );
+        assert!(dir.join(".zshenv").exists(), "the rc dir carries .zshenv");
+        assert!(dir.join(".zshrc").exists(), "the rc dir carries .zshrc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeper_shell_argv_bash_carries_rcfile_tail() {
+        let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/bash"), "sess", 8) else {
+            panic!("bash candidate must produce a keeper argv");
+        };
+        let rcfile = argv
+            .iter()
+            .position(|a| a == "--rcfile")
+            .map(|i| argv[i + 1].clone())
+            .expect("bash argv names its rcfile");
+        assert!(
+            std::path::Path::new(&rcfile).exists(),
+            "the rcfile exists: {rcfile}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeper_shell_argv_skips_non_shell_candidates() {
+        assert!(keeper_shell_argv(OsStr::new("/usr/bin/htop"), "sess", 9).is_none());
     }
 
     #[test]
@@ -2349,13 +2724,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-                Ok(Some((pane_id, chunk))) => {
+                Ok(Some((pane_id, PaneChunk::Output(chunk)))) => {
                     assert_eq!(pane_id, 7, "reader must tag output with its pane id");
                     seen.extend_from_slice(&chunk);
                     if String::from_utf8_lossy(&seen).contains("fallback-ok") {
                         return;
                     }
                 }
+                Ok(Some((_, PaneChunk::Resized(..)))) => {}
                 Ok(None) => break,
                 Err(_) => {}
             }
@@ -2426,7 +2802,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-                Ok(Some((_, chunk))) => {
+                Ok(Some((_, PaneChunk::Output(chunk)))) => {
                     seen.extend_from_slice(&chunk);
                     let text = String::from_utf8_lossy(&seen);
                     if text.contains("mark-envtest-envtest-31-end") && text.contains("-epochend") {
@@ -2437,6 +2813,7 @@ mod tests {
                         return;
                     }
                 }
+                Ok(Some((_, PaneChunk::Resized(..)))) => {}
                 Ok(None) => break,
                 Err(_) => {}
             }

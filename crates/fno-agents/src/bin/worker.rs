@@ -13,6 +13,16 @@
 //!   graph file, serves reads and locked mutations over its own socket, and
 //!   outlives the daemon the same way the pane keeper does. Callers build
 //!   this argv; humans never type it.
+//! - `--store-exec`: the one-shot store lane (graph_keeper.rs). Serves ONE
+//!   store request on stdin/stdout and exits, so a client that must not
+//!   leave a resident process behind (the leak shape recorded 2026-09-17: a
+//!   keeper grows with requests served) still gets the full dispatch.
+//!   Callers build this argv; humans never type it.
+//! - `--law-exec`: the one-shot law-door lane (law_match.rs). Serves ONE
+//!   law request on stdin, prints the door's own answer, and exits with the
+//!   door's code. The front's `fno inbox law` verbs spawn it, because the
+//!   mux never links the runtime (product boundary). Callers build this
+//!   argv; humans never type it.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
 //! terminal going away) cannot take it - and therefore the PTY child -
@@ -42,10 +52,11 @@ fn main() {
         return;
     }
 
-    // Three lanes: `--keeper` (the keeper: pty master ownership outlives the
+    // Four lanes: `--keeper` (the keeper: pty master ownership outlives the
     // mux server; `--pane` is the alias its call sites spell it by),
     // `--stream` (claude stream-json adoption, launched by the daemon's
-    // spawn_claude_stream_lane), and `--store-keeper` (the graph store).
+    // spawn_claude_stream_lane), `--store-keeper` (the resident graph
+    // store), and `--store-exec` (one store request, then exit).
     // Everything else refuses, truthfully.
     if args.iter().any(|a| a == "--store-keeper") {
         if let Err(msg) = store_keeper_lane(&args) {
@@ -53,6 +64,31 @@ fn main() {
             std::process::exit(2);
         }
         return;
+    }
+    if args.iter().any(|a| a == "--store-exec") {
+        if let Err(msg) = store_exec_lane(&args) {
+            eprintln!("fno-agents-worker: {msg}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--law-exec") {
+        law_exec_lane();
+        return;
+    }
+    if let Some(idx) = args.iter().position(|a| a == "--law-exec-arg") {
+        let request = args
+            .get(idx + 1)
+            .map(|s| s.clone())
+            .unwrap_or_else(|| "fno-agents-worker: --law-exec-arg needs a request".to_string());
+        if args.get(idx + 1).is_none() {
+            eprintln!("{request}");
+            std::process::exit(2);
+        }
+        // The request rides argv so stdin stays INHERITED: the retract door
+        // proves the operator by the real terminal fd, which a piped stdin
+        // can never be.
+        std::process::exit(fno_agents::law_match::run_law_match_str(&request));
     }
     if args.iter().any(|a| a == "--keeper" || a == "--pane") {
         if let Err(msg) = pane_keeper_lane(&args) {
@@ -64,7 +100,10 @@ fn main() {
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
             "fno-agents-worker: pass a lane: --keeper (alias --pane), --stream \
-             (claude stream-json adoption), or --store-keeper (graph store)"
+             (claude stream-json adoption), --store-keeper (graph store), \
+             --store-exec (one store request), --law-exec (one law request on \
+             stdin), or --law-exec-arg <request> (one law request by argv, \
+             stdin inherited)"
         );
         std::process::exit(2);
     }
@@ -78,9 +117,36 @@ fn store_keeper_lane(args: &[String]) -> Result<(), String> {
     fno_agents::graph_keeper::run(cfg)
 }
 
-/// `--keeper` / `--pane` entrypoint: parse, then run the keeper to completion.
+/// `--store-exec` entrypoint: parse, serve one request, exit. A failed
+/// request still prints its reply envelope, then exits 1 (the reply is the
+/// completion record; the exit code is for the shell, the stdout is for the
+/// client).
+fn store_exec_lane(args: &[String]) -> Result<(), String> {
+    let cfg = fno_agents::store_exec::parse_store_exec_args(args)?;
+    fno_agents::store_exec::run_exec(cfg)
+}
+
+/// `--law-exec` entrypoint: one law-door request on stdin, the door's own
+/// stdout and exit code out. The front's `fno inbox law` verbs spawn this
+/// lane; the child reads stdin to EOF and answers, so write-then-read
+/// cannot deadlock.
+fn law_exec_lane() {
+    use std::io::Read;
+
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("fno-agents-worker: --law-exec could not read stdin");
+        std::process::exit(2);
+    }
+    std::process::exit(fno_agents::law_match::run_law_match_str(&input));
+}
+
+/// `--keeper` / `--pane` entrypoint: parse, fill the build-dir env (before any
+/// thread starts, so the env write is sound), then run the keeper; every hosted
+/// harness child inherits it.
 fn pane_keeper_lane(args: &[String]) -> Result<(), String> {
     let cfg = fno_agents::pane_keeper::parse_pane_args(args)?;
+    fno_agents::cargo_build_dirs::fill_build_dir_env(&cfg.cwd);
     fno_agents::pane_keeper::run(cfg)
 }
 

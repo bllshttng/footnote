@@ -149,6 +149,22 @@ def _switch_lock_path(root: Path | None = None) -> Path:
     return (root or store_root()) / ".switch.lock"
 
 
+def _vault(action: str, *args: str) -> dict:
+    from fno.rust_binary import find_dev_binary, resolve_binary
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise ManagedStoreError("fno-agents binary not found; run fno doctor update --rust")
+    try:
+        proc = subprocess.run([str(binary), "provider-cap", "vault", action, "--store", str(store_root()), "--lock-held", "--json", *args], capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        raise ManagedStoreError(f"fno-agents vault {action} timed out after 15s") from exc
+    try:
+        receipt = json.loads(proc.stdout)
+    except (TypeError, ValueError) as exc:
+        raise ManagedStoreError((proc.stderr or "vault returned no JSON receipt").strip()) from exc
+    return receipt
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -188,6 +204,16 @@ def _claude_keychain_account() -> str:
 def _claude_scoped_service(config_dir: Path) -> str:
     suffix = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
     return f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}"
+
+
+def slot_switch_remedy(account: str) -> str:
+    """The hand path that moves every claude session on the shared slot to `account`."""
+    # `fno config accounts use` replaces this once stored copies are read back and refreshed.
+    slot = Path.home() / ".claude"
+    return (f"with no `/logout` first, sign in as {account} with `claude /login` (interactive"
+            f" sessions) and with `CLAUDE_CONFIG_DIR={slot} claude /login` (background"
+            f" sessions, which read '{_claude_scoped_service(slot)}'); blocked sessions"
+            f" recover on their next request")
 
 
 def _run_security(args: list[str]) -> subprocess.CompletedProcess:
@@ -774,33 +800,6 @@ def credential_digest(blob: Optional[str]) -> Optional[str]:
             if isinstance(token, str) and token:
                 material = token
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def credential_expiry(blob: Optional[str]) -> Optional[float]:
-    """``claudeAiOauth.expiresAt`` as epoch SECONDS, or None when absent.
-
-    Claude Code stores it in milliseconds; a value in that range is scaled here
-    so no caller has to guess the unit. A stored blob whose expiry has passed is
-    a dead credential: `fno config accounts use` would materialize it and the next
-    session would prompt for a login.
-    """
-    if not blob:
-        return None
-    try:
-        data = json.loads(blob)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    oauth = data.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return None
-    raw = oauth.get("expiresAt")
-    if not isinstance(raw, (int, float)):
-        return None
-    # Milliseconds since epoch is the shape Claude Code writes; anything past
-    # the year 33658 in seconds is really milliseconds.
-    return float(raw) / 1000.0 if raw > 1e12 else float(raw)
 
 
 def read_blob(record_id: str, root: Path | None = None) -> Optional[str]:
@@ -1600,9 +1599,8 @@ def _reconcile_locked(
                 "ambiguous-slot",
                 detail=(
                     f"the {cli} slot presents credentials belonging to different "
-                    "accounts (a stale scoped Keychain item beside a live unscoped "
-                    "one); whichever was stamped, some reader would get the other - "
-                    "sign out and back in to settle it"
+                    "accounts; whichever was stamped, some reader would get the other - "
+                    + slot_switch_remedy("the account to keep")
                 ),
             )
         return ReconcileResult(
@@ -1765,23 +1763,10 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
 
 
 def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
-    """Re-snapshot the outgoing account's current slot credential. True if done.
-
-    Reads the SAME canonical candidates the identity path resolves, because
-    those two must not disagree about which credential belongs to a record:
-    reconciliation may have stored the proven (unscoped) blob while a
-    scoped-first read here would capture the other one straight back over it.
-
-    More than one distinct credential in the slot means we cannot say which is
-    this record's, so it captures nothing and the older snapshot stands. That
-    loses a rotated refresh token at worst - recoverable with a login - where
-    guessing would file another account's credential under this record, which
-    is silent and is not. It is the same "skip capture rather than poison it"
-    stance the taint check above already takes.
-
-    A read failure still propagates: overwriting the slot without capturing a
-    live credential we could not read would lose the outgoing token for real.
-    """
+    if outgoing.harness == "claude":
+        if _vault("sync").get("verdict") not in ("written", "unchanged"):
+            raise ManagedStoreError("Claude vault sync refused before overwrite. The slot was not touched")
+        return True
     blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
     if len(blobs) != 1:
         return False
@@ -1829,6 +1814,14 @@ def _switch_locked(
     pin_policy: str = "warn",
 ) -> SwitchResult:
     stored = _blob_path(target.id, root)
+    if target.harness == "claude":
+        refresh_args = ["--id", target.id] + (["--config-dir", str(target.config_dir)] if target.config_dir else [])
+        receipt = _vault("refresh", *refresh_args)
+        if receipt.get("verdict") == "dead":
+            raise ManagedStoreError(
+                f"stored credential for '{target.id}' is spent (invalid_grant); sign in as "
+                f"{target.id} and run `fno config accounts register {target.id}`; the slot was not touched"
+            )
     try:
         target_blob = stored.read_text(encoding="utf-8")
     except OSError as exc:

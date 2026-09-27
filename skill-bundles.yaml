@@ -40,6 +40,8 @@ bundles:
         dest: scripts/lib/node-id.sh
       - source: scripts/validate-plan.sh
         dest: scripts/validate-plan.sh
+      - source: scripts/lib/code-index-detect.sh
+        dest: scripts/lib/code-index-detect.sh
       - source: scripts/check-product-md.sh
         dest: scripts/check-product-md.sh
 
@@ -85,6 +87,32 @@ bundles:
       # (owned by target: "new target -> new worktree"; auto-merge is a
       # target ship concern). They are not bundled from elsewhere. Consumers
       # that need them declare their own references: entry sourcing them.
+      # The code lenses of blueprint drafting (lean dispatch): the plan is no
+      # longer the upstream quality gate, so the review phase carries those
+      # checks. Canonical files live under blueprint's lenses/code/ (the
+      # license NOTICE entry names that tree); target gets bundled copies at
+      # the review phase's read path.
+    references:
+      - source: skills/blueprint/references/lenses/code/agent_user.md
+        dest: references/lenses/agent_user.md
+      - source: skills/blueprint/references/lenses/code/blast_radius.md
+        dest: references/lenses/blast_radius.md
+      - source: skills/blueprint/references/lenses/code/boundaries.md
+        dest: references/lenses/boundaries.md
+      - source: skills/blueprint/references/lenses/code/door_type.md
+        dest: references/lenses/door_type.md
+      - source: skills/blueprint/references/lenses/code/epic_outcome.md
+        dest: references/lenses/epic_outcome.md
+      - source: skills/blueprint/references/lenses/code/inversion.md
+        dest: references/lenses/inversion.md
+      - source: skills/blueprint/references/lenses/code/outcome.md
+        dest: references/lenses/outcome.md
+      - source: skills/blueprint/references/lenses/code/story_split.md
+        dest: references/lenses/story_split.md
+      - source: skills/blueprint/references/lenses/code/test_scenarios.md
+        dest: references/lenses/test_scenarios.md
+      - source: skills/blueprint/references/lenses/code/unlock_order.md
+        dest: references/lenses/unlock_order.md
 
   # Cluster router: /fix. The default fix loop (SKILL.md) and the investigate
   # flow (references/investigate.md) plus their references are canonical in the folder.
@@ -105,15 +133,9 @@ bundles:
         dest: references/cli-tool-mapping.md
       - source: scripts/validate-plan.sh
         dest: scripts/validate-plan.sh
-
-  # The tenured king. The minion contract, court operations, and the CLI
-  # command map are canonical in king-for-a-day; reign bundles them so the
-  # skill is portable the way drivers must be.
-  - skill: reign
-    files:
-      - source: skills/king-for-a-day/references/minion-clause.md
-        dest: references/minion-clause.md
-      - source: skills/king-for-a-day/references/court-operations.md
-        dest: references/court-operations.md
-      - source: skills/king-for-a-day/references/cli-commands.md
-        dest: references/cli-commands.md
+      - source: scripts/lib/code-index-detect.sh
+        dest: scripts/lib/code-index-detect.sh
+      - source: skills/blueprint/code-index/providers/codegraph.toml
+        dest: code-index/providers/codegraph.toml
+      - source: skills/blueprint/code-index/providers/graphify.toml
+        dest: code-index/providers/graphify.toml

@@ -96,7 +96,7 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--model": FlagOwner(FNO, "fno routes on it and stamps model_basis"),
     "--permission-mode": FlagOwner(
         TRANSLATED, "approval mode; spelling is per harness",
-        site="mux_spawn.py:permission_pane_tokens",
+        site="crates/fno-agents/src/codex_posture.rs:permission_pane_tokens",
     ),
     "--effort": FlagOwner(
         TRANSLATED, "reasoning effort; TWO maps (Python and Rust) that must agree",

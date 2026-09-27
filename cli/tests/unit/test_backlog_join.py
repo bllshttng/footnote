@@ -168,6 +168,9 @@ def _naming_real(cmd, **kw):
     parts = [str(part) for part in cmd]
     if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
         return _REAL_RUN(cmd, **kw)
+    if {"doctor", "event"} <= set(parts):
+        # Event emission rides the same subprocess seam; it is not a spawn.
+        return _REAL_RUN(cmd, **kw)
     return None
 
 _REAL_RUN = __import__("subprocess").run

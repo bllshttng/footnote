@@ -29,6 +29,10 @@ impl Drop for Keeper {
     }
 }
 
+fn seed_empty_store(graph: &Path) {
+    fno_agents::graph_store::seed_rows(graph, &[]).unwrap();
+}
+
 fn short_home(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -48,6 +52,27 @@ fn spawn_keeper(tag: &str, graph: &Path, sock: &Path) -> Keeper {
             "--session",
             tag,
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn store keeper");
+    Keeper { child }
+}
+
+/// Like [`spawn_keeper`], plus one env var the keeper process reads at
+/// startup (the claims-root override the refusal test needs).
+fn spawn_keeper_with_env(tag: &str, graph: &Path, sock: &Path, key: &str, val: &str) -> Keeper {
+    let child = Command::new(WORKER_BIN)
+        .args([
+            "--store-keeper",
+            "--sock",
+            sock.to_str().unwrap(),
+            "--graph",
+            graph.to_str().unwrap(),
+            "--session",
+            tag,
+        ])
+        .env(key, val)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -115,7 +140,7 @@ fn ok_result(reply: Value) -> Value {
 fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
     let home = short_home("serve");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("serve-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -171,7 +196,7 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
 fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
     let home = short_home("lost-write");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("lost-write-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -181,7 +206,6 @@ fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
     let params = json!({
         "request_id": "r1",
         "base_version": begin["version"],
-        "base_digests": begin["base_digests"],
         "base_plan_rungs": {},
         "changed": [{"id": "x-disconnected", "title": "disconnected"}],
         "removed": [],
@@ -225,7 +249,7 @@ fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
 fn keeper_keeps_serving_after_its_client_hangs_up() {
     let home = short_home("survive");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("survive-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -287,12 +311,12 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
     // instead of blocking the caller past the deadline.
     let home = short_home("wedge");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("wedge-test", &graph, &sock);
     wait_for_socket(&sock);
 
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -328,20 +352,22 @@ fn a_wedged_writer_answers_lock_timeout_inside_its_deadline() {
 fn read_file_returns_the_bytes_load_graph_validates() {
     let home = short_home("bytes");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("bytes-test", &graph, &sock);
     wait_for_socket(&sock);
     let mut stream = UnixStream::connect(&sock).unwrap();
-    let result = ok_result(rpc(&mut stream, 1, "read_file", json!({})));
+    let entries = ok_result(rpc(&mut stream, 1, "read", json!({})))["entries"].clone();
+    let result = ok_result(rpc(&mut stream, 2, "read_file", json!({})));
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(result["bytes_b64"].as_str().unwrap())
         .unwrap();
-    let on_disk = std::fs::read(&graph).unwrap();
-    assert_eq!(bytes, on_disk, "read_file returns the real file bytes");
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["entries"], entries);
+    assert!(!graph.exists(), "the JSON anchor is not persisted");
     assert!(
-        result["sha256"].as_str().unwrap().starts_with("sha256:"),
-        "the digest labels its algorithm"
+        result["sha256"].as_str().unwrap().starts_with("sqlite:"),
+        "the version token labels the store it names"
     );
 }
 
@@ -356,7 +382,7 @@ fn concurrent_spawns_settle_on_one_keeper_and_losers_exit_three() {
     // running on one socket, each holding a parsed 15MB graph.
     let home = short_home("seat");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     // Each racer's stderr lands in its own file: an unexpected exit names its
     // path (seat refusal, self-retire, bind failure) instead of a bare code.
@@ -431,7 +457,7 @@ fn keeper_holds_its_seat_lock() {
     // end of the if condition, before the guarded body ran).
     let home = short_home("seatlock");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let _keeper = spawn_keeper("seatlock-test", &graph, &sock);
     wait_for_socket(&sock); // positive control: the keeper bound and serves
@@ -467,7 +493,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
     // new listener's) stays in place.
     let home = short_home("rebound");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let a_stderr = home.join("rebound-a.stderr");
     let mut a = Keeper {
@@ -534,7 +560,7 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
 fn a_keeper_on_a_rewritten_binary_self_retires_when_idle() {
     let home = short_home("drift");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let copy = home.join("worker-copy");
     std::fs::copy(WORKER_BIN, &copy).unwrap();
@@ -577,11 +603,11 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     // keeper answers kind busy inside lock_timeout and keeps serving.
     let home = short_home("busy");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\"entries\": []}").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("busy-test", &graph, &sock);
     wait_for_socket(&sock);
-    let lock_path = PathBuf::from(format!("{}.lock", graph.canonicalize().unwrap().display()));
+    let lock_path = fno_agents::graph_store::graph_lock_path(&graph);
     let holder = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -677,11 +703,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
             })
         })
         .collect();
-    std::fs::write(
-        &graph,
-        serde_json::to_string(&json!({ "entries": seed })).unwrap(),
-    )
-    .unwrap();
+    fno_agents::graph_store::seed_rows(&graph, &seed).unwrap();
     let sock = home.join("graph.json.store.sock");
     let keeper = spawn_keeper("race-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -722,8 +744,12 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         })
         .collect();
 
-    // Two idea-style appenders: 30 begin + commit_rows appends each through
-    // the keeper socket, retrying kind conflict like cmd_idea does.
+    // Two idea-style appenders: 20 begin + commit_rows appends each through
+    // the keeper socket, retrying kind conflict like cmd_idea does. They send
+    // no base_digests, so every commit takes the whole-graph fallback, where
+    // any concurrent publish is a conflict. A row can starve through all 30
+    // tries on a slow runner; it never answered ok, so the contract below
+    // does not cover it.
     let appender_handles: Vec<_> = (0..2)
         .map(|w| {
             let s = sock.clone();
@@ -737,23 +763,23 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                     let row = json!({
                         "id": id,
                         "slug": format!("slug-{id}"),
-                        "title": format!("appended {id}"),
+                        // The title must stay off the leak grammar the
+                        // store gate enforces at write time: the raw id
+                        // (prefix-app-0004) carries a node-id match.
+                        "title": format!("appended {prefix}{i:04}"),
                         "type": "feature",
                         "status": "intake",
                         "priority": "p2",
                     });
-                    let mut landed_here = false;
                     for attempt in 0..30u64 {
                         let begin = ok_result(rpc(&mut stream, attempt, "begin", json!({})));
                         let version = begin["version"].as_str().unwrap().to_string();
-                        let digests = begin["base_digests"].clone();
                         let reply = rpc(
                             &mut stream,
                             attempt,
                             "commit_rows",
                             json!({
                                 "base_version": version,
-                                "base_digests": digests,
                                 "changed": [row],
                                 "removed": [],
                                 "attempt": attempt + 1,
@@ -761,7 +787,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         if reply.get("ok") == Some(&json!(true)) {
                             landed.push(id.clone());
-                            landed_here = true;
                             break;
                         }
                         let kind = reply["error"]["kind"].as_str().unwrap_or("");
@@ -771,10 +796,6 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                         );
                         conflicts += 1;
                     }
-                    assert!(
-                        landed_here,
-                        "appender {w}: row {id} never landed in 30 attempts"
-                    );
                 }
                 (landed, conflicts)
             })
@@ -798,12 +819,15 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         total_conflicts > 0,
         "did not race: zero commit_rows conflicts across both appenders"
     );
+    let total_landed: usize = appender_out.iter().map(|(landed, _)| landed.len()).sum();
+    assert!(
+        total_landed > 0,
+        "positive control: no append ever answered ok, so the check below proves nothing"
+    );
 
-    // Every append that answered ok must be in the final file.
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // Every append that answered ok must be in the store: the json file is
+    // a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -817,19 +841,18 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
         }
     }
 
-    // Each note node's final revision equals its successful write count: a
-    // reverted note write (clobbered by a stale whole-file publish) reads as
-    // a revision below the count of ok answers.
+    // Each acknowledged write must be present in the final revision. A write
+    // can commit before its transport outcome is reported, so the revision
+    // may exceed the count of successful replies but must never be lower.
     for (node, ok) in &note_out {
-        let row = final_graph["entries"]
-            .as_array()
-            .unwrap()
+        let rows = fno_agents::graph_store::read_rows(&graph).unwrap();
+        let row = rows
             .iter()
             .find(|r| r["id"].as_str() == Some(node.as_str()))
             .unwrap();
         let revision = row["current_state"]["revision"].as_u64().unwrap();
-        assert_eq!(
-            revision, *ok,
+        assert!(
+            revision >= *ok,
             "node {node} answered ok {ok} times but its final revision is {revision}"
         );
     }
@@ -846,7 +869,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
 fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     let home = short_home("shutrace");
     let graph = home.join("graph.json");
-    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    seed_empty_store(&graph);
     let sock = home.join("graph.json.store.sock");
     let mut keeper = spawn_keeper("shutrace-test", &graph, &sock);
     wait_for_socket(&sock);
@@ -891,7 +914,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             let row = json!({
                 "id": id,
                 "slug": format!("slug-{id}"),
-                "title": format!("mid-commit {id}"),
+                // Off the leak grammar: the raw id (m-app-0004) carries a
+                // node-id match the store gate refuses at write time.
+                "title": format!("mid-commit {i:04}"),
                 "type": "feature",
                 "status": "intake",
                 "priority": "p2",
@@ -901,7 +926,6 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
                 "method": "commit_rows",
                 "params": {
                     "base_version": version,
-                    "base_digests": begin["base_digests"],
                     "changed": [row],
                     "removed": [],
                 },
@@ -944,24 +968,22 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     );
     let outcomes = staged.join().unwrap();
 
-    // Late arrivals: sent after the ack, they meet the dying keeper and read
-    // a hangup BEFORE any publish.
-    let mut late_ok = 0;
-    for i in 0..2 {
-        let late = UnixStream::connect(&sock);
-        match late {
-            Err(_) => continue, // socket already unlinked: hangup by refusal
-            Ok(mut s) => {
-                let begin = rpc(&mut s, 900 + i as u64, "begin", json!({}));
-                // Either the frame round-trips (keeper still draining) or the
-                // stream is cut; both are legal, only ok-published rows count.
-                if begin.get("ok") == Some(&json!(true)) {
-                    late_ok += 1;
-                }
-            }
+    // Late arrivals: sent after the ack, they meet the dying keeper. Either
+    // the frame round-trips (keeper still draining) or the stream is cut;
+    // both are legal, so neither is asserted. rpc() would panic on the cut.
+    for i in 0..2u64 {
+        let Ok(mut s) = UnixStream::connect(&sock) else {
+            continue; // socket already unlinked: hangup by refusal
+        };
+        let req = json!({"id": 900 + i, "method": "begin", "params": {}});
+        let payload = serde_json::to_vec(&req).unwrap();
+        let mut frame = vec![TAG_REQUEST];
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+        if s.write_all(&frame).is_ok() {
+            let _ = read_frame(&mut s);
         }
     }
-    let _ = late_ok;
 
     // Reap: the keeper exits 0 on its own.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -980,12 +1002,9 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     assert!(!sock.exists(), "shutdown unlinks its socket");
 
     // THE CONTRACT: every staged connection that read an ok reply has its
-    // row in the file. A connection cut before its reply has no row (it
-    // never read ok).
-    let final_raw = std::fs::read_to_string(&graph).unwrap();
-    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
-    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
-        .as_array()
+    // row in the store. A connection cut before its reply has no row (it
+    // never read ok). The json file is a frozen mirror under graph.db.
+    let final_ids: std::collections::BTreeSet<String> = fno_agents::graph_store::read_rows(&graph)
         .unwrap()
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_string))
@@ -996,7 +1015,7 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             ok_replies += 1;
             assert!(
                 final_ids.contains(id),
-                "commit {id} answered ok but is missing from the file"
+                "commit {id} answered ok but is missing from the store"
             );
         }
     }
@@ -1005,4 +1024,116 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
         "positive control: at least one staged commit must have answered ok, got {outcomes:?}"
     );
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
+
+#[test]
+fn ready_board_mode_orders_every_entry_with_its_facts() {
+    let home = short_home("board-mode");
+    let graph = home.join("graph.json");
+    fno_agents::graph_store::seed_rows(&graph, &[
+        json!({"id": "x-e", "slug": "x-e", "title": "epic", "status": "ready", "priority": "p1", "type": "epic"}),
+        json!({"id": "x-c1", "slug": "x-c1", "title": "child one", "status": "ready", "priority": "p2", "type": "feature", "parent": "x-e"}),
+        json!({"id": "x-c2", "slug": "x-c2", "title": "child two", "status": "done", "priority": "p2", "type": "feature", "parent": "x-e", "completed_at": "2026-09-01T00:00:00Z"}),
+        json!({"id": "x-loose", "slug": "x-loose", "title": "loose", "status": "ready", "priority": "p1", "type": "feature"}),
+        json!({"id": "x-def", "slug": "x-def", "title": "deferred", "status": "deferred", "priority": "p2", "type": "feature"}),
+    ]).unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper("board-mode", &graph, &sock);
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let result = ok_result(rpc(
+        &mut stream,
+        1,
+        "ready",
+        json!({"board": true, "claimed": []}),
+    ));
+    let ids: Vec<String> = result["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(ids.len(), 5, "every entry id, no admission: {ids:?}");
+    for id in ["x-e", "x-c1", "x-c2", "x-loose", "x-def"] {
+        assert!(ids.iter().any(|i| i == id), "{id} rides in ids: {ids:?}");
+    }
+    assert!(
+        result["underway"]
+            .as_array()
+            .expect("underway array")
+            .iter()
+            .any(|v| v == "x-e"),
+        "the epic with a done child is underway: {result}"
+    );
+    assert_eq!(
+        result["effective_priority"]["x-c1"],
+        json!("p1"),
+        "the p2 child of a p1 epic carries the epic's priority: {result}"
+    );
+
+    // The board's order restricted to selection's admitted ids equals the
+    // selection order itself - the board never invents a second order.
+    let ready = ok_result(rpc(&mut stream, 2, "ready", json!({"claimed": []})));
+    let ready_ids: Vec<String> = ready["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !ready_ids.is_empty(),
+        "positive control: selection admits some"
+    );
+    let board_order = ready_ids.iter().map(|id| {
+        ids.iter()
+            .position(|b| b == id)
+            .unwrap_or_else(|| panic!("{id} missing from board ids"))
+    });
+    let positions: Vec<usize> = board_order.collect();
+    let mut sorted = positions.clone();
+    sorted.sort();
+    assert_eq!(
+        positions, sorted,
+        "board ids order extends selection order: {positions:?}"
+    );
+    drop(keeper);
+}
+
+#[test]
+fn ready_board_mode_refuses_when_claims_are_unreadable() {
+    let home = short_home("board-claims");
+    let graph = home.join("graph.json");
+    seed_empty_store(&graph);
+    let claims_root = home.join("claims-root");
+    std::fs::create_dir_all(claims_root.join(".fno")).unwrap();
+    // A regular file where read_dir expects a directory: ENOTDIR, the
+    // unknown-claim-state the ready op fails closed on.
+    std::fs::write(claims_root.join(".fno/claims"), b"not a directory").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper_with_env(
+        "board-claims",
+        &graph,
+        &sock,
+        "FNO_CLAIMS_ROOT",
+        claims_root.to_str().unwrap(),
+    );
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let reply = rpc(&mut stream, 1, "ready", json!({"board": true}));
+    assert_eq!(reply.get("ok"), Some(&json!(false)), "refused: {reply}");
+    assert_eq!(
+        reply["error"]["kind"],
+        json!("claims_unavailable"),
+        "kind names the claims store: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("live claim state is unavailable"),
+        "the refusal names the claims store: {reply}"
+    );
+    drop(keeper);
 }

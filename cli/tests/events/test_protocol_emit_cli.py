@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 
 import pytest
+
+from fno.events.store_client import read_committed_lines
 from typer.testing import CliRunner
 
 from fno.events.cli import cli as event_cli
@@ -25,7 +27,7 @@ def _events_path(tmp_path: Path) -> Path:
 
 
 def _last_event(events: Path) -> dict:
-    lines = [ln for ln in events.read_text().splitlines() if ln.strip()]
+    lines = [ln for ln in read_committed_lines(events) if ln.strip()]
     return json.loads(lines[-1])
 
 
@@ -140,4 +142,4 @@ def test_bad_outcome_rejected_pre_lock(runner, tmp_path, monkeypatch) -> None:
         "--data", "{}",
     )
     assert result.exit_code == 1
-    assert not _events_path(tmp_path).exists()  # pre-lock reject: nothing written
+    assert not read_committed_lines(_events_path(tmp_path))  # pre-lock reject: nothing written

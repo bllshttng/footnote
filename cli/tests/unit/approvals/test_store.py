@@ -97,10 +97,9 @@ def store(tmp_path: Path, clock: list[_dt.datetime]) -> EffectStore:
 
 
 def _events(tmp_path: Path) -> list[dict]:
-    path = tmp_path / "events.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(tmp_path / "events.jsonl")
 
 
 def _approve(store: EffectStore, request: ApprovalRequest) -> str:

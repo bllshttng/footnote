@@ -146,17 +146,12 @@ _DEFAULT_ESCAPE_EXPLANATION = (
 # ---------------------------------------------------------------------------
 
 
-def _scan_jsonl_file(
+def _scan_state_file(
     path: Path,
     eval_session_ids: set[str],
     surface_key: str,
 ) -> list[Violation]:
-    """Scan a JSONL file line by line for eval session ids.
-
-    Reports the 1-based line number of the first match per (id, file).
-    Missing files are silently skipped (clean result).
-    """
-    if not path.exists():
+    if surface_key != "graph_json" and not path.exists():
         return []
 
     violations: list[Violation] = []
@@ -164,9 +159,14 @@ def _scan_jsonl_file(
     explanation = _ESCAPE_EXPLANATIONS.get(surface_key, _DEFAULT_ESCAPE_EXPLANATION)
 
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+        if surface_key == "graph_json":
+            from fno.graph.store import read_graph_strict
+
+            text = repr(read_graph_strict(path))
+        else:
+            text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return [Violation(path, sid, 1, explanation) for sid in eval_session_ids] if surface_key == "graph_json" else []
 
     for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
@@ -292,11 +292,10 @@ def check_isolation(
 
     all_violations: list[Violation] = []
 
-    # --- JSONL surfaces ---
     for key in ("ledger_json", "graph_json", "repo_events_jsonl", "global_events_jsonl"):
         path = real_state_paths.get(key)
         if path is not None:
-            all_violations.extend(_scan_jsonl_file(path, eval_session_ids, key))
+            all_violations.extend(_scan_state_file(path, eval_session_ids, key))
 
     # --- memory directory (whole-file scan per file) ---
     memory_dir = real_state_paths.get("memory_dir")
@@ -382,23 +381,30 @@ def collect_eval_session_ids(
     # ------------------------------------------------------------------ #
     events_path = workdir / ".fno" / "events.jsonl"
     if events_path.exists():
-        try:
-            for line in events_path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    event = json.loads(stripped)
-                    sid = (
-                        event.get("session_id")
-                        or event.get("data", {}).get("session_id")
-                    )
-                    if sid and isinstance(sid, str):
-                        ids.add(sid)
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-        except OSError:
-            pass
+        # The store commit is the write boundary: committed rows carry the
+        # history, raw bytes are only the pre-store fallback.
+        from fno.events.store_client import native_rows
+
+        lines = native_rows(events_path)
+        if lines is None:
+            try:
+                lines = events_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+        for line in lines:
+            stripped = line.strip() if isinstance(line, str) else ""
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+                sid = (
+                    event.get("session_id")
+                    or event.get("data", {}).get("session_id")
+                )
+                if sid and isinstance(sid, str):
+                    ids.add(sid)
+            except (json.JSONDecodeError, AttributeError):
+                continue
 
     # ------------------------------------------------------------------ #
     # 3. Transcript files under ~/.claude/projects/<encoded-workdir>/     #

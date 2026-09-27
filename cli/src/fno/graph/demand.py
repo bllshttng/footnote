@@ -36,10 +36,10 @@ def recent_encounter(entry: dict, now, within_days: int) -> bool:
 
     A vote says the node cost somebody time THEN. Unwindowed it would be a
     permanent exemption from the age drain that any agent could switch on with
-    no undo, so this reads the ``ts`` the record already carries.
+    no undo, so this reads the ``created_at`` the record already carries.
     """
     stamps = (
-        _parse_ts(r.get("ts"))
+        _parse_ts(r.get("created_at") or r.get("ts"))
         for r in (entry.get("encounters") or [])
         if isinstance(r, dict)
     )

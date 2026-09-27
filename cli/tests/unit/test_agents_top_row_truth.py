@@ -169,7 +169,7 @@ def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):
 
     monkeypatch.setattr(top, "census", lambda: _census)
     monkeypatch.setattr(top, "lane_rows", lambda: [])
-    monkeypatch.setattr(top, "tree_rss_mb", lambda pid: 297.0)
+    monkeypatch.setattr(top, "_tree_rss", lambda pids: {41468: 297})
     text = top.render_top()
     assert "REACH" in text
     assert "unknown" in text
@@ -194,7 +194,7 @@ def test_json_mirror_carries_new_fields_without_touching_old_ones(
 
     monkeypatch.setattr(top, "census", lambda: _census)
     monkeypatch.setattr(top, "lane_rows", lambda: [])
-    monkeypatch.setattr(top, "tree_rss_mb", lambda pid: 297.0)
+    monkeypatch.setattr(top, "_tree_rss", lambda pids: {41468: 297})
     payload = json.loads(top.render_top(as_json=True))
     (row,) = payload["workers"]
     assert row["reach"] == "reachable"
@@ -238,7 +238,7 @@ def test_retirable_line_renders_under_lanes_and_none_when_empty(
                 {"provider": "zai", "cap": 10, "count": 1, "holders": ["t-06f7-row"]}
             ],
         )
-        monkeypatch.setattr(top, "tree_rss_mb", lambda pid: 297.0)
+        monkeypatch.setattr(top, "_tree_rss", lambda pids: {41468: 297})
         return top.render_top()
 
     patched["answers"]["1a2b3c4d"] = _answer("1a2b3c4d", "working", 45)

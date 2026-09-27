@@ -722,21 +722,22 @@ def test_unknown_template_variable_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_graph_json_override(
+def test_graph_json_uses_state_dir_even_if_the_removed_override_is_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC1-HP: paths.graph_json explicit value overrides state_dir derivation."""
+    """The retired paths.graph_json key cannot move the store anchor."""
+    custom_dir = str(tmp_path / "state")
     custom_json = str(tmp_path / "custom" / "g.json")
     _set_settings(
         monkeypatch,
         tmp_path,
-        f"schema_version: 1\nconfig:\n  paths:\n    graph_json: '{custom_json}'\n",
+        f"schema_version: 1\nconfig:\n  state_dir: '{custom_dir}'\n  paths:\n    graph_json: '{custom_json}'\n",
     )
 
     from fno.paths import graph_json
 
     result = graph_json()
-    assert result == Path(custom_json).resolve()
+    assert result == Path(custom_dir).resolve() / "graph.json"
 
 
 def test_explicit_briefs_dir_override(
@@ -1241,3 +1242,73 @@ def test_project_template_uses_remote_slug_in_non_vault_path(
     result = plans_dir(project_root=checkout)
     assert result.name == "footnote"
     assert "athens" not in result.name
+
+
+# ---------------------------------------------------------------------------
+# x-fc25: FNO_STATE_DIR - the pinned carrier for the state root
+# ---------------------------------------------------------------------------
+
+
+def test_state_dir_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The env carrier moves the state root ahead of the config default.
+
+    seal_state_root pins this var around a forwarded HOME, so a worker on a
+    non-claude oauth_dir account resolves the same graph.json its parent did.
+    """
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import graph_json, state_dir
+
+    assert state_dir() == (tmp_path / "pinned").resolve()
+    assert graph_json() == (tmp_path / "pinned").resolve() / "graph.json"
+
+
+def test_state_dir_empty_carrier_falls_back_to_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty value counts as unset, matching the FNO_AGENTS_HOME idiom."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", "")
+
+    from fno.paths import state_dir
+
+    assert state_dir().name == ".fno"
+
+
+def test_locks_dir_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """locks_dir honors the carrier: it is config-free, so both stamp and
+    append writers still agree under it without loading settings."""
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import locks_dir
+
+    assert locks_dir() == (tmp_path / "pinned").resolve() / "locks"
+
+
+def test_locks_dir_stays_home_anchored_without_the_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No carrier means the deliberate $HOME anchor, unchanged."""
+    monkeypatch.delenv("FNO_STATE_DIR", raising=False)
+
+    from fno.paths import locks_dir
+
+    assert locks_dir() == Path.home() / ".fno" / "locks"
+
+
+def test_ledger_json_honors_fno_state_dir_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sealed worker's ledger follows the pinned root, never the raw
+    relative-config fallback that would strand it under the moved HOME."""
+    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "pinned"))
+
+    from fno.paths import ledger_json
+
+    assert ledger_json() == (tmp_path / "pinned").resolve() / "ledger.json"

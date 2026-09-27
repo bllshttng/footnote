@@ -7,35 +7,33 @@ targets) is paired with the same mutation writing graph.json, proving the
 mutator ran and chose to skip.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
-import json
 import os
 from pathlib import Path
 from typing import Generator
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
-from fno.graph.store import locked_mutate_graph, render_canonical_views
+from fno.graph.store import commit_rows_via_store, render_canonical_views
 
 # Since the store port every mutation here rides the keeper, so the module
 # needs the compiled runtime and skips whole where the smoke harness deleted
 # the worker binary (the parity-test convention).
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 pytestmark = requires_rust
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    seed_graph(path, entries)
 
 
 def _read_graph(path: Path) -> list[dict]:
-    return json.loads(path.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(path)
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -82,7 +80,6 @@ def _isolate(
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path / "repo"))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
 
-    from fno import config as config_mod
 
     import fno.graph._constants as gc
     for attr in ("GRAPH_JSON", "GRAPH_MD", "GRAPH_HTML", "GRAPH_ARCHIVE_JSON"):
@@ -111,7 +108,7 @@ def _isolate(
 
 def _mutate(graph: Path, entries: list[dict], new_title: str) -> None:
     _write_graph(graph, entries)
-    locked_mutate_graph(
+    commit_rows_via_store(
         graph,
         lambda nodes: nodes[0].__setitem__("title", new_title) or nodes,
     )
@@ -312,7 +309,6 @@ def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, cap
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
-    from fno import config as config_mod
 
     from fno.graph.roadmap_public import render_configured_targets
 
@@ -362,10 +358,10 @@ def test_target_mtime_advances_with_each_view_pass(_isolate, tmp_path, monkeypat
     )
     graph = _isolate["graph"]
     _write_graph(graph, [_entry("ab-mtime00", title="first title")])
-    locked_mutate_graph(graph, lambda nodes: nodes)
+    commit_rows_via_store(graph, lambda nodes: nodes)
     render_canonical_views()
     before = _isolate["target"].stat().st_mtime_ns
-    locked_mutate_graph(graph, lambda nodes: nodes)
+    commit_rows_via_store(graph, lambda nodes: nodes)
     render_canonical_views()
     after = _isolate["target"].stat().st_mtime_ns
     assert after > before
@@ -380,7 +376,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     )
     graph = _isolate["graph"]
     _write_graph(graph, [_entry("ab-leaky000", title="x-1234 leaks here")])
-    locked_mutate_graph(graph, lambda nodes: nodes)
+    commit_rows_via_store(graph, lambda nodes: nodes)
     render_canonical_views()
     assert not target.exists()
     # Seed the target with prior bytes, then mutate again: the refusal must
@@ -393,7 +389,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
         nodes[0]["priority"] = "p1"
         return nodes
 
-    locked_mutate_graph(graph, mutator)
+    commit_rows_via_store(graph, mutator)
     render_canonical_views()
 
     assert hashlib.sha256(target.read_bytes()).hexdigest() == digest_before
@@ -403,6 +399,35 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     # The mutation itself must not be wedged by the public refusal.
     row = _read_graph(graph)[0]
     assert row["priority"] == "p1"
+
+
+def test_leak_refusal_fires_the_render_alert(_isolate, tmp_path, monkeypatch):
+    # The push script's bare exit 1 was invisible under launchd and
+    # the live page sat stale. A refused render alerts through the same
+    # `fno inbox notify` lane the push script uses.
+    target = _isolate["target"]
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"',
+        tmp_path,
+        monkeypatch,
+    )
+    fired: list[tuple[str, str]] = []
+
+    def fake_notify(title: str, message: str, pointer: str = "") -> tuple[int, str | None]:
+        fired.append((title, message))
+        return 0, None
+
+    monkeypatch.setattr("fno.notify._impl.send_notification", fake_notify)
+
+    graph = _isolate["graph"]
+    _write_graph(graph, [_entry("ab-leakalt0", title="x-1234 leaks here")])
+    commit_rows_via_store(graph, lambda nodes: nodes)
+    render_canonical_views()
+
+    assert not target.exists(), "the target must still be refused"
+    assert fired, "a refused render must alert"
+    assert fired[0][0] == "roadmap render refused"
+    assert "node-id" in fired[0][1] and "ab-leakalt0" in fired[0][1]
 
 
 def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):
@@ -586,7 +611,7 @@ def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkey
     open_node = _entry("ab-open0000", title="clean open work")
     graph = _isolate["graph"]
     _write_graph(graph, [done, open_node])
-    locked_mutate_graph(graph, lambda nodes: nodes)
+    commit_rows_via_store(graph, lambda nodes: nodes)
     render_canonical_views()
 
     backlog_text = backlog_target.read_text(encoding="utf-8")
@@ -668,7 +693,7 @@ def test_the_canonical_board_is_current_when_the_view_pass_returns(tmp_path, mon
     )
 
     graph = tmp_path / "graph.json"
-    graph.write_text('{"entries": []}')
+    seed_graph(graph, '{"entries": []}')
     monkeypatch.setattr(gc, "GRAPH_JSON", graph)
 
     def _add(entries):
@@ -685,7 +710,7 @@ def test_the_canonical_board_is_current_when_the_view_pass_returns(tmp_path, mon
         )
         return entries
 
-    store.locked_mutate_graph(graph, _add)
+    store.commit_rows_via_store(graph, _add)
     store.render_canonical_views()
 
     assert board.exists(), "the canonical board was not rendered for the write"

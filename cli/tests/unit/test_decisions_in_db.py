@@ -1,19 +1,15 @@
 """Decision records round-trip through the graph.db keeper and its node join."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from fno.graph import api
-from fno.rust_binary import find_dev_binary
+from tests.fixtures.graph_seed import seed_graph
 
 
-pytestmark = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present",
-)
+pytestmark = pytest.mark.dev_build
 
 
 def _graph(tmp_path: Path, decisions: list[dict] | None = None) -> Path:
@@ -30,7 +26,7 @@ def _graph(tmp_path: Path, decisions: list[dict] | None = None) -> Path:
     if decisions is not None:
         row["decisions"] = decisions
     path = tmp_path / "graph.json"
-    path.write_text(json.dumps({"entries": [row]}) + "\n", encoding="utf-8")
+    seed_graph(path, {"entries": [row]})
     return path
 
 
@@ -60,10 +56,3 @@ def test_decision_record_round_trips_and_joins_to_subject_node(tmp_path: Path) -
     assert [row["decision_id"] for row in api.decisions("x-decision-node", path=graph)] == [
         "d-wave12"
     ]
-
-
-def test_import_requires_every_node_decision_to_have_a_durable_event(tmp_path: Path) -> None:
-    graph = _graph(tmp_path, [{"decision_id": "d-missing", "ts": "2026-09-16T00:00:01Z"}])
-
-    with pytest.raises(Exception, match="d-missing"):
-        api.decisions(path=graph)

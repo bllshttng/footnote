@@ -23,14 +23,18 @@ fi
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fm.XXXXXX")"
 MUX_DIR="$TMP_DIR/mux"
 CARGO_HOME_TEST="$TMP_DIR/cargo"
-mkdir -p "$MUX_DIR" "$CARGO_HOME_TEST/bin"
+AGENTS_HOME="$TMP_DIR/agents-home"
+mkdir -p "$MUX_DIR" "$CARGO_HOME_TEST/bin" "$AGENTS_HOME"
 ln -s "$MUX_BIN" "$CARGO_HOME_TEST/bin/fno"
-ln -s /usr/bin/true "$CARGO_HOME_TEST/bin/fno-agents"
+# The restart verb itself is the Rust binary now, so the journey needs the
+# REAL one; the daemon leg stays isolated by the private agents home below.
+ln -s "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents" "$CARGO_HOME_TEST/bin/fno-agents"
 
 export FNO_MUX_DIR="$MUX_DIR"
 export FNO_BIN="$MUX_BIN"
 export CARGO_HOME="$CARGO_HOME_TEST"
-export FNO_AGENTS_BIN="/usr/bin/true"
+export FNO_AGENTS_HOME="$AGENTS_HOME"
+export FNO_AGENTS_DAEMON_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-daemon"
 export PATH="$CARGO_HOME_TEST/bin:$PATH"
 SESSION="f2ae-$$"
 export SESSION
@@ -42,7 +46,21 @@ cleanup() {
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
-    rm -rf "$TMP_DIR"
+    # The restart's daemon leg lazy-starts a daemon in the private home:
+    # end it and HOLD for its exit, because its last writes (and its
+    # children's) race the sweep below and turn rm -rf into
+    # "Directory not empty".
+    if [[ -f "$AGENTS_HOME/supervisor.sock.lock" ]]; then
+        DPID="$(head -1 "$AGENTS_HOME/supervisor.sock.lock" | awk '{print $1}')"
+        if [[ -n "$DPID" ]] && kill -0 "$DPID" 2>/dev/null; then
+            kill -9 "$DPID" 2>/dev/null || true
+            for _ in {1..100}; do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 0.05
+            done
+        fi
+    fi
+    rm -rf "$TMP_DIR" 2>/dev/null || { sleep 0.5; rm -rf "$TMP_DIR"; }
 }
 trap cleanup EXIT
 

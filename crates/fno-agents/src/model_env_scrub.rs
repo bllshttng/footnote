@@ -183,6 +183,24 @@ pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
         if !claimed.is_empty() {
             eprintln!("{}", unrouted_model_clear_notice(&claimed));
         }
+        // The provider stamp follows the same set-or-clear rule: an unrouted
+        // child must not read the launching shell's stamp as its own route
+        // (review_level and review_capability trust it as written). It gets
+        // its own notice, because the model notice's "comes from its --model
+        // flag" sentence is false for a provider stamp. A routed child keeps
+        // the stamp its overlay sets, as with the model vars.
+        let stamped = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if stamped {
+            cmd.env_remove(crate::codex_route::ROUTE_PROVIDER_ENV);
+            eprintln!(
+                "fno: cleared {} from this child's env: the provider stamp names \
+                 the route that launched the PARENT, and no overlay here routes \
+                 this child, so the child would report a provider it is not on.",
+                crate::codex_route::ROUTE_PROVIDER_ENV
+            );
+        }
     }
     if !dropped.is_empty() {
         let names = dropped
@@ -494,5 +512,83 @@ mod tests {
         ]);
         assert!(!base_url_is_anthropic(&get));
         assert!(incoherent_model_env(&get).is_empty());
+    }
+
+    #[test]
+    fn an_unrouted_child_never_inherits_the_route_stamp() {
+        // AC7-HP: ambient stamp, no route in the overlay. The stamp joins the
+        // unrouted clear (set-or-clear, never inherit) and rides the notice.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV).ok();
+        std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, "zai");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(&mut cmd, &[]);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        match prior {
+            Some(v) => std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, v),
+            None => std::env::remove_var(crate::codex_route::ROUTE_PROVIDER_ENV),
+        }
+        assert!(
+            removed.contains(&crate::codex_route::ROUTE_PROVIDER_ENV.to_string()),
+            "route stamp must be held off an unrouted child, got removals {removed:?}"
+        );
+    }
+
+    #[test]
+    fn a_routed_overlay_owns_the_route_stamp() {
+        // AC8-EDGE: the overlay carries a model var, so it is a route and
+        // owns the slot; the stamp survives untouched.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV).ok();
+        std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, "zai");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(&mut cmd, &[("ANTHROPIC_MODEL", "glm-5.3")]);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        match prior {
+            Some(v) => std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, v),
+            None => std::env::remove_var(crate::codex_route::ROUTE_PROVIDER_ENV),
+        }
+        assert!(
+            !removed.contains(&crate::codex_route::ROUTE_PROVIDER_ENV.to_string()),
+            "a routed overlay must own the stamp, got removals {removed:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_stamp_is_no_stamp() {
+        // The unrouted clear keys on a non-blank stamp; an inherited empty
+        // value is no claim and nothing is removed for it.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV).ok();
+        std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, "  ");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(&mut cmd, &[]);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        match prior {
+            Some(v) => std::env::set_var(crate::codex_route::ROUTE_PROVIDER_ENV, v),
+            None => std::env::remove_var(crate::codex_route::ROUTE_PROVIDER_ENV),
+        }
+        assert!(
+            !removed.contains(&crate::codex_route::ROUTE_PROVIDER_ENV.to_string()),
+            "a blank stamp is no claim, got removals {removed:?}"
+        );
     }
 }

@@ -12,12 +12,19 @@ echo path, which produce exactly the bytes the ``fno agents <verb>`` Python
 command writes (the Typer wrapper only does ``sys.stdout.write(result.output)``).
 The Rust side is the compiled ``fno-agents`` client driven with ``FNO_AGENTS_HOME``
 pointed at the fixture. Skipped when the Rust binary is absent (sdist test env).
+
+One declared exception: a resume form that owns a ``pre_exec`` (codex's, the
+shared-daemon start) is composed into the exec chain by Rust alone - the
+Python fallback door renders the identity tokens only, with no daemon
+lifecycle of its own. Those rows compare argv via ``_resume_argv_tokens``
+rather than raw bytes.
 """
 from __future__ import annotations
 
 import functools
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +34,28 @@ from types import SimpleNamespace
 import pytest
 
 from fno.rust_binary import find_dev_binary
+
+
+def _resume_argv_tokens(snippet: str) -> tuple[str, list[str]]:
+    """Parse a ``--print-command`` snippet into its cwd and its innermost argv.
+
+    Rust may compose a declared ``pre_exec`` into
+    ``sh -c '<pre_exec>; exec <argv>'`` and prefixes the command with ``env``
+    bindings for launch identity and route context. Those wrappers are launch
+    context, not provider argv; this recovers the argv both doors agree on.
+    """
+    outer = shlex.split(snippet)
+    assert outer[0] == "cd" and outer[2] == "&&" and outer[3] == "exec"
+    cwd = outer[1]
+    rest = outer[4:]
+    if rest[:2] == ["sh", "-c"]:
+        _, _, tail = rest[2].partition("; exec ")
+        rest = shlex.split(tail)
+    if rest[:1] == ["env"]:
+        rest = rest[1:]
+        while rest and "=" in rest[0]:
+            rest = rest[1:]
+    return cwd, rest
 
 
 @pytest.fixture(autouse=True)
@@ -325,8 +354,13 @@ def test_resume_print_command_parity(tmp_path) -> None:
 
     py = resume_cli.resume_logic(name="cx", print_command=True, registry_loader=loader)
     rust = _run_rust(["resume", "cx", "--print-command"], agents)
-    assert rust.stdout == py.output
     assert rust.returncode == py.exit_code
+    # codex's resume form declares a pre_exec; only Rust composes it (see
+    # _resume_argv_tokens), so compare the argv both doors agree on.
+    py_cwd, py_argv = _resume_argv_tokens(py.output)
+    rust_cwd, rust_argv = _resume_argv_tokens(rust.stdout)
+    assert rust_cwd == py_cwd
+    assert rust_argv == py_argv
 
 
 @requires_rust
@@ -420,7 +454,12 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
         py = resume_cli.resume_logic(
             name=token, print_command=True, registry_loader=loader
         )
-        assert rust.stdout == py.output, f"rust/py parity for token {token}"
+        # codex's resume form declares a pre_exec; only Rust composes it
+        # (see _resume_argv_tokens), so compare the argv both agree on.
+        py_cwd, py_argv = _resume_argv_tokens(py.output)
+        rust_cwd, rust_argv = _resume_argv_tokens(rust.stdout)
+        assert rust_cwd == py_cwd, f"rust/py cwd parity for token {token}"
+        assert rust_argv == py_argv, f"rust/py argv parity for token {token}"
 
 
 @requires_rust
@@ -771,12 +810,18 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # proving the Rust reader found the agent under the real "agents" key.
     rust = _run_rust(["resume", "cx", "--print-command"], agents)
     assert rust.returncode == 0, rust.stderr
-    assert rust.stdout.startswith("cd /tmp/proj && exec codex ")
-    assert "writable_roots=" in rust.stdout
+    # The resume form's declared pre_exec (the shared-daemon ownership
+    # assertion) composes ahead of the resume exec, so the snippet is a
+    # quoted `sh -c` script rather than a bare `codex` invocation.
+    assert rust.stdout.startswith("cd /tmp/proj && exec sh -c ")
+    # codex 0.156.1 refuses the writable_roots override on the declared
+    # form's --remote lane, so the grant is absent from the snippet.
+    assert "writable_roots=" not in rust.stdout
+    assert "app-server" in rust.stdout and "daemon" in rust.stdout
     # The Rust reader resolved the agent and rendered ITS session id, and the
-    # id is the LAST token: codex's globals (-c, --cd) all sit before the
-    # subcommand, so nothing trails the positional.
-    assert rust.stdout.strip().endswith(" resume uuid-9")
+    # daemon-attach flag trails it: codex's globals (-c, --cd) sit before the
+    # subcommand, nothing trails the positional except --remote unix://.
+    assert rust.stdout.strip().endswith("'\"'\"'unix://'\"'\"''")
     # attach found the agent: a codex row with no thread shape reads the
     # native features.attach claim and names the daemon-kept lane (exit 24),
     # never "not found" (exit 2).

@@ -138,6 +138,49 @@ done < <(
         || true
 )
 
+# Rule 5: stdlib-jsonl-append
+# The store is the write boundary in every language. A stdlib append that
+# NAMES an events journal is a second authoritative writer even when it
+# hides behind a helper: Python `open(..., "a")` and Rust
+# `OpenOptions::new().append(true)` over an events.jsonl path are both
+# refused. `hook-events.jsonl` stays allowlisted: it is the pre-runtime
+# diagnostic a hook writes before the native binary can answer, and no
+# runtime gate or reader ever consumes it.
+while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    echo "stdlib events append at $hit: production code must not open an event journal for append" >&2
+    remediation "commit through the native store (fno.events.append_event / EventEmitter / _append_bounded_event) instead"
+    violations=$((violations + 1))
+done < <(
+    grep -rEn 'open\([^)]*events\.jsonl[^)]*"[aA]"|OpenOptions::new\(\)[^;]*events\.jsonl|\.append\(true\)[^;]*events\.jsonl|events\.jsonl[^;]*\.append\(true\)' \
+        --include='*.py' --include='*.rs' \
+        cli/src crates hooks scripts 2>/dev/null \
+        | grep -v '/tests/' \
+        | grep -v 'test' \
+        | grep -v 'scripts/lint/events-discipline.sh' \
+        | grep -v 'hook-events\.jsonl' \
+        || true
+)
+
+# Rule 6: jsonl-rotation
+# Rotation was the JSONL-era size guard: the store keeps full history in
+# bounded rows, so renaming a live journal aside can only orphan rows a
+# reader needs.
+while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    echo "events rotation at $hit: renaming an events journal aside is retired" >&2
+    remediation "let the store hold the history; delete the rotation branch"
+    violations=$((violations + 1))
+done < <(
+    grep -rEn '(mv|rename)[^|;]*events\.jsonl[^|;]*\.1|events\.jsonl[^|;]*(mv|rename)[^|;]*\.1' \
+        --include='*.sh' --include='*.py' --include='*.rs' \
+        cli/src crates hooks scripts skills 2>/dev/null \
+        | grep -v '/tests/' \
+        | grep -v 'scripts/lint/events-discipline.sh' \
+        | grep -v 'events-discipline:allow' \
+        || true
+)
+
 # The debt outside the gate lane, same pattern: real hand-built sites (hooks
 # today) that stay legal until their own lane sweeps them.
 remaining_hand_built=$(

@@ -63,12 +63,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # state `done` does and is corrected by the same verb.
     Pair("backlog", "reconcile", "reopen"),
     Pair("backlog", "archive", "unarchive"),
-    Pair(
-        "backlog",
-        "decide-retract",
-        None,
-        "retractions are append-only and have no inverse",
-    ),
     # An edit path would make the record deniable, which is the property the
     # demand signal exists to prevent. A later correction is a progress note.
     Pair(
@@ -83,14 +77,18 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     Pair("backlog", "new", "remove"),
     Pair("backlog", "intake", "remove"),
     # -- self-inverse: the same verb reverses itself --
-    Pair("backlog", "rank", "rank"),
-    Pair("backlog", "update", "update"),
-    # requeue releases a dead worker's wedge (open do row + claim); update
-    # --locked-by re-locks the node, returning it to in_progress.
-    Pair("backlog", "requeue", "update"),
-    # contain stamps contained_in + parent; its correction is update's
-    # --parent null flag, which the contain epilog names verbatim.
-    Pair("backlog", "contain", "update"),
+    # requeue releases a dead worker's wedge (open do row + claim) and its
+    # wedge refusal names requeue itself as the settling call.
+    Pair("backlog", "requeue", "requeue"),
+    # contain stamps contained_in + parent; its correction names the native
+    # update verb (`fno backlog update <id> --parent null`), which the python
+    # app no longer serves.
+    Pair(
+        "backlog",
+        "contain",
+        None,
+        "a verb the native binary serves after the python update leg retired",
+    ),
     # -- corrections whose forward transition is not a verb in this app --
     Pair(
         "backlog",
@@ -109,18 +107,18 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
 # accept that it lands in the derived non-transition set.
 KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
-        "add", "advance", "album", "annotate", "archive", "archive-dedupe-ids",
+        "add", "advance", "album", "annotate", "archive",
         "bases", "backfill-deferred-kind", "batch", "board", "capture", "carveout",
         "collisions", "contain", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
-        "demand", "dispatch-lanes", "discover", "done", "encounter", "epic", "find", "get", "groom",
+        "demand", "dispatch-lanes", "discover", "done", "encounter", "epic", "get", "groom",
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
-        "next", "note", "notes", "pick", "project-root", "provenance", "queue", "queued",
-        "rank", "ready", "reconcile", "reconcile-findings", "requeue", "retro",
+        "next", "note", "pick", "project-root", "provenance", "queue", "queued",
+        "ready", "reconcile", "reconcile-findings", "requeue", "retro",
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "retract", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
-        "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
+        "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede",
         "version", "view", "worked",
     }),
     "carveout": frozenset({"add", "list", "resolve", "update"}),

@@ -8,6 +8,8 @@ fn agent_hit_resolves_pane_then_attach_then_notice() {
     // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
     // agent to the SAME ChromeHit. pane > attach > notice.
     let hosted = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -37,9 +39,11 @@ fn agent_hit_resolves_pane_then_attach_then_notice() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,
@@ -161,6 +165,8 @@ fn agent_hit_resumes_a_resumable_paneless_row() {
     // still wins while a claude bg row is live and carries a jobId;
     // resumable takes the dead-and-nameless cases the notice used to eat.
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -190,9 +196,11 @@ fn agent_hit_resumes_a_resumable_paneless_row() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: true,
@@ -237,6 +245,8 @@ fn agent_hit_watch_only_reaches_the_thread_pane() {
     // placement gestures (picker `p`, menu splits, open-here, drag) still
     // pin a persisted pane when the operator wants one.
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -266,9 +276,11 @@ fn agent_hit_watch_only_reaches_the_thread_pane() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
+        crown_name: None,
         basis: None,
         last_activity_age_s: None,
         resumable: false,

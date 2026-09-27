@@ -4,6 +4,7 @@ Covers AC1 (auto-link + receipt), AC2 (suggest below the bar), the orphan line,
 and AC4 (a rollup failure never breaks intake).
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -45,7 +46,7 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     g = tmp_path / "graph.json"
 
     def _write(entries: list[dict]) -> Path:
-        g.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        seed_graph(g, json.dumps({"entries": entries}))
         _route_graph(g, tmp_path, monkeypatch)
         return g
 
@@ -53,7 +54,11 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _nodes(g: Path) -> list[dict]:
-    return json.loads(g.read_text(encoding="utf-8"))["entries"]
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _created(g: Path, title: str) -> dict:
@@ -72,6 +77,33 @@ def test_auto_link_sets_parent_and_prints_receipt(graph):
     assert "rollup: auto-linked" in res.stderr
     assert "x-mux0001" in res.stderr
     assert "--parent null" in res.stderr
+
+
+def test_auto_link_survives_a_related_edge_on_the_same_create(graph):
+    """x-129e (second site): set_related() rebinds `entries` under the create
+    mutator too, so the rollup block below it must keep writing `parent` onto
+    the LIVE node, not a copy orphaned by that rebind.
+    """
+    g = graph([
+        _epic("x-mux0001", "mux pane layout polish"),
+        {
+            "id": "x-peer0001", "parent": None, "title": "unrelated peer",
+            "type": "feature", "project": "fno", "cwd": "/tmp/proj",
+            "priority": "p2", "domain": "code", "blocked_by": [],
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+    ])
+    title = "mux pane layout polish resize"
+
+    res = _invoke(
+        "backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low",
+        "--separate", "--related", "x-peer0001",
+    )
+
+    assert res.exit_code == 0, res.stderr
+    created = _created(g, title)
+    assert created["parent"] == "x-mux0001"
+    assert created["related"] == ["x-peer0001"]
 
 
 def test_suggest_below_the_bar_writes_no_parent(graph):
@@ -126,6 +158,27 @@ def test_explicit_parent_is_never_second_guessed(graph):
 
     assert _created(g, title)["parent"] == "x-oth00002"
     assert "rollup:" not in res.stderr
+
+
+def test_filing_under_a_closed_parent_refuses_instead_of_dropping(graph):
+    """x-1c7f: a closed parent cannot hold a live child. The strand healers
+    (the reconcile re-parent sweep, the close-guard release) clear that edge
+    after birth, so exiting 0 with the flag would drop it on the floor. The
+    birth path refuses naming why instead."""
+    done = _epic("x-done0001", "shipped mux epic")
+    done["status"] = "done"
+    g = graph([done, _epic("x-mux0001", "mux pane layout polish")])
+    title = "mux pane layout polish resize"
+
+    res = _invoke(
+        "backlog", "idea", title, "--cwd", "/tmp/proj", "--parent", "x-done0001", "--difficulty", "low", "--separate"
+    )
+
+    assert res.exit_code == 1
+    assert "x-done0001" in res.stderr
+    assert "done" in res.stderr
+    assert "reconcile" in res.stderr
+    assert all(e.get("title") != title for e in _nodes(g))
 
 
 def test_bug_type_is_exempt_from_the_ladder(graph):

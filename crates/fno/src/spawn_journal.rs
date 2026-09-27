@@ -103,16 +103,22 @@ impl DetachedPane {
                 .is_none_or(|id| agent_harness_session_id(agent) == Some(id))
     }
 
+    /// The join a detach-time snapshot keeps against its stored member. The
+    /// snapshot's identity narrows the member, never the reverse: the member's
+    /// harness facts are backfilled from the registry AFTER the pane was
+    /// spawned (a detach inside that first tick captures no identity), so a
+    /// snapshot captured identity-less must still join the member it was
+    /// created from once the enrichment lands.
     pub(crate) fn matches_member(&self, member: &crate::squad_store::StoredMember) -> bool {
         member.worker.as_deref() == Some(self.name.as_str())
-            && member
+            && self
                 .harness
                 .as_deref()
-                .is_none_or(|h| self.harness.as_deref() == Some(h))
-            && member
+                .is_none_or(|h| member.harness.as_deref() == Some(h))
+            && self
                 .harness_session_id
                 .as_deref()
-                .is_none_or(|id| self.harness_session_id.as_deref() == Some(id))
+                .is_none_or(|id| member.harness_session_id.as_deref() == Some(id))
     }
 }
 
@@ -126,10 +132,6 @@ pub(crate) struct ReentryVerdict {
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<String>,
     pub(crate) config_dir: Option<std::path::PathBuf>,
-    /// The resolver's mechanism word ("attach" | "respawn" | "resume" |
-    /// "bg-resume"). A pane consumer refuses "bg-resume": the launcher
-    /// backgrounds and exits at once, so the pane would host nothing.
-    pub(crate) mechanism: Option<String>,
 }
 
 impl ReentryVerdict {
@@ -174,16 +176,10 @@ impl ReentryVerdict {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        let mechanism = value
-            .get("mechanism")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
         Ok(Self {
             argv,
             env,
             config_dir,
-            mechanism,
         })
     }
 
@@ -615,12 +611,21 @@ fn segment_stamps(live: &std::path::Path) -> Vec<(std::path::PathBuf, std::time:
         .collect()
 }
 
-/// The journal's retained segments plus the live file, concatenated
+/// The journal's durable rows: store history oldest first when a store
+/// exists (the live file reads verbatim there, so an unterminated tail
+/// survives), else the retained segments plus the live file concatenated
 /// OLDEST FIRST and newline-terminated per segment, with the first read
 /// error. Shared with the mux CLI's prune evidence (`member_evidence`), so
 /// the sweep modal and the CLI apply read the same durable rows the server
 /// sweep reads - one reader shape, never two.
 pub(crate) fn read_journal_text_at(live: &std::path::Path) -> (String, Option<String>) {
+    let store = crate::event_store::store_path(&crate::event_store::live_journal(live));
+    if store.is_file() {
+        // The reader never syncs, so a read never writes: rows the writers
+        // committed come back in commit order, filtered to the types this
+        // journal parses, and the live file still answers verbatim.
+        return (crate::event_store::journal_text(live, &HANDLED_TYPES), None);
+    }
     let dir = live.parent().map(std::path::Path::to_path_buf);
     let mut paths = dir
         .map(|dir| spawn_receipt_segments(&dir, "events.jsonl"))
@@ -834,7 +839,9 @@ mod tests {
             .open(&live)
             .unwrap();
         f.write_all(b"\n{\"type\":\"control_plane_tick\"}").unwrap();
-        std::fs::rename(&live, s.segment("events.jsonl.1")).unwrap();
+        // events-discipline:allow: a fixture must build the legacy layout
+        // the generation importer exists to read.
+        std::fs::rename(&live, s.segment("events.jsonl.1")).unwrap(); // events-discipline:allow
         std::fs::write(
             &live,
             concat!(

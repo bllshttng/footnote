@@ -44,7 +44,7 @@ GRAPH_JSON="$HOME/.fno/graph.json"
 export FNO_REPO_ROOT="$TMP/repo"
 mkdir -p "$FNO_REPO_ROOT/.fno"
 cd "$TMP" || exit 1
-echo '{"entries": []}' > "$GRAPH_JSON"
+printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
 
 PASS=0
 FAIL=0
@@ -93,9 +93,10 @@ verb_in_help() {
 
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
-# the advertised menu instead.
+# the advertised menu instead. `find` retired from the python surface; the
+# store serves it natively.
 out=$(run_fno backlog --help 2>&1)
-for verb in add done next find triage; do
+for verb in add done next get triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else
@@ -167,17 +168,27 @@ else
 fi
 
 # --- Scenario 5: backlog done marks node complete ---------------------------
-# Extract the last adopted ID from graph.json (one of the two we just added)
-node_id=$(python3 -c "
-import json, sys
-data = json.load(open('$GRAPH_JSON'))
-entries = data.get('entries', [])
-print(entries[-1]['id'] if entries else '')
-")
+# The id comes from the intake receipt. The store owns the rows, and an
+# installed `fno` is no Python interpreter to read them with.
+node_id=$(printf '%s\n' "$intake_out" | sed -n 's/.*intake \(ab-[0-9a-z]*\).*/\1/p' | head -1)
 
 if [[ -z "$node_id" ]]; then
     fail "no node ID available for done test"
 else
+    # The close-evidence guard refuses a bare `done` on a node carrying no
+    # record of why, and the typer surface retired `update --completion-note`
+    # (the leaf the guard's own remedy names). Stamp the note through the
+    # native binary, the same door test_defer.py drives, resolved by the same
+    # finder the store's worker spawn uses.
+    native_fno=$(uv run --project "$REPO_ROOT/cli" python -c "from fno.rust_binary import resolve_binary; b = resolve_binary(); print(b if b else '')")
+    if [[ -z "$native_fno" ]]; then
+        fail "no fno-agents binary: cannot stamp the completion record done requires"
+    fi
+    stamp_rc=0
+    "$native_fno" backlog update "$node_id" --completion-note "smoke alias fixture" > /dev/null 2>&1 || stamp_rc=$?
+    if [[ "$stamp_rc" -ne 0 ]]; then
+        fail "native update could not stamp the completion record (rc=$stamp_rc)"
+    fi
     done_out=$(run_fno backlog done "$node_id" 2>&1)
     if [[ "$done_out" == *"Marked $node_id done"* ]]; then
         pass "done marks node complete"
@@ -185,16 +196,8 @@ else
         fail "done did not report completion: $done_out"
     fi
 
-    # Verify completed_at is set in the json
-    has_completed=$(python3 -c "
-import json
-data = json.load(open('$GRAPH_JSON'))
-for e in data.get('entries', []):
-    if e.get('id') == '$node_id':
-        print('yes' if e.get('completed_at') else 'no')
-        break
-")
-    if [[ "$has_completed" == "yes" ]]; then
+    # Verify completed_at landed on the store row
+    if run_fno backlog get "$node_id" 2>/dev/null | grep -q '"completed_at": "'; then
         pass "done sets completed_at timestamp"
     else
         fail "done did not set completed_at on the node"

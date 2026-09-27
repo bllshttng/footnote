@@ -1,6 +1,6 @@
-# Vocabulary: user, superuser, and the reserved token operator
+# Vocabulary: user, superuser, the reserved token `operator`, and workspace
 
-This document states what the words mean in this repo, where each sense lives, and which senses stay spelled `operator` forever. The authority an agent can never synthesize is called **superuser** (law d-cfc62071, operator's ruling of 2026-09-14). It was formerly spelled `operator authority`.
+This document states what the words mean in this repo, where each sense lives, and which senses stay spelled `operator` forever. The authority an agent can never synthesize is called **superuser** (law d-cfc62071, `operator`'s ruling of 2026-09-14). It was formerly spelled `operator authority`.
 
 ## Is this page for you?
 
@@ -14,13 +14,13 @@ The words carry different meanings, and the difference is load-bearing. This pag
 
 **Superuser** is the authority an agent can never synthesize for itself. Every live string, gate, doc and skill spells it superuser. `--authority operator` stays the wire value that opens the superuser lane.
 
-**Operator** is a reserved token. It is never the word for the authority, and it is never the address. The senses it still names are in the table below.
+**`operator`** is a reserved token. It is never the word for the authority, and it is never the address. The senses it still names are in the table below.
 
 ## Why user and superuser must stay separate
 
 The AGENTS.md pitfall needs both words to say what it says. It reads: "`fno agents mail send` injects as user-shaped text, indistinguishable from superuser typing." A flat rename collapses the human being addressed into the authority being claimed. The sentence that warns about confusing them then stops warning about anything.
 
-## The senses of "operator"
+## The senses of `operator`
 
 Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the authority rename: 43 hits for the two patterns outside tests. Every one is either renamed to superuser or a retired form listed below. A future sweep starts here, not at sed.
 
@@ -31,22 +31,37 @@ Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the au
 | Wire value | the origin string in ledgers and envelopes: 80 sites in `cli/src` and `crates/*/src`, plus the env pins `FNO_OPERATOR_SESSION_ID`, `FNO_OPERATOR_HARNESS`, `FNO_OPERATOR_TRANSCRIPT`, `FNO_OPERATOR_CAPTURE_DIR`, and the `--authority operator` value | No. A data migration with no gain the human can see. |
 | Persisted graph data | `source_kind: operator_request`: 12 source files plus live rows in `graph.json` | No. Stored values; the display layer can relabel without touching them. |
 | Shipped config keys | `routing.operator_access` and `routing.operator_view`, written in `crates/fno-agents/src/route_slot.rs` | No. They are already in users' config.toml files. |
-| Shell homonym | `hooks/king-delegation-guard.sh`, where operator means a redirect operator, not a person | No. Nothing to rename. |
+| Shell homonym | `hooks/king-delegation-guard.sh`, where the shell uses `operator` for redirection, not a person | No. Nothing to rename. |
 
 ## Judged keep-list: authority-adjacent phrasings that stay
 
-Each phrasing below was weighed against the table during the authority rename and keeps the word operator on purpose.
+Each phrasing below was weighed against the table during the authority rename and keeps the word `operator` on purpose.
 
 - **operator ruling** - a dated decision citation ("operator ruling 2026-08-13"). It records who ruled. It is history, not a live gate. New rulings say superuser in their prose.
 - **operator override** - config precedence the human set (`EVENTS_SCHEMA_PATH`, `FNO_AGENTS_BIN`). It names a setting, not the authority a gate checks.
-- **queue lanes** - the king board's operator-request lane, the `fno inbox user` queue's internal "operator lane" file name, and the origin-keyed voter lane. They hang off the wire value and the stored rows.
-- **operator typing** for pane provenance - keystroke provenance in `mux_cli.rs`, not the mail-probe warning. The mail-probe pitfall family says superuser typing.
-- **the OPERATOR as the addressed boss** in king skills - the address sense. A separate vocabulary decision from this one.
+- **queue lanes** - the king board's `operator-request` lane, the `fno inbox user` queue's internal `operator lane` file name, and the origin-keyed voter lane. They hang off the wire value and the stored rows.
+- **`operator` typing** for pane provenance - keystroke provenance in `mux_cli.rs`, not the mail-probe warning. The mail-probe pitfall family says superuser typing.
 
 ## A deliberate omission
 
 `crates/fno-agents/src/finalize.rs` keeps its generic human-facing string. A Rust copy of `display_name()` is a second implementation of one behavior. A parity harness forcing the two to agree costs more than the string staying generic.
 
+## Workspace, squad, project, project group
+
+The user said it on 2026-09-27: "i think of workspaces as an object that houses threads. and each thread can have different cwds (not just worktrees)." One word had drifted into three meanings: this mux grouping, the config project group, and `project.id`'s git resolution. The senses below settle them. axis-vocabulary.md's one-line ruling ("Workspace and squad are one object under two names") lives here now.
+
+| Sense | Where | Renamed? |
+|---|---|---|
+| Workspace | the mux object that houses threads: the `Squad` type in `crates/fno/src/squad.rs`. It has an id, an optional name, zero or more cwds (`origins`), and member threads. The one user-facing word. | Yes. Every string a person reads says workspace; the ruling at `mux_cli.rs` keeps code names until a real `PROTO_VERSION` bump. |
+| Squad | the code name for the same object: the Rust type, the `squads.json` store, the wire keys `squad`, `squad_id` and `squads`, the kv receipt keys `squad=`, the hidden `--squad` alias, and the tombstoned `fno mux squad` verb. | No. Code and wire names survive; prose and person-read strings do not. |
+| Membership | the one resolver in `crates/fno/src/server/thread_workspace.rs`: the recorded member answers first, then the spawner's workspace (the `spawned_by_session` edge), then the project default. A thread's cwd is its own property and decides membership only on the last rung. | New rule, no rename. |
+| Project | one repo, named by `project.id` through git. It is the default workspace for a thread nobody placed. | No. |
+| Project group | the config key `work.workspaces.<name>.projects[]` and the `mux.board_scope = workspace:<name>` value. Called a project group in prose. | No. The key keeps its spelling and its data: it is already in users' config.toml, the same call this page makes for `routing.operator_*`. Migration: none. |
+| `fno agents workspace` | the worktree-lifecycle verb group, unrelated to the mux object. `.claude/rules/worktrees.md` names it. | No. |
+| Squad (company topology) | `direct, loop, squad, pipeline` in `cli/src/fno/company/topology.py`: a group of workers as an org shape. | Homonym, like the shell `operator`. Out of scope. |
+
 ## Before you run sed
+
+The address sense in skill prose is `user`. `scripts/ci/check-operator-address.sh` prevents drift.
 
 Read the tables first. Every row except the authority sense, which is done, is out of scope by decision, not by oversight. A rename of the address sense goes through `cli/src/fno/user.py` (`UserBlock`, `display_name()`), the three address strings that import it, and the `fno inbox user` verb. It does not touch the reserved senses, the wire values, the graph rows, the shipped config keys, or the shell homonym.

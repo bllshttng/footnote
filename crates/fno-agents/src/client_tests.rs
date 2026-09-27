@@ -1206,6 +1206,34 @@ fn global_register_boolean_shorts_parse() {
     assert_eq!(force_params["force"], true);
 }
 
+/// The lifecycle verbs' store heal resolves through the project-confinement
+/// refusal that prescribes `--cross-project`, so `fno agents rm|stop <id>
+/// --cross-project` must PARSE (the old surface died with "unknown flag:
+/// --cross-project" before any resolution ran). The flag rides to the daemon
+/// as `cross_project`, where entry_for_lifecycle hands it to the scoped
+/// resolver; verbs that take no such flag keep refusing it.
+#[test]
+fn rm_accepts_cross_project_as_prescribed() {
+    let (method, params) = build_request(
+        "rm",
+        &["myagent".to_string(), "--cross-project".to_string()],
+    )
+    .expect("the refusal-prescribed --cross-project must parse on rm");
+    assert_eq!(method, "agent.rm");
+    assert_eq!(params["cross_project"], true);
+    let (_, plain) = build_request("rm", &["myagent".to_string()]).expect("plain rm must parse");
+    assert!(plain.get("cross_project").is_none());
+    let (stop_method, stop_params) = build_request(
+        "stop",
+        &["myagent".to_string(), "--cross-project".to_string()],
+    )
+    .expect("the refusal-prescribed --cross-project must parse on stop");
+    assert_eq!(stop_method, "agent.stop");
+    assert_eq!(stop_params["cross_project"], true);
+    let err = build_request("list", &["--cross-project".to_string()]).unwrap_err();
+    assert!(err.contains("unknown flag: --cross-project"), "got: {err}");
+}
+
 /// x-c5cc: the spawn-gate flags parse on the spawn verb (--force already
 /// shared with stop/rm; --no-wait is gate-only).
 #[test]
@@ -1575,6 +1603,32 @@ fn spawn_explicit_substrate_wins_over_once_alias() {
     ];
     let (_m, params) = build_request("spawn", &args).unwrap();
     assert_eq!(params["substrate"], "thread");
+}
+
+#[test]
+fn resume_conversion_flags_reach_parse_conversion_args() {
+    // --dry-run/--allow-new-id are parsed by the resume arm's re-parse of
+    // `rest`, so the generic loop must swallow them, not refuse.
+    let args = vec![
+        "convert-proof".to_string(),
+        "--substrate".to_string(),
+        "thread".to_string(),
+        "--dry-run".to_string(),
+        "--allow-new-id".to_string(),
+    ];
+    let (method, params) = build_request("resume", &args).unwrap();
+    assert_eq!(method, "agent.convert");
+    assert_eq!(params["name"], "convert-proof");
+    assert_eq!(params["dry_run"], true);
+    assert_eq!(params["allow_new_id"], true);
+}
+
+#[test]
+fn spawn_still_refuses_dry_run() {
+    // The swallow is guarded to `resume`; every other verb keeps the refusal.
+    let args = vec!["wk".to_string(), "--dry-run".to_string()];
+    let err = build_request("spawn", &args).unwrap_err();
+    assert!(err.contains("unknown flag: --dry-run"), "got: {err}");
 }
 
 #[test]
@@ -2180,6 +2234,7 @@ fn render_list_with_discovered_lane() {
         Some(3),
         Some(3),
         None,
+        &Value::Null,
     );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
@@ -2188,7 +2243,7 @@ fn render_list_with_discovered_lane() {
     // Without a codex probe the key is absent, not null.
     assert!(parsed.get("codex_loaded").is_none());
 
-    let table = render_list_table(&agents, &discovered, Some(3), Some(3));
+    let table = render_list_table(&agents, &discovered, Some(3), Some(3), &Value::Null);
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
     // ADDRESS leads and the alias is demoted to LABEL. The alias led this
     // table for its whole life, so it was the leftmost thing a reader
@@ -2223,7 +2278,16 @@ fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
             cwd: "/repo".into(),
         },
     ]));
-    let out = render_list_json(&agents, &filters, &json!([]), &[], None, None, Some(&block));
+    let out = render_list_json(
+        &agents,
+        &filters,
+        &json!([]),
+        &[],
+        None,
+        None,
+        Some(&block),
+        &Value::Null,
+    );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["codex_loaded"]["available"], true);
     assert_eq!(
@@ -2273,7 +2337,7 @@ fn render_list_table_shows_the_ten_roster_columns() {
             "pr_basis": "no-node",
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(3), Some(3), &Value::Null);
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines[0].split_whitespace().collect::<Vec<_>>().join(" "),
@@ -2330,7 +2394,7 @@ fn render_list_table_qualifies_model_and_pr_cells() {
             "pr_basis": "graph-unreadable",
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(2), Some(2));
+    let table = render_list_table(&agents, &[], Some(2), Some(2), &Value::Null);
     let sub = table.lines().find(|l| l.contains("sub-worker")).unwrap();
     assert!(
         sub.contains("claude-opus-5 (observed; requested glm-5.3-flash[1m])"),
@@ -2387,7 +2451,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(3), Some(3), &Value::Null);
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2436,7 +2500,7 @@ fn render_list_table_names_a_total_probe_outage() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(43), Some(0));
+    let table = render_list_table(&agents, &[], Some(43), Some(0), &Value::Null);
     assert!(
         table.contains("truth probe failed: 0 of 43 rows answered"),
         "outage must be named, got: {table}"
@@ -2446,7 +2510,7 @@ fn render_list_table_names_a_total_probe_outage() {
         "the statuses must be disclaimed: {table}"
     );
 
-    let healthy = render_list_table(&agents, &[], Some(43), Some(43));
+    let healthy = render_list_table(&agents, &[], Some(43), Some(43), &Value::Null);
     assert!(
         !healthy.contains("truth probe failed"),
         "a healthy page carries no outage line: {healthy}"
@@ -2679,7 +2743,7 @@ fn harness_arg_parses_repeatable_into_params() {
 #[test]
 fn a_codex_thread_add_dir_leads_the_state_dirs() {
     let mut params = serde_json::json!({"add_dir": "/tmp/x"});
-    attach_codex_thread_state_dirs(&mut params);
+    fno_agents::codex_thread::attach_codex_thread_state_dirs(&mut params);
     assert_eq!(
         params["state_dirs"][0], "/tmp/x",
         "the operator's add-dir leads the state-root grant"
@@ -2687,7 +2751,7 @@ fn a_codex_thread_add_dir_leads_the_state_dirs() {
 
     // No add-dir and no published set: today's request, no key at all.
     let mut bare = serde_json::json!({});
-    attach_codex_thread_state_dirs(&mut bare);
+    fno_agents::codex_thread::attach_codex_thread_state_dirs(&mut bare);
     assert!(bare.get("state_dirs").is_none(), "{bare}");
 }
 
@@ -2714,6 +2778,14 @@ fn attention_row(
         failing_for_s: None,
         cause: None,
         line: String::new(),
+        repair: None,
+        heal: None,
+        upstream: None,
+        arm_key: None,
+        arm_value: None,
+        reader: None,
+        starved: false,
+        retries: Vec::new(),
     }
 }
 

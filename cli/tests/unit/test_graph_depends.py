@@ -40,6 +40,52 @@ def _make_entry(eid: str, plan_path: str, cwd: str = None) -> dict:
     return {"id": eid, "plan_path": plan_path, "cwd": cwd}
 
 
+def _write_plan_fm(dirpath: Path, name: str, fm_lines: list) -> Path:
+    lines = ["---", *fm_lines, "---", "", "# t"]
+    p = dirpath / name
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+# -- canonical blocker key: blocked_by first, depends_on one-release fallback --
+
+
+def test_blocked_by_block_list_is_read(tmp_path):
+    p = _write_plan_fm(
+        tmp_path, "p.md", ["blocked_by:", "  - ab-11111111", "  - ab-22222222"]
+    )
+    values, _dir = _collect_frontmatter_depends(str(p))
+    assert values == ["ab-11111111", "ab-22222222"]
+
+
+def test_depends_on_fallback_still_lands(tmp_path):
+    p = _write_plan_fm(tmp_path, "p.md", ["depends_on:", "  - ab-33333333"])
+    values, _dir = _collect_frontmatter_depends(str(p))
+    assert values == ["ab-33333333"]
+
+
+def test_both_keys_takes_blocked_by_and_warns(tmp_path, capsys):
+    p = _write_plan_fm(
+        tmp_path,
+        "p.md",
+        ["blocked_by:", "  - ab-44444444", "depends_on:", "  - ab-55555555"],
+    )
+    values, _dir = _collect_frontmatter_depends(str(p))
+    assert values == ["ab-44444444"]
+    assert "depends_on" in capsys.readouterr().err
+
+
+def test_empty_blocked_by_falls_back_without_warning(tmp_path, capsys):
+    # `blocked_by: []` is the default spelling on most plans: present but
+    # silent, so the legacy key still speaks and no warning fires.
+    p = _write_plan_fm(
+        tmp_path, "p.md", ["blocked_by: []", "depends_on:", "  - ab-66666666"]
+    )
+    values, _dir = _collect_frontmatter_depends(str(p))
+    assert values == ["ab-66666666"]
+    assert capsys.readouterr().err == ""
+
+
 # -- _parse_frontmatter tests --
 
 

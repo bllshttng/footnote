@@ -12,6 +12,133 @@ pub(super) fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
+/// The `agent.list` response tail: the sorted entries, the echoed filters,
+/// the truth-probe counters, and the `--all` provenance lane. The payload
+/// key is always present so a consumer can tell "no retired rows" from an
+/// older shape, the way the discovered lane is.
+pub(super) fn list_response(
+    req: &Request,
+    entries: Vec<Value>,
+    filters_applied: Value,
+    truth_probe_asked: usize,
+    truth_probe_answered: usize,
+    all: bool,
+    home: &AgentsHome,
+) -> Response {
+    let retired_sessions = if all { retired_rows(home) } else { Vec::new() };
+    Response::ok(
+        req.id,
+        json!({
+            "agents": entries,
+            "filters_applied": filters_applied,
+            "fields_omitted": LIST_PROJECTION_OMISSIONS,
+            "truth_probe_asked": truth_probe_asked,
+            "truth_probe_answered": truth_probe_answered,
+            "retired_sessions": retired_sessions,
+            "retired_count": retired_sessions.len(),
+        }),
+    )
+}
+
+/// The reaped and retired sessions `--all` shows: every receipt in the
+/// reap-receipt store, newest first, with the newest recorded cause from the
+/// event store joined by session id. A reaped row leaves the registry, so a
+/// wrongful reap is invisible without this lane; the receipt is the record
+/// that the row existed, and the event names WHY it left. A receipt the
+/// event store cannot explain still shows, with the cause honestly absent.
+pub(super) fn retired_rows(home: &AgentsHome) -> Vec<Value> {
+    let mut out = Vec::new();
+    let dir = home.root().join("reap-receipts");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut receipts: Vec<(std::path::PathBuf, crate::receipt::ReapReceipt)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter_map(|p| crate::receipt::read_reap_receipt(&p).ok().map(|r| (p, r)))
+        .collect();
+    receipts.sort_by(|a, b| b.1.reaped_at.cmp(&a.1.reaped_at));
+    let causes = newest_reap_causes(home);
+    for (path, receipt) in receipts {
+        let cause = causes.get(&receipt.harness_session_id);
+        let (cause, cause_at, basis) = match cause {
+            Some((kind, ts, why)) => (kind.clone(), ts.clone(), why.clone()),
+            None => (
+                "not recorded".to_string(),
+                "not recorded".to_string(),
+                "not recorded".to_string(),
+            ),
+        };
+        let ledger_node = receipt
+            .ledger
+            .as_ref()
+            .and_then(|l| l.get("graph_node_id").or_else(|| l.get("node")))
+            .and_then(Value::as_str)
+            .map(String::from);
+        out.push(json!({
+            "name": receipt.row_name,
+            "harness": receipt.harness,
+            "session_id": receipt.harness_session_id,
+            "short_id": receipt.short_id,
+            "cwd": receipt.cwd,
+            "state": "reaped",
+            "reaped_at": receipt.reaped_at,
+            "cause": cause,
+            "cause_at": cause_at,
+            "basis": basis,
+            "node": ledger_node,
+            "resume": receipt.resume,
+            "receipt": path.display().to_string(),
+        }));
+    }
+    out
+}
+
+/// The newest reaped/removed/vacated event per session id: `(type, ts,
+/// basis)`. Commit order means the last line for a sid is the newest; a
+/// later removal over an earlier one is the reading that names why the row
+/// is gone NOW.
+fn newest_reap_causes(
+    home: &AgentsHome,
+) -> std::collections::HashMap<String, (String, String, String)> {
+    let mut out: std::collections::HashMap<String, (String, String, String)> =
+        std::collections::HashMap::new();
+    let raw = match crate::event_store::journal_text_checked(
+        &home.events_jsonl(),
+        &crate::event_store::EventQuery::of_types(&[
+            "agent_row_reaped",
+            "registry_row_removed",
+            "agent_crown_vacated",
+        ]),
+    ) {
+        Ok(raw) => raw,
+        Err(_) => return out,
+    };
+    for line in raw.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let ts = event.get("ts").and_then(Value::as_str).unwrap_or("");
+        let data = event.get("data").cloned().unwrap_or(Value::Null);
+        let sid = data
+            .get("harness_session_id")
+            .or_else(|| data.get("session_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if sid.is_empty() {
+            continue;
+        }
+        let basis = data.get("basis").and_then(Value::as_str).unwrap_or("");
+        out.insert(
+            sid.to_string(),
+            (kind.to_string(), ts.to_string(), basis.to_string()),
+        );
+    }
+    out
+}
+
 /// One row's list-lane attention key: evidence tier, then longest-silent
 /// first, then name so consecutive lists never shuffle equal rows. Only
 /// fields that carry their evidence with them (`basis`,
@@ -248,6 +375,7 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// assert the same rules.
 pub(super) fn apply_row_contradiction(
     row: &mut Map<String, Value>,
+    exited_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
@@ -279,7 +407,16 @@ pub(super) fn apply_row_contradiction(
         row.get("status").and_then(Value::as_str),
         Some("orphaned" | "exited")
     );
-    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
+    // An exit-recorded verdict dates from the exit stamp. The reconcile stamp
+    // is rewritten every sweep tick, so a later event could never beat it.
+    let verdict_at = if incoming_basis == "exit-recorded" {
+        exited_at
+            .and_then(|s| row_timestamp(Some(&json!(s))))
+            .or(reconciled_at)
+    } else {
+        reconciled_at
+    };
+    if terminal && event_at.is_some() && verdict_at.is_some() && event_at > verdict_at {
         row.insert("status".into(), json!("unknown"));
         row.insert("basis".into(), json!("stale-verdict-fresher-event"));
     }
@@ -773,7 +910,9 @@ mod tests {
         .with_timezone(&chrono::Utc);
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row, now);
+            let exited_at = row.remove("exited_at");
+            apply_row_contradiction(&mut row, exited_at.as_ref().and_then(Value::as_str), now);
+            assert!(!row.contains_key("exited_at"), "case={}", case["name"]);
             // Where the two lanes legitimately differ - the Rust
             // projection never runs the claude live-status probe, so its
             // no-contradiction basis reads `not-probed` where Python renders
@@ -832,6 +971,83 @@ mod tests {
             );
             assert_eq!(row["status"], "unknown", "row {}", row["name"]);
         }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The `--all` provenance lane: a reaped row the registry dropped still
+    /// shows, newest first, carrying the resume command and the newest
+    /// recorded cause from the event journal. The event store is absent in
+    /// this staged world, so the journal text is the source and the join
+    /// runs on the same code path.
+    #[test]
+    fn the_all_lane_joins_the_newest_recorded_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AgentsHome::at(temp.path().join("agents"));
+        let receipts = home.root().join("reap-receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(
+            receipts.join("claude-11111111-2222-3333-4444-555555555555.json"),
+            json!({
+                "row_name": "warden",
+                "short_id": "11111111",
+                "harness": "claude",
+                "harness_session_id": "11111111-2222-3333-4444-555555555555",
+                "cwd": "/tmp/wt",
+                "log_path": null,
+                "created_at": "2026-09-24T10:00:00Z",
+                "reaped_at": "2026-09-25T16:19:49Z",
+                "resume": "claude --bg --resume 11111111-2222-3333-4444-555555555555 --model opus --effort high",
+                "ledger": {"graph_node_id": "x-node", "pr_number": 1943}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            home.events_jsonl(),
+            concat!(
+                r#"{"ts":"2026-09-25T16:19:48Z","type":"registry_row_removed","source":"daemon","data":{"session_id":"11111111-2222-3333-4444-555555555555"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-25T16:19:49Z","type":"agent_row_reaped","source":"daemon","data":{"harness_session_id":"11111111-2222-3333-4444-555555555555","basis":"every named node done: x-node"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let rows = retired_rows(&home);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["name"], "warden");
+        assert_eq!(row["state"], "reaped");
+        assert_eq!(row["node"], "x-node");
+        assert_eq!(row["cause"], "agent_row_reaped", "the newest event wins");
+        assert_eq!(row["basis"], "every named node done: x-node");
+        assert!(
+            row["resume"]
+                .as_str()
+                .unwrap()
+                .contains("--model opus --effort high"),
+            "the resume command rides the row verbatim"
+        );
+        // A receipt whose cause never journal'd still shows, honestly absent.
+        std::fs::write(
+            receipts.join("claude-99999999-2222-3333-4444-555555555555.json"),
+            json!({
+                "row_name": "ghost",
+                "short_id": "99999999",
+                "harness": "claude",
+                "harness_session_id": "99999999-2222-3333-4444-555555555555",
+                "cwd": "/tmp/other",
+                "log_path": null,
+                "created_at": "2026-09-24T10:00:00Z",
+                "reaped_at": "2026-09-25T15:00:00Z",
+                "resume": "claude --bg --resume 99999999-2222-3333-4444-555555555555"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let rows = retired_rows(&home);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "warden", "newest reaped_at first");
+        assert_eq!(rows[1]["cause"], "not recorded");
         std::fs::remove_dir_all(home.root()).ok();
     }
 }

@@ -341,6 +341,21 @@ def test_journey_harness_carries_its_build_prerequisite(tmp_path: Path) -> None:
     assert "tests/hooks/test_journey.sh" in names
 
 
+def test_env_pin_harness_drags_in_the_rust_build(tmp_path: Path) -> None:
+    """A harness that resolves the binary through FNO_AGENTS_BIN (or the
+    release fallback) depends on a binary being present just as much as one
+    spelling the debug path: without the carried build step, pytest's exit
+    scrub deletes the binary and the harness exits 77, a false red."""
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+    _repo(tmp_path)
+    _write(tmp_path / "tests/hooks/test_env_pin.sh",
+           '#!/usr/bin/env bash\nB="${FNO_AGENTS_BIN}"\n'
+           '[[ -x "$B" ]] || exit 77\n', executable=True)
+    sel, _ = select_changed(tmp_path, ["tests/hooks/test_env_pin.sh"])
+    names = [s[0] for s in _changed_steps(tmp_path, sel)]
+    assert names[0] == _RUST_BUILD_STEP, names
+
+
 def test_native_claim_door_build_precedes_changed_pytest(tmp_path: Path) -> None:
     from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
 

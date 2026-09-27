@@ -18,12 +18,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
-use crate::mail_inject::contains_fno_mail_tag_anywhere;
-use crate::provider::parse_verb_token;
+// The classifier is the promoted `provenance` module: same functions, same
+// reason names, so the queue's skip counters and its 17 regression tests are
+// unchanged by the move.
+use crate::provenance::{classify, is_user_turn, turn_text, turn_ts_epoch};
 
 /// A held turn in the scan cursor; the payload adds the rendered excerpt.
 #[derive(Debug, Clone, Serialize)]
@@ -69,25 +71,7 @@ struct ScanState {
     skipped: BTreeMap<String, u64>,
 }
 
-/// `(prefix, reason)` matched against the reminder-stripped turn text, in
-/// order. Every prefix is a harness-injected envelope a person cannot type.
-const SKIP_RULES: &[(&str, &str)] = &[
-    ("<command-name>", "command_invocation"),
-    ("<command-message>", "command_invocation"),
-    ("<local-command", "command_invocation"),
-    ("<user_instructions>", "synthetic"),
-    ("<environment_context>", "synthetic"),
-    ("<task-notification>", "task_notification"),
-    ("<bash-input>", "bash_echo"),
-    ("<bash-stdout>", "bash_echo"),
-    ("[Request interrupted by user", "interrupt_marker"),
-    (
-        "This session is being continued from a previous conversation",
-        "compaction_preamble",
-    ),
-    ("Another Claude session sent a message:", "teammate_message"),
-];
-
+/// The excerpt width. Retained beside the cursor machinery the queue owns.
 const EXCERPT_CHARS: usize = 160;
 const HEAD_SAMPLE_BYTES: u64 = 4096;
 
@@ -97,13 +81,6 @@ fn scan_path(capture_dir: &Path, session: &str) -> PathBuf {
 
 fn ledger_path(capture_dir: &Path, session: &str) -> PathBuf {
     capture_dir.join(format!("{session}.jsonl"))
-}
-
-fn system_reminder_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid pattern")
-    })
 }
 
 fn stand_down_re() -> &'static regex::Regex {
@@ -130,56 +107,6 @@ fn head_digest(prefix: &[u8], offset: u64) -> String {
     to_hex(&h.finalize())
 }
 
-/// True for a row the transcript writes when a user (or mail) speaks: a claude
-/// `type:"user"` row without a truthy `isMeta`, or a codex payload message.
-fn is_user_turn(obj: &Value) -> bool {
-    if obj.get("type").and_then(|v| v.as_str()) == Some("user") {
-        return !json_truthy(obj.get("isMeta"));
-    }
-    match obj.get("payload") {
-        Some(p) if p.is_object() => {
-            p.get("type").and_then(|v| v.as_str()) == Some("message")
-                && p.get("role").and_then(|v| v.as_str()) == Some("user")
-        }
-        _ => false,
-    }
-}
-
-fn json_truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_none_or(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
-/// The user-visible text of a row, `""` when it has none. Both content shapes
-/// (string, block list) across the claude and codex row formats; a codex
-/// payload wins when present.
-fn turn_text(obj: &Value) -> String {
-    let mut content = match obj.get("message") {
-        Some(m) if m.is_object() => m.get("content"),
-        _ => obj.get("content"),
-    };
-    if let Some(p) = obj.get("payload") {
-        if p.is_object() {
-            content = p.get("content");
-        }
-    }
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
-    }
-}
-
 /// A stable ledger id: the row's own uuid/id, else a digest. The digest folds
 /// the row's line number in, so byte-identical duplicate rows still get
 /// distinct ids and one ack can never dispose two turns. sha1 (not sha256)
@@ -202,94 +129,6 @@ fn turn_id(obj: &Value, text: &str, line_no: usize) -> String {
     h.update(format!("{line_no}:{ts}:{text}").as_bytes());
     let hex = to_hex(&h.finalize());
     format!("derived-{}", &hex[..12])
-}
-
-/// RFC 3339 (Z or offset), else a naive stamp read as UTC: transcripts are
-/// UTC by convention and a naive stamp must not skew by the local offset.
-fn turn_ts_epoch(obj: &Value) -> Option<f64> {
-    let raw = match obj.get("timestamp") {
-        Some(Value::String(s)) if !s.trim().is_empty() => s,
-        _ => match obj.get("ts") {
-            Some(Value::String(s)) if !s.trim().is_empty() => s,
-            _ => return None,
-        },
-    };
-    let t = raw.trim();
-    let secs = |ts: i64, micros: u32| ts as f64 + micros as f64 / 1_000_000.0;
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
-        return Some(secs(dt.timestamp(), dt.timestamp_subsec_micros()));
-    }
-    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(secs(
-            nd.and_utc().timestamp(),
-            nd.and_utc().timestamp_subsec_micros(),
-        ));
-    }
-    // A date-only stamp reads as midnight UTC, as Python's fromisoformat did.
-    let date_only = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))?;
-    Some(secs(date_only.and_utc().timestamp(), 0))
-}
-
-/// A single-line slash command or `$fno:` verb with flag-shaped args only.
-/// A token ending in sentence punctuation means the turn carries prose, and
-/// prose may carry a ruling. A filename dot is fine (over-counting is the
-/// safe direction); `x-1.` is not.
-fn is_bare_command(text: &str) -> bool {
-    if text.contains('\n') {
-        return false;
-    }
-    let mut parts = text.split_whitespace();
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    if parse_verb_token(first).is_none() {
-        return false;
-    }
-    parts.all(is_arg_token)
-}
-
-fn is_arg_token(tok: &str) -> bool {
-    if tok.is_empty() {
-        return false;
-    }
-    let shaped = tok.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '.' | '_' | '/' | ':' | '@' | '%' | '+' | '=' | '~' | '-')
-    });
-    shaped
-        && !matches!(
-            tok.chars().last(),
-            Some('.') | Some('?') | Some('!') | Some(';') | Some(',')
-        )
-}
-
-/// The operator-shaped text of a turn, or its named skip reason when it is
-/// not one. In order, failing toward the queue: injected mail never queues;
-/// a bare command invocation carries no ruling; a turn with no user text
-/// outside system-reminder/hook content is not a turn; a machine envelope is
-/// refused with its reason; everything else queues.
-fn classify(text: &str) -> Result<String, &'static str> {
-    if contains_fno_mail_tag_anywhere(text) {
-        return Err("fno_mail");
-    }
-    let cleaned = system_reminder_re()
-        .replace_all(text.trim(), "")
-        .trim()
-        .to_string();
-    if cleaned.is_empty() {
-        return Err("no_user_text");
-    }
-    for (prefix, reason) in SKIP_RULES {
-        if cleaned.starts_with(prefix) {
-            return Err(reason);
-        }
-    }
-    if is_bare_command(&cleaned) {
-        return Err("bare_command");
-    }
-    Ok(cleaned)
 }
 
 /// One-line excerpt; whitespace runs collapse so a row stays one row.
@@ -415,22 +254,28 @@ fn save_state(path: &Path, state: &ScanState) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot rename into place: {e}"))
 }
 
-/// Every line of the ack ledger that parses as an object with a string
-/// `turn_id`; an unreadable ledger is an empty set.
-fn read_acked_turn_ids(path: &Path) -> HashSet<String> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return HashSet::new();
+/// Acked turn ids; an absent ledger means none have been acked, while malformed
+/// or unreadable ledgers are errors.
+fn read_acked_turn_ids(path: &Path) -> Result<HashSet<String>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(format!("ack ledger {} unreadable: {error}", path.display())),
     };
     let mut acked = HashSet::new();
-    for line in raw.lines() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+    for (line_no, line) in raw.lines().enumerate() {
+        let row = serde_json::from_str::<Value>(line).map_err(|error| {
+            format!(
+                "ack ledger {} line {} malformed: {error}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
         if let Some(id) = row.get("turn_id").and_then(|v| v.as_str()) {
             acked.insert(id.to_string());
         }
     }
-    acked
+    Ok(acked)
 }
 
 fn build_payload(state: ScanState, now_epoch: f64, cursor_error: Option<String>) -> QueuePayload {
@@ -517,7 +362,7 @@ fn read_queue(
     }
     // A torn trailing row waits for its newline above, so a read never parses
     // a half-written row and derived turn ids stay stable across reads.
-    let acked = read_acked_turn_ids(&ledger_path(capture_dir, session));
+    let acked = read_acked_turn_ids(&ledger_path(capture_dir, session))?;
     state.turns.retain(|t| !acked.contains(&t.turn_id));
     state.head_sha256 = head_digest(&head, state.offset);
     let mut warnings = Vec::new();
@@ -549,6 +394,57 @@ pub(crate) fn pending_stand_down(
         .filter(|turn| turn.stand_down)
         .map(|turn| (turn.turn_id, turn.excerpt))
         .collect())
+}
+
+pub(crate) fn capture_dir(cwd: &Path) -> Option<PathBuf> {
+    std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))
+}
+
+pub(crate) fn session_queue_depth(
+    get: &impl Fn(&str) -> Option<String>,
+    home: &crate::paths::AgentsHome,
+    cwd: &Path,
+    now_epoch: f64,
+) -> Result<usize, String> {
+    let session_pin = get("FNO_OPERATOR_SESSION_ID").filter(|value| !value.trim().is_empty());
+    let harness_pin = get("FNO_OPERATOR_HARNESS").filter(|value| !value.trim().is_empty());
+    let identity = (session_pin.is_none() || harness_pin.is_none())
+        .then(|| crate::spawn_context::resolve_self_identity(get, None, None, home));
+    let session = session_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.session_id.clone())
+        })
+        .ok_or_else(|| "no resolvable session identity".to_string())?;
+    let harness = harness_pin
+        .or_else(|| {
+            identity
+                .as_ref()
+                .and_then(|identity| identity.harness.clone())
+        })
+        .unwrap_or_else(|| "claude".to_string());
+    let transcript = if let Some(path) =
+        get("FNO_OPERATOR_TRANSCRIPT").filter(|value| !value.trim().is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        match harness.as_str() {
+            "claude" => crate::claude_drive::find_transcript(&session),
+            "codex" => crate::codex_store::codex_rollout_path(None, &session),
+            _ => return Err(format!("harness {harness} keeps no transcript file")),
+        }
+        .ok_or_else(|| format!("no transcript found for {harness} session {session}"))?
+    };
+    let capture_dir = get("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| capture_dir(cwd))
+        .ok_or_else(|| "no operator capture directory could be resolved".to_string())?;
+    read_queue(&session, &transcript, &capture_dir, now_epoch).map(|outcome| outcome.payload.depth)
 }
 
 /// CLI entry: `fno-agents compaction operator-turns --session <id>
@@ -591,9 +487,141 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
+/// CLI entry: `fno-agents compaction ack --session <id> --turn <id>
+/// --outcome <o> [--why <w>] --capture-dir <dir>`. Session resolution stays
+/// in Python; this binary resolves nothing.
+pub fn run_ack(args: &[String]) -> i32 {
+    let (Some(session), Some(turn), Some(outcome), Some(capture_dir)) = (
+        crate::compaction::flag_value(args, "--session"),
+        crate::compaction::flag_value(args, "--turn"),
+        crate::compaction::flag_value(args, "--outcome"),
+        crate::compaction::flag_value(args, "--capture-dir"),
+    ) else {
+        eprintln!("usage: compaction ack --session <id> --turn <id> --outcome <o> [--why <w>] --capture-dir <dir>");
+        return 2;
+    };
+    // The id lands in a path join; a crafted id must not escape the capture dir.
+    if session.contains('/') || session.contains('\\') || session.contains("..") {
+        eprintln!("compaction ack: --session must be a bare id (no '/', '\\', '..'): {session}");
+        return 2;
+    }
+    let why = crate::compaction::flag_value(args, "--why").unwrap_or_default();
+    let home = crate::paths::AgentsHome::from_env();
+    match ack_turn(
+        &home,
+        Path::new(&capture_dir),
+        &session,
+        &turn,
+        &outcome,
+        &why,
+    ) {
+        Ok(row) => {
+            println!("{}", serde_json::to_string(&row).unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// The write behind `fno inbox user ack`. The kinds are law, capture, node
+/// and answer; `nothing` stands alone. An answer ack also records one
+/// `user_ask_answered` row in the machine question index, which is what the
+/// attention arm folds into the file sink as a closed line.
+pub fn ack_turn(
+    home: &crate::paths::AgentsHome,
+    capture_dir: &Path,
+    session: &str,
+    turn_id: &str,
+    outcome: &str,
+    why: &str,
+) -> Result<Value, String> {
+    const KINDS: [&str; 4] = ["law", "capture", "node", "answer"];
+    let (kind, ref_part) = match outcome.trim().split_once(':') {
+        Some((k, r)) => (k.trim().to_string(), r.trim().to_string()),
+        None => (outcome.trim().to_string(), String::new()),
+    };
+    let outcome = if kind == "nothing" && ref_part.is_empty() {
+        "nothing".to_string()
+    } else if KINDS.contains(&kind.as_str()) && !ref_part.is_empty() {
+        outcome.trim().to_string()
+    } else {
+        let legal = KINDS
+            .iter()
+            .map(|k| format!("{k}:<ref>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "invalid --outcome {outcome:?}. Must be nothing or {legal}"
+        ));
+    };
+    let row = json!({
+        "turn_id": turn_id,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "outcome": outcome,
+        "ref": if ref_part.is_empty() { None } else { Some(ref_part.clone()) },
+        "why": if why.trim().is_empty() { None } else { Some(why.trim().to_string()) },
+    });
+    let path = ledger_path(capture_dir, session);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{row}").map_err(|e| e.to_string())?;
+
+    if kind == "answer" {
+        let answered = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "type": "user_ask_answered",
+            "source": "target",
+            "data": {
+                "session_id": session,
+                "turn_id": turn_id,
+                "excerpt": excerpt_of(capture_dir, session, turn_id),
+                "answer": ref_part,
+                "answered_at": chrono::Utc::now().to_rfc3339(),
+            }
+        });
+        let _ = crate::provider_cap::append_questions_row(
+            &crate::provider_cap::questions_path(home),
+            &answered,
+        );
+    }
+    Ok(row)
+}
+
+/// Best-effort: the scan cursor's stored text for the acked turn, cut to the
+/// excerpt width. A rotated or never-scanned turn answers empty.
+fn excerpt_of(capture_dir: &Path, session: &str, turn_id: &str) -> String {
+    let Ok(raw) = std::fs::read_to_string(scan_path(capture_dir, session)) else {
+        return String::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return String::new();
+    };
+    v.get("turns")
+        .and_then(Value::as_array)
+        .and_then(|turns| {
+            turns
+                .iter()
+                .find(|t| t.get("turn_id").and_then(Value::as_str) == Some(turn_id))
+        })
+        .and_then(|t| t.get("text").and_then(Value::as_str))
+        .map(|text| text.chars().take(EXCERPT_CHARS).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::is_bare_command;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
 
@@ -652,6 +680,83 @@ mod tests {
         let tp = dir.join("transcript.jsonl");
         write_jsonl(&tp, rows);
         read(&dir, &tp)
+    }
+
+    fn pinned_operator_turns(
+        dir: &Path,
+        transcript: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([
+            ("FNO_OPERATOR_SESSION_ID".into(), "fixture-session".into()),
+            ("FNO_OPERATOR_HARNESS".into(), "claude".into()),
+            (
+                "FNO_OPERATOR_TRANSCRIPT".into(),
+                transcript.display().to_string(),
+            ),
+            ("FNO_OPERATOR_CAPTURE_DIR".into(), dir.display().to_string()),
+        ])
+    }
+
+    #[test]
+    fn session_queue_depth_reads_planted_turn_and_ack() {
+        let dir = tmp_dir("session-depth");
+        let transcript = dir.join("transcript.jsonl");
+        write_jsonl(&transcript, &[user_row(json!("first ask"), "u-1")]);
+        let vars = pinned_operator_turns(&dir, &transcript);
+        let get = |key: &str| vars.get(key).cloned();
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(1));
+        std::fs::write(
+            ledger_path(&dir, "fixture-session"),
+            "{\"turn_id\":\"u-1\"}\n",
+        )
+        .unwrap();
+        assert_eq!(session_queue_depth(&get, &home, &dir, NOW), Ok(0));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unreadable_transcript() {
+        let dir = tmp_dir("session-depth-errors");
+        let missing = dir.join("missing.jsonl");
+        let vars = pinned_operator_turns(&dir, &missing);
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn session_queue_depth_refuses_unreadable_or_malformed_ack_ledger() {
+        let dir = tmp_dir("session-depth-ack-errors");
+        let transcript = dir.join("transcript.jsonl");
+        write_jsonl(&transcript, &[user_row(json!("first ask"), "u-1")]);
+        let ledger = ledger_path(&dir, "fixture-session");
+        std::fs::create_dir(&ledger).unwrap();
+        let vars = pinned_operator_turns(&dir, &transcript);
+        let get = |key: &str| vars.get(key).cloned();
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("ack ledger"));
+        std::fs::remove_dir(&ledger).unwrap();
+        std::fs::write(&ledger, "not-json\n").unwrap();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("malformed"));
+    }
+
+    #[test]
+    fn session_queue_depth_names_unsupported_harness() {
+        let dir = tmp_dir("session-depth-unsupported");
+        let mut vars = pinned_operator_turns(&dir, &dir.join("unused.jsonl"));
+        vars.insert("FNO_OPERATOR_HARNESS".into(), "opencode".into());
+        vars.remove("FNO_OPERATOR_TRANSCRIPT");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let get = |key: &str| vars.get(key).cloned();
+        assert!(session_queue_depth(&get, &home, &dir, NOW)
+            .unwrap_err()
+            .contains("opencode"));
     }
 
     #[test]
@@ -1067,6 +1172,57 @@ mod tests {
                 "t".to_string(),
             ]),
             2
+        );
+    }
+
+    #[test]
+    fn ac14_hp_answer_ack_records_the_answered_row() {
+        let dir = tmp_dir("ac14-hp");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let capture = dir.join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        let row = ack_turn(
+            &home,
+            &capture,
+            "s",
+            "u-1",
+            "answer:use the narrow reading",
+            "",
+        )
+        .unwrap();
+        assert_eq!(row["outcome"], "answer:use the narrow reading");
+        assert_eq!(row["ref"], "use the narrow reading");
+        // The durable answered row: the fold the attention arm reads.
+        let index = crate::event_store::journal_text(
+            &crate::provider_cap::questions_path(&home),
+            &["user_ask_answered"],
+        );
+        assert!(
+            index.contains("\"user_ask_answered\""),
+            "index carries the answered row: {index}"
+        );
+        assert!(index.contains("use the narrow reading"));
+    }
+
+    #[test]
+    fn ac14_err_empty_answer_ref_refuses_and_writes_nothing() {
+        let dir = tmp_dir("ac14-err");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let capture = dir.join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        let err = ack_turn(&home, &capture, "s", "u-1", "answer:", "").unwrap_err();
+        assert!(err.contains("invalid --outcome"), "{err}");
+        assert!(
+            !capture.join("s.jsonl").exists(),
+            "the refusal writes no ledger"
+        );
+        let index = crate::event_store::journal_text(
+            &crate::provider_cap::questions_path(&home),
+            &["user_ask_answered"],
+        );
+        assert!(
+            !index.contains("user_ask_answered"),
+            "the refusal writes no answered row: {index}"
         );
     }
 }

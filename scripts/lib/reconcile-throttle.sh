@@ -118,6 +118,36 @@ reconcile_maybe_fire() {
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
         "$2" agents prove-it-verdicts --route >/dev/null 2>&1 || true
+        # Orphan-plan binder, best-effort like every co-fired verb: a plan
+        # whose `claims:` bind write never landed keeps its node unplanned
+        # forever, so retry the bind inside the same window. The result
+        # publishes whenever the binary produced JSON, exit code aside: exit 1
+        # is the bind_failed verdict, and that verdict is exactly what the
+        # SessionStart hook surfaces.
+        obin="$(command -v fno-agents 2>/dev/null || true)"
+        if [[ -z "$obin" ]]; then obin="${FNO_AGENTS_BIN:-}"; fi
+        if [[ -z "$obin" ]]; then
+            fself="$(command -v -- "$2" 2>/dev/null || true)"
+            if [[ -z "$fself" ]] && [[ -x "$2" ]]; then fself="$2"; fi
+            if [[ -n "$fself" ]]; then
+                cand="$(dirname "$fself")/fno-agents"
+                if [[ -x "$cand" ]]; then obin="$cand"; fi
+            fi
+        fi
+        # The binder does not resolve state_dir, so run it only for the default
+        # state root. The graph_json path override has been retired.
+        state_root="$("$2" config get state_dir 2>/dev/null || true)"
+        state_root="${state_root%/}"
+        odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
+        default_state_root="${HOME:-}/.fno"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" \
+            && ( "$state_root" == "~/.fno" || "$state_root" == "$default_state_root" ) ]]; then
+            "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
+                > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null || true
+            [[ -s "$1/.fno/.orphan-plans-result.json.tmp" ]] \
+                && mv -f "$1/.fno/.orphan-plans-result.json.tmp" \
+                    "$1/.fno/.orphan-plans-result.json" 2>/dev/null || true
+        fi
     ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 

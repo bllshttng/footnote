@@ -395,14 +395,14 @@ fn row_for(
     })
 }
 
-/// The machine-wide decision index, read through the shared module
-/// (`decision_index`) so every Rust reader flattens and retires the same way.
-/// The retirement key is the report PATH in a ruling's text, which needs no
-/// subject resolution. A missing or damaged index reads as no rulings: a
-/// maybe-ruled FAIL re-surfaces, a live one is never hidden.
+/// The machine-wide decision store, read through the shared module
+/// (`decision_index`) so every Rust reader flattens and retires the same way
+/// over graph.db plus the JSONL rows the db lacks. The retirement key is the
+/// report PATH in a ruling's text, which needs no subject resolution. An
+/// unreadable store reads as no rulings: a maybe-ruled FAIL re-surfaces, a
+/// live one is never hidden.
 fn load_rulings() -> Vec<Value> {
-    let path = decision_index::default_state_path("decisions.jsonl");
-    match decision_index::read_live(&path) {
+    match decision_index::default_store_live() {
         Ok(index) => index
             .rows
             .into_iter()
@@ -442,7 +442,7 @@ fn ruling_for(rulings: &[Value], report: &str) -> Option<String> {
 }
 
 fn note_exit(node: &str, body: &str, quiet: bool) -> Option<i32> {
-    let mut cmd = Command::new("fno");
+    let mut cmd = Command::new(crate::scrape::fno_bin());
     cmd.args(["backlog", "note", node, "--body-file", "-"]);
     if quiet {
         cmd.arg("--quiet");
@@ -513,8 +513,7 @@ mod tests {
 
     fn write_graph(dir: &Path, entries: &[Value]) -> PathBuf {
         let path = dir.join("graph.json");
-        std::fs::write(&path, serde_json::json!({"entries": entries}).to_string())
-            .expect("write graph");
+        graph_store::seed_rows(&path, entries).expect("seed graph.db");
         path
     }
 
@@ -1075,15 +1074,14 @@ mod tests {
     }
 
     #[test]
-    fn read_defaulted_reads_the_written_graph_back() {
-        // Positive control for the fixture writer: the same read_defaulted the
-        // verb uses must see the entries the test wrote.
+    fn read_rows_reads_the_seeded_store() {
+        // The verb's store reader sees rows seeded through graph.db.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_graph(
             dir.path(),
             &[json!({"id": "x-aaa", "plan_path": "/p/a.md"})],
         );
-        let entries = graph_store::read_defaulted(&path, false).expect("read");
+        let entries = graph_store::read_rows(&path).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entry_id(&entries[0]), Some("x-aaa"));
     }

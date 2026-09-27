@@ -34,11 +34,18 @@ def summarize_gate_escapes(
     counts: Counter[str] = Counter()
     prs: dict[str, list[int]] = defaultdict(list)
     nodes: dict[str, list[str]] = defaultdict(list)
-    try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        text = ""
-    for line in text.splitlines():
+    # The store commit is the write boundary: committed rows carry the
+    # history, raw bytes are only the pre-store fallback.
+    from fno.events.store_client import native_rows
+
+    lines = native_rows(events_path, types=["gate_escape"])
+    if lines is None:
+        try:
+            text = events_path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        lines = text.splitlines()
+    for line in lines:
         if '"gate_escape"' not in line:
             continue
         try:

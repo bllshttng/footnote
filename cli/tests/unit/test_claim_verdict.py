@@ -3,15 +3,6 @@ from __future__ import annotations
 import pytest
 
 
-def test_claim_clock_lives_with_claim_types():
-    from fno.claims.types import now_ms
-
-    before = now_ms()
-    after = now_ms()
-
-    assert after >= before
-
-
 def test_missing_agents_binary_refuses_without_a_python_fallback(monkeypatch):
     from fno.claims import verdict
 

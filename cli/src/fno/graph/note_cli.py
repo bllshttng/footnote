@@ -21,9 +21,10 @@ from fno.graph.cli import cli
 
 # Registered through graph_cli's namespace so the tests' existing
 # `monkeypatch.setattr("fno.graph.cli._graph_path", ...)` seam keeps working.
-@cli.command("note")
+@cli.command("note", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_note(
-    task_id: str = typer.Argument(..., help="Node id (or slug) whose current state the note replaces."),
+    ctx: typer.Context,
+    task_id: Optional[str] = typer.Argument(None, help="Node id (or slug) whose current state the note replaces."),
     text: Optional[str] = typer.Argument(None, help="The note body (replaces current state)."),
     body_file: Optional[Path] = typer.Option(
         None,
@@ -53,6 +54,25 @@ def cmd_note(
     from fno.claims.self_identity import resolve_self_identity
     from fno.text_or_file import read_text_arg
 
+    extra = list(ctx.args)
+    graph_path = graph_cli._graph_path()
+    if not task_id or "--blocking" in extra or "--resolve" in extra:
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
+            raise typer.Exit(code=1)
+        argv = [str(binary), "backlog", "note", "--graph", str(graph_path)]
+        if json_output:
+            argv.append("--json")
+        if body_file:
+            argv += ["--body-file", str(body_file)]
+        argv += [a for a in (task_id, text) if a]
+        argv += extra
+        proc = subprocess.run(argv, check=False)
+        raise typer.Exit(code=proc.returncode)
+
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
     # An empty body refuses in the native action, which owns the message.
 
@@ -73,10 +93,18 @@ def cmd_note(
     graph_path = graph_cli._graph_path()
 
     # Archived refusal BEFORE the write, exact PR 1871 remedy (AC16); quiet
-    # mode never bypasses it (it guards the write, not the delivery).
+    # mode never bypasses it (it guards the write, not the delivery). Live
+    # first, then the archive: a live id is live whatever the archive holds
+    # (the same order update, reopen, and unarchive take).
     from fno.graph._archive_lookup import refuse_update_if_archived
+    from fno.graph._intake import _find_node
+    from fno.graph.api import wire_rows
 
-    if refuse_update_if_archived(task_id):
+    try:
+        live = _find_node(wire_rows(path=graph_path), task_id)
+    except Exception:  # noqa: BLE001 - an unreadable store is the write path's error to report
+        live = None
+    if live is None and refuse_update_if_archived(task_id):
         raise typer.Exit(code=1)
 
     # Refuse BEFORE the write: an unread note is a silent drop wearing a
@@ -109,16 +137,8 @@ def cmd_note(
     if receipt is None:
         typer.echo("Error: the note action returned no receipt", err=True)
         raise typer.Exit(code=1)
-    if json_output:
-        note = {
-            "id": receipt.get("node_id") or task_id,
-            "text": text,
-            "revision": receipt.get("revision"),
-            "routed": receipt.get("routed"),
-        }
-        _echo_receipt(json.dumps(note, separators=(",", ":")))
-    else:
-        _echo_receipt(f"noted {receipt.get('node_id') or task_id}: {text}")
+    shown = json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
+    _echo_receipt(shown)
     warn_if_note_is_long(text)
     # Terminal-routed notes delivered too: the write went to history, but the
     # bound readers are still the people to tell.
@@ -159,7 +179,7 @@ def native_update(
     graph_path,
     json_out: bool = True,
 ) -> "tuple[int, Optional[dict]]":
-    """One native `backlog-update` invocation : the patch door.
+    """One native `backlog update` invocation : the patch door.
 
     Returns `(exit, receipt)`; the receipt is parsed from the child's stdout
     when `json_out` and the exit is 0. Without `json_out` the child's text
@@ -174,7 +194,7 @@ def native_update(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog update`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-update", "--graph", str(graph_path), "--node", node_id]
+    argv = [str(binary), "backlog", "update", "--graph", str(graph_path), "--node", node_id]
     if json_out:
         argv.append("--json")
     argv.extend(args)
@@ -208,7 +228,7 @@ def _write_state(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
         raise typer.Exit(code=1)
-    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
+    argv = [str(binary), "backlog", "note", "--graph", str(graph_path), "--stdin",
             "--json", "--node", node_id]
     if reads:
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
@@ -223,26 +243,3 @@ def _write_state(
         sys.stderr.write(proc.stderr or "")
         return proc.returncode, None
     return 0, _receipt(proc.stdout)
-
-
-@cli.command(
-    "notes",
-    hidden=True,  # the advertised backlog menu caps at 12; `fno backlog note` help names this reader
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    add_help_option=False,
-)
-def cmd_notes(ctx: typer.Context) -> None:
-    """Read the note history the note verb archives (passthrough to the Rust reader)."""
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo(
-            "fno backlog notes: the fno-agents binary was not found. Reinstall fno, run "
-            "`fno doctor update --rust`, or set FNO_AGENTS_BIN.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    proc = subprocess.run([str(binary), "backlog-notes", *ctx.args], check=False)
-    raise typer.Exit(code=propagate_returncode(proc.returncode))

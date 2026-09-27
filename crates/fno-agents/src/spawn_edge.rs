@@ -10,7 +10,7 @@
 //! sweep stamps the derived word onto rows through [`stamp_lineage_kinds`]
 //! for readers that cannot call this crate.
 
-use crate::state::RegistryEntry;
+use crate::state::{Lineage, RegistryEntry};
 
 /// Whether a spawn edge means "waits on it" (Child) or "handed off to it"
 /// (Peer).
@@ -68,6 +68,51 @@ pub fn live_child_of<'a>(
                 child.liveness_measured_at.as_deref(),
             ) != Some("dead")
     })
+}
+
+/// The one `agent_spawned` payload builder. A birth names its parent or
+/// says why it could not - the rule `registry_schema.toml` states in both
+/// trees and `registry.py::mint_agent_entry` enforces on the Python leg.
+/// `extras` carries the per-door keys (`provider`, `lane`, `substrate`, ...)
+/// and merges over the lineage keys, which never collide. A lineage with
+/// neither a session nor a reason reads as `"birth built with no lineage"`:
+/// the journal never says nothing. The birth guard (`birth_guard_tests.rs`)
+/// fails any emit of that kind that bypasses this builder.
+pub fn birth_event(name: &str, lineage: &Lineage, extras: serde_json::Value) -> serde_json::Value {
+    let session = lineage
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let reason = lineage
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut payload = serde_json::json!({
+        "name": name,
+        "spawned_by_session": session,
+        "spawned_by_harness": lineage
+            .harness
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        "spawned_by_cwd": lineage
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        "lineage_reason": reason,
+    });
+    if session.is_none() && reason.is_none() {
+        payload["lineage_reason"] = serde_json::Value::String("birth built with no lineage".into());
+    }
+    if let (Some(base), Some(rest)) = (payload.as_object_mut(), extras.as_object()) {
+        for (k, v) in rest {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    payload
 }
 
 /// Stamp the derived kind onto every row with a spawn edge, for readers
@@ -233,5 +278,48 @@ mod tests {
 
     fn chrono_now_rfc3339() -> String {
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    }
+
+    #[test]
+    fn birth_event_names_the_parent_with_the_triple() {
+        let lineage = Lineage::captured((
+            Some(" s-parent ".into()),
+            Some("claude".into()),
+            Some("/repo".into()),
+        ));
+        let payload = birth_event(
+            "t-x-worker",
+            &lineage,
+            serde_json::json!({"provider": "codex", "lane": "thread"}),
+        );
+        assert_eq!(payload["name"], "t-x-worker");
+        assert_eq!(payload["spawned_by_session"], "s-parent");
+        assert_eq!(payload["spawned_by_harness"], "claude");
+        assert_eq!(payload["spawned_by_cwd"], "/repo");
+        assert_eq!(payload["provider"], "codex");
+        assert_eq!(payload["lane"], "thread");
+    }
+
+    #[test]
+    fn a_birth_without_a_session_carries_its_reason() {
+        let lineage = Lineage::unproven("daemon mint: spawn request carried no parent edge");
+        let payload = birth_event("t-x-worker", &lineage, serde_json::json!({}));
+        assert!(payload["spawned_by_session"].is_null());
+        assert_eq!(
+            payload["lineage_reason"],
+            "daemon mint: spawn request carried no parent edge"
+        );
+    }
+
+    #[test]
+    fn a_birth_with_neither_session_nor_reason_never_says_nothing() {
+        let payload = birth_event(
+            "t-x-worker",
+            &Lineage::captured((None, None, None)),
+            serde_json::json!({"provider": "opencode"}),
+        );
+        assert!(payload["spawned_by_session"].is_null());
+        assert_eq!(payload["lineage_reason"], "birth built with no lineage");
+        assert_eq!(payload["provider"], "opencode");
     }
 }

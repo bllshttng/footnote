@@ -2,9 +2,11 @@
 
 One row's ids serve different jobs. Delivery (mail, inject, pane send) always
 consumes the row's CURRENT address, even when the caller named a predecessor.
-Exact-id resume is the one consumer allowed to keep the historical id it
-actually spelled. A token that could name either of two live workers refuses
-and names both full ids, never picking a winner.
+Exact-id resume keeps the historical id a caller actually spelled, except a
+claude session under the Python runtime, which refuses (exit 13) and names
+the spawn door instead of reopening it unpinned. A token that could name
+either of two live workers refuses and names both full ids, never picking a
+winner.
 """
 from __future__ import annotations
 
@@ -161,12 +163,11 @@ def test_resume_by_predecessor_full_uuid_keeps_that_exact_id() -> None:
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )
     assert res.exit_code == 0
-    assert res.exec_argv[-2:] == ["resume", A], (
+    assert res.exec_argv[-4:] == ["resume", A, "--remote", "unix://"], (
         "exact-id resume reopens A, not the row's current B"
     )
 
@@ -186,20 +187,19 @@ def test_resume_by_name_keeps_the_current_session() -> None:
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )
     assert res.exit_code == 0
-    assert res.exec_argv[-2:] == ["resume", B], (
+    assert res.exec_argv[-4:] == ["resume", B, "--remote", "unix://"], (
         "a current address (name) selects the current session"
     )
 
 
-def test_claude_exact_predecessor_resume_uses_the_resume_form_not_attach() -> None:
-    """Attach follows the row's live session by transport key and can never
-    reopen a retired id, so an exact predecessor match switches claude to the
-    resume form with the full id the caller named."""
+def test_claude_exact_predecessor_resume_refuses_and_names_the_spawn_door() -> None:
+    """This runtime cannot pin a claude resume's model or route, so an exact
+    predecessor id refuses with exit 13, launches nothing, and names the
+    spawn door instead of reopening the session on the account default."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _Row(
@@ -212,19 +212,15 @@ def test_claude_exact_predecessor_resume_uses_the_resume_form_not_attach() -> No
     )
     res = resume_logic(
         name=A,
-        print_command=True,  # the argv contract without a live wake
         registry_loader=lambda: [entry],
         path_checker=lambda _bin: True,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: None,
         execvp=lambda *_a, **_k: None,
     )
-    assert res.exit_code == 0
-    assert res.exec_argv[:1] == ["claude"]
-    assert res.exec_argv[-2:] == ["--resume", A], (
-        "the exact predecessor id is the resume target, never attach"
-    )
+    assert res.exit_code == 13
+    assert res.exec_argv is None, "a refusal launches nothing"
+    assert f"fno agents spawn --resume {A}" in (res.stderr or "")
 
 
 # ---------------------------------------------------------------------------

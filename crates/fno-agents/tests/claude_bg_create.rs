@@ -10,6 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Serializes the tests that mutate process env. The lib's
+/// `claims::test_env_lock` is #[cfg(test)]-gated, so an integration binary
+/// carries its own.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "fno-ask-create-{}-{}-{}",
@@ -35,6 +40,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$FAKE_CLAUDE_STDIN_DUMP" ]; then cat > "$FAKE_CLAUDE_STDIN_DUMP"; fi
+if [ -n "$FAKE_CLAUDE_ARGV_DUMP" ]; then printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGV_DUMP"; fi
 if [ -n "$FAKE_CLAUDE_STDERR" ]; then printf '%s' "$FAKE_CLAUDE_STDERR" >&2; fi
 if [ -n "$FAKE_CLAUDE_STDOUT" ]; then
   printf '%s' "$FAKE_CLAUDE_STDOUT"
@@ -227,4 +233,98 @@ fn create_missing_binary_is_127() {
         AskError::Subprocess { exit_code, .. } => assert_eq!(exit_code, 127),
         other => panic!("expected 127 subprocess error, got {:?}", other),
     }
+}
+
+#[test]
+fn create_unrouted_child_floors_the_inherited_route_stamp() {
+    // AC7-HP: ambient stamp, no route in the overlay. The serving
+    // session forks with the SUPERVISOR's env, so only a settings file
+    // reaches it: the argv must splice a --settings floor that empties the
+    // stamp for this one session.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let stamp = fno_agents::codex_route::ROUTE_PROVIDER_ENV;
+    let prior = std::env::var(stamp).ok();
+    std::env::set_var(stamp, "zai");
+    let bin = tmpdir("stamp-floor");
+    install_fake_claude(&bin);
+    let cwd = tmpdir("stamp-floor-cwd");
+    let dump = cwd.join("argv_dump.txt");
+    let path = path_with(&bin);
+    let res = bg_create(
+        "gina",
+        "hi",
+        &cwd,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_ARGV_DUMP", dump.to_str().unwrap()),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
+    match prior {
+        Some(v) => std::env::set_var(stamp, v),
+        None => std::env::remove_var(stamp),
+    }
+    let res = res.expect("bg_create succeeds under the floor");
+    assert_eq!(res.short_id, "7c5dcf5d");
+    let argv = fs::read_to_string(&dump).unwrap();
+    let mut it = argv.lines();
+    let mut settings = None;
+    while let Some(a) = it.next() {
+        if a == "--settings" {
+            settings = it.next();
+        }
+    }
+    let settings = settings.unwrap_or_else(|| panic!("no --settings in argv: {argv}"));
+    let raw = fs::read_to_string(settings).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        v["env"][stamp], "",
+        "the floor must empty the inherited stamp: {raw}"
+    );
+}
+
+#[test]
+fn create_routed_overlay_keeps_its_stamp() {
+    // AC8-EDGE: an overlay carrying the endpoint is a route; it owns the
+    // slot, so no floor file empties its stamp.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let stamp = fno_agents::codex_route::ROUTE_PROVIDER_ENV;
+    let prior = std::env::var(stamp).ok();
+    std::env::set_var(stamp, "zai");
+    let bin = tmpdir("stamp-routed");
+    install_fake_claude(&bin);
+    let cwd = tmpdir("stamp-routed-cwd");
+    let dump = cwd.join("argv_dump.txt");
+    let path = path_with(&bin);
+    let res = bg_create(
+        "hank",
+        "hi",
+        &cwd,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_ARGV_DUMP", dump.to_str().unwrap()),
+            ("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic"),
+            (stamp, "zai"),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+    );
+    match prior {
+        Some(v) => std::env::set_var(stamp, v),
+        None => std::env::remove_var(stamp),
+    }
+    let res = res.expect("bg_create succeeds on the routed lane");
+    assert_eq!(res.short_id, "7c5dcf5d");
+    let argv = fs::read_to_string(&dump).unwrap();
+    assert!(
+        !argv.contains("--settings"),
+        "a routed overlay must not get a scrub floor: {argv}"
+    );
 }

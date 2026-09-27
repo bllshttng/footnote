@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# SessionStart hook: remind the user to install the `fno` Rust front door when
-# it is not active on PATH. The uv / `curl fno.sh | sh` / plugin channels land
-# `fno-py` (the Python CLI console script), NOT the Rust `fno` mux front door
-# (crates/fno) that owns `fno` on PATH and bootstraps `fno-py`. Without it, bare
-# `fno` is command-not-found - and the fix is otherwise only visible if the user
-# happens to run `fno doctor`. One advisory line; goes SILENT the moment the
-# front door is active. Stdout becomes session context (same plain-text
-# convention as setup-nudge-session-start.sh).
+# SessionStart hook: when the `fno` Rust front door is not active on PATH, start
+# the plugin installer (.claude-plugin/postinstall.sh) or remind the user to
+# install it. Claude Code has no plugin install hook, so this is the only place a
+# plugin install runs the installer. It runs detached, once per plugin version,
+# under a lock, and logs to ${CLAUDE_PLUGIN_DATA}/postinstall.log. Goes SILENT the
+# moment the front door is active. Stdout becomes session context (same
+# plain-text convention as setup-nudge-session-start.sh).
 
 set -uo pipefail
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 # The Rust front door answers a mux-only verb; the Python `fno-py` has no `mux`
 # subcommand and fails "No such command". This is the same probe `fno doctor`'s
@@ -34,8 +37,61 @@ if command -v fno >/dev/null 2>&1; then
   fi
 fi
 
+PLUGIN_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
+INSTALLER="$PLUGIN_ROOT/.claude-plugin/postinstall.sh"
+DATA="${CLAUDE_PLUGIN_DATA:-}"
+STAMPED_LOG=""
+if [[ -n "$DATA" && -f "$INSTALLER" ]] && mkdir -p "$DATA" 2>/dev/null; then
+  LOG="$DATA/postinstall.log"
+  STAMP="$DATA/postinstall.version"
+  LOCK="$DATA/postinstall.lock"
+  VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+  if [[ -n "$VERSION" && "$(cat "$STAMP" 2>/dev/null)" != "$VERSION" ]]; then
+    # Reclaim a stale lock under a short mutex, so two sessions never remove
+    # each other's fresh lock. A lock with no pid file yet is live for 10
+    # minutes: the pid is written just after mkdir. Any lock older than 60
+    # minutes is stale, because a reused pid would otherwise hold it forever.
+    find "$LOCK.reclaim" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
+    if [[ -d "$LOCK" ]] && mkdir "$LOCK.reclaim" 2>/dev/null; then
+      holder="$(cat "$LOCK/pid" 2>/dev/null)"
+      if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+        rm -rf "$LOCK"
+      elif [[ -n "$holder" ]]; then
+        kill -0 "$holder" 2>/dev/null || rm -rf "$LOCK"
+      elif [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]]; then
+        rm -rf "$LOCK"
+      fi
+      rmdir "$LOCK.reclaim" 2>/dev/null
+    fi
+    if mkdir "$LOCK" 2>/dev/null; then
+      last="$(tail -1 "$LOG" 2>/dev/null)"
+      # Every descriptor is redirected: a child holding the hook's stdout keeps
+      # Claude Code waiting on EOF for the whole install.
+      nohup bash -c 'bash "$1"; rc=$?; echo "installer exit $rc"; [[ $rc -eq 0 ]] && printf "%s\n" "$4" >"$2"; rm -rf "$3"; exit $rc' \
+        _ "$INSTALLER" "$STAMP" "$LOCK" "$VERSION" </dev/null >"$LOG" 2>&1 &
+      echo $! >"$LOCK/pid" 2>/dev/null
+      echo "## Installing the fno CLI"
+      echo
+      if [[ "$last" =~ ^installer\ exit\ ([1-9][0-9]*)$ ]]; then
+        echo "The previous install attempt failed (installer exit ${BASH_REMATCH[1]}), so it runs again."
+      fi
+      echo "\`fno\` is not on your PATH yet. The footnote installer started in the background and logs to \`$LOG\`. Open a new session when the log ends with \`installer exit 0\`. Until then, verbs that shell out to \`fno\` fail."
+      exit 0
+    fi
+    echo "## fno CLI install in progress"
+    echo
+    echo "\`fno\` is not on your PATH yet. Another session is running the footnote installer. It logs to \`$LOG\`. Open a new session when the log ends with \`installer exit 0\`."
+    exit 0
+  fi
+  [[ -n "$VERSION" ]] && STAMPED_LOG="$LOG"
+fi
+
 cat <<'EOF'
 ## Install the `fno` front door
 
 `fno` (the Rust mux front door) is not active on your PATH - you likely have `fno-py` (the Python CLI) only. Install the front door so bare `fno` works and bootstraps the rest: `cargo install fno` (needs a Rust toolchain), or `fno doctor update --rust` from a clone - see docs/getting-started.md for other methods. Until then, reach the CLI as `fno-py`.
 EOF
+if [[ -n "$STAMPED_LOG" ]]; then
+  echo
+  echo "The footnote installer already ran for this plugin version. Its log is \`$STAMPED_LOG\`. If it installed \`fno\`, put the tool bin directory (usually \`~/.local/bin\`) on your PATH."
+fi

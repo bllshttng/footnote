@@ -294,6 +294,14 @@ pub fn is_word_code_verb(verb: &str) -> bool {
     codes().word_codes.contains_key(verb)
 }
 
+/// The word-code keys, sorted: the accepted-verb vocabulary the write gate
+/// names in its refusals.
+pub fn word_code_words() -> Vec<String> {
+    let mut words: Vec<String> = codes().word_codes.keys().cloned().collect();
+    words.sort();
+    words
+}
+
 /// The verb code for a work-verb word (`/target`, `$fno:blueprint`, ...).
 /// Unknown words raise: nothing defaults to `t`.
 pub fn verb_code_for(word: Option<&str>) -> Result<String, NameError> {

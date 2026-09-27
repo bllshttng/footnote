@@ -81,7 +81,12 @@ def test_ac2_hp_register_worker_atomic_concurrent(tmp_path):
         for i in range(n_workers)
     ]
 
-    with multiprocessing.Pool(processes=n_workers) as pool:
+    # spawn, not fork: the pytest worker process carries background threads
+    # (xdist, keeper clients), and forking a multithreaded parent can hand the
+    # child a locked lock - the 300s pytest-timeout kill this test hit under
+    # load. Spawn re-executes the interpreter, so nothing inherited is held.
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=n_workers) as pool:
         pool.map(_register_worker_in_pool, args_list)
 
     lines = workers_file.read_text().strip().splitlines()

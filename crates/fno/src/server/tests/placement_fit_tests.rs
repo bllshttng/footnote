@@ -270,11 +270,21 @@ fn os(args: &[&str]) -> Vec<std::ffi::OsString> {
     args.iter().map(std::ffi::OsString::from).collect()
 }
 
+fn op_of(word: &str) -> crate::cli_args::PaneOp {
+    use crate::cli_args::{MuxTail, PaneOp};
+    let t = || MuxTail { tail: Vec::new() };
+    match word {
+        "run" => PaneOp::Run(t()),
+        "ls" => PaneOp::Ls(t()),
+        _ => panic!("no test op mapping for {word}"),
+    }
+}
+
 #[test]
 fn mux_pane_parse_run_fit_selects_server_tab() {
     // AC4-ERR + AC6-HP (client half): bare --fit parses into the
     // placement; any explicit geometry refuses before a command exists.
-    let p = parse_pane_args(&os(&["run", "--fit", "--", "sleep", "300"])).unwrap();
+    let p = parse_pane_args(&op_of("run"), &os(&["--fit", "--", "sleep", "300"])).unwrap();
     assert!(matches!(
         p.cmd,
         PaneCmd::Run {
@@ -284,12 +294,12 @@ fn mux_pane_parse_run_fit_selects_server_tab() {
         } if argv == &["sleep", "300"]
     ));
     for combo in [
-        vec!["run", "--fit", "--tab", "id:1", "--", "true"],
-        vec!["run", "--fit", "--at", "3", "--", "true"],
-        vec!["run", "--fit", "--split", "down", "--", "true"],
-        vec!["run", "--fit", "at", "3", "--", "true"],
+        vec!["--fit", "--tab", "id:1", "--", "true"],
+        vec!["--fit", "--at", "3", "--", "true"],
+        vec!["--fit", "--split", "down", "--", "true"],
+        vec!["--fit", "at", "3", "--", "true"],
     ] {
-        let err = parse_pane_args(&os(&combo)).unwrap_err();
+        let err = parse_pane_args(&op_of("run"), &os(&combo)).unwrap_err();
         assert_eq!(
             err,
             "--fit selects its own tab and cannot be combined with --tab, --at, or --split"

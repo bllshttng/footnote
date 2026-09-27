@@ -36,8 +36,8 @@ from typing import Any, List, Optional, Sequence
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.pr._proc import ToolMissing, run
 
-# Check classification lives in fno.pr._status (_classify + _latest_per_name),
-# shared with the merge verb so the two surfaces never disagree (round 12).
+# Check classification is the Rust reader's (pr_status verdict + supersession
+# rows), shared with the merge verb so the two surfaces never disagree.
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +155,13 @@ def _events_file(repo_root: str, reason: str) -> Optional[str]:
 
 
 def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) -> None:
-    """Validate-with-warning, then append under the events mkdir-mutex.
+    """Validate-with-warning, then commit through the native event store.
 
     Mirrors the bash: a schema-validation failure logs a warning but the event
-    is appended anyway (missing audit evidence is worse than a relaxed shape).
+    is committed anyway (missing audit evidence is worse than a relaxed shape).
     An unresolved journal (None) was already warned about by ``_events_file``.
+    Like the writer it replaces, this stays best-effort: a store failure is one
+    stderr line, never a failed verdict.
     """
     if events_file is None:
         return
@@ -170,25 +172,14 @@ def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) 
     except Exception:
         sys.stderr.write(
             f"pr-verify: schema validation failed for transcript_audit_failed "
-            f"(reason={reason}); appending anyway\n"
+            f"(reason={reason}); committing anyway\n"
         )
-    requested_path = Path(events_file)
-    while True:
-        path = requested_path.resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_dir = path.with_name(path.name + ".lock.d")
-        token = acquire_dir_mutex(lock_dir, 30, steal=True, poll_s=1)
-        if token is None:
-            sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
-            return
-        if requested_path.resolve() == path:
-            break
-        release_dir_mutex(lock_dir, token)
     try:
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-    finally:
-        release_dir_mutex(lock_dir, token)
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(event, Path(events_file))
+    except Exception as exc:  # noqa: BLE001 - audit stays best-effort
+        sys.stderr.write(f"pr-verify: event store commit failed (reason={reason}): {exc}\n")
 
 
 def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:
@@ -389,11 +380,9 @@ def run_verify_merged(
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge(repo).require_checks_pass:
-        from fno.pr._status import without_coverage_statuses
-
-        failing = _failing_required(
-            without_coverage_statuses(pr_json.get("statusCheckRollup") or [])
-        )
+        failing = _failing_required(int(pr_number), repo)
+        if failing is None:
+            return 1
         if failing:
             failing_csv = ",".join(failing)
             _emit_audit(
@@ -446,26 +435,22 @@ def run_verify_merged(
     )
 
 
-def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks, classified by the SAME truth table the merge verb uses -
-    a second hand-built state table is how verify ends up refusing what
-    `fno do pr merge` merges (round 12). Callers pass the rollup through
-    `without_coverage_statuses`, so the coverage projections the merge verb's
-    covered path ignores are ignored here too; a stale coverage FAILURE beside
-    a flipped-covered row must not read as required_checks_failing.
-    _latest_per_name drops superseded runs; _classify reads pass/fail/pending
-    with the shared semantics (a REQUESTED or empty-conclusion check is
-    pending, not failing). No isRequired filter - `gh pr view` never emits
-    that key (see the checks arm of authorized_merge.rs), so with
-    require_checks_pass every
-    check counts."""
-    from fno.pr._status import _classify, _latest_per_name
+def _failing_required(pr_number: int, cwd: str) -> List[str] | None:
+    """Failing checks from the Rust owner's status-ci op (coverage rows
+    dropped): the SAME truth table the merge verb uses, never a second one.
+    None = unreadable read; the caller refuses rather than pass blind."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    failing: List[str] = []
-    for c in _latest_per_name(rollup):
-        if _classify(c) == "fail":
-            failing.append(str(_alt(c.get("name"), c.get("context"), "unnamed")))
-    return failing
+    try:
+        rows = verb_call(
+            "authorized-merge",
+            {"op": "status-ci", "cwd": cwd, "pr": int(pr_number), "drop_coverage": True},
+            timeout=120,
+        )
+    except VerbUnavailable:
+        sys.stderr.write("verify-pr-merged: required checks unreadable\n")
+        return None
+    return [str(r.get("name") or "unnamed") for r in rows if r.get("bucket") == "fail"]
 
 
 def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:

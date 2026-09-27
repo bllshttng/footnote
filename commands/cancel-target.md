@@ -19,7 +19,7 @@ Cancels a target pipeline. Behavior depends on whether a state file exists:
   (postmortem + ledger + the backlog node returning to `ready`); the next
   `fno do target init` archives that terminal state cleanly.
 
-  The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `do` row that was pinning the status.
+  The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `execute` row that was pinning the status.
 
 - **Orphan (no state file):** the session was driven off-ceremony (init
   skipped) or a prior cancel removed the file. Clearing the orphan block

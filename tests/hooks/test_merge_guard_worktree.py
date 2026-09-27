@@ -22,12 +22,26 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HOOK_PATH = REPO_ROOT / "hooks" / "git-protection.py"
 
 _spec = importlib.util.spec_from_file_location("git_protection", HOOK_PATH)
 git_protection = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(git_protection)
+
+_TEST_PR_WORKTREES = {}
+
+
+@pytest.fixture(autouse=True)
+def _stub_pr_worktree_lookup(monkeypatch):
+    _TEST_PR_WORKTREES.clear()
+    monkeypatch.setattr(
+        git_protection,
+        "_pr_worktree_root",
+        lambda pr: _TEST_PR_WORKTREES.get(str(pr)),
+    )
 
 
 def _git(cwd, *args):
@@ -81,6 +95,7 @@ def _setup_canonical_plus_worktree(td):
 
     wt = Path(td) / "wt"
     _git(canonical, "worktree", "add", "-q", "-b", "feature/x", str(wt))
+    _TEST_PR_WORKTREES["356"] = wt.resolve()
     return canonical, wt
 
 
@@ -161,6 +176,7 @@ def test_cwd_session_still_authorizes():
         sid = "cwd-active-sid"
         _write_state(canonical, status="IN_PROGRESS", sid=sid)
         _write_external_artifact(canonical, sid)
+        _TEST_PR_WORKTREES["356"] = canonical.resolve()
 
         reason = _call_in(canonical, git_protection._check_pr_merge_allowed,
                           "gh pr merge 356 --merge")
@@ -188,6 +204,7 @@ def test_multi_worktree_prefer_pr_selects_matching():
         canonical, wtA = _setup_canonical_plus_worktree(td)
         wtB = Path(td) / "wtB"
         _git(canonical, "worktree", "add", "-q", "-b", "feature/y", str(wtB))
+        _TEST_PR_WORKTREES["999"] = wtB.resolve()
         _write_state(wtA, status="IN_PROGRESS", sid="sid-a")
         _write_external_artifact(wtA, "sid-a", pr_number=356)
         _write_state(wtB, status="IN_PROGRESS", sid="sid-b")
@@ -420,7 +437,15 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
         'exit 1\n'
     )
     fno.chmod(0o755)
+    fno_agents = bin_dir / "fno-agents"
+    fno_agents.write_text(
+        '#!/usr/bin/env bash\n'
+        'cat >/dev/null\n'
+        'printf \'{"worktree":"%s"}\\n\' "$PWD"\n'
+    )
+    fno_agents.chmod(0o755)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["FNO_AGENTS_BIN"] = str(fno_agents)
     # FNO_HOME alone does NOT isolate the in-process hold reader: graph_json()
     # resolves through load_settings(), which ignores FNO_HOME, so the veto
     # read the MACHINE's real backlog graph and then failed its gh closure

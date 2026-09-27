@@ -352,7 +352,7 @@ The plugin is loaded via the `.claude-plugin/plugin.json` manifest:
 {
   "name": "footnote",
   "version": "1.0.0",
-  "description": "Autonomous development workflow: think -> plan -> do -> review -> ship.",
+  "description": "Autonomous development workflow: think -> plan -> execute -> review -> ship.",
   "author": {"name": "Jason Noah Choi"},
   "keywords": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"]
 }

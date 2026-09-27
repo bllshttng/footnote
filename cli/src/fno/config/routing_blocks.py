@@ -19,8 +19,11 @@ class RoutingBlock(BaseModel):
     prefer_harness: str = ""
     # Declared rows stay plain mappings, handed to readers verbatim. The row
     # shape is {name, harness, model, route, account, band, effort,
-    # operator_view, cost_per_mtok_in, context, color}; a repeated name folds
-    # per field. The one seam boundary (_field) reads the mapping spelling -
+    # operator_view, cost_per_mtok_in, context, context_measured_at,
+    # context_source, color}; a repeated name folds per field. The window
+    # reader is the Rust resolver (crates/fno-agents/src/context_window.rs):
+    # a context counts only beside a measured date, else the id-based
+    # default. The one seam boundary (_field) reads the mapping spelling -
     # a type test at a reader is the trap, never the cure.
     models: list[dict[str, Any]] = Field(default_factory=list)
     # Opt-in strict inventory (default off): a spawn qualifies against the

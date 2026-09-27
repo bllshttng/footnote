@@ -251,7 +251,18 @@ fn success(harness: &str, state: DaemonState, reused: bool) -> EnsureResult {
     }
 }
 
-fn acquire_lock(path: &Path) -> Option<std::fs::File> {
+pub(crate) fn acquire_lock(path: &Path) -> Option<std::fs::File> {
+    lock_with(path, libc::LOCK_EX)
+}
+
+/// Non-blocking variant: `None` = someone else holds it, try again later.
+/// The upgrade transaction takes this so a busy lock reads lock-busy instead
+/// of parking the restart verb behind another transaction.
+pub(crate) fn try_acquire_lock(path: &Path) -> Option<std::fs::File> {
+    lock_with(path, libc::LOCK_EX | libc::LOCK_NB)
+}
+
+fn lock_with(path: &Path, flags: libc::c_int) -> Option<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
@@ -260,7 +271,7 @@ fn acquire_lock(path: &Path) -> Option<std::fs::File> {
         .write(true)
         .open(path)
         .ok()?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
     (rc == 0).then_some(file)
 }
 

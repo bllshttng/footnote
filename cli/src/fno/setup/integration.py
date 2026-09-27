@@ -130,7 +130,7 @@ def _claude_install(run: Runner) -> IntegrationResult:
             if inst.returncode == 0:
                 return IntegrationResult("claude", label, "installed")
     # Fallback: clone the plugin into ~/.claude/skills/fno/ -> fno@skills-dir.
-    # No postinstall and no `claude plugin update`, but a curl user already has
+    # No `claude plugin update`, but a curl user already has
     # the CLI, so that is acceptable.
     return _claude_skills_dir_install(run)
 
@@ -197,50 +197,61 @@ def _codex_install(run: Runner) -> IntegrationResult:
 
 
 # --- opencode ---------------------------------------------------------------
-# OpenCode is a loop-wrapper harness (scripts/lib/driver-opencode.sh), not a
-# native plugin-marketplace CLI. Its integration is a local-file plugin copied
-# into OpenCode's plugin dir - no npm publish needed (OpenCode loads .js files
-# from ~/.config/opencode/plugins/ directly). Unlike codex, the installed state
-# is verifiable (the file exists and matches the shipped source), so we can
-# claim "installed" honestly.
-
-def _opencode_plugin_src() -> Path:
-    return Path(__file__).parent / "assets" / "opencode" / "footnote.js"
+# OpenCode is a loop-wrapper harness (scripts/lib/driver-opencode.sh). Its
+# integration is one fno-agents install (opencode_install.rs) that writes the
+# stop bridge, generated fno:<verb> command files, translated agent files and
+# the skill trees into the directories OpenCode already scans in the global
+# config dir. The Python side reads JSON receipts through the fno-agents door
+# and owns no install logic of its own; the receipt decides "installed".
 
 
-def _opencode_plugins_dir() -> Path:
-    return Path.home() / ".config" / "opencode" / "plugins"
+def _opencode_status():
+    """One door round-trip: (error, receipt) from the fno-agents opencode arm.
 
+    The flags ride AHEAD of the harness word: a deployed binary older than
+    this change parses the first flag as the mode, lands on "unknown
+    harness", and refuses - so a stale binary can answer a PROBE with an
+    install, never the reverse."""
+    from fno.rust_binary import call_binary_json
 
-def _opencode_plugin_dest() -> Path:
-    return _opencode_plugins_dir() / "footnote.js"
+    return call_binary_json("plugin-install", ["--installed", "--json", "opencode"])
 
 
 def _opencode_is_installed() -> bool:
-    # Installed == the dest file exists AND matches the shipped source, so a
-    # stale copy (older footnote) reports not-installed and gets refreshed.
-    dest = _opencode_plugin_dest()
-    if not dest.exists():
-        return False
-    try:
-        return dest.read_text(encoding="utf-8") == _opencode_plugin_src().read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return False
+    err, receipt = _opencode_status()
+    return (
+        err is None
+        and isinstance(receipt, dict)
+        and receipt.get("status") == "installed"
+    )
 
 
 def _opencode_install() -> IntegrationResult:
     label = "OpenCode"
-    src = _opencode_plugin_src()
-    dest = _opencode_plugin_dest()
-    try:
-        src_text = src.read_text(encoding="utf-8")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src_text, encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("opencode", label, "failed", note=str(exc))
-    return IntegrationResult("opencode", label, "installed", note=f"plugin -> {dest}")
+    from fno.rust_binary import call_binary_json
+
+    err, receipt = call_binary_json("plugin-install", ["--json", "opencode"])
+    if err is not None:
+        return IntegrationResult("opencode", label, "failed", note=str(err))
+    if not isinstance(receipt, dict):
+        return IntegrationResult(
+            "opencode", label, "failed", note="unreadable install receipt"
+        )
+    kept = receipt.get("kept") or []
+    note = "{} file(s) (footnote {}) -> {}".format(
+        receipt.get("written", 0),
+        receipt.get("version", "?"),
+        receipt.get("config_dir", "?"),
+    )
+    if kept:
+        note += "; kept user files: " + ", ".join(str(k) for k in kept)
+    status = receipt.get("status")
+    return IntegrationResult(
+        "opencode",
+        label,
+        "installed" if status in ("installed", "partial") else "failed",
+        note=note,
+    )
 
 
 # --- pi ---------------------------------------------------------------------
@@ -257,39 +268,28 @@ def _pi_extension_src() -> Path:
     return Path(__file__).parent / "assets" / "pi" / "footnote.ts"
 
 
-def _pi_extensions_dir() -> Path:
-    return Path.home() / ".pi" / "agent" / "extensions"
-
-
-def _pi_extension_dest() -> Path:
-    return _pi_extensions_dir() / "footnote.ts"
-
-
 def _pi_is_installed() -> bool:
-    # Installed == the dest file exists AND matches the shipped source, so a
-    # stale copy (older footnote) reports not-installed and gets refreshed.
-    dest = _pi_extension_dest()
-    if not dest.exists():
-        return False
-    try:
-        return dest.read_text(encoding="utf-8") == _pi_extension_src().read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return False
+    from fno.rust_binary import call_binary_json
+
+    _err, payload = call_binary_json(
+        "plugin-install",
+        ["pi", "--status", "--extension-src", str(_pi_extension_src()), "--json"],
+    )
+    return bool(payload and payload.get("installed"))
 
 
 def _pi_install() -> IntegrationResult:
-    label = "pi"
-    src = _pi_extension_src()
-    dest = _pi_extension_dest()
-    try:
-        src_text = src.read_text(encoding="utf-8")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src_text, encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("pi", label, "failed", note=str(exc))
-    return IntegrationResult("pi", label, "installed", note=f"extension -> {dest}")
+    from fno.rust_binary import call_binary_json
+
+    _err, payload = call_binary_json(
+        "plugin-install", ["pi", "--extension-src", str(_pi_extension_src()), "--json"]
+    )
+    if payload and payload.get("status"):
+        return IntegrationResult(
+            payload["cli"], payload["label"], payload["status"], note=payload["note"]
+        )
+    note = _err or "the fno-agents binary is missing or failed; run fno doctor update --rust"
+    return IntegrationResult("pi", "pi", "failed", note=note)
 
 
 # --- agy (Antigravity CLI) --------------------------------------------------
@@ -327,39 +327,25 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
 
 
 def _agy_is_installed() -> bool:
-    hooks = _agy_hooks_json()
-    if not hooks.is_file():
-        return False
-    try:
-        data = json.loads(hooks.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    fn = data.get("footnote")
-    if not isinstance(fn, dict):
-        return False
-    stop = fn.get("Stop")
-    if not isinstance(stop, list):
-        # Absent or malformed (e.g. {"Stop": null}); not a TypeError on iteration.
-        return False
+    from fno.rust_binary import call_binary_json
+
     adapter = _agy_adapter_path()
-    if adapter is None:
-        # Can't verify the command targets the live adapter; installed iff ANY
-        # footnote Stop handler is registered.
-        return bool(stop)
-    if not any(
-        isinstance(h, dict) and h.get("command") == str(adapter) for h in stop
-    ):
-        return False
-    # The crown adapter is part of the install when it ships in this install.
     crown = _agy_crown_adapter_path()
-    if crown is None:
-        return True
-    pre = fn.get("PreInvocation")
-    if not isinstance(pre, list):
+    args = [
+        "agy",
+        "--hooks-status",
+        "--hooks-file",
+        str(_agy_hooks_json()),
+        "--json",
+    ]
+    if adapter is not None:
+        args += ["--adapter", str(adapter)]
+    if crown is not None:
+        args += ["--crown", str(crown)]
+    error, payload = call_binary_json("plugin-install", args)
+    if error is not None or not isinstance(payload, dict):
         return False
-    return any(isinstance(h, dict) and h.get("command") == str(crown) for h in pre)
+    return bool(payload.get("installed"))
 
 
 def _agy_install() -> IntegrationResult:
@@ -373,42 +359,47 @@ def _agy_install() -> IntegrationResult:
             note="adapter ships in the plugin (not this CLI-only install); wire "
             "hooks/agy-target-stop-hook.sh into ~/.gemini/config/hooks.json by hand",
         )
-    hooks = _agy_hooks_json()
-    # Merge the footnote Stop handler into hooks.json, preserving any other tool's
-    # namespace key. A corrupt/non-dict file is overwritten (we can't safely merge
-    # into garbage); only the parseable-dict case is preserved.
-    data: "dict[str, object]" = {}
-    if hooks.is_file():
-        try:
-            loaded = json.loads(hooks.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (ValueError, OSError):
-            data = {}
-    fn = data.get("footnote")
-    if not isinstance(fn, dict):
-        fn = {}
-    fn["Stop"] = [{"type": "command", "command": str(adapter), "timeout": 60}]
+    from fno.rust_binary import call_binary_json
+
+    # Probe first: a stale fno-agents binary IGNORES unknown flags and would
+    # fall through to the old full plugin install. A current one answers
+    # --hooks-status with a JSON status object.
+    hooks_file = _agy_hooks_json()
+    error, probe = call_binary_json(
+        "plugin-install",
+        ["agy", "--hooks-status", "--hooks-file", str(hooks_file), "--json"],
+    )
+    if error is not None or not isinstance(probe, dict) or "file" not in probe:
+        return IntegrationResult(
+            "agy",
+            label,
+            "failed",
+            note="the fno-agents binary does not answer --hooks-status; run "
+            "`fno doctor update --rust`",
+        )
+    args = [
+        "agy",
+        "--hooks",
+        "--adapter",
+        str(adapter),
+        "--hooks-file",
+        str(hooks_file),
+        "--json",
+    ]
     crown = _agy_crown_adapter_path()
     if crown is not None:
-        # PreInvocation takes handlers directly under the event key; the matcher
-        # is ignored per agy's schema. The adapter self-gates on invocationNum
-        # == 0, so later invocations inject nothing.
-        fn.setdefault("PreInvocation", [])
-        if not any(
-            isinstance(h, dict) and h.get("command") == str(crown)
-            for h in fn["PreInvocation"]
-        ):
-            fn["PreInvocation"].append(
-                {"type": "command", "command": str(crown), "timeout": 30}
-            )
-    data["footnote"] = fn
-    try:
-        hooks.parent.mkdir(parents=True, exist_ok=True)
-        hooks.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("agy", label, "failed", note=str(exc))
-    return IntegrationResult("agy", label, "installed", note=f"Stop hook -> {hooks}")
+        args += ["--crown", str(crown)]
+    error, payload = call_binary_json("plugin-install", args)
+    if error is not None:
+        if "not found" in error:
+            note = "fno-agents binary not found; run `fno doctor update --rust`"
+        else:
+            note = error
+        return IntegrationResult("agy", label, "failed", note=note)
+    note = "Stop hook installed"
+    if isinstance(payload, dict):
+        note = payload.get("note") or note
+    return IntegrationResult("agy", label, "installed", note=note)
 
 
 def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":

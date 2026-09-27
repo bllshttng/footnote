@@ -2,11 +2,11 @@
 //!
 //! Client-side and daemon-free, like [`crate::wait`]: a batch read is a
 //! filesystem read, not an agent-lifecycle operation, so it needs no daemon
-//! RPC. Not a routable `fno agents` verb (it stays out of `CLIENT_VERB_USAGE` /
-//! `RUST_CLIENT_VERBS`, the same rule `pr-heal` and `kill-check` follow) - the
-//! only caller is `fno backlog get`'s Python forwarder, which reaches for this
-//! binary only when it is handed more than one id (a single id keeps its
-//! existing all-Python path byte for byte).
+//! RPC. Not a routable `fno agents` verb (it serves from `bin/client.rs`'s
+//! dispatch, but stays out of `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`, the
+//! same rule `pr-heal` and `kill-check` follow) - the argv callers are
+//! `fno backlog get`'s Python forwarder (>1 id) and, through the stdin door,
+//! the tracker seam's Python client and the mux's `read_snapshot`.
 //!
 //! The census this verb answers: `backlog get` was 1,516 single-node calls
 //! over 21 days, one graph read each. A caller naming several ids in one
@@ -14,6 +14,7 @@
 
 use crate::graph_store;
 use serde_json::Value;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// The graph entry's lifecycle-status key, and its read. Lives here, not in
@@ -27,20 +28,39 @@ pub(crate) fn entry_status<'a>(entry: &'a Value) -> &'a str {
     entry.get(STATUS_KEY).and_then(Value::as_str).unwrap_or("?")
 }
 
-/// `graph.json`'s default location: `$FNO_HOME/graph.json`, else
-/// `$HOME/.fno/graph.json`. Mirrors the FNO_HOME-first resolution every other
-/// client-side verb in this crate uses (see `finalize::append_corrections_pointer`).
-/// Does not read `config.paths.graph_json` - a batch convenience read is not
-/// where a config-driven relocation belongs, and `--graph` covers a test or an
+/// `graph.json`'s default location: `$FNO_STATE_DIR/graph.json`, else
+/// `$FNO_HOME/graph.json`, else `$HOME/.fno/graph.json`. `FNO_STATE_DIR` first:
+/// it is the root `fno.paths.state_dir` resolves, and `seal_state_root` pins it
+/// around a forwarded HOME, so a sealed Rust child reads the graph its parent
+/// wrote. A `~`-prefixed carrier expands like Python's, so both legs resolve
+/// the same store. Mirrors the FNO_HOME-first resolution every other
+/// client-side verb in this crate uses (see
+/// `finalize::append_corrections_pointer`). Does not read
+/// `config.paths.graph_json` - a batch convenience read is not where a
+/// config-driven relocation belongs, and `--graph` covers a test or an
 /// operator override in the meantime.
 pub(crate) fn default_graph_path() -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_HOME") {
+    if let Some(v) = std::env::var_os("FNO_STATE_DIR").filter(|v| !v.is_empty()) {
+        return expand_home_prefix(&v).join("graph.json");
+    }
+    if let Some(v) = std::env::var_os("FNO_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(v).join("graph.json");
     }
-    let home = std::env::var_os("HOME")
+    var_os_home().join(".fno").join("graph.json")
+}
+
+fn var_os_home() -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".fno").join("graph.json")
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn expand_home_prefix(v: &std::ffi::OsStr) -> PathBuf {
+    let s = v.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        return var_os_home().join(rest);
+    }
+    PathBuf::from(v)
 }
 
 /// Whether an external tracker backend is selected, resolved exactly as the
@@ -94,6 +114,14 @@ fn get_rows(entries: &[Value], ids: &[String]) -> (Vec<Value>, bool) {
     (out, any_missing)
 }
 
+/// The run's row assembly, split from `run_graph_get` for the same reason
+/// `get_rows` is: the marker-first contract is testable against the same
+/// function the binary runs, not against captured stdout.
+fn serve(entries: &mut [Value], ids: &[String]) -> (Vec<Value>, bool) {
+    crate::node_reading::attach_reading(entries);
+    get_rows(entries, ids)
+}
+
 pub fn run_graph_get(args: &[String]) -> i32 {
     let mut ids: Vec<String> = Vec::new();
     let mut graph_path = default_graph_path();
@@ -125,6 +153,24 @@ pub fn run_graph_get(args: &[String]) -> i32 {
         }
         i += 1;
     }
+    // The stdin door (the gh-budget shape on fleet-incident): no positional
+    // ids plus a non-terminal stdin means one JSON payload naming a tracker
+    // op. Empty or non-JSON stdin falls through to the usage refusal below,
+    // so a script that passes no ids still gets the old message.
+    if ids.is_empty() && !std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).is_ok() {
+            if let Ok(payload) = serde_json::from_str::<Value>(&buf) {
+                if payload
+                    .as_object()
+                    .is_some_and(|o| o.contains_key("tracker"))
+                {
+                    println!("{}", crate::tracker::run_door(&payload));
+                    return 0;
+                }
+            }
+        }
+    }
     if ids.is_empty() {
         eprintln!("fno-agents graph-get: needs at least one <id>");
         return 2;
@@ -151,7 +197,7 @@ pub fn run_graph_get(args: &[String]) -> i32 {
     };
     graph_store::apply_readiness_overlay(&mut entries);
 
-    let (out, any_missing) = get_rows(&entries, &ids);
+    let (out, any_missing) = serve(&mut entries, &ids);
     println!(
         "{}",
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
@@ -162,13 +208,57 @@ pub fn run_graph_get(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+
+    #[test]
+    fn the_state_dir_carrier_outranks_fno_home_for_the_default_graph() {
+        let _guard = crate::claims::test_env_lock();
+        let prior_state = std::env::var_os("FNO_STATE_DIR");
+        let prior_home = std::env::var_os("FNO_HOME");
+        std::env::set_var("FNO_STATE_DIR", "/pinned-state");
+        std::env::set_var("FNO_HOME", "/pinned-home");
+
+        assert_eq!(
+            default_graph_path(),
+            PathBuf::from("/pinned-state").join("graph.json")
+        );
+
+        match prior_state {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+        match prior_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
+    }
+
+    #[test]
+    fn without_the_state_dir_carrier_fno_home_still_wins() {
+        let _guard = crate::claims::test_env_lock();
+        let prior_state = std::env::var_os("FNO_STATE_DIR");
+        let prior_home = std::env::var_os("FNO_HOME");
+        std::env::remove_var("FNO_STATE_DIR");
+        std::env::set_var("FNO_HOME", "/pinned-home");
+
+        assert_eq!(
+            default_graph_path(),
+            PathBuf::from("/pinned-home").join("graph.json")
+        );
+
+        match prior_state {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+        match prior_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
+    }
 
     fn write_graph(entries: &[Value]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("graph.json");
-        let mut f = std::fs::File::create(&path).expect("create graph.json");
-        write!(f, "{}", serde_json::json!({"entries": entries})).expect("write graph.json");
+        crate::graph_store::seed_rows(&path, entries).expect("seed graph.db");
         dir
     }
 
@@ -211,6 +301,46 @@ mod tests {
     fn no_ids_is_a_usage_error() {
         let args = vec!["--json".to_string()];
         assert_eq!(run_graph_get(&args), 2);
+    }
+
+    #[test]
+    fn a_row_with_a_plan_serves_the_reading_marker_first() {
+        let mut entries = vec![serde_json::json!({
+            "id": "x-aaaa",
+            "slug": "fewer-gated",
+            "status": "ready",
+            "details": "stale fix path",
+            "plan_path": "plans/one.md",
+        })];
+        let (out, missing) = serve(&mut entries, &["x-aaaa".to_string()]);
+        assert!(!missing);
+        assert_eq!(
+            out[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("_reading")
+        );
+        assert_eq!(
+            out[0]["_reading"],
+            "plan_path is authoritative for the file list; \
+             details is the original filing and may be stale"
+        );
+    }
+
+    #[test]
+    fn a_bare_row_is_served_byte_for_byte() {
+        let mut entries = vec![node("x-aaaa", "fewer-gated")];
+        let before = entries.clone();
+        let (out, missing) = serve(&mut entries, &["x-aaaa".to_string()]);
+        assert!(!missing);
+        assert!(
+            out[0].get("_reading").is_none(),
+            "no plan, no state: the served row is unchanged"
+        );
+        assert_eq!(out[0], before[0]);
     }
 
     #[test]

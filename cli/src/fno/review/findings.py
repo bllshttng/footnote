@@ -304,10 +304,8 @@ class FindingPrimitive:
     #:
     #: Without it a blocking finding's entire human payload is
     #: ``file:line:category``, and the gate that blocks on it carries nothing
-    #: a reader can act on. That makes the ``fixed`` disposition unreachable:
-    #: clearing a blocking finding means fixing it, fixing it means knowing
-    #: what it says, and the only remaining disposition is ``declined``, which
-    #: needs corroboration a solo author cannot mint. The record already
+    #: a reader can act on. Clearing a blocking finding means fixing it, and
+    #: fixing it means knowing what the finding says. The record already
     #: carried the text; only this primitive dropped it.
     summary: Optional[str] = None
 

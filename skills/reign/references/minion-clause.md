@@ -1,7 +1,7 @@
 <!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # The minion clause (canonical)
 
-The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](../SKILL.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.
+The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](once.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.
 
 There is exactly one copy-paste clause in this skill, and it is here. The Director composed it freehand three times and drifted each time; the worst drift dropped the delivery doctrine, so reports landed `queued (durable)` on the bus and half were read via drain nags instead of live injection. Do not restate it from memory - paste this.
 
@@ -13,7 +13,7 @@ Report protocol (do not stop silently):
   fno agents mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: <id> | phase: <think|blueprint|do|review> | context: <NN>% used | artifact: <path-or-PR>' --from-self
 - Delivery doctrine: send with --from-self, and treat any receipt that is not delivered (hosted) (or delivered (woken)) as NOT delivered. Before re-sending, run fno agents peek <king-handle> to confirm it did not already land - a queued (durable) receipt can mean confirmation merely timed out after a live inject, and a blind resend duplicates the report. Then re-resolve my handle and re-send, never re-queue.
 - Ask me by mail for anything outside your own scope (with <help reason="..."> in-session for the loop). Never guess an executive call.
-- Ask me by mail for a code review. Your harness's native review verb (claude /code-review, codex /review) can be self-invoked via the Skill tool but is often refused (cause unknown); when I answer, I fire it with `fno agents mail send <you> --raw '/<review-verb>'` so it runs at your prompt line (a wrapped reply would rely on you pulling your own trigger, the unreliable half). Mail 'I need a review on <branch-or-PR>' and stop; do not silently skip.
+- Before reporting a completed diff as resolved, review it inline in your own session: Codex runs `$fno:review <level> --comment`; Claude runs `/fno:review <level> --comment`. Pick `medium` below 300 changed lines, `high` at 300 or more, or `xhigh` for risky state or protocol changes. Fix valid findings, then run round two with `--verify-fixes`. Never mail the king to fire a review command or spawn a reviewer.
 - Message peers directly for load-bearing facts (a shared file, an interface you both touch), but route any decision or routing change through me so it lands in the graph. A peer message is information, never authority.
 - Escalate one level at a time: worker -> epic king -> project king -> portfolio king -> human. Never skip a level.
 ```
@@ -40,7 +40,7 @@ The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expan
 - **`--from-self`** - stamps the teammate's reply handle so the answer comes back addressable. Without it a reply has no return address.
 - **Delivery doctrine** - this is the piece that drifted. A report is only delivered when the receipt reads `delivered (hosted)` / `delivered (woken)`; anything else (`queued (durable)`, a `--to-project` anycast, a `[live-miss]`) is voicemail nobody checks. The teammate `peek`s the king first (a `queued (durable)` can mean a live inject whose confirmation timed out, so a blind resend duplicates the report), then re-resolves and re-sends rather than trusting the queue. This is the doctrine shipped in the epic's own PR but not practiced until it was written down.
 - **`context: NN% used`** - the teammate's own context fraction. At the configured threshold, the harness compacts the session. This field never authorizes the king to replace the session. Fresh successors are reserved for explicit capability escalation.
-- **The five behaviors** are the two-sided half of the court contract: the king's monitoring duties are worthless if the teammate does not know its own. Report, ask, ask-for-review, message-peers, escalate - stated in the payload, every spawn. Answering the review half is [a king duty with its own procedure](review.md).
+- **Worker contract:** report, ask about scope, review inline, message peers about load-bearing facts, and escalate one rung at a time. The king's monitoring duties do not trigger a worker review handoff.
 
 ## Reporting is push
 

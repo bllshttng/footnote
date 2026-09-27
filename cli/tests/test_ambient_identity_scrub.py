@@ -169,6 +169,27 @@ def _capture_subprocess_env(monkeypatch, module) -> dict:
     return captured
 
 
+def test_no_child_env_carries_the_node_receipt(tmp_path: Path, monkeypatch) -> None:
+    """The seam's derivation receipt is fno-internal: a spawned child never
+    sees FNO_NODE_REASON, on either transport shape (dict scrub or env -u)."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setenv("FNO_NODE_REASON", "x-gone names no readable backlog row")
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+
+    explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
+    assert explicit_envs, "headless spawn inherited the parent env with no scrub"
+    child_env = explicit_envs[-1]
+    assert "FNO_NODE_REASON" not in child_env
+
+    flags = ambient_identity_env_unset_args()
+    assert "FNO_NODE_REASON" in flags
+
+
 def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None:
     """AC5 (bg substrate): a `claude --bg` child sheds every ambient identity
     marker its parent carried. The operator's spawned-reviewer lane uses

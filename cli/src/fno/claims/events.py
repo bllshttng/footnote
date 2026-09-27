@@ -151,11 +151,15 @@ def emit_claim_force_overridden(
 # so adding a helper now would be dead code.
 
 
-def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
+def emit_claim_reaped(
+    claim: Claim, *, root: str, age_ms: int, basis: Optional[str] = None
+) -> None:
     """GC archived one provably-dead claim. Per-file record."""
     data = _common(claim)
     data["root"] = root
     data["age_ms"] = int(age_ms)
+    if basis is not None:
+        data["basis"] = basis
     _emit(_build("claim_reaped", data))
 
 

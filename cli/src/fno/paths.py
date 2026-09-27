@@ -658,13 +658,6 @@ class StateFile:
 
 STATE_FILES: tuple[StateFile, ...] = (
     StateFile(
-        filename="graph.json",
-        resolver="fno.paths.graph_json",
-        root_class="OPERATOR",
-        selector="config.paths.graph_json, else config.state_dir",
-        owning_modules=("cli/src/fno/paths.py",),
-    ),
-    StateFile(
         filename="ledger.json",
         resolver="fno.paths.ledger_json",
         root_class="OPERATOR",
@@ -726,6 +719,8 @@ STATE_FILES: tuple[StateFile, ...] = (
 
 def state_dir() -> Path:
     """Return the state directory (default: ~/.fno/)."""
+    if carrier := os.environ.get("FNO_STATE_DIR"):
+        return _guard_state_path(Path(os.path.expanduser(carrier)).resolve())
     settings = _settings()
     return _guard_state_path(_resolve(settings.state_dir))
 
@@ -763,41 +758,28 @@ def github_cli_proxy_dir() -> Path:
 def locks_dir() -> Path:
     """Advisory-lock sidecar directory (``~/.fno/locks``).
 
-    Deliberately config-free (``$HOME`` only, no settings load) so
-    ``fno.plan._stamp`` can compute it under the bare python - no tomli_w - that
-    Rust finalize invokes. The plan-doc lock is keyed by the plan's resolved path,
+    Deliberately config-free (``$HOME``/``FNO_STATE_DIR`` only, no settings load). The plan-doc lock is keyed by the plan's resolved path,
     so the two fno writers only need to agree on this directory; a config
     ``state_dir`` override deliberately does NOT move it (moving it would desync
-    the config-loading append side from the config-free stamp side)."""
+    the config-loading append side from the config-free stamp side). The
+    ``FNO_STATE_DIR`` carrier may: it needs no config load, so both writers
+    agree under it, and the seal pins it around a forwarded HOME."""
+    if carrier := os.environ.get("FNO_STATE_DIR"):
+        return Path(os.path.expanduser(carrier)).resolve() / "locks"
     return Path.home() / ".fno" / "locks"
 
 
 def graph_json() -> Path:
     """Return the path to graph.json."""
-    settings = _settings()
-    override = settings.paths.graph_json
-    if override is not None:
-        return _guard_state_path(_resolve(override))
     return state_dir() / "graph.json"
 
 
 def graph_archive_json() -> Path:
-    """Return the path to graph-archive.json (terminal-node archive sweep).
-
-    A sibling of graph.json so it follows any ``config.paths.graph_json``
-    override automatically - the archive must live next to the graph it drains
-    from. No override of its own (and so no bare ``~/.fno``): it is never
-    meaningful to separate the archive from its working graph.
-    """
     return graph_json().parent / "graph-archive.json"
 
 
 def relatedness_json() -> Path:
     """Return the path to relatedness.json (node-to-node relatedness sidecar).
-
-    A sibling of graph.json (like graph-archive.json) so it follows any
-    ``config.paths.graph_json`` override and is inherently shared across
-    worktrees. Regenerable artifact, never part of graph.json.
     """
     return graph_json().parent / "relatedness.json"
 
@@ -807,13 +789,17 @@ def ledger_json() -> Path:
 
     Pinned global: the ledger is cross-project by definition (one row per
     terminal session across every repo), so it must never fork into a
-    per-repo stray. An absolute ``config.paths.ledger_json`` override wins,
-    while a relative override is anchored under ``~/.fno``. Otherwise it
-    follows ``config.state_dir`` only when that is an absolute anchor - the
-    ``~/.fno`` default and test sandboxes both are; a *relative*
-    (project-/CWD-anchored) ``state_dir`` would land the ledger inside a repo
-    checkout, so it falls back to the user-global ``~/.fno`` instead.
+    per-repo stray. The ``FNO_STATE_DIR`` carrier wins first: the seal pins an
+    absolute root, so a sealed ledger follows ``state_dir()``. An absolute
+    ``config.paths.ledger_json`` override wins, while a relative override is
+    anchored under ``~/.fno``. Otherwise it follows ``config.state_dir`` only
+    when that is an absolute anchor - the ``~/.fno``
+    default and test sandboxes both are; a *relative* (project-/CWD-anchored)
+    ``state_dir`` would land the ledger inside a repo checkout, so it falls
+    back to the user-global ``~/.fno`` instead.
     """
+    if os.environ.get("FNO_STATE_DIR"):
+        return _guard_state_path(state_dir() / "ledger.json")
     settings = _settings()
     override = settings.paths.ledger_json
     if override is not None:
@@ -1621,16 +1607,20 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
          file in EVERY repo - not the fno-area default, which is the wrong
          file outside this repo (and would make producer-written items invisible
          to the read commands).
-      3. With Obsidian enabled: ``<project_root>/internal/fno/backlog/parking-lot.md``
+      3. With Obsidian enabled AND this repo already carries an ``internal/``
+         (the vault symlink setup-worktree creates): ``<project_root>/internal/fno/backlog/parking-lot.md``
          (canonical default), unless a legacy
          ``internal/fno/backlog/inbox.md`` already exists, in which case that
          file keeps being used (back-compat, so old captures still resolve).
+         The global Obsidian flag is machine-level consent, not per-project:
+         a repo without its own ``internal/`` never gets one created.
       4. Without a vault, but a legacy ``internal/fno/backlog/inbox.md``
          already exists under the repo: keep using it (back-compat, so an
          upgrade never strands previously captured fu-* items).
       5. Without a vault, but a legacy ``.fno/backlog/inbox.md`` exists: keep it.
-      6. Without a vault and no legacy file: ``<project_root>/.fno/backlog/parking-lot.md``
-         so a non-vault repo never has a stray ``internal/`` directory materialized.
+      6. Otherwise: ``<project_root>/.fno/backlog/parking-lot.md``
+         so a repo without its own vault link never has a stray ``internal/``
+         directory materialized.
 
     The Obsidian default is plain-relative and anchors to the repo root
     (mirrors plans_dir). ``.resolve()`` follows the ``internal/`` symlink to
@@ -1651,7 +1641,7 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
         raw = override
     elif post_merge_parking_lot is not None:
         raw = post_merge_parking_lot
-    elif settings.obsidian.enabled:
+    elif settings.obsidian.enabled and (root / "internal").exists():
         if (root / "internal/fno/backlog/inbox.md").exists():
             raw = "internal/fno/backlog/inbox.md"
         else:
@@ -1710,15 +1700,15 @@ def config_file() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Plugin-script resolution with a self-healing persisted pointer (#2)
+# Plugin-script resolution with a persisted pointer (#2)
 # ---------------------------------------------------------------------------
 # `fno do target init` / `fno gate set` need scripts that ship with the PLUGIN
 # (hooks/, scripts/lib/), not the active project. From a foreign project with
 # no env hint those were unreachable (the uv-tool wheel carries no hooks/, and
 # CLAUDE_PLUGIN_ROOT is not propagated to `fno` subprocesses), forcing a
-# hand-set FNO_REPO_ROOT. resolve_plugin_script() adds a persisted
-# ~/.fno/plugin-root pointer, primed by the session-start hook and
-# self-healed on any env/pkg resolve, as the env-less fallback.
+# hand-set FNO_REPO_ROOT. resolve_plugin_script() falls back to the persisted
+# ~/.fno/plugin-root pointer, written by the session-start hook from an
+# installed or canonical root, as the env-less fallback.
 
 _PLUGIN_ROOT_POINTER_NAME = "plugin-root"
 _PLUGIN_MARKER_RELPATH = "hooks/helpers/init-target-state.sh"
@@ -1769,9 +1759,10 @@ def _read_persisted_plugin_root() -> "Path | None":
     """Read ~/.fno/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
     None so resolution falls through rather than handing back a dead path. The
-    session-start hook writes the CURRENT (often a linked-worktree) checkout, so
-    the pointer is canonicalized to the main checkout here - the sole read point
-    - rather than shelling out in the subprocess-sensitive persist/env path."""
+    session-start hook writes installed and canonical roots only, but pointers
+    written before that guard may still name a linked worktree, so the pointer
+    is canonicalized to the main checkout here - the sole read point - rather
+    than shelling out on the env/pkg resolve path."""
     try:
         pointer = _plugin_root_pointer()
         if not pointer.is_file():
@@ -1782,45 +1773,20 @@ def _read_persisted_plugin_root() -> "Path | None":
     return cand if _is_plugin_root(cand) else None
 
 
-def _persist_plugin_root(root: Path) -> None:
-    """Best-effort cache of *root* to ~/.fno/plugin-root. Only writes a
-    root carrying the plugin manifest (.claude-plugin/plugin.json), so an
-    env/test fake with just a stub hook can never poison the pointer. A
-    worktree root is canonicalized at READ time (_read_persisted_plugin_root),
-    not here, so this stays subprocess-free. Never raises - priming is an
-    optimization, not a contract."""
-    try:
-        if not (root / ".claude-plugin" / "plugin.json").is_file():
-            return
-        pointer = _plugin_root_pointer()
-        new = str(root)
-        if pointer.is_file() and pointer.read_text().strip() == new:
-            return
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        tmp = pointer.with_name(pointer.name + ".tmp")
-        tmp.write_text(new + "\n")
-        tmp.replace(pointer)
-    except OSError:
-        pass
-
-
 def resolve_plugin_script(relpath: str) -> Path:
     """Resolve a script that ships with the fno PLUGIN (not the active
     project), e.g. ``hooks/helpers/init-target-state.sh`` or
     ``scripts/setup/setup-worktree.sh``.
 
     Order: env hint (CLAUDE_PLUGIN_ROOT / CODEX_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
-    package-relative -> persisted ~/.fno/plugin-root pointer -> repo.
-    Self-heals the pointer on any env/pkg resolve (manifest-gated)."""
+    package-relative -> persisted ~/.fno/plugin-root pointer -> repo."""
     for env_name in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"):
         root = os.environ.get(env_name)
         if root:
             base = Path(root).expanduser()
-            _persist_plugin_root(base)
             return base / relpath
     pkg_root = Path(__file__).resolve().parents[3]
     if _is_plugin_root(pkg_root):
-        _persist_plugin_root(pkg_root)
         return pkg_root / relpath
     persisted = _read_persisted_plugin_root()
     if persisted is not None and (persisted / relpath).exists():

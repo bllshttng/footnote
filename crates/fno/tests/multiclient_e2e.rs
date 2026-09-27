@@ -79,12 +79,16 @@ fn multiclient_clamp_letterbox_area_and_regrow_on_abrupt_death() {
     assert_eq!((rect.rows, rect.cols), (20, 80));
 
     // Kernel-winsize proof + identical frames: both clients converge on the
-    // same 20x80 grid content.
+    // same 18x78 grid content (the pane frame insets the pty).
     a.input(b"echo sz=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz=20 80#"));
-    b.wait_pane_text(15, pane, |t| t.contains("sz=20 80#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz=18 78#"));
+    b.wait_pane_text(15, pane, |t| t.contains("sz=18 78#"));
     let fa = a.frames.get(&pane).unwrap();
-    assert_eq!((fa.rows, fa.cols), (20, 80), "frame is the clamped grid");
+    assert_eq!(
+        (fa.rows, fa.cols),
+        (18, 78),
+        "frame is the clamped grid, frame-inset"
+    );
 
     // AC1-ERR: the constraining client dies WITHOUT Detach (socket dropped
     // abruptly). The Gone path recomputes the clamp: the tab regrows to the
@@ -92,7 +96,7 @@ fn multiclient_clamp_letterbox_area_and_regrow_on_abrupt_death() {
     drop(b);
     a.wait_layout(10, "regrown", |l| l.area == (40, 120));
     a.input(b"echo sz2=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz2=40 120#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz2=38 118#"));
 }
 
 #[test]
@@ -208,10 +212,12 @@ while :; do sleep 0.2; done\n",
         "the input box renders exactly once"
     );
     let frame = a.frames.get(&pane).expect("clamped frame");
+    // The frame ring insets the pty: the grid is the clamped grid minus the
+    // 2-row, 2-col border.
     assert_eq!(
         (frame.rows, frame.cols),
-        (20, 80),
-        "frame is the clamped grid"
+        (18, 78),
+        "frame is the clamped grid minus its border ring"
     );
     // The node's first marker: the SMALLER viewer's own grid carries the
     // input box, on its last row.
@@ -386,7 +392,7 @@ fn multiclient_resize_storm_while_coviewing_settles_on_final_clamp() {
     a.wait_layout(10, "a settles on final clamp", |l| l.area == (22, 70));
     b.wait_layout(10, "b settles on final clamp", |l| l.area == (22, 70));
     a.input(b"echo sz=$(stty size)#\r");
-    a.wait_pane_text(15, pane, |t| t.contains("sz=22 70#"));
+    a.wait_pane_text(15, pane, |t| t.contains("sz=20 68#"));
 }
 
 #[test]
@@ -459,7 +465,7 @@ fn multiclient_mux_ls_reports_live_counts_and_stale_without_unlinking() {
     assert!(out.status.success(), "ls exits 0: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("main: 1 clients, 1 squads, 1 panes"),
+        stdout.contains("main: 1 clients, 1 workspaces, 1 panes"),
         "live row with counts; got: {stdout}"
     );
     assert!(stdout.contains("dead: stale"), "stale row; got: {stdout}");
@@ -499,10 +505,21 @@ fn multiclient_kill_server_live_stale_and_missing() {
     c.input(b"echo pid=$$#\r");
     let child_pid: i32 = c.wait(15, "pane pid", |c| extract_pid(&c.pane_text(pane)));
 
-    // Live kill: exit 0, the attached client is Byed, the socket vanishes,
-    // the server process exits, and the pane child is dead (AC4-UI/FR).
+    // Live kill, unkept pane: the measure-first refusal names the pane and
+    // exits non-zero; `--end-unkept` is the deliberate override that then
+    // kills the server AND the pane child (AC4-UI/FR under the new
+    // contract; keeper-hosted survival is the matrix's proof).
     let out = fno_cmd(&scratch, &["mux", "kill-server", "main"]);
-    assert!(out.status.success(), "live kill exits 0: {out:?}");
+    assert!(
+        !out.status.success(),
+        "an unkept pane refuses the kill: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unkept pane"),
+        "the refusal names the unkept pane: {out:?}"
+    );
+    let out = fno_cmd(&scratch, &["mux", "kill-server", "main", "--end-unkept"]);
+    assert!(out.status.success(), "end-unkept kill exits 0: {out:?}");
     // Bounded wait for the kill to land: the Bye(killed) frame OR the socket
     // closing, whichever wins the race (the two are unordered). Capped well
     // under the job timeout; a timeout fails with a named reason + state dump.
@@ -619,6 +636,8 @@ fn concurrent_strict_spawn_only_one_commits() {
             rows: None,
             claim: false,
             placement: PanePlacement {
+                view: false,
+                from: None,
                 portal_new: false,
                 portal: None,
                 tab: None,
@@ -704,12 +723,14 @@ fn concurrent_graft_one_commits_one_refuses() {
                     binding: LayoutBinding::Anchor,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
                 LayoutSlot {
                     name: "fresh".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
             ],
         }
@@ -879,12 +900,14 @@ fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     let strip = |s: &str| s.lines().next().unwrap_or("").to_string();
-    let a_row = a.wait_screen(15, |s| strip(s).contains(" 3]"));
+    // The padded active tab reads `[ ? 3 ]` (one cell of padding inside each
+    // bracket), so the ordinal markers carry the trailing space.
+    let a_row = a.wait_screen(15, |s| strip(s).contains(" 3 ]"));
     assert!(
-        a_row.contains(" 3]"),
+        a_row.contains(" 3 ]"),
         "a shows three tabs before the close; strip: {a_row:?}"
     );
-    b.wait_screen(15, |s| strip(s).contains(" 3]"));
+    b.wait_screen(15, |s| strip(s).contains(" 3 ]"));
 
     let out = scratch
         .command()
@@ -899,12 +922,12 @@ fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
 
     // The marker: the client that issued nothing repaints the strip with the
     // closed tab's ordinal gone (every later tab renumbers down).
-    let b_row = b.wait_screen(15, |s| !strip(s).contains(" 3]"));
+    let b_row = b.wait_screen(15, |s| !strip(s).contains(" 3 ]"));
     assert!(
-        b_row.contains(" 2]"),
+        b_row.contains(" 2 ]"),
         "the renumbered strip still names ordinal 2: {b_row:?}"
     );
-    a.wait_screen(15, |s| !strip(s).contains(" 3]"));
+    a.wait_screen(15, |s| !strip(s).contains(" 3 ]"));
 }
 
 #[test]

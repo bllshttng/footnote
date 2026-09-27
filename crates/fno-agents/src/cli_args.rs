@@ -28,9 +28,15 @@ pub struct RestartArgs {
     /// Break-glass: SIGKILL the lockfile holder before any probe; plain restart drains gracefully
     #[arg(long)]
     pub force: bool,
+    /// Also restart live mux servers: --stale-idle (pane-less stale-wire ones) by default, every live one with --mux
+    #[arg(long)]
+    pub mux: bool,
     /// Chain-only: swap only when the running daemon measures drifted; quiet exit 0 on fresh, down, or unknown
     #[arg(long)]
     pub if_drifted: bool,
+    /// Internal: run ONLY the stale-store-keeper cycle and print the keepers summary; never restarts the daemon or mux servers. The post-mux pass `fno agents restart --mux` drives after each kill.
+    #[arg(long)]
+    pub keepers_only: bool,
     #[command(flatten)]
     pub json: JsonOnly,
 }
@@ -83,8 +89,10 @@ pub struct ReportArgs {
 }
 
 /// `fno-agents review-summary`: the reviewed-at display line's inputs.
-/// Branch and head are required; the caller turns a parse failure into the
-/// verb's deliberate silence (print nothing, exit 0), never into a claim.
+/// Branch and head are required for the display line; the caller turns a
+/// parse failure into the verb's deliberate silence (print nothing, exit 0),
+/// never into a claim. `--evidence` replaces them: observer items on stdin,
+/// their review evidence as JSON on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "fno-agents review-summary", no_binary_name = true)]
 pub struct ReviewSummaryArgs {
@@ -92,11 +100,14 @@ pub struct ReviewSummaryArgs {
     #[arg(long, value_name = "PATH")]
     pub events: Option<PathBuf>,
     /// Branch name the attestation must match
-    #[arg(long, value_name = "BRANCH")]
-    pub branch: String,
+    #[arg(long, value_name = "BRANCH", required_unless_present = "evidence")]
+    pub branch: Option<String>,
     /// Head sha (prefix ok, min 7) the attestation must be pinned to
-    #[arg(long, value_name = "SHA")]
-    pub head: String,
+    #[arg(long, value_name = "SHA", required_unless_present = "evidence")]
+    pub head: Option<String>,
+    /// Read observer items as JSON on stdin and print their review evidence as JSON
+    #[arg(long)]
+    pub evidence: bool,
 }
 
 /// The spawn head's axis flags, parsed once and consumed by both the client's
@@ -300,6 +311,9 @@ mod tests {
         let a = RestartArgs::try_parse_from(["--if-drifted"]).expect("--if-drifted parses");
         assert!(a.if_drifted);
         assert!(!a.force);
+        let a = RestartArgs::try_parse_from(["--keepers-only"]).expect("--keepers-only parses");
+        assert!(a.keepers_only);
+        assert!(!a.mux, "the keeper-only leg implies no mux leg");
         let a = RestartArgs::try_parse_from(["-J"]).expect("-J is the json alias");
         assert!(a.json.json);
     }
@@ -361,8 +375,9 @@ mod tests {
         ])
         .expect("all three parse, equals form included");
         assert_eq!(a.events, Some(PathBuf::from("e.jsonl")));
-        assert_eq!(a.branch, "feature/x");
-        assert_eq!(a.head, "abc1234");
+        assert_eq!(a.branch.as_deref(), Some("feature/x"));
+        assert_eq!(a.head.as_deref(), Some("abc1234"));
+        assert!(!a.evidence);
         for partial in [
             vec![],
             vec!["--events", "e.jsonl"],
@@ -374,6 +389,20 @@ mod tests {
                 "a partial triplet is a parse failure (the caller stays silent)"
             );
         }
+    }
+
+    #[test]
+    fn review_summary_evidence_replaces_branch_and_head() {
+        let a = ReviewSummaryArgs::try_parse_from(["--evidence"]).expect("evidence alone parses");
+        assert!(a.evidence);
+        assert_eq!(a.branch, None);
+        assert_eq!(a.head, None);
+        let both =
+            ReviewSummaryArgs::try_parse_from(["--evidence", "--branch", "b", "--head", "h"])
+                .expect("evidence tolerates the display flags");
+        assert!(both.evidence && both.branch.is_some() && both.head.is_some());
+        // A bare call still refuses: neither the display triplet nor evidence.
+        assert!(ReviewSummaryArgs::try_parse_from(["--events", "e.jsonl"]).is_err());
     }
 
     #[test]

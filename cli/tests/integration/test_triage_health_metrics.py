@@ -6,6 +6,7 @@ when nothing recorded). The folds are pure dict->dict, so they are unit-tested
 directly; one integration test pins the rendered wire.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 
@@ -115,7 +116,7 @@ def test_triage_fold_drop_rate_denominator():
 @pytest.fixture()
 def health_env(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
-    g.write_text('{"entries": []}\n')
+    seed_graph(g, '{"entries": []}\n')
     import fno.graph._constants as gc
     import fno.graph.store as gs
     import fno.graph.triage as triage
@@ -183,7 +184,7 @@ def test_health_lists_unverified_supersession_rows(health_env, monkeypatch):
             "completed_at": "2026-08-30T00:00:00Z", "pr_number": 1307,
         },
     ]
-    gc.GRAPH_JSON.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(gc.GRAPH_JSON, json.dumps({"entries": entries}) + "\n")
     # The triage reader resolves through paths.graph_json(), not the module
     # constant, so the redirect must land there or the test reads the live
     # graph (which silently passes nothing and proves nothing).
@@ -222,7 +223,7 @@ def test_health_lists_blocked_by_held_rows(health_env, monkeypatch):
             "deferred_at": "2026-08-01T00:00:00Z",
         },
     ]
-    gc.GRAPH_JSON.write_text(json.dumps({"entries": entries}) + "\n")
+    seed_graph(gc.GRAPH_JSON, json.dumps({"entries": entries}) + "\n")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gc.GRAPH_JSON)
 
     r = runner.invoke(

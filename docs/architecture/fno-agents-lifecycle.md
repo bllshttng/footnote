@@ -43,12 +43,10 @@ cli.py
 
 dispatch.py
    ├─ stop_agent     ─ per-agent flock → claude_stop → events.agent_stopped
-   ├─ reconcile_agents ─ no flock; per-entry update_registry; one-shot capability checks (claude-on-PATH, codex-session-index)
-   └─ attach_agent   ─ no flock; claude_attach with inherited stdio
+   └─ reconcile_agents ─ no flock; per-entry update_registry; one-shot capability checks (claude-on-PATH, codex-session-index)
 
 harnesses/claude.py
    ├─ claude_stop(short_id, timeout=30)         → (exit_code, stderr)
-   ├─ claude_attach(short_id)                   → exit_code  (no capture, no timeout)
    └─ claude_logs_reachable(short_id, timeout=10) → bool
 
 harnesses/codex.py

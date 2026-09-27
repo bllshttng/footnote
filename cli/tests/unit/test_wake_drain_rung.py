@@ -156,6 +156,15 @@ def test_wake_name_derived_from_uuid_not_msgid(monkeypatch):
         return R()
 
     monkeypatch.setattr(d, "dispatch_spawn", fake_spawn)
+
+    class _Guard:
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: _Guard(),
+    )
     ok, short = d.wake_drain_agent("abcdef12-9999-8888-7777-666655554444")
     assert ok is True
     assert captured["name"] == "wake-abcdef12"

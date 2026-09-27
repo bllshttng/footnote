@@ -26,13 +26,21 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-#: Whether the pytest process itself runs inside a harness session. The shared
-#: conftest scrubs ambient identity markers per-test, so capture this at import:
-#: a claim acquired WITH a provable session stays live after init exits, while
-#: a claim from a bare shell is anchored to the transient init process and
-#: reads free the moment it exits. Both are correct behavior; only the first
-#: supports a liveness assertion.
-_HARNESS_SESSION_AT_IMPORT = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+#: Whether the pytest process itself runs inside a harness session. A claim
+#: acquired WITH a provable session stays live after init exits, while a claim
+#: from a bare shell is anchored to the transient init process and reads free
+#: the moment it exits. Both are correct behavior; only the first supports a
+#: liveness assertion. The shared conftest empties every session marker before
+#: this module imports, so the value arrives through its ``harness_session_id``
+#: fixture (caught before the scrub), carried onto this global per test.
+_HARNESS_SESSION_ID = ""
+
+
+@pytest.fixture(autouse=True)
+def _carry_harness_session_id(harness_session_id):
+    global _HARNESS_SESSION_ID
+    _HARNESS_SESSION_ID = harness_session_id
+
 
 #: Env that would route state back at the developer's checkout or fleet.
 _DEV_ENV_KEYS = (
@@ -69,7 +77,7 @@ def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[
     # session that wants agent semantics sets its own marker (conftest's
     # documented carve-out), so this journey carries one - the real session id
     # when pytest itself runs inside a harness, a synthetic one otherwise.
-    env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_AT_IMPORT or "journey-fixture")
+    env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
     return subprocess.run(
         [sys.executable, "-c", "from fno.cli import app; app()", *args],
         cwd=repo,
@@ -170,6 +178,9 @@ def test_authorized_target_init_journey(clean_machine):
         [repo / ".fno" / "target-state.md"]
         + list(home.glob(".fno/spaces/*/target-state.md"))
         + list(home.parent.glob("spaces/*/target-state.md"))
+        # A state root that resolves from the process CWD lands one .fno
+        # above the repo: <tmp>/.fno/spaces/<repo-slug>/target-state.md.
+        + list(home.parent.glob(".fno/spaces/*/target-state.md"))
     )
     manifests = [m for m in manifests if m.exists()]
     assert manifests, (
@@ -186,7 +197,7 @@ def test_authorized_target_init_journey(clean_machine):
     #    from a bare shell it correctly died with the init that made it.
     claim = _run_fno(repo, home, "agents", "claim", "status", f"node:{node}")
     assert claim.returncode == 0, claim.stderr
-    if _HARNESS_SESSION_AT_IMPORT:
+    if _HARNESS_SESSION_ID:
         assert '"state": "live"' in claim.stdout, claim.stdout
 
     # 6. The node readback: the graph agrees the work is in progress.

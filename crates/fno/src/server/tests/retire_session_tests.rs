@@ -251,7 +251,7 @@ fn a_portal_named_after_the_worker_never_carries_its_identity() {
     );
     // The x-119e outcome: the viewer's pane dying must not tombstone the
     // live worker it was watching.
-    core.close_pane(seat);
+    core.close_viewer_died(seat, "session retired");
     let store = crate::squad_store::load();
     let member = store.squads[0]
         .members

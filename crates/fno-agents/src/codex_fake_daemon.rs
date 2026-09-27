@@ -83,6 +83,24 @@ pub struct Behavior {
     pub thread_sandbox: Option<Value>,
     /// Answer `thread/resume` with an error frame: the refused probe.
     pub fail_thread_resume: bool,
+    /// The version `initialize` reports in `serverInfo` and
+    /// `thread/loaded/list` implies exists. Models the LIVE daemon's version;
+    /// a fake `codex` CLI on PATH reporting a NEWER `--version` makes the
+    /// readiness verdict read stale.
+    pub server_version: String,
+    /// The ids `thread/loaded/list` answers with. Empty models an app-server
+    /// hosting nothing.
+    pub loaded_ids: Vec<String>,
+    /// The `status.type` every `thread/read` answer carries. `idle` is the
+    /// safe-to-upgrade shape; `active` and `systemError` are the refusal
+    /// shapes the upgrade transaction must hold on.
+    pub thread_status: String,
+    /// When set, the fake reports the upgraded version in `serverInfo` once
+    /// `<fake home>/<marker filename>` exists - the file a fake
+    /// `codex app-server daemon restart` writes to model a new daemon
+    /// incarnation serving the new build. The fake models the protocol side
+    /// of the swap; the state file is the script's to rewrite.
+    pub upgrade_marker: Option<(String, String)>,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -108,6 +126,10 @@ impl Default for Behavior {
             thread_cwd: "/tmp/fake-daemon-cwd".to_string(),
             thread_sandbox: None,
             fail_thread_resume: false,
+            server_version: "0.149.1-fake".to_string(),
+            loaded_ids: vec!["thread-t".to_string()],
+            thread_status: "idle".to_string(),
+            upgrade_marker: None,
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -185,6 +207,26 @@ impl Behavior {
         self.fail_thread_resume = true;
         self
     }
+
+    pub fn with_server_version(mut self, version: &str) -> Self {
+        self.server_version = version.to_string();
+        self
+    }
+
+    pub fn with_loaded_ids(mut self, ids: &[&str]) -> Self {
+        self.loaded_ids = ids.iter().map(|id| id.to_string()).collect();
+        self
+    }
+
+    pub fn with_thread_status(mut self, status: &str) -> Self {
+        self.thread_status = status.to_string();
+        self
+    }
+
+    pub fn with_upgrade_marker(mut self, marker: &str, version: &str) -> Self {
+        self.upgrade_marker = Some((marker.to_string(), version.to_string()));
+        self
+    }
 }
 
 /// A running fake daemon. `CODEX_HOME` points at it for the guard's lifetime,
@@ -241,13 +283,14 @@ impl FakeDaemon {
         let saved_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("CODEX_HOME", &home);
         let received = Arc::clone(&behavior.received);
+        let server_home = home.clone();
         let server = tokio::spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
-                tokio::spawn(serve(conn, behavior.clone()));
+                tokio::spawn(serve(conn, server_home.clone(), behavior.clone()));
             }
         });
         Self {
-            home,
+            home: home.clone(),
             saved_home,
             server,
             received,
@@ -301,7 +344,7 @@ impl Drop for FakeDaemon {
 /// sleeps inside its turn branch leaves the interrupt unread, which is not
 /// how the real app-server behaves and is why the old Python fakes each
 /// carried a reader thread.
-async fn serve(conn: UnixStream, behavior: Behavior) {
+async fn serve(conn: UnixStream, home: std::path::PathBuf, behavior: Behavior) {
     let Ok(ws) = tokio_tungstenite::accept_async(conn).await else {
         return;
     };
@@ -360,10 +403,24 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
             Some("initialize") if behavior.refuse_initialize => json!({"id": id, "error": {
                 "message": "initialize refused: client protocol newer than daemon"
             }}),
-            Some("initialize") => json!({"id": id, "result": {}}),
+            Some("initialize") => {
+                let version = match &behavior.upgrade_marker {
+                    Some((marker_name, upgraded_version)) if home.join(marker_name).exists() => {
+                        upgraded_version.clone()
+                    }
+                    _ => behavior.server_version.clone(),
+                };
+                json!({"id": id, "result": {"serverInfo": {
+                    "name": "codex", "version": version
+                }}})
+            }
             Some("initialized") => continue,
+            Some("thread/loaded/list") => json!({"id": id, "result": {
+                "data": behavior.loaded_ids, "nextCursor": null
+            }}),
             Some("thread/read") => json!({"id": id, "result": {"thread": {
-                "id": behavior.thread_id, "cwd": behavior.thread_cwd
+                "id": behavior.thread_id, "cwd": behavior.thread_cwd,
+                "status": {"type": behavior.thread_status}
             }}}),
             Some("thread/start") | Some("thread/resume") => {
                 if behavior.fail_thread_resume

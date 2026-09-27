@@ -41,13 +41,9 @@ def journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _rows(journal: Path) -> list[dict[str, Any]]:
-    if not journal.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in journal.read_text().splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(journal)
 
 
 def test_join_emits_one_dispatched_event_carrying_the_brief_inputs(

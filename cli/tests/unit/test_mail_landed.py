@@ -47,27 +47,39 @@ def _envelope_line(msg_id: str) -> str:
     return json.dumps(record) + "\n"
 
 
+def _backdate_last(ts: str) -> None:
+    """Envelopes are immutable once appended; rewrite the just-written line's
+    timestamp in place so age-bound tests can backdate a send."""
+    from fno.bus.log import bus_log_path
+
+    path = bus_log_path()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    obj = json.loads(lines[-1])
+    obj["ts"] = ts
+    lines[-1] = json.dumps(obj)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _ts_ago(seconds: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    dt = datetime.now(tz=timezone.utc) - timedelta(seconds=seconds)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _send_hosted(
-    *, to_session: str = RECIPIENT_SESSION, to_harness: str = "claude",
+    *, to_session: str | None = RECIPIENT_SESSION, to_harness: str = "claude",
     from_session: str = SENDER_SESSION, recipient: str = "bob", ts: str | None = None,
+    body: str | None = None,
 ) -> str:
     msg_id = new_msg_id()
     record_hosted_delivery(
-        msg_id=msg_id, sender="alice", recipient=recipient, body="hi",
+        msg_id=msg_id, sender="alice", recipient=recipient,
+        body=body if body is not None else f'<fno_mail from="alice" id="{msg_id}">hi</fno_mail>',
         from_session=from_session, to_session=to_session, to_harness=to_harness,
     )
     if ts is not None:
-        # Envelopes are immutable once appended; rewrite the just-written line's
-        # timestamp in place so age-bound tests can backdate a send without a
-        # second bus writer.
-        from fno.bus.log import bus_log_path
-
-        path = bus_log_path()
-        lines = path.read_text(encoding="utf-8").splitlines()
-        obj = json.loads(lines[-1])
-        obj["ts"] = ts
-        lines[-1] = json.dumps(obj)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _backdate_last(ts)
     return msg_id
 
 
@@ -132,6 +144,80 @@ def test_ac5_landed_proof_survives_transcript_rotation(tmp_path, monkeypatch):
     _write_transcript(tmp_path, monkeypatch, RECIPIENT_SESSION, "")
     all_msgs = list(iter_messages())
     assert landed_states(all_msgs, all_msgs)[mid] is True
+
+
+def test_ac2_hp_past_ttl_with_id_in_transcript_clears_and_records(tmp_path, monkeypatch):
+    """A hosted row past the TTL whose id the recipient's transcript holds is
+    not outstanding, and the proof is recorded as a durable landed row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    mid = _send_hosted(ts=_ts_ago(3600))
+    _write_transcript(tmp_path, monkeypatch, RECIPIENT_SESSION, _envelope_line(mid))
+
+    assert _sent_unclaimed("alice", ttl_seconds=0) == []
+    assert mid in landed_ids(list(iter_messages()))
+
+
+def test_ac2_err_readable_transcript_without_the_id_nags(tmp_path, monkeypatch):
+    """The transcript was readable and the id is absent: a proven miss. The
+    row stays outstanding and the nag names its recipient."""
+    use_tmpdir(monkeypatch, tmp_path)
+    mid = _send_hosted(ts=_ts_ago(3600))
+    _write_transcript(tmp_path, monkeypatch, RECIPIENT_SESSION, "")
+
+    outstanding = _sent_unclaimed("alice", ttl_seconds=0)
+
+    assert [m.id for m in outstanding] == [mid]
+    assert "bob" in (nag_line(outstanding) or "")
+
+
+def test_ac2_edge_unknown_rows_are_never_reported_lost(tmp_path, monkeypatch):
+    """No transcript coordinates (a legacy registry row with no session id)
+    and a raw payload with no envelope id both read ``None`` -- unknown, and
+    unknown is not lost."""
+    use_tmpdir(monkeypatch, tmp_path)
+    mid = _send_hosted(ts=_ts_ago(3600), to_session=None)
+    raw = _send_hosted(ts=_ts_ago(3600), body="/compact")
+
+    assert _sent_unclaimed("alice", ttl_seconds=0) == []
+    all_msgs = list(iter_messages())
+    assert landed_states(all_msgs, all_msgs)[mid] is None
+    assert landed_states(all_msgs, all_msgs)[raw] is None
+
+
+def test_ac3_hp_budget_reads_one_store_then_stops(tmp_path, monkeypatch):
+    """With a zero budget the scan reads exactly one recipient store (which
+    one is shuffled), so the other row stays unknown; unbounded reads both."""
+    use_tmpdir(monkeypatch, tmp_path)
+    mid_a = _send_hosted(recipient="bob", to_session="recipient01", ts=_ts_ago(60))
+    mid_b = _send_hosted(recipient="carol", to_session="recipient02", ts=_ts_ago(60))
+    _write_transcript(tmp_path, monkeypatch, "recipient01", _envelope_line(mid_a))
+    _write_transcript(tmp_path, monkeypatch, "recipient02", _envelope_line(mid_b))
+    ticks = iter([0.0, 1.0, 1.0, 1.0, 1.0])
+    monkeypatch.setattr("fno.mail.landed.monotonic", lambda: next(ticks))
+
+    all_msgs = list(iter_messages())
+    bounded = landed_states(all_msgs, all_msgs, budget_s=0.0)
+
+    assert sum(v is True for v in bounded.values()) == 1
+    assert bounded[mid_a] is None or bounded[mid_b] is None
+    assert landed_states(all_msgs, all_msgs)[mid_a] is True
+    assert landed_states(all_msgs, all_msgs)[mid_b] is True
+
+
+def test_ac3_edge_durable_row_with_unread_cursor_still_nags(tmp_path, monkeypatch):
+    """The durable rule does not move: a past-TTL row whose recipient cursor
+    is still behind it is outstanding even with no landed verdict."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.bus.log import Envelope, append
+
+    send = Envelope.new(
+        from_="alice", to="king", kind="send", body="status report", ts=_ts_ago(3600)
+    )
+    append(send)
+
+    outstanding = _sent_unclaimed("alice", ttl_seconds=0)
+
+    assert [m.id for m in outstanding] == [send.id]
 
 
 def test_ac9_self_send_refuses_the_resolution(tmp_path, monkeypatch):

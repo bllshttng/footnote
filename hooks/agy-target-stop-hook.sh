@@ -38,6 +38,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # Consecutive checker-unavailable fires tolerated for an active session before a
 # loud give-up allow (mirrors target-stop-hook.sh's MAX_UNAVAIL_RETRIES).
 readonly MAX_UNAVAIL_RETRIES=3
@@ -93,7 +97,19 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(
 EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 # shellcheck source=../scripts/lib/events.sh
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
-LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
+REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
+
+# shellcheck source=lib/agents-bin.sh
+source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
+# The seam sits ABOVE every `state path` read: a bare-PATH call there let an
+# ambient fno-agents answer for a tmp cwd, so a mocked fixture inherited an
+# arbitrary manifest/space answer and the delivery-retry tests went red or
+# green per machine. The fixture's FNO_AGENTS_BIN decides now.
+BIN=$(resolve_agents_bin)
+state_path_answer() { "${BIN:-fno-agents}" state path "$1" 2>/dev/null || true; }
+
+LIVE_STATE_FILE=$(state_path_answer target-state)
 # The verb answers THIS cwd's spaces-layout slice whether or not a manifest
 # lives there; when that answer is not on disk, the manifest init wrote at the
 # workspace root is the one to gate on. agy fires Stop from unrelated cwds, so
@@ -101,20 +117,34 @@ LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
 [[ -z "$LIVE_STATE_FILE" || ! -f "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
-REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
 WORKTREE_COUNT=$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
     | grep -c '^worktree ' || true)
 [[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
 OTHER_WORKTREE_PRESENT=0
 (( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
-SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
+SPACE_DIR=$(dirname "$(state_path_answer events)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
-# shellcheck source=lib/agents-bin.sh
-source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
-resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
+# The worktree that owns a resolved manifest. A space-slice manifest sits
+# outside every checkout, so its `owner_cwd:` stamp is the answer; the parent
+# of `.fno/` is only right for a legacy checkout manifest.
+manifest_owner_cwd() {
+    local state="$1" owner
+    owner=$(sed -n 's/^owner_cwd:[[:space:]]*//p' "$state" 2>/dev/null \
+        | head -1 | sed 's/[[:space:]]*$//')
+    # YAML may quote the value: strip one matching outer pair only, so a
+    # quote that is part of the path (an apostrophe in a user dir) survives.
+    case "$owner" in
+        '"'*'"') owner=${owner#\"}; owner=${owner%\"} ;;
+        "'"*"'") owner=${owner#\'}; owner=${owner%\'} ;;
+    esac
+    if [[ -n "$owner" && -d "$owner" ]]; then
+        (cd "$owner" && pwd -P)
+        return
+    fi
+    (cd "$(dirname "$state")/.." 2>/dev/null && pwd -P)
+}
 
-BIN=""
 TARGET_RESOLVE_BROKEN=0
 TARGET_NO_MATCH=0
 # Set ONLY when no manifest file exists at all (the "else" branch below),
@@ -139,7 +169,7 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
         fi
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
@@ -161,7 +191,7 @@ else
             --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"

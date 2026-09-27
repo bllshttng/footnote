@@ -10,9 +10,9 @@ Not for: process-level facts about one worker (is it alive, what holds its pane)
 
 ## The feature is conditional
 
-The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.
+The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle. The Rust `machine_watch` arm reads its own `machine_sample` row and does not depend on this enable switch.
 
-One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` (default 0.9) is the band the `machine_watch` arm and the `machine` payload object band whole-machine CPU against. The arm reads the `fno-agents census --ps` process table and the load average through the footprint payload, so it works on every machine. It does not read `resource_meter.enabled`, and it has no enable key of its own: `reap` and `retire` carry none either. The throttle key `resource_meter.notifications.throttle_minutes` (default 60) spaces its repeat notices.
+One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` sets the machine busy band. Rust `machine_watch` reads host ticks, the process table and load directly. It works on every machine. It ignores `resource_meter.enabled` and has no enable key. The throttle key `resource_meter.notifications.throttle_minutes` spaces repeat notices.
 
 ## What you get without macmon
 
@@ -28,7 +28,7 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 ## The two verdicts are different alarms
 
-`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold, an undecidable band, or the fifteen-minute backstop. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
+`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold or an undecidable band. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
 
 ## The court panel
 

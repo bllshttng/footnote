@@ -49,7 +49,7 @@ make_repo() {
   mkdir -p "${_dir}/bin" "${_dir}/space"
   cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${_dir}/bin/fno-agents"
   chmod 755 "${_dir}/bin/fno-agents"
-  cat > "${_dir}/home/.fno/graph.json" <<'JSON'
+  cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "${_dir}/home/.fno/graph.json"
 {"entries":[
   {"id":"tst-aa00aa00","title":"first guard node","session_id":null},
   {"id":"tst-bb00bb00","title":"second guard node","session_id":null}

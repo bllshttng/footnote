@@ -15,6 +15,7 @@ adapter grew a second validation brain: delete it, do not realign it.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -54,15 +55,17 @@ def _python_verdict(event: dict) -> tuple[bool, str]:
 def _bash_verdict(event: dict, type_hint: str | None = None) -> tuple[bool, str]:
     type_str = type_hint or event.get("type", "phase_transition")
     payload = json.dumps(event, separators=(",", ":"))
-    cmd = (
-        f"source {BASH_VALIDATOR} && "
-        f"validate_event {type_str} {json.dumps(payload)}"
-    )
+    # The payload rides an env var, never an embedded shell literal: a
+    # double-quoted expansion re-parses nothing, while an embedded payload
+    # with a backtick runs arbitrary commands (a corpus row once rebased
+    # the branch mid-test this way).
+    cmd = f'source {BASH_VALIDATOR} && validate_event {type_str} "$PAYLOAD"'
     proc = subprocess.run(
         ["bash", "-c", cmd],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env={**os.environ, "PAYLOAD": payload},
     )
     return proc.returncode == 0, proc.stderr.strip()
 

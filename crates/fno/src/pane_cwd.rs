@@ -68,6 +68,7 @@ impl crate::proto::LayoutSlot {
             binding,
             cwd: None,
             portal: None,
+            pane_id: None,
         }
     }
 }
@@ -122,11 +123,36 @@ impl crate::server::Core {
         cwd0: &str,
         tab_name: &str,
     ) -> Option<u64> {
+        // The restart join first: a keeper shell that re-adopted at the
+        // birth id this slot recorded returns to its OWN leaf, instead of a
+        // fresh shell minting beside it and the real pane landing in a tab
+        // of its own.
+        if let Some(birth) = slot.pane_id {
+            if let Some(pane) = self.take_adopted_for_slot(birth) {
+                return Some(pane);
+            }
+        }
         let is_shell = matches!(slot.binding, crate::proto::LayoutBinding::Shell);
         let (spawn_cwd, notice) =
             shell_restore_cwd(is_shell, slot.cwd.as_deref(), cwd0, tab_name, &slot.name);
         if let Some(notice) = notice {
             self.notice_all(notice);
+        }
+        // A portal slot's seat is the parked screen: it carries the held
+        // channel in its own argv (the one mint site, shared with the
+        // no-signal swap), so a later server re-adopts it and re-derives
+        // the hold instead of reading it as a live viewer of the row.
+        if let Some(portal) = slot.portal.as_ref() {
+            let spawned = self.spawn_parked_screen(&portal.row, rows, cols, &spawn_cwd);
+            return match spawned {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.notice_all(format!(
+                        "restore: tab {tab_name}: could not open shell: {e}"
+                    ));
+                    None
+                }
+            };
         }
         match self.spawn_pane(rows, cols, &spawn_cwd) {
             Ok(p) => Some(p),

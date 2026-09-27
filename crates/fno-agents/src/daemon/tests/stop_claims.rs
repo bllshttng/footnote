@@ -144,3 +144,83 @@ async fn a_confirmed_stop_releases_the_stopped_holders_dead_claims() {
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// A stop addressed by FULL SESSION ID (not the row name) resolves the row
+/// the same finder the lifecycle verbs use, so the release carries the row's
+/// own session id and cwd. An exact-name lookup here missed the row, dropped
+/// both fields, and left the stopped holder's claims in place.
+#[tokio::test]
+async fn a_stop_by_session_id_releases_the_rows_claims() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = short_home("stopclaimsbysid");
+    let mut row = claude_rm_row("w1", "aaabbb23", "aaabbb23-1111-2222-3333-444444444444");
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let claims_root = home.root().join("claims-root");
+    std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+    std::env::set_var("FNO_SPACES_DIR", home.root().join("spaces"));
+    let claim_path = write_stop_claim(
+        &claims_root.join(".fno/claims"),
+        "node:x-bysid",
+        "spawn-handover:w1",
+        GONE_PID,
+        None,
+    );
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(
+        1,
+        "agent.stop",
+        json!({"name": "aaabbb23-1111-2222-3333-444444444444"}),
+    );
+    let mut response = Response::ok(1, json!({"stopped": true, "short_id": "aaabbb23"}));
+    attach_stopped_claims_release(&ctx, &request, "stop", &mut response).await;
+
+    let claims = response
+        .result()
+        .unwrap()
+        .get("claims")
+        .cloned()
+        .expect("a confirmed stop rides the claims receipt");
+    let released = claims.get("released").and_then(Value::as_array).unwrap();
+    assert_eq!(
+        released.len(),
+        1,
+        "{claims}; at assert time: {}",
+        dir_listing(&claims)
+    );
+    assert_eq!(released[0]["key"], "node:x-bysid");
+    assert!(!claim_path.exists(), "the dead claim file is gone");
+    std::env::remove_var("FNO_CLAIMS_ROOT");
+    std::env::remove_var("FNO_SPACES_DIR");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// The claude stop's registry write is the row's memory that fno did the
+/// stop: Exited, an exit stamp, and the stop record the reachability gate
+/// reads. A write failure surfaces as the verb's error, never as a clean
+/// stop over a registry row that still reads live.
+#[tokio::test]
+async fn claude_stop_stamps_the_stop_record_and_exit() {
+    let home = short_home("claude-stop-record");
+    let mut row = claude_rm_row("w1", "aaabbb31", "aaabbb31-1111-2222-3333-444444444444");
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.stop", json!({"name": "w1"}));
+
+    crate::daemon::claude_stop::mark_claude_stopped(&ctx, &request, "w1")
+        .await
+        .expect("the registry write succeeds");
+
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    let entry = registry.find("w1").unwrap();
+    assert_eq!(entry.status, AgentStatus::Exited);
+    assert!(entry.exited_at.is_some(), "an exit stamp is set");
+    let stop = entry.stop.as_ref().expect("the stop record is set");
+    assert_eq!(stop.by, "stop-verb");
+    assert_eq!(stop.reason.as_deref(), Some("claude"));
+    assert!(!stop.at.is_empty(), "the stop instant is set");
+    std::fs::remove_dir_all(home.root()).ok();
+}

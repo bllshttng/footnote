@@ -1,4 +1,5 @@
 use fno_agents::codex_fake_daemon::{Behavior, FakeDaemon, Interrupt, Steer};
+use fno_agents::codex_posture::CodexPosture;
 use fno_agents::codex_thread::{
     parse_thread_start_response, thread_start_request_json, CodexThread, CodexThreadActor,
     InterruptOutcome, ThreadStartError,
@@ -59,7 +60,7 @@ async fn turn_survives_more_frames_and_a_longer_gap_than_the_old_bounds() {
         .with_turn_duration(Duration::from_secs(16));
     with_fake_daemon(behavior, async {
         let worktree = tempfile::tempdir().unwrap();
-        let mut thread = CodexThread::start(worktree.path(), None, false, None)
+        let mut thread = CodexThread::start(worktree.path(), None, &CodexPosture::bounded(), None)
             .await
             .expect("thread starts against the fake daemon");
         assert_eq!(thread.thread_id(), "thread-bounds");
@@ -80,7 +81,7 @@ async fn turn_survives_more_frames_and_a_longer_gap_than_the_old_bounds() {
 
 async fn start_actor() -> (CodexThreadActor, tempfile::TempDir) {
     let worktree = tempfile::tempdir().unwrap();
-    let driver = CodexThread::start(worktree.path(), None, false, None)
+    let driver = CodexThread::start(worktree.path(), None, &CodexPosture::bounded(), None)
         .await
         .expect("thread starts against the fake daemon");
     (
@@ -274,7 +275,7 @@ async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
         Behavior::quick().with_turn_duration(Duration::from_millis(1500)),
         async move {
             let worktree = tempfile::tempdir().unwrap();
-            let driver = CodexThread::start(worktree.path(), None, false, None)
+            let driver = CodexThread::start(worktree.path(), None, &CodexPosture::bounded(), None)
                 .await
                 .expect("thread starts");
             let actor = driver.into_actor(
@@ -318,7 +319,7 @@ async fn actor_fires_working_at_ack_and_done_at_completion() {
     let seen = Arc::clone(&phases);
     with_fake_daemon(Behavior::quick(), async move {
         let worktree = tempfile::tempdir().unwrap();
-        let driver = CodexThread::start(worktree.path(), None, false, None)
+        let driver = CodexThread::start(worktree.path(), None, &CodexPosture::bounded(), None)
             .await
             .expect("thread starts");
         let actor = driver.into_actor(
@@ -417,7 +418,7 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
     let mut thread = CodexThread::start_with_state_dirs(
         worktree.path(),
         None,
-        false,
+        &CodexPosture::bounded(),
         None,
         &grant_roots(),
         None,
@@ -465,10 +466,16 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-plain"));
     let worktree = tempfile::tempdir().unwrap();
-    let mut thread =
-        CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &[], None)
-            .await
-            .expect("thread starts");
+    let mut thread = CodexThread::start_with_state_dirs(
+        worktree.path(),
+        None,
+        &CodexPosture::bounded(),
+        None,
+        &[],
+        None,
+    )
+    .await
+    .expect("thread starts");
     thread.drive_turn("go").await.expect("turn");
 
     let start = daemon.first_params("thread/start").expect("a thread/start");
@@ -480,12 +487,13 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
     );
 }
 
-/// A yolo thread is not unsandboxed on this lane. The scalar asks for
-/// `danger-full-access`, but the server keeps its workspaceWrite default, so
-/// withholding the policy left `.git` read-only - sandboxed, with every grant
-/// suppressed. The grant rides every posture; only the scalar differs.
+/// A yolo thread's turn policy is built from its REQUEST when the server
+/// names no sandbox. The old frame fabricated `workspaceWrite` from nothing
+/// and narrowed a full-access thread on every turn (AC2-HP): the full-access
+/// posture is now spelled onto the policy, and nothing invents a bounded
+/// posture the caller never asked for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn yolo_thread_still_sends_the_git_grant() {
+async fn yolo_thread_carries_its_requested_posture_onto_every_turn() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -496,29 +504,28 @@ async fn yolo_thread_still_sends_the_git_grant() {
         .current_dir(worktree.path())
         .output()
         .expect("git init runs");
-    let mut thread =
-        CodexThread::start_with_state_dirs(worktree.path(), None, true, None, &grant_roots(), None)
-            .await
-            .expect("thread starts");
+    let mut thread = CodexThread::start_with_state_dirs(
+        worktree.path(),
+        None,
+        &CodexPosture::full_access(),
+        None,
+        &grant_roots(),
+        None,
+    )
+    .await
+    .expect("thread starts");
     thread.drive_turn("go").await.expect("turn");
 
     let start = daemon.first_params("thread/start").expect("a thread/start");
     assert_eq!(start["sandbox"], "danger-full-access");
     let turn = daemon.first_params("turn/start").expect("a turn/start");
     let policy = &turn["sandboxPolicy"];
-    assert_eq!(policy["type"], "workspaceWrite");
-    let roots: Vec<&str> = policy["writableRoots"]
-        .as_array()
-        .expect("roots array")
-        .iter()
-        .filter_map(|root| root.as_str())
-        .collect();
-    assert!(
-        roots.iter().any(|root| root.ends_with("/.git")),
-        "the git common dir must be granted on a yolo thread: {turn}"
+    assert_eq!(
+        policy["type"], "dangerFullAccess",
+        "a full-access request builds a full-access policy: {turn}"
     );
     assert!(
-        roots.iter().any(|root| *root == "/Users/x/.fno"),
-        "the caller's state dirs must survive: {turn}"
+        policy.get("writableRoots").is_none(),
+        "roots mean nothing under full access: {turn}"
     );
 }

@@ -344,7 +344,7 @@ def acquire(
         typer.echo(f"contention error: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    # do provenance opens at acquire - the one choke point a session killed
+    # execute provenance opens at acquire - the one choke point a session killed
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
     # started_at from this claim's own acquire time; ended_at stays open for the
     # release path to fill. Best-effort and node-keyed, mirroring the release
@@ -391,7 +391,7 @@ def release(
     stamp_do: bool = typer.Option(
         False,
         "--stamp-do",
-        help="Stamp a do provenance row (started_at from this claim's acquire time, "
+        help="Stamp a execute provenance row (started_at from this claim's acquire time, "
         "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
         "finished terminal - never a handoff, which runs under a successor's "
         "identity and would mis-attribute the predecessor's window.",
@@ -399,7 +399,7 @@ def release(
     rollback_do: bool = typer.Option(
         False,
         "--rollback-do",
-        help="Remove the open do provenance row this claim's acquire opened. Set "
+        help="Remove the open execute provenance row this claim's acquire opened. Set "
         "by a releaser whose POST-ACQUIRE validation refused it: it took the "
         "claim only to serialize, did no work, and must not leave the node "
         "reading as in progress. Only an open row (no ended_at) whose "
@@ -495,7 +495,7 @@ def release(
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
 
-    # do provenance: the third choke point (ship=pr_number, blueprint=plan_path,
+    # execute provenance: the third choke point (ship=pr_number, blueprint=plan_path,
     # do=claim release). started_at from the claim's own acquire time, ended_at
     # at the release instant - a true per-session hold window, not the
     # stamp-fire time. The --stamp-do gate means only a session releasing its
@@ -542,7 +542,7 @@ def release(
 
 
 def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
-    """Resolve the (harness, session_id) a do provenance row should be written
+    """Resolve the (harness, session_id) a execute provenance row should be written
     under: the OWNED identity, not the ambient env.
 
     The harness the claim was pinned to (init passes the proven --harness;
@@ -579,7 +579,7 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
     harness, session_id, effort = _owned_do_identity(claim, holder)
     if not harness or not session_id:
         typer.echo(
-            f"claim {action}: no owned identity for the do provenance row of "
+            f"claim {action}: no owned identity for the execute provenance row of "
             f"{node_id}; the row is skipped. Skipped.",
             err=True,
         )
@@ -634,13 +634,13 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, effort = coords
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim acquire: do provenance open skipped for {node_id}: {exc}",
+            f"claim acquire: execute provenance open skipped for {node_id}: {exc}",
             err=True,
         )
         return
@@ -650,7 +650,7 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     # the operator knows provenance was not opened, not silently dropped.
     if not found:
         typer.echo(
-            f"claim acquire: do provenance open skipped for {node_id} "
+            f"claim acquire: execute provenance open skipped for {node_id} "
             f"(node not in graph); the row was not written. Skipped.",
             err=True,
         )
@@ -675,13 +675,13 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started, ended_at=ended, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim release: do provenance stamp skipped for {node_id}: {exc}",
+            f"claim release: execute provenance stamp skipped for {node_id}: {exc}",
             err=True,
         )
         return
@@ -691,7 +691,7 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     # so the operator knows provenance was lost, not silently dropped.
     if not found:
         typer.echo(
-            f"claim release: do provenance stamp skipped for {node_id} "
+            f"claim release: execute provenance stamp skipped for {node_id} "
             f"(node not in graph); the row was not written. Skipped.",
             err=True,
         )
@@ -721,19 +721,19 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
-            graph_json(), node_id, phase="do",
+            graph_json(), node_id, phase="execute",
             harness=harness, session_id=session_id,
             started_at=started,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
-            f"claim release: do provenance rollback skipped for {node_id}: {exc}",
+            f"claim release: execute provenance rollback skipped for {node_id}: {exc}",
             err=True,
         )
         return
     if not found:
         typer.echo(
-            f"claim release: do provenance rollback skipped for {node_id} "
+            f"claim release: execute provenance rollback skipped for {node_id} "
             f"(node not in graph); nothing was removed. Skipped.",
             err=True,
         )
@@ -743,7 +743,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
         # rollback must not touch. Say which outcome happened rather than let
         # silence read as "the open row was removed".
         typer.echo(
-            f"claim release: no open do row to roll back for {node_id} "
+            f"claim release: no open execute row to roll back for {node_id} "
             f"(none was opened, or the row is already closed).",
             err=True,
         )
@@ -840,7 +840,8 @@ def _roster_verdict_line(info: dict) -> str:
     Each string is produced by exactly one outcome, so a caller asserts a
     positive marker instead of grepping for the absence of the word free - an
     absence has two explanations and cannot tell them apart, which is the
-    defect this whole cross-check exists to remove.
+    defect this whole cross-check exists to remove. One rider: the
+    finished-session clause rides any outcome it can coexist with.
 
     Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
@@ -889,11 +890,21 @@ def _roster_verdict_line(info: dict) -> str:
             f"unmeasured, never live: {rendered}. "
             f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
         )
+    # Two ways a row reads finished: the predicate said so (it is still in
+    # `workers`), or the session closed its own phase row on this node and the
+    # display field dropped it. The clause is built HERE, above the unresolved
+    # branch, because that branch returns and used to leave it unreachable: a
+    # node whose only row was a closed session read "no row resolved to this
+    # node" over a payload naming that row under `roster_closed_workers`.
+    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
+    tail = ""
+    if finished:
+        tail = f"; {len(finished)} finished session(s) resolved to it: {', '.join(finished)}"
     unresolved = info.get("roster_rows_unresolved", 0)
     if unresolved:
         scanned = (
             f"{state}, no row resolved to this node "
-            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved)"
+            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved){tail}"
         )
         candidates = info.get("roster_unresolved_candidates") or []
         if candidates:
@@ -907,15 +918,7 @@ def _roster_verdict_line(info: dict) -> str:
         # the roster was complete", which both used to render as plain free.
         return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
-    # Two ways a row reads finished: the predicate said so (it is still in
-    # `workers`), or the session closed its own phase row on this node and the
-    # display field dropped it. Both are named, so a node whose only row closed
-    # says so instead of reporting nothing at all.
-    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
-    if finished:
-        rendered = ", ".join(finished)
-        return f"{scanned}; {len(finished)} finished session(s) resolved to it: {rendered}"
-    return scanned
+    return f"{scanned}{tail}"
 
 
 def _expiry_clause(info: dict) -> str:
@@ -1475,10 +1478,9 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
     disaster): the pane's ``fno_id`` is the SESSION uuid, not the worker
     name (mux_spawn stamps ``fno_id=stored_session_uuid or name``), the OSC
     ``title`` is whatever the pane's shell set, and the load-bearing join is
-    the worktree: dispatch names the worker's worktree after the worker
-    (``workspace worktree ensure --name <agent_name>``), so
-    ``basename(pane.cwd) == worker`` is the normal live-launch marker, with
-    the node id covering the ``target start`` naming. Follows
+    the worktree: dispatch names the worker's worktree after the NODE id, so
+    ``basename(pane.cwd) == node_id`` is the normal live-launch marker, with
+    a worker-named tree still possible from older spawns. Follows
     ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
     prints ``[]`` both for a session with no panes and for an unreachable
     socket, so only a NON-EMPTY listing somewhere proves the instrument ran
@@ -1815,19 +1817,49 @@ def session_pid(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Resolve the durable session pid (nearest harness ancestor:
-    claude/codex/gemini/opencode/agy) for the hybrid liveness pid-arm. Prints the
+    """Resolve the durable session pid (nearest harness ancestor that is not
+    Claude Code pool machinery) for the hybrid liveness pid-arm. Prints the
     pid on stdout, or nothing when uncapturable (plain-shell / no harness
-    ancestor; the caller degrades to TTL-only liveness). Always exit 0 - a
-    missing pid is a safe degrade, not an error."""
-    from .session_pid import resolve_session_pid
+    ancestor / a pooled bg-spare; the caller degrades to TTL-only liveness).
+    Always exit 0 - a missing pid is a safe degrade, not an error.
 
-    pid = resolve_session_pid(from_pid=from_pid)
+    The walk is native: this command fronts the fno-agents binary, which owns
+    the one implementation (`spawn_context::session_identity_ambient`). The
+    Python module `session_pid` is a SHIM over this very verb, so importing it
+    here would recurse.
+    """
+    import subprocess as _subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        # Uncapturable: empty stdout, exit 0 (the shim's degrade shape).
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    cmd = [str(binary), "claim", "session-pid"]
+    if from_pid is not None:
+        cmd += ["--from-pid", str(from_pid)]
     if json_output:
-        typer.echo(json.dumps({"session_pid": pid}))
-    elif pid is not None:
-        typer.echo(str(pid))
-    # else: emit nothing on stdout so `$(fno agents claim session-pid)` is empty.
+        cmd.append("--json")
+    try:
+        result = _subprocess.run(  # noqa: S603 - resolved binary, fixed verb
+            cmd, capture_output=True, text=True, check=False
+        )
+    except OSError:
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    if json_output:
+        try:
+            payload = json.loads(result.stdout)
+        except ValueError:
+            payload = {"session_pid": None, "harness": None}
+        typer.echo(json.dumps(payload))
+    elif result.stdout.strip():
+        typer.echo(result.stdout.strip())
+    # Always exit 0 - this command always exits 0.
 
 
 def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> None:

@@ -11,7 +11,7 @@ use super::{
 use crate::codex_thread_entry::build_codex_thread_entry;
 use crate::protocol::{ErrorCode, Request, Response};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(super) async fn spawn_codex_thread_lane(
@@ -39,12 +39,14 @@ pub(super) async fn spawn_codex_thread_lane(
     // Both spellings, resolved by one reader. Reading `yolo` alone dropped
     // `permission_mode` silently and started bounded, which downgrades the very
     // posture the caller was naming; an unrecognized value is refused here
-    // rather than degraded, for the same reason.
-    let yolo = match crate::codex_thread::resolve_thread_posture(
+    // rather than degraded, for the same reason. The posture stays TYPED from
+    // here on: both halves ride the start frame, the registry row and the
+    // resume, never a bool.
+    let posture = match crate::codex_thread::resolve_thread_posture(
         req.params.get("yolo").and_then(Value::as_bool),
         req.params.get("permission_mode").and_then(Value::as_str),
     ) {
-        Ok(yolo) => yolo,
+        Ok(posture) => posture,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
@@ -108,10 +110,22 @@ pub(super) async fn spawn_codex_thread_lane(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // A node-backed target seeded from the CANONICAL checkout is born in the
+    // node's worktree, not on canonical main: the same node-keyed ensure the
+    // node-seeded spawn door already runs, applied before `thread/start` so
+    // the app-server request, the registry row and the birth event carry ONE
+    // cwd. A refused ensure refuses the whole spawn - starting on canonical
+    // as a fallback would be the exact outcome this resolves away. The ensure
+    // shells out (git + the worktree ensure), so it runs on the blocking
+    // pool, off the async executor every hosted thread shares.
+    let cwd = match resolve_target_cwd(cwd, node, &seed).await {
+        Ok(cwd) => cwd,
+        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
+    };
     let driver = match crate::codex_thread::CodexThread::start_with_state_dirs(
-        cwd.to_path_buf(),
+        cwd.clone(),
         model,
-        yolo,
+        &posture,
         effort,
         &state_dirs,
         Some(&carry.config),
@@ -129,11 +143,10 @@ pub(super) async fn spawn_codex_thread_lane(
     };
     let entry = build_codex_thread_entry(
         name,
-        cwd,
+        &cwd,
         &driver,
         model,
         effort,
-        yolo,
         node,
         req.params.get("account").and_then(Value::as_str),
         &harness_args,
@@ -226,24 +239,23 @@ pub(super) async fn spawn_codex_thread_lane(
     // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
     // event without both, which is how a thread worker could lose its only
     // resume fallback before the row is reaped.
-    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
-    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
-    // event without both, which is how a thread worker could lose its only
-    // resume fallback before the row is reaped.
     let _ = ctx.emitter.emit(
         "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "codex",
-            "harness": "codex",
-            "harness_session_id": session_id,
-            "short_id": "",
-            "status": "live",
-            "lane": "thread",
-            "substrate": "thread",
-            "cwd": cwd.to_string_lossy(),
-            "node": node,
-        }),
+        &crate::spawn_edge::birth_event(
+            name,
+            &crate::codex_thread_entry::thread_lineage(&req.params, provenance),
+            json!({
+                "provider": "codex",
+                "harness": "codex",
+                "harness_session_id": session_id,
+                "short_id": "",
+                "status": "live",
+                "lane": "thread",
+                "substrate": "thread",
+                "cwd": cwd.to_string_lossy(),
+                "node": node,
+            }),
+        ),
     );
     Response::ok(
         req.id,
@@ -256,4 +268,47 @@ pub(super) async fn spawn_codex_thread_lane(
             "lane": "thread",
         }),
     )
+}
+
+/// The one cwd a hosted Codex target thread is born with. A node-backed
+/// target whose requested cwd is the repository's canonical checkout is
+/// re-homed onto the node's worktree through the existing launch-workdir
+/// ensure. Every other shape keeps the requested path: a non-target seed,
+/// no node, a cwd that already IS a worktree, and a worktree policy of
+/// `never` (where the ensure answers the canonical path itself).
+async fn resolve_target_cwd(cwd: &Path, node: Option<&str>, seed: &str) -> Result<PathBuf, String> {
+    let Some(node) = node.filter(|node| !node.is_empty()) else {
+        return Ok(cwd.to_path_buf());
+    };
+    let Some((verb, _)) = seed
+        .split_whitespace()
+        .next()
+        .and_then(crate::provider::parse_verb_token)
+    else {
+        return Ok(cwd.to_path_buf());
+    };
+    if verb != "target" {
+        return Ok(cwd.to_path_buf());
+    }
+    let requested = cwd.to_path_buf();
+    let node_owned = node.to_string();
+    let ensured = {
+        let node = node_owned.clone();
+        tokio::task::spawn_blocking(move || {
+            if !crate::canonical_check::is_canonical_checkout(&requested) {
+                return Ok(requested);
+            }
+            crate::launch_workdir::ensure_node_workdir(&requested, &node, "codex")
+        })
+        .await
+        .map_err(|error| format!("node {node_owned}: launch-workdir join failed: {error}"))?
+        .map_err(|reason| format!("node {node_owned}: {reason}"))?
+    };
+    if !ensured.is_dir() {
+        return Err(format!(
+            "node {node_owned}: target worktree disappeared before thread start: {}",
+            ensured.display()
+        ));
+    }
+    Ok(ensured)
 }

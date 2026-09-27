@@ -8,6 +8,7 @@ retryable. A contradictory local graph file rides along: completion must
 never answer from it.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
@@ -83,10 +84,10 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
     monkeypatch.setattr(sidecar_store, "sidecar_path",
                         lambda i: sidecar_dir / f"{i}.json")
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [
+    seed_graph(g, json.dumps({"entries": [
         {"id": r["id"], "title": "GRAPH-SENTINEL", "completed_at": None}
         for r in rows
-    ]}), encoding="utf-8")
+    ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: g)
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
@@ -96,6 +97,12 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
 
     monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "absent-ledger.json")
     return tracker, sidecar_dir
+
+
+def _graph_state(path: Path):
+    from fno.graph.store import read_graph_strict, store_export_status
+
+    return read_graph_strict(path), store_export_status(path)
 
 
 def _gh_state(state, url="https://github.com/o/r/pull/7"):
@@ -257,9 +264,9 @@ def test_backfill_sweep_refused_externally_without_touching_graph(
     rows = [{"id": "EXT-1", "state": "closed", "title": "Done thing"}]
     _wire(monkeypatch, tmp_path, rows, {"EXT-1": {}})
     g = tmp_path / "graph.json"
-    before = g.read_bytes()
+    before = _graph_state(g)
 
     r = runner.invoke(app, ["done", "--backfill"], catch_exceptions=False)
     assert r.exit_code == 1
     assert "refused" in r.output
-    assert g.read_bytes() == before
+    assert _graph_state(g) == before

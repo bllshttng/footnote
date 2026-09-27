@@ -13,6 +13,7 @@ the stop hook's staleness check (check_session_satisfied) can match it.
 Covers AC1-HP and AC1-ERR.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import hashlib
 import json
@@ -58,10 +59,9 @@ def _write_state(cwd: Path, *, session_id: str, status: str = "IN_PROGRESS", pr_
 
 
 def _events(cwd: Path) -> list[dict]:
-    f = cwd / ".fno" / "events.jsonl"
-    if not f.exists():
-        return []
-    return [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(cwd / ".fno" / "events.jsonl")
 
 
 def _record(cwd: Path | None, *, session_id: str | None = "sid-1", pr_number: int = 42) -> MergeDriftRecord:
@@ -178,12 +178,12 @@ def test_emit_is_non_fatal_when_append_event_raises(tmp_path, monkeypatch):
     cwd = tmp_path / "repo"
     _write_state(cwd, session_id="sid-1")
 
-    import fno.events as events
+    import fno.events.store_client as store_client
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(events, "append_event", _boom)
+    monkeypatch.setattr(store_client, "emit_envelope", _boom)
     # Must not raise; returns None.
     assert emit_session_satisfied_for_record(_record(cwd)) is None
 
@@ -245,7 +245,7 @@ def test_cli_reconcile_emits_session_satisfied_for_owner(tmp_path, monkeypatch):
     expected_hash = _md5(state)
 
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": [{
+    seed_graph(graph_path, json.dumps({"entries": [{
         "id": "ab-hp", "title": "t", "pr_number": 100,
         "pr_url": "https://github.com/test-owner/test-repo/pull/100",
         "additional_prs": [], "completed_at": None, "superseded_by": None,
@@ -277,7 +277,7 @@ def test_cli_reconcile_no_emit_when_query_fails(tmp_path, monkeypatch):
     _write_state(owner_cwd, session_id="owner-sid")
 
     graph_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps({"entries": [{
+    seed_graph(graph_path, json.dumps({"entries": [{
         "id": "ab-fail", "title": "t", "pr_number": 800,
         "pr_url": "https://github.com/test-owner/test-repo/pull/800",
         "additional_prs": [], "completed_at": None, "superseded_by": None,

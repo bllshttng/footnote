@@ -19,7 +19,11 @@ runner = CliRunner()
 
 def _wire(monkeypatch, tmp_path, events, *, paused=False, level="report"):
     p = tmp_path / "events.jsonl"
-    p.write_text("".join(json.dumps(e) + "\n" for e in events))
+    from fno.events.store_client import emit_envelope
+
+    for i, e in enumerate(events):
+        envelope = {"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **e}
+        emit_envelope(envelope, p)
     monkeypatch.setattr(cli, "_events_paths", lambda: [p])
     monkeypatch.setattr(cli, "loops_paused", lambda: paused)
     monkeypatch.setattr(cli, "loop_level", lambda name: level)
@@ -27,7 +31,9 @@ def _wire(monkeypatch, tmp_path, events, *, paused=False, level="report"):
 
 
 def _events(path):
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def _rc(run_id, top="collision_free"):
@@ -68,7 +74,9 @@ def test_architectural_followup_folds_when_near_duplicate_exists(monkeypatch):
         {
             "outcome": "choice_required",
             "minted_id": None,
-            "candidates": [{"id": "fno-cand01"}],
+            "candidates": [
+                {"id": "fno-cand01", "title": "skill-diff: blueprint failure looks architectural (run r0)"}
+            ],
             "wave_command": "fno backlog idea t --wave-of fno-cand01",
         },
         indent=2,
@@ -88,6 +96,33 @@ def test_architectural_followup_folds_when_near_duplicate_exists(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli._file_no_diff_node("blueprint", "run-2", "architectural") == "fno-cand01"
     assert "--wave-of" in calls[1] and "fno-cand01" in calls[1]
+
+
+def test_architectural_followup_mints_separately_over_another_skills_node(monkeypatch):
+    """The top fold candidate belongs to another skill: text similarity is not
+    identity, so the filer mints its own node with --separate."""
+    calls = []
+    choice = json.dumps(
+        {
+            "outcome": "choice_required",
+            "candidates": [
+                {"id": "fno-other1", "title": "skill-diff: review failure looks architectural (run r9)"}
+            ],
+        }
+    )
+    minted = json.dumps({"id": "fno-new01"})
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return Result(choice if len(calls) == 1 else minted)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._file_no_diff_node("blueprint", "run-4", "architectural") == "fno-new01"
+    assert "--separate" in calls[1] and "--wave-of" not in calls[1]
 
 
 def test_architectural_followup_unparseable_receipt_defers(monkeypatch):
@@ -307,10 +342,21 @@ def _wire_reeval(monkeypatch, path, merged=True, merge_sha="mergesha12345", repl
         if verdict is None:
             return 1  # observer emitted nothing usable (batch failure for this item)
         tf = verdict == "tool_fault"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(_find(
-                run_id_after, corpus_item,
-                verdict="fail" if tf else verdict, tool_fault=tf)) + "\n")
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(
+            {
+                "ts": f"2026-01-02T00:00:{len(calls):02d}Z",
+                "source": "test",
+                **_find(
+                    run_id_after,
+                    corpus_item,
+                    verdict="fail" if tf else verdict,
+                    tool_fault=tf,
+                ),
+            },
+            path,
+        )
         return 0
 
     monkeypatch.setattr(cli, "_run_replay", fake_replay)
@@ -385,12 +431,31 @@ def test_reconcile_concurrent_close_is_noop(monkeypatch, tmp_path):  # codex P1 
 
     def racing_replay(corpus_item, skill_ref, run_id_after):
         # Simulate a concurrent reconcile closing the PR during our replay window,
-        # plus our own after-finding.
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(_find(run_id_after, corpus_item, verdict="pass")) + "\n")
-            fh.write(json.dumps({"type": "skill_diff_eval_closed",
-                     "data": {"pr_number": 201, "skill_id": "fno:blueprint",
-                              "run_id_before": "r1"}}) + "\n")
+        # plus our own after-finding. Both land as committed rows: the raw file
+        # is legacy only, and reconcile's re-read is store-first.
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(
+            {
+                "ts": "2026-01-02T00:00:01Z",
+                "source": "test",
+                **_find(run_id_after, corpus_item, verdict="pass"),
+            },
+            p,
+        )
+        emit_envelope(
+            {
+                "ts": "2026-01-02T00:00:02Z",
+                "source": "test",
+                "type": "skill_diff_eval_closed",
+                "data": {
+                    "pr_number": 201,
+                    "skill_id": "fno:blueprint",
+                    "run_id_before": "r1",
+                },
+            },
+            p,
+        )
         return 0
 
     monkeypatch.setattr(cli, "_run_replay", racing_replay)

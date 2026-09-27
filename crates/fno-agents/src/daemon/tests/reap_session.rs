@@ -16,7 +16,7 @@ fn x2774_open_node(id: &str, status: &str, sids: &[&str]) -> Value {
         .iter()
         .map(|sid| {
             json!({
-                "phase": "do",
+                "phase": "execute",
                 "harness": "claude",
                 "session_id": sid,
                 "started_at": "2026-09-01T01:00:00Z",
@@ -43,11 +43,12 @@ fn x2774_spawn(name: &str, short_id: &str, sid: &str) -> state::RegistryEntry {
 /// The x-2774 sweep harness: production graph read over a staged graph.json,
 /// staged transcripts, stop confirmed, no tree.
 #[allow(clippy::too_many_arguments)]
-fn x2774_sweep(
+fn x2774_sweep_at(
     home: &AgentsHome,
     emitter: &EventEmitter,
     grace: i64,
     dry_run: bool,
+    now: i64,
     transcripts: impl Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
     agents: crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> GcSummary {
@@ -59,13 +60,34 @@ fn x2774_sweep(
         7,
         &gc_sweep::read_graph_entries,
         &transcripts,
-        &staged_ages(&transcripts),
+        &staged_ages_at(now, &transcripts),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
         &move || agents.clone(),
         &|_| (None, None),
         &|_| None,
+    )
+}
+
+/// The wall-clock wrapper: each pass reads its own now, as before the
+/// injected-clock variant existed.
+fn x2774_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace: i64,
+    dry_run: bool,
+    transcripts: impl Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    agents: crate::claude_roster::ClaudeAgentsSnapshot,
+) -> GcSummary {
+    x2774_sweep_at(
+        home,
+        emitter,
+        grace,
+        dry_run,
+        crate::daemon::now_epoch_secs(),
+        transcripts,
+        agents,
     )
 }
 
@@ -101,7 +123,7 @@ fn x2774_terminal_harness_state_releases_an_open_work_row() {
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, working_agents);
     assert!(summary.retired.is_empty(), "{summary:?}");
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-term".to_string(),
             "N1".to_string(),
@@ -114,7 +136,7 @@ fn x2774_terminal_harness_state_releases_an_open_work_row() {
     let unreadable = crate::claude_roster::ClaudeAgentsSnapshot::unknown("staged: unreadable");
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, unreadable);
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
 
     // Terminal roster state: the row retires on the session question. APPLY
     // mode, run LAST: the basis is an effect-outcome artifact, so
@@ -151,7 +173,7 @@ fn xb7f8_a_terminal_parent_is_not_held_by_its_descendants() {
             "id": "NP",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "claude", "session_id": "s-parent", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "claude", "session_id": "s-parent", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );
@@ -245,7 +267,7 @@ fn x2774_supersession_and_its_fail_closed_corner() {
         "{summary:?}"
     );
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-new".to_string(),
             "N1".to_string(),
@@ -269,7 +291,7 @@ fn x2774_supersession_and_its_fail_closed_corner() {
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, false, both_quiet, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 2, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 2, "{summary:?}");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -312,7 +334,7 @@ fn x2774_a_recorded_merge_releases_a_lagging_open_node() {
     .unwrap();
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert!(summary.retired.is_empty(), "{summary:?}");
-    assert_eq!(summary.kept_open_work.len(), 1, "{summary:?}");
+    assert_eq!(summary.kept_open_work_stale.len(), 1, "{summary:?}");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -336,7 +358,7 @@ fn x2774_open_work_keeps_name_their_reader() {
     };
     let summary = x2774_sweep(&home, &emitter, 900, true, picks, no_agents());
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "t-name".to_string(),
             "N2".to_string(),
@@ -370,9 +392,9 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         "id": "ND",
         "status": "done",
         "sessions": [
-            {"phase": "do", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
-            {"phase": "do", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
-            {"phase": "do", "harness": "claude", "session_id": "s-donefresh", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+            {"phase": "execute", "harness": "codex", "session_id": "s-done", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s-nostop", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"},
+            {"phase": "execute", "harness": "claude", "session_id": "s-donefresh", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
         ]
     });
     stage_graph(
@@ -407,13 +429,24 @@ fn x2774_dry_and_acting_agree_row_for_row() {
         crate::claude_roster::ClaudeAgentRow::new("t-nostop", Some("working")),
         crate::claude_roster::ClaudeAgentRow::new("t-donefresh", Some("done")),
     ]);
-    let dry = x2774_sweep(&home, &emitter, 900, true, &picks, roster.clone());
-    let acting = x2774_sweep(&home, &emitter, 900, false, &picks, roster);
+    // One now for both passes: the seam answers identical ages, so the
+    // agreement asserts below hold byte for byte (CI flake 2026-09-27 read
+    // active ages 10 against 11 across the two wall reads).
+    let now = crate::daemon::now_epoch_secs();
+    let dry = x2774_sweep_at(&home, &emitter, 900, true, now, &picks, roster.clone());
+    let acting = x2774_sweep_at(&home, &emitter, 900, false, now, &picks, roster);
     assert_eq!(
-        dry.kept_open_work, acting.kept_open_work,
+        dry.kept_open_work_stale, acting.kept_open_work_stale,
         "open-work bucket agrees"
     );
-    assert_eq!(dry.kept_active, acting.kept_active, "active bucket agrees");
+    // The bucket's second element is the transcript age. Both passes judged
+    // the staged world against ONE injected now, so the tuples agree byte
+    // for byte; per-pass wall reads flaked here when a row crossed a second
+    // boundary between the passes (CI, 2026-09-27: 10 vs 11).
+    assert_eq!(
+        dry.kept_active, acting.kept_active,
+        "active bucket agrees row for row"
+    );
     assert_eq!(
         dry.kept_no_provenance, acting.kept_no_provenance,
         "provenance bucket agrees"
@@ -440,8 +473,10 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     dry_unverified.sort_unstable();
     assert_eq!(
         dry_unverified,
-        vec!["t-donefresh", "t-term"],
-        "positive stop evidence advances to the unevaluated active-surface gate"
+        vec!["t-term"],
+        "positive stop evidence advances to the unevaluated active-surface \
+         gate; t-donefresh keeps under active because recency inside the \
+         grace outranks the terminal state, so it never reaches a gate"
     );
     assert!(
         dry.dry_run_unverified
@@ -466,18 +501,13 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     acting_ids.sort_unstable();
     assert_eq!(
         acting_ids,
-        vec!["t-done", "t-donefresh", "t-nostop", "t-term"],
+        vec!["t-done", "t-nostop", "t-term"],
         "apply records the effect outcome: every row whose gates confirmed \
-         retired"
+         retired; t-donefresh keeps under active because recency outranks the terminal state inside the grace"
     );
-    // x-b7f8 change 1: the early fire is named (apply's basis; the dry run
-    // carries the gate name instead of a basis).
     assert!(
-        acting
-            .retired
-            .iter()
-            .any(|(id, basis)| id == "t-donefresh" && basis.contains("session terminal")),
-        "{:?}",
+        acting.retired.iter().all(|(id, _)| id != "t-donefresh"),
+        "a fresh transcript is never reaped as unattended: {:?}",
         acting.retired
     );
     assert_eq!(
@@ -496,11 +526,12 @@ fn x2774_dry_and_acting_agree_row_for_row() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// x-b7f8 change 3: for a terminal row the apply-window re-check asks one
-/// question - did the session write since classification. A DECREASING
-/// fresh age is a new write: the row keeps and the stop never fires. (The
-/// 274-to-275 case - age equal or older, retire - is covered by the
-/// dry/acting agreement extension above.)
+/// x-b7f8 change 3, amended: a terminal row whose transcript is
+/// inside the grace keeps AT CLASSIFICATION - the terminal state no longer
+/// overrides recency, so the apply-window re-check never sees the row. The
+/// decreasing age seam still answers, and the row keeps with the
+/// classification age. (Past the grace the terminal state retires; that is
+/// x2774_terminal_harness_state_releases_an_open_work_row.)
 #[test]
 fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
     let (dir, home) = staged_graph_home();
@@ -511,7 +542,7 @@ fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
             "id": "NW",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "claude", "session_id": "s-wrote", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "claude", "session_id": "s-wrote", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );
@@ -562,8 +593,8 @@ fn xb7f8_activity_arriving_in_the_apply_window_keeps_a_terminal_row() {
     );
     assert_eq!(
         summary.kept_active,
-        vec![("t-wrote".to_string(), 3)],
-        "the decreasing re-read keeps: {summary:?}"
+        vec![("t-wrote".to_string(), 274)],
+        "recency keeps at classification: {summary:?}"
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
@@ -587,7 +618,7 @@ fn x58a5_dry_and_acting_agree_on_a_gone_pid_pane_row() {
             "id": "NP",
             "status": "done",
             "sessions": [
-                {"phase": "do", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
+                {"phase": "execute", "harness": "codex", "session_id": "s-pane-x58a5", "started_at": "2026-09-01T01:00:00Z", "ended_at": "2026-09-01T02:00:00Z"}
             ]
         }]),
     );

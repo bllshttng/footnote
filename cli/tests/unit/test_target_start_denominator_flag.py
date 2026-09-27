@@ -1,40 +1,14 @@
-"""`fno do target start` carries every denominator flag its own refusal names.
+"""`fno do target start` carries the denominator flag its init path stamps.
 
-`start` composes `init`, so a plan-less code node makes init print the
-absent-denominator refusal through start's own stdout. That refusal says
-"re-run with --deliverables N". Doing exactly that used to fail with
-`Error: No such option: --deliverables`, because the option lived on `init`
-alone. A receipt naming a flag its own verb rejects is a dead end.
+`start` composes `init`, which on a plan-less code node derives the count and
+tells the caller they can override with `--deliverables N`. Doing exactly that
+used to fail with `Error: No such option: --deliverables`, because the option
+lived on `init` alone. A receipt naming a flag its own verb rejects is a dead
+end, so `start` must accept and forward it.
 """
 from __future__ import annotations
 
-import inspect
-import re
-
 from fno import target_cli
-from fno.target.denominator import absent_denominator_refusal
-
-_NODE = {"id": "x-1", "domain": "code", "title": "fix one thing", "details": ""}
-
-
-def _flags_named_in(message: str) -> set[str]:
-    return set(re.findall(r"--[a-z][a-z-]+", message))
-
-
-def test_start_accepts_every_flag_the_denominator_refusal_names():
-    message = absent_denominator_refusal(
-        node=_NODE, plan_path=None, deliverables=None
-    )
-    assert message is not None
-    named = _flags_named_in(message)
-    assert "--deliverables" in named
-
-    params = set(inspect.signature(target_cli.start).parameters)
-    for flag in named:
-        assert flag.removeprefix("--").replace("-", "_") in params, (
-            f"{flag} is named by the refusal a caller reads out of "
-            f"`fno do target start`, but start does not accept it"
-        )
 
 
 def test_start_forwards_the_declared_count_to_init(monkeypatch):

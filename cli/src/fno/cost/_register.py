@@ -21,12 +21,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fno import paths as _paths
+from fno.graph._constants import NODE_ID_BODY
 from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 
 # The recorded value when no harness session id resolves. A row that omits
 # `sessions` is indistinguishable from a run that had no session at all; this
 # says "we looked and found nothing", which is a different fact.
 LEDGER_SESSION_UNRESOLVED = "unresolved:no-harness-session"
+
+# The canonical node id grammar, anchored for whole-token matches.
+GRAPH_NODE_ID_SHAPE = re.compile(rf"^{NODE_ID_BODY}$")
 
 
 def _utc_iso(value: datetime | str | None) -> str | None:
@@ -135,7 +139,6 @@ def parse_target_state(state_path: str) -> dict:
     # poisoning the
     # entry with a parenthetical-laden ID. Comment lines (`# ...`) are
     # already excluded by the leading-whitespace anchor `^\s*`.
-    _GRAPH_NODE_ID_SHAPE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$")
     if "graph_node_id" not in result or result.get("graph_node_id") is None:
         for line in content.splitlines():
             m = re.match(r"^\s*graph_node_id:\s*(.*?)\s*$", line)
@@ -146,7 +149,7 @@ def parse_target_state(state_path: str) -> dict:
                 raw = raw[1:-1]
             elif raw.startswith("'") and raw.endswith("'"):
                 raw = raw[1:-1]
-            if raw and raw != "null" and _GRAPH_NODE_ID_SHAPE.match(raw):
+            if raw and raw != "null" and GRAPH_NODE_ID_SHAPE.match(raw):
                 result["graph_node_id"] = raw
             break
 
@@ -239,43 +242,35 @@ def _pr_number_from_gh(cwd: str) -> int | None:
     return int(out) if out.isdigit() else None
 
 
-def derive_phases(state: dict) -> tuple[list[str], list[str]]:
-    """Derive completed and skipped phases from gates and skip flags."""
-    gates = state.get("_gates", {})
+def derive_phases(state: dict, pr_number: int | None = None) -> tuple[list[str], list[str]]:
+    """Derive completed and skipped phases from what the run did.
 
-    phase_map = {
-        "do": ("quality_check_passed", None),  # if we got to gates, do ran
-        "review": ("quality_check_passed", None),
-        "validate": ("output_validated", None),
-        "ship": ("artifact_shipped", None),
-        "external": ("external_review_passed", "no_external"),
-        "browser": ("browser_testing_passed", "no_browser"),
-        "docs": ("docs_generated", "no_docs"),
-    }
-
-    completed = []
-    skipped = []
-
-    # Think and plan: check input_type
-    input_type = state.get("input_type", "idea")
-    if input_type == "idea":
-        completed.extend(["think", "plan"])
-    else:
-        # Plan input skips think/blueprint
+    The control-plane collapse removed the completion-gate booleans and the
+    input_type key this read, so every gate fell to "false" and every run
+    defaulted to idea: a do/review/ship run recorded ["think", "plan"], the
+    fold's plan-only discriminator read the row planned, and the fidelity gate
+    wedged the stop gate until merge. Phases now derive from the manifest's
+    input shape and skip flags plus the resolved PR; no evidence, no entry.
+    """
+    completed = ["execute"]  # this path registers only a target run's terminal
+    skipped: list[str] = []
+    # Think/plan ran in-session only for a bare-idea input; a plan or node
+    # input binds planning that happened before this session.
+    if state.get("plan_path") or GRAPH_NODE_ID_SHAPE.match(str(state.get("input") or "")):
         skipped.extend(["think", "plan"])
-
-    for phase, (gate_key, skip_flag) in phase_map.items():
-        gate_value = gates.get(gate_key, state.get(gate_key, "false"))
-        skip_value = state.get(skip_flag) if skip_flag else False
-
-        if gate_value == "true":
-            completed.append(phase)
-        elif gate_value == "skipped" or skip_value is True:
+    else:
+        completed.extend(["think", "plan"])
+    # The spine runs the review lane before the PR opens, so a resolved PR
+    # is the evidence both ship phases happened.
+    if pr_number:
+        completed.extend(["review", "ship"])
+    elif state.get("no_ship") is True:
+        skipped.append("ship")
+    for phase, flag in (
+        ("external", "no_external"), ("browser", "no_browser"), ("docs", "no_docs"),
+    ):
+        if state.get(flag) is True:
             skipped.append(phase)
-        else:
-            # Not completed and not skipped — omit from both
-            pass
-
     return completed, skipped
 
 
@@ -377,7 +372,7 @@ def build_entry(
     pr_url = _pr_url_for(pr_number, remote_url, cwd)
 
     # Phases
-    phases_completed, phases_skipped = derive_phases(state)
+    phases_completed, phases_skipped = derive_phases(state, pr_number)
 
     # Plan points
     plan_path = state.get("plan_path") or state.get("plan_dir")
@@ -717,6 +712,17 @@ _NON_DELIVERY_TERMINALS = frozenset(
 )
 
 
+def ledger_project_for(node: dict | None) -> str | None:
+    """The project key the plan-fidelity gate joins on: the checkout's remote
+    slug, exactly what the register path stamps and the gate reads. The node's
+    ``project`` field is a different key ('fno' vs the remote slug), so it is
+    only the fallback when no remote resolves."""
+    from fno.graph._intake import repo_root
+    from fno.paths import _slug_from_git_remote
+
+    return _slug_from_git_remote(Path(repo_root())) or (node or {}).get("project")
+
+
 def upsert_ledger_pr(
     node_id: str,
     pr_number: int,
@@ -724,11 +730,15 @@ def upsert_ledger_pr(
     project: str | None,
     merged_at: str | None,
     node_sessions: list[str] | None = None,
+    plan_path: str | None = None,
 ) -> str:
     """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
 
     Reconcile-side backstop for the transcript-gone tail: the
     merge event knows ``(node, pr, project, merged_at)`` but no ``finalize`` ran.
+    ``project`` is the REMOTE slug the plan-fidelity gate joins on and
+    ``plan_path`` the bound plan, so the created row is visible to that join;
+    the node's ``project`` field is a different key and leaves it unjoined.
     Under the SAME ``/tmp/fno-ledger.lock`` flock the register path uses:
 
     - existing execution row with ``pr_number`` null -> stamp pr_number/pr_url
@@ -785,6 +795,7 @@ def upsert_ledger_pr(
                 "pr_number": pr_number,
                 "pr_url": pr_url,
                 "project": project,
+                "plan_path": plan_path,
                 "completed": _utc_iso(merged_at),
                 "backstop": True,
                 "termination_reason": "reconcile-backstop",

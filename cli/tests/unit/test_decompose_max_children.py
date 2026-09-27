@@ -11,12 +11,14 @@ Covers US1-US5 / AC1-HP, AC2-HP, AC1-ERR, AC2-ERR, AC1-UI, AC1-EDGE, AC2-EDGE,
 AC3-EDGE, AC1-FR from the plan.
 """
 from __future__ import annotations
+from tests.fixtures.graph_seed import seed_graph
 
 import json
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from fno.graph.store import read_graph_strict
 
 
 def _node(node_id: str, **overrides) -> dict:
@@ -87,7 +89,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         cwd=str(tmp_path),
         status="ready",
     )
-    g.write_text(json.dumps({"entries": [epic]}) + "\n")
+    seed_graph(g, json.dumps({"entries": [epic]}) + "\n")
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
@@ -95,7 +97,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     def read_entries():
-        return json.loads(g.read_text())["entries"]
+        return read_graph_strict(g)
 
     return write_frontmatter, read_entries, doc
 
@@ -221,9 +223,9 @@ def test_relative_plan_path_resolved_against_epic_cwd(graph_env, tmp_path, monke
     # Point the epic's plan_path at a RELATIVE path (basename), cwd = tmp_path.
     import fno.graph._constants as gc
 
-    g = json.loads(Path(gc.GRAPH_JSON).read_text())
-    g["entries"][0]["plan_path"] = "big.md#c1-anchor"  # relative
-    Path(gc.GRAPH_JSON).write_text(json.dumps(g) + "\n")
+    entries = read_entries()
+    entries[0]["plan_path"] = "big.md#c1-anchor"  # relative
+    seed_graph(Path(gc.GRAPH_JSON), entries)
     # Run from a DIFFERENT cwd so a process-cwd read would miss big.md.
     other = tmp_path / "elsewhere"
     other.mkdir()

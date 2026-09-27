@@ -14,6 +14,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 command -v fno-agents >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

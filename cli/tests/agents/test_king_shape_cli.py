@@ -8,13 +8,14 @@ tests); the two write tests run the real binary and skip when it is not built.
 """
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.agents.registry import AgentEntry, update_registry
-from fno.king.state import king_manifest_path, parse_manifest, write_manifest
+from fno.king.state import king_manifest_path, king_state_root, parse_manifest, write_manifest
 from fno.paths_testing import use_tmpdir
 
 CALLER_SESSION = "5d4c3b2a-1111-4000-8000-000000000001"
@@ -42,8 +43,8 @@ def court(tmp_path, monkeypatch):
     install_fake_claude(bin_dir)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CALLER_SESSION)
-    # The verb resolves the manifest state root from the caller's cwd; seat
-    # the court so that resolution lands on the tmp state root too.
+    # The verb keys the manifest root on the caller row's cwd; the seated row
+    # carries that cwd (see _seat's cwd argument).
     monkeypatch.chdir(tmp_path)
     built = Path(__file__).parents[3] / (
         "crates/fno-agents/target/debug/fno-agents"
@@ -61,13 +62,20 @@ def _binary_available() -> bool:
     return (Path(__file__).parents[3] / "crates/fno-agents/target/debug/fno-agents").is_file()
 
 
-def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "busy"):
+def _seat(
+    name: str,
+    session: str,
+    *,
+    scope: str | None = SCOPE,
+    status: str = "busy",
+    cwd: str = "/tmp",
+):
     update_registry(
         lambda rows: rows
         + [
             AgentEntry(
                 name=name,
-                cwd="/tmp",
+                cwd=cwd,
                 log_path="",
                 harness="claude",
                 harness_session_id=session,
@@ -81,10 +89,9 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
 
 
 def _manifest(court, scope: str = SCOPE, session: str = CALLER_SESSION):
-    # No state_root pin: the shape verb resolves the default (the repo's
-    # space), so the fixture must write through the same resolver or the verb
-    # reads a different file than the test wrote.
-    path = king_manifest_path(scope)
+    # The verb keys the manifest root on the caller row's cwd, so the fixture
+    # writes through the same call the resolver makes.
+    path = king_manifest_path(scope, state_root=king_state_root(Path(court)))
     write_manifest(path, scope=scope, harness_session_id=session)
     return path
 
@@ -97,7 +104,7 @@ def _shape(*args: str):
 
 @pytest.mark.skipif(not _binary_available(), reason="fno-agents binary not built")
 def test_shape_court_lands_on_the_manifest_and_echoes(court) -> None:
-    _seat("reigning-king", CALLER_SESSION)
+    _seat("reigning-king", CALLER_SESSION, cwd=str(court))
     manifest = _manifest(court)
 
     result = _shape("court")
@@ -109,7 +116,7 @@ def test_shape_court_lands_on_the_manifest_and_echoes(court) -> None:
 
 @pytest.mark.skipif(not _binary_available(), reason="fno-agents binary not built")
 def test_shape_is_idempotent_on_a_second_call(court) -> None:
-    _seat("reigning-king", CALLER_SESSION)
+    _seat("reigning-king", CALLER_SESSION, cwd=str(court))
     manifest = _manifest(court)
 
     _first = _shape("court")
@@ -146,3 +153,36 @@ def test_shape_refuses_a_foreign_scope(court) -> None:
 
     assert result.exit_code == 2, result.output
     assert "only its own reign" in result.output
+
+
+def test_own_crown_argv_keys_the_root_on_the_caller_row_cwd(
+    court, monkeypatch
+) -> None:
+    """--root must name the caller row's space, so a king whose shell sits
+    outside the repo still declares on its own manifest (x-8387)."""
+    import fno.agents.crown as crown_mod
+    from fno.king.cli import _own_crown_argv
+    from fno.king.state import king_state_root as _ksr
+
+    kingrepo = court / "kingrepo"
+    kingrepo.mkdir()
+    row = types.SimpleNamespace(
+        harness_session_id=CALLER_SESSION,
+        cc_session_id=None,
+        harness="claude",
+        crown_scope=SCOPE,
+        cwd=str(kingrepo),
+    )
+    monkeypatch.setattr(crown_mod, "calling_agent_row", lambda: row)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: Path("/fake/fno-agents")
+    )
+    elsewhere = court / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    argv, own = _own_crown_argv("reign-shape", "")
+
+    assert own == SCOPE
+    i = argv.index("--root")
+    assert argv[i + 1] == str(_ksr(kingrepo)), argv

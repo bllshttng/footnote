@@ -48,8 +48,26 @@ The EPERM correlation hunt refuted five explanations with evidence. An untrusted
 
 One proposal was refuted on lane evidence: dropping the headless `if !ctx.yolo` grant guard. That guard governs `codex exec` argv only, where yolo emits the bypass flag and no exec run is ever yolo-sandboxed. Its test states a true invariant and stays. The lane discriminator is sharp. 44 of 49 blocked rollouts carry the `fno-mail-inject` clientInfo of the app-server handshake. Zero carry `codex_exec`. Both `codex exec` rollouts in the same scan worked.
 
-## Known limits
+## Posture fidelity (was: Known limits)
 
-The `yolo` scalar still asks for more than the server delivers: a yolo thread runs `workspaceWrite` server-side with widened roots, not full access. The spawn client also spells its posture as a `yolo` boolean. A `permission_mode` of the same meaning sent under its own key is not read by the thread lane. Both are posture-fidelity gaps, not write gaps: with the grant, a worker at either posture can commit.
+Both posture-fidelity gaps the section above named are closed.
 
-The pre-launch sandbox probe judges the `~/.codex/config.toml` posture, not the turn frame. On a network-off config it can refuse a bounded thread spawn that the turn-level network grant supports.
+The spawn client no longer spells its posture as a `yolo` boolean on the thread lane. `resolve_thread_posture` resolves the typed pair - sandbox half plus approval half - and both halves ride `thread/start`, `thread/resume`, and every `turn/start`. A `permission_mode` of `read-only:on-request` launches read-only with approvals on request, and the exact string is stamped on the row as `requested_permission_mode` (schema v35) so a resume replays the request, not a derived name. Fail-closed refusals name the codex vocabulary: an unknown sandbox half, an unknown approval half, or both keys at once refuse the spawn instead of degrading to bounded.
+
+The per-turn policy never fabricates a posture. It echoes the server's RESOLVED posture with only the roots widened (`workspaceWrite`), or - when the server names no sandbox - builds from the recorded request, stamped `turn_policy_source: requested` on the row. Requested, resolved, and current-turn policy are therefore three distinguishable readings on every row. Nothing narrows a deliberately bounded run, and nothing invents a bounded posture for a full-access thread: a resolved `dangerFullAccess` posture is echoed unchanged, and an unresolved full-access request builds a `dangerFullAccess` policy rather than a `workspaceWrite` one. A resolved `readOnly` posture is echoed without any widening.
+
+The yolo scalar caveat stands as a SERVER fact, not an fno gap: a thread started with the `danger-full-access` scalar may still run `workspaceWrite` server-side. fno names what it asked for (`sandbox_posture`), what the server resolved (`resolved_sandbox`), and what each turn carries (`granted_writable_roots` + `turn_policy_source`), so the gap is measurable instead of silent.
+
+A thread can also be narrowed after launch by a settings change fno did not send. A measured 2026-09-21 `thread_settings_applied` moved a live yolo thread to the `:workspace` profile, and no fno event fired at that second. The held driver already echoes the posture recorded at `thread/start` on every turn it drives. The mail and resume-wake lane now reads the row's recorded posture too. A row recording full access gets a `{"type":"dangerFullAccess"}` turn policy, and the live-posture probe is skipped. The next `fno agents mail send` or resume wake therefore restores the thread. A turn another client starts is the remaining gap: it runs under whatever the server last resolved until fno's next delivered turn.
+
+The pre-launch sandbox probe judges the worker's OWN requested posture (never a hardcoded `workspace-write`), and proves access with a harmless canary write inside the granted roots beside the `gh` and git ref-lock checks. Its negative control closes the detector gap: a write OUTSIDE the granted roots must fail, and when that control succeeds the verdict is `unknown`, never `reachable` - a detector that cannot fail has proved nothing. Exit 85 and the `sandbox-probe:` marker are unchanged.
+
+## The default scope (an operator decision, recorded open)
+
+Footnote reads no `~/.codex/config.toml` and writes none. The one key that sets a codex worker's default posture is `config.agents.defaults.harness.codex.permission_mode` (and its per-verb overlays), and it is UNSET by default: a worker launched with nothing named keeps the lane's bounded default, `workspace-write:never`. The key sits in the existing harness-overlay precedence line documented in [role-based-model-routing.md](role-based-model-routing.md).
+
+No default widens any existing posture. A configured `bypassPermissions` (a claude-only token) refused by name on a codex lane rather than degrading open to an unnamed posture. The machine-wide alternative - `sandbox_mode = "danger-full-access"` in `~/.codex/config.toml` - stays an open operator decision this project does not make for them.
+
+## Native subagent inheritance
+
+A Codex native subagent inherits the parent thread's current effective posture: there is no separate child knob upstream, so the parent's per-turn policy is what a child runs under. fno records the parent's effective policy on the row (`turn_policy_source` plus the resolved posture); when that reading is `unknown`, a child's inherited posture reads `unknown` too and is never reported as permitted. The roster names the parent thread id beside the inherited posture rather than deriving a second answer.

@@ -146,7 +146,6 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
             return _home_relative(raw) if raw.startswith("~") else raw
         return f"$STATE_DIR/{subdir}"
 
-    lines.append(f"export GRAPH_JSON_PATH={_bash_quote(_state_subpath(cfg.paths.graph_json, 'graph.json'))}")
     lines.append(f"export LEDGER_JSON_PATH={_bash_quote(_state_subpath(cfg.paths.ledger_json, 'ledger.json'))}")
     lines.append(f"export BRIEFS_DIR={_bash_quote(_state_subpath(cfg.paths.briefs_dir, 'briefs'))}")
     lines.append(f"export FLEET_DIR={_bash_quote(_state_subpath(cfg.paths.fleet_dir, 'fleet'))}")

@@ -167,13 +167,40 @@ pub fn decide(
     }
 }
 
+/// A lib unit test gets only the porcelain it declared: the same rule
+/// `AgentsHome::from_env` applies to `$HOME` (docs/architecture/test-hermeticity.md).
+/// A raw `cargo test` inherits the calling session's identity, and the installed
+/// fno would act on it - its parent push mails that session a false alarm.
+pub(crate) const UNDECLARED_FNO: &str =
+    "/nonexistent/fno-undeclared-in-this-unit-test--set-FNO_BIN";
+
+/// Answer `declared` when set. Otherwise `fno` in every shipped build, and a
+/// path that cannot exec under `cfg!(test)` - every caller treats a spawn
+/// failure as "fno missing, skip", so the refusal costs a test one skipped
+/// shellout, never a production behavior change.
+pub(crate) fn declared_fno<T: From<&'static str>>(declared: Option<T>) -> T {
+    declared.unwrap_or_else(|| {
+        if cfg!(test) {
+            T::from(UNDECLARED_FNO)
+        } else {
+            T::from("fno")
+        }
+    })
+}
+
 /// The `fno` front-door binary (the Rust mux owner), same resolution as the
 /// active-backlog supervisor and the Python spawn back half: `FNO_BIN`
 /// overrides for tests and non-PATH installs. `var_os` (not `var`) so a path
 /// with non-UTF-8 bytes passes through to `Command` unmangled (gemini MEDIUM).
 pub fn fno_bin() -> std::ffi::OsString {
-    std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
+    declared_fno(std::env::var_os("FNO_BIN"))
 }
+
+/// The undeclared-`fno-py` twin of [`UNDECLARED_FNO`]: the same refusal for
+/// the Python half of the porcelain, whose uv-tools and bare-name fallback
+/// legs otherwise still reach the installed CLI from a lib unit test.
+pub(crate) const UNDECLARED_FNO_PY: &str =
+    "/nonexistent/fno-py-undeclared-in-this-unit-test--set-FNO_PY";
 
 /// The `fno-py` Python CLI console script, resolved without relying on PATH
 /// `FNO_PY` overrides for tests and nonstandard installs, then the
@@ -183,10 +210,15 @@ pub fn fno_bin() -> std::ffi::OsString {
 /// performs for the `fno` shim), then the uv tool venv's bin under its
 /// default tools dir, for a cargo/dev build of this binary with the wheel
 /// installed elsewhere. Bare `fno-py` last, so a genuinely missing install
-/// surfaces a real NotFound instead of a silent no-op.
+/// surfaces a real NotFound instead of a silent no-op. Under `cfg!(test)` an
+/// unset `FNO_PY` refuses through [`UNDECLARED_FNO_PY`], the same
+/// declared-only rule `fno_bin` applies.
 pub fn fno_py() -> std::ffi::OsString {
     if let Some(p) = std::env::var_os("FNO_PY").filter(|v| !v.is_empty()) {
         return p;
+    }
+    if cfg!(test) {
+        return std::ffi::OsString::from(UNDECLARED_FNO_PY);
     }
     if let Some(p) = std::env::current_exe()
         .ok()
@@ -908,21 +940,15 @@ mod tests {
         // rewrites between sweeps.
         let ls_path = dir.join("ls.json");
         let read_path = dir.join("read.json");
-        let stub = dir.join("fno-stub.sh");
-        std::fs::write(
-            &stub,
-            format!(
+        let stub = crate::write_exec_stub(
+            &dir,
+            "fno-stub.sh",
+            &format!(
                 "#!/bin/sh\ncase \"$3\" in\nls) cat {} ;;\nread) cat {} ;;\nesac\n",
                 ls_path.display(),
                 read_path.display()
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         std::env::set_var("FNO_BIN", &stub);
 
         let live_pane =
@@ -1008,33 +1034,27 @@ mod tests {
         );
     }
 
-    fn write_script(path: &std::path::Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
     // the fallback must resolve with the wheel bin absent from PATH.
     // Neither leg consults PATH at all; the temp dir stands in for the uv
     // tools bin the measured failure could not reach.
     #[test]
     fn fno_py_beside_resolves_executable_sibling_without_path() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("fno-agents");
-        write_script(&exe, 0o755);
-        let script = dir.path().join("fno-py");
-        write_script(&script, 0o755);
+        let exe = crate::write_exec_stub(dir.path(), "fno-agents", "#!/bin/sh\n");
+        let script = crate::write_exec_stub(dir.path(), "fno-py", "#!/bin/sh\n");
         assert_eq!(fno_py_beside(&exe).as_deref(), Some(script.as_path()));
     }
 
     #[test]
     fn fno_py_beside_ignores_missing_or_non_executable_sibling() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("fno-agents");
-        write_script(&exe, 0o755);
+        let exe = crate::write_exec_stub(dir.path(), "fno-agents", "#!/bin/sh\n");
         assert_eq!(fno_py_beside(&exe), None, "no sibling");
+        // The non-executable case stays in-process: mode 0o644 is the point.
+        use std::os::unix::fs::PermissionsExt;
         let script = dir.path().join("fno-py");
-        write_script(&script, 0o644);
+        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(fno_py_beside(&exe), None, "sibling not executable");
     }
 
@@ -1043,7 +1063,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fno").join("bin").join("fno-py");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        write_script(&script, 0o755);
+        crate::write_exec_stub(script.parent().unwrap(), "fno-py", "#!/bin/sh\n");
         assert_eq!(
             fno_py_in_tools_dir(dir.path()).as_deref(),
             Some(script.as_path())
@@ -1052,5 +1072,56 @@ mod tests {
             fno_py_in_tools_dir(tempfile::tempdir().unwrap().path()),
             None
         );
+    }
+
+    #[test]
+    fn an_undeclared_fno_bin_is_refused_under_a_unit_test() {
+        // AC3: unset under cfg!(test) the resolver answers a path that does
+        // not exist and whose text names the remedy; AC2: a declared path
+        // passes through unchanged.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_BIN");
+        std::env::remove_var("FNO_BIN");
+        let resolved = fno_bin();
+        // The declared leg: the resolver answers the string, it never stats
+        // it, so a tempdir path proves pass-through.
+        let dir = tempfile::tempdir().unwrap();
+        let declared = std::ffi::OsString::from(dir.path().join("fno"));
+        std::env::set_var("FNO_BIN", &declared);
+        let declared_resolved = fno_bin();
+        match prior {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_ne!(resolved, std::ffi::OsString::from("fno"));
+        assert!(!std::path::Path::new(&resolved).exists());
+        assert!(resolved.to_string_lossy().contains("FNO_BIN"));
+        assert_eq!(declared_resolved, declared);
+    }
+
+    #[test]
+    fn an_undeclared_fno_py_is_refused_under_a_unit_test() {
+        // The Python half of the porcelain carries the same declared-only
+        // rule: unset FNO_PY refuses (its uv-tools leg would find the
+        // installed CLI), a declared path passes through.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_PY");
+        std::env::remove_var("FNO_PY");
+        let resolved = fno_py();
+        let dir = tempfile::tempdir().unwrap();
+        let declared = std::ffi::OsString::from(dir.path().join("fno-py"));
+        std::env::set_var("FNO_PY", &declared);
+        let declared_resolved = fno_py();
+        match prior {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        assert!(!std::path::Path::new(&resolved).exists());
+        assert!(resolved.to_string_lossy().contains("FNO_PY"));
+        assert_eq!(declared_resolved, declared);
     }
 }

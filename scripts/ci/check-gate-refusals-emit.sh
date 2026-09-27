@@ -19,8 +19,9 @@
 # (inside _refuse) plus the transport's call into it - the gate's axes
 # themselves live in crates/fno-agents/src/spawn_gate.rs and answer the
 # Python transport as data, so a spawn that enters Python still emits its
-# refusal through this seam, and a native (bg/headless) spawn emits nothing
-# (owns a Rust emit).
+# refusal through this seam. The native routing side is owned by Rust: the
+# route-slot verb journals its refusal itself (crates/fno-agents/src/route_slot.rs,
+# journal_routing_refusal), guarded by the route_slot journal tests.
 #
 # Exit 0 when every Python refusal routes through the seam; exit 1 naming file
 # and line otherwise.

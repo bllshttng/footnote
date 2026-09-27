@@ -39,6 +39,10 @@ command -v bash  >/dev/null 2>&1 || { skip "bash not on PATH"; exit 77; }
 [[ -f "$VALIDATOR" ]] || { skip "events-validate.sh not found: $VALIDATOR"; exit 77; }
 
 REAL_BIN="${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
+CLI_BIN="${REPO_ROOT}/crates/fno/target/debug/fno"
+if [[ ! -x "$CLI_BIN" ]]; then
+    CLI_BIN="$(command -v fno || true)"
+fi
 if [[ ! -x "$REAL_BIN" ]]; then
     skip "fno-agents debug binary not found at $REAL_BIN; run: cd crates/fno-agents && cargo build"
     exit 77
@@ -117,8 +121,13 @@ MANIFEST
 validate_events_file() {
     local label="$1" events_file="$2"
 
-    if [[ ! -f "$events_file" ]]; then
-        fail "${label}: events file not created at ${events_file}"
+    # The store commit is the write boundary: validate the committed rows the
+    # rows verb answers (raw journal bytes ride the verb's own fallback), so
+    # a store-only journal cannot read as "not created".
+    local rows
+    rows="$("$CLI_BIN" doctor event rows --events "$events_file" 2>/dev/null || true)"
+    if [[ -z "$rows" || "$rows" == "[]" ]]; then
+        fail "${label}: no committed events beside ${events_file}"
         return 1
     fi
 
@@ -147,7 +156,7 @@ validate_events_file() {
             fail "${label}: offending event: ${line}"
             line_ok=false
         fi
-    done < "$events_file"
+    done < <(jq -r '.[]' <<< "$rows")
 
     if [[ "$line_num" -eq 0 ]]; then
         fail "${label}: events file was empty (expected at least one event)"
@@ -155,6 +164,11 @@ validate_events_file() {
     fi
 
     [[ "$line_ok" == "true" ]] && return 0 || return 1
+}
+
+# rows_text EVENTS_FILE -> committed rows as one line of JSON array text
+rows_text() {
+    "$CLI_BIN" doctor event rows --events "$1" 2>/dev/null || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,11 +330,11 @@ MANIFEST
         pass "S4: legacy-manifest events all validate against schema"
     fi
 
-    # Bonus: legacy event name should appear
-    if grep -q 'loop_check_legacy_manifest' "$EVENTS_FILE" 2>/dev/null; then
+    # Bonus: legacy event name should appear (committed rows, not raw bytes)
+    if rows_text "$EVENTS_FILE" | grep -q 'loop_check_legacy_manifest'; then
         pass "S4 bonus: loop_check_legacy_manifest event present"
     else
-        fail "S4 bonus: loop_check_legacy_manifest event missing; content: $(cat "$EVENTS_FILE" 2>/dev/null)"
+        fail "S4 bonus: loop_check_legacy_manifest event missing; content: $(rows_text "$EVENTS_FILE")"
     fi
 
 rm -rf "$TMP_DIR"
@@ -376,10 +390,12 @@ RUNLOG
         --now "2026-06-05T01:00:00Z" \
         --events "$EVENTS_FILE" 2>/dev/null || true)
 
+    local S5_ROWS
+    S5_ROWS="$(rows_text "$EVENTS_FILE")"
     if [[ "$(jq -r '.decision // empty' <<< "$OUTPUT" 2>/dev/null)" == "block" ]] && \
         validate_events_file "S5" "$EVENTS_FILE" && \
-        grep -q '"type":"transition_rejected"' "$EVENTS_FILE" && \
-        grep -q '"kind":"invalid_transition"' "$EVENTS_FILE"; then
+        printf '%s' "$S5_ROWS" | grep -q 'transition_rejected' && \
+        printf '%s' "$S5_ROWS" | grep -q 'invalid_transition'; then
         pass "S5: observer rejection is recorded and legacy block remains"
     else
         fail "S5: observer rejection or legacy block missing; output: $OUTPUT events: $(cat "$EVENTS_FILE" 2>/dev/null)"
@@ -422,9 +438,11 @@ MANIFEST
         --now "2026-06-05T01:00:00Z" \
         --events "$EVENTS_FILE" 2>/dev/null || true)
 
+    local S6_ROWS
+    S6_ROWS="$(rows_text "$EVENTS_FILE")"
     if [[ "$(jq -r '.decision // empty' <<< "$OUTPUT" 2>/dev/null)" == "block" ]] && \
         validate_events_file "S6" "$EVENTS_FILE" && \
-        grep -q '"kind":"invalid_run_id"' "$EVENTS_FILE"; then
+        printf '%s' "$S6_ROWS" | grep -q 'invalid_run_id'; then
         pass "S6: invalid run ID telemetry validates and legacy block remains"
     else
         fail "S6: invalid run ID telemetry or legacy block missing; output: $OUTPUT events: $(cat "$EVENTS_FILE" 2>/dev/null)"

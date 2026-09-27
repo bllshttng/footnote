@@ -16,6 +16,7 @@
     second acquisition.
   split: test
   control: true
+  labels: {persona: pass, surface_fit: pass, uncovered_case: pass, deletable: pass, duplication: pass, epic_fit: pass, mission_fit: pass, customer_fit: pass, competitive_fit: pass, ship_quality: pass, partner_challenge: pass}
   sources:
     epic_fit: >
       x-groom live Groom reliability: overnight groom runs clean the board
@@ -24,9 +25,13 @@
       part of that path.
     customer_fit: The user is the operator who dispatches plans in the
       morning and reads the groom report with coffee.
-  labels: {persona: pass, surface_fit: pass, uncovered_case: pass, deletable: pass, duplication: pass, epic_fit: pass, mission_fit: pass, customer_fit: pass}
-  note: A plan that answers all five with named things and whose sources
-    agree; must pass everywhere it is labeled.
+    competitive_fit: >
+      What a solo founder uses instead: a coding agent driven by hand with no
+      backlog and no loop; a tracker plus a coding agent with nothing joining
+      them; a hosted autonomous agent that owns neither the plan nor the
+      merge gate. None of them touches a duplicate lock check inside groom.
+  note: A plan that answers every pack question with named things and whose
+    sources agree; must pass everywhere it is labeled.
 
 - plan: controls/empty-answers.md
   node_text: >
@@ -124,3 +129,34 @@
   labels: {code_truth: fail}
   note: The plan cites blueprint_judge.rs:29 as declaring no dimension list,
     but the resolved lines carry JUDGE_DIMENSIONS; code_truth fails.
+
+- plan: controls/symptom-patch.md
+  node_text: >
+    Bug: the groom worker crashes with AttributeError when a dispatch row
+    carries no lane field. Reported from the 2026-09-10 overnight run log.
+  split: test
+  control: true
+  labels: {reproduced: fail, root_cause: fail, regression_test: fail}
+  note: sibling_callers gets no control on purpose; its evidence is an rg run
+    over the working tree, which a fixture cannot pin. The plan quotes the
+    report, guards the one call site, ships no test and never runs the
+    failure, so reproduced, root_cause and regression_test all fail.
+
+- plan: controls/rebuild-the-alternative.md
+  node_text: >
+    Give operators a place to track feature requests inside fno so they stop
+    losing them across sessions.
+  split: test
+  control: true
+  sources:
+    competitive_fit: >
+      What a solo founder uses instead: a coding agent driven by hand with no
+      backlog and no loop; a tracker plus a coding agent with nothing joining
+      them; a hosted autonomous agent that owns neither the plan nor the
+      merge gate. The tracker already records feature requests, votes and
+      status columns.
+  labels: {competitive_fit: fail, ship_quality: fail, partner_challenge: fail}
+  note: A feature plan that rebuilds what the named alternative already does
+    and never says the difference; puts a model in the loop nothing checks;
+    rewrites a module without saying what it was for. All three product
+    reads fail.

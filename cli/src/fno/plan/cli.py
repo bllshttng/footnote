@@ -8,18 +8,11 @@ Verbs:
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
     path              - print the save path for a NEW plan/design doc (config.plans_filename)
-
-stamp and graduate forward all unknown args + propagate exit codes from the
-in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
-
-Why a CLI verb at all? It's the polished surface skills can call instead of
-spawning ``python3 -m fno.plan._stamp`` directly.
 """
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from enum import Enum
 from pathlib import Path
@@ -39,21 +32,16 @@ plan_app = typer.Typer(
 
 
 def _forward(verb: str, extra_args: List[str]) -> int:
-    """Subprocess into the in-package stamp module with verb + extra_args.
+    """Send verb + extra_args to the keeper-served plan-doc writer; return its exit code."""
+    from fno.plan._project import plan_docs
 
-    Runs ``python3 -m fno.plan._stamp`` under the current interpreter so the
-    module is always importable in-package (no repo-root resolution, no
-    script-missing degrade). Returns the module's exit code so callers chain.
-    """
-    cmd = [sys.executable, "-m", "fno.plan._stamp", verb] + extra_args
-    result = subprocess.run(cmd, check=False)
-    return result.returncode
+    return (plan_docs("argv", verb=verb, args=extra_args) or {"exit": 1})["exit"]
 
 
 @plan_app.command(
     "stamp",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Stamp plan frontmatter with ship metadata. Forwards all args to fno.plan._stamp stamp.",
+    help="Stamp plan frontmatter with ship metadata. Forwards all args to the plan-doc writer.",
 )
 def stamp(ctx: typer.Context) -> None:
     rc = _forward("stamp", list(ctx.args))
@@ -63,7 +51,7 @@ def stamp(ctx: typer.Context) -> None:
 @plan_app.command(
     "graduate",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Graduate a stamped plan (shipped -> done). Forwards all args to fno.plan._stamp graduate.",
+    help="Graduate a stamped plan (in_review -> done). Forwards all args to the plan-doc writer.",
 )
 def graduate(ctx: typer.Context) -> None:
     rc = _forward("graduate", list(ctx.args))
@@ -75,7 +63,7 @@ def graduate(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "Authoritatively set a plan's expected_url_count (count-only). Forwards "
-        "all args to fno.plan._stamp set-expected. Used to record the "
+        "all args to the plan-doc writer. Used to record the "
         "group count on a shared epic-decomposition doc."
     ),
 )

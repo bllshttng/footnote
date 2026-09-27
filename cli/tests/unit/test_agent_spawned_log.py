@@ -29,9 +29,9 @@ def daemon_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _read_records(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def test_daemon_lifecycle_log_is_agents_home() -> None:
@@ -107,8 +107,8 @@ def test_emit_spawned_does_not_land_in_python_dispatch_log(daemon_log: Path) -> 
     """One birth per spawn, in the daemon log only (not also in the python log)."""
     py_log = daemon_log.parent.parent / "events.jsonl"
     events.emit_spawned(name="wkB", short_id="11111111", provider=_CLAUDE)
-    assert daemon_log.is_file()
-    assert not py_log.is_file()
+    assert _read_records(daemon_log)
+    assert not _read_records(py_log)
 
 
 def test_emit_spawn_failed_records_the_failed_start(daemon_log: Path) -> None:

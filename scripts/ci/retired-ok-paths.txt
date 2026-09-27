@@ -21,3 +21,4 @@
 #
 # Format: <repo-relative path>|<why the marker cannot live in the file>
 skills/reign/references/postcompact-brief.md|Re-injected into every king on every compaction and byte-budgeted by tests/hooks/test_king_postcompact_reinject.sh, so an in-file marker is paid per session forever. Its one hit forbids the command rather than teaching it.
+cli/src/fno/annotate/cli.py|Every hit is the refusal itself: the retired verb names its replacement in order to forbid it.

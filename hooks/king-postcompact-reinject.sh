@@ -19,6 +19,10 @@
 # reads is missing: no lib, no fno, no registry row, no crown, no brief.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # BASH_SOURCE-relative, never `git rev-parse`: cwd is the session's repo, not
 # the plugin (the fix banked from 502af79f2).
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,7 +73,14 @@ SID="$(postcompact_resolve_sid "$SID" "$TRANSCRIPT")"
 # a short id in one field and the full harness id in the other.
 command -v fno >/dev/null 2>&1 || exit 0
 command -v jq  >/dev/null 2>&1 || exit 0
-AGENTS_JSON="$(fno agents registry-json 2>/dev/null || true)"
+# A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin here
+# has leaked off a spawned worker: strip it for this read and keep the exit
+# code, so a broken read never reads silently as "no row" (the crown
+# was unreadable for a whole reign under the leaked pin).
+AGENTS_JSON="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
+REG_RC=$?
+[[ "$REG_RC" -ne 0 ]] \
+  && echo "king-postcompact-reinject.sh: fno agents registry-json exited $REG_RC; crown treated as unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
 MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SID" \
     '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
 [[ -n "$MY_ROW" ]] || exit 0
@@ -190,6 +201,90 @@ $USER_NOTES"
     fi
 fi
 
+# Summary id resolution: the compaction summary is the crown's snapshot of
+# the board, and after a compact nothing else re-resolves it. Candidates come
+# from the NEWEST isCompactSummary entry, chosen by LINE POSITION (tail -1),
+# never by timestamp: on a real transcript the summary line carried an
+# earlier timestamp than the boundary line before it. Resolution goes through
+# the CLI, never a graph.json read - with the sqlite backend the file is the
+# relational store's stale twin. Same degrade contract as every section
+# above: no transcript, no summary, no candidates, or a read that failed
+# (empty stdout) means no section, never a failed hook.
+ID_MAX_BYTES=2000
+if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] && command -v python3 >/dev/null 2>&1; then
+    # Two literals, not one: a tool result echoing a transcript line (this
+    # hook greps its own needle) must not shadow the real summary entry.
+    SUMMARY_LINE="$(grep '"isCompactSummary":true' "$TRANSCRIPT" 2>/dev/null | grep '"type":"user"' | tail -1 || true)"
+    CANDIDATES="$(printf '%s' "$SUMMARY_LINE" | python3 -c "
+import re, sys
+text = sys.stdin.buffer.read().decode('utf-8', errors='replace')
+# Whole uuids mask first: their inner hex groups straddle the id grammar at
+# word boundaries (...-abcd-1234-...) and are never node ids.
+text = re.sub(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', ' ', text)
+found = sorted(set(re.findall(r'\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b', text)))
+sys.stdout.write('\n'.join(found[:40]))
+" 2>/dev/null || true)"
+    if [[ -n "$CANDIDATES" ]]; then
+        BOARD_ROWS="$(printf '%s\n' "$CANDIDATES" | xargs fno backlog get 2>/dev/null || true)"
+        BOARD_BLOCK="$(CANDIDATES="$CANDIDATES" ROWS_JSON="$BOARD_ROWS" \
+            REGISTRY_JSON="$AGENTS_JSON" CAP="$ID_MAX_BYTES" python3 -c "
+import json, os, sys
+
+cands = [c for c in os.environ.get('CANDIDATES', '').splitlines() if c]
+# A batch answer is always a JSON array (even an all-miss one). Empty or
+# unparseable stdout means the verb itself failed; emit nothing rather than
+# fabricate an unverified all-unresolved list.
+raw = os.environ.get('ROWS_JSON', '')
+try:
+    data = json.loads(raw) if raw.strip() else None
+except ValueError:
+    data = None
+if not isinstance(data, list):
+    sys.exit(0)
+rows = data
+by_id = {r.get('id'): r for r in rows
+         if isinstance(r, dict) and r.get('id') and not r.get('error')}
+live = set()
+try:
+    registry = json.loads(os.environ.get('REGISTRY_JSON', '') or 'null') or {}
+    for agent in registry.get('agents') or []:
+        for key in ('session_id', 'harness_session_id'):
+            value = agent.get(key)
+            if value:
+                live.add(value)
+except ValueError:
+    live = set()
+
+lines = ['unresolved: ' + c for c in cands if c not in by_id]
+for c in cands:
+    row = by_id.get(c)
+    if row is None:
+        continue
+    holder = row.get('locked_by_harness_session') or ''
+    held = '-' if not holder else ('yes' if holder in live else 'no')
+    lines.append('resolved: %s status=%s locked_by=%s holder_live=%s' % (
+        c, row.get('status') or '?', row.get('locked_by_harness') or '-', held))
+out = '\n'.join(lines)
+cap = int(os.environ.get('CAP') or '2000')
+payload = out.encode('utf-8')
+if len(payload) > cap:
+    # Same UTF-8-safe cut as the FAQ: decode, drop the trailing partial
+    # character, never split one mid-sequence.
+    out = payload[:cap].decode('utf-8', errors='ignore') + '\n\n_(truncated at %dB)_' % cap
+sys.stdout.write(out)
+" 2>/dev/null || true)"
+        if [[ -n "$BOARD_BLOCK" ]]; then
+            CONTEXT="$CONTEXT
+
+## The summary's node ids, re-resolved
+
+Act on these rows, not on the summary; any id whose state differs from what the summary said is a correction.
+
+$BOARD_BLOCK"
+        fi
+    fi
+fi
+
 # Reign limb: when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing
@@ -204,7 +299,7 @@ if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
 
 ## You are still reigning (shape: ${REIGN_SHAPE})
 
-The loop, goal and monitor survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The one monitor: the fleet settled-PR wake (600s) - a quiet or parked roster row whose node's PR reads settled gets poked with \`fno agents resume <id>\` (\`fno agents list --json\` + \`fno do pr status <n>\`; skip rows whose \`pr_state\` reads MERGED or CLOSED and rows whose node reads done or superseded, because a merged PR still reads green); mail, board, crown liveness, main CI, capacity and \`fno agents king verdict\` are demand reads, not beats. The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. The check-in beat is one verb: \`fno agents king checkin\` gathers the readings, prints them, diffs the last beat, and journals \`reign_checkin\` itself; then act on the printout. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the operator's pin and refuses you), undefer or supersede, ask the operator. Dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
+The /loop heartbeat and stop arm survive a compact: verify the loop receipt. The daemon mails this crown when a covered PR settles green or its node closes (\`king_settle\`), so no watch is armed or re-armed. Re-read the reign skill's Arm the beat section on a wake; mail, board, crown liveness, main CI, capacity and \`fno agents king verdict\` are demand reads, not beats. Claude's self-injected command is \`/loop <king.checkin_interval> <king.checkin_text>\`. The check-in beat is one verb: \`fno agents king checkin\` gathers the readings, prints them, diffs the last beat, and journals \`reign_checkin\` itself; then act on the printout. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the user's pin and refuses you), undefer or supersede, ask the user. Dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`."
     fi
 fi
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"

@@ -71,13 +71,17 @@ node_claim_exists() {  # $1 = HOME dir, $2 = node id
   ls "$1/.fno/claims/" 2>/dev/null | grep -qi "node.*${2}"
 }
 
+seed_graph() {
+  uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$1"
+}
+
 # ── (a) legacy fails, modern wins => node id + captured stderr ────────
 log "(a): legacy-claim failure + modern-claim win => graph_node_id=node, stderr captured"
 
 make_repo TMP_A
 _ALL_TMPS+=("$TMP_A")
 # A claimable node (session_id null => _CURRENT_CLAIM empty => legacy path taken).
-cat > "${TMP_A}/home/.fno/graph.json" <<'JSON'
+seed_graph "${TMP_A}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-11000a","title":"legacy-fail modern-win test node","session_id":null}]}
 JSON
 
@@ -155,7 +159,7 @@ _ALL_TMPS+=("$TMP_C")
 # Graph exists but does NOT contain the requested ab-id. The guard's single arm
 # greps for the id and misses, so the node never resolves: graph_node_id stays
 # null (no successor for a bogus node) AND no phantom claim is acquired (x-8e98).
-cat > "${TMP_C}/home/.fno/graph.json" <<'JSON'
+seed_graph "${TMP_C}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-other0","title":"some other node","session_id":null}]}
 JSON
 
@@ -184,44 +188,6 @@ if node_claim_exists "${TMP_C}/home" "ab-deadbeef"; then
 fi
 pass "(c): no phantom claim acquired for an ab-id absent from an existing graph"
 
-# ── (d) config-relocated graph (config.paths.graph_json) resolves ab-id ────
-# The guard greps _GRAPH_FILE, which honors GRAPH_JSON_PATH (config.sh's stub)
-# instead of a hard-coded $HOME/.fno/graph.json. A real ab-id living only in a
-# relocated graph must still resolve (codex P2 on PR #536, x-8e98).
-log "(d): config.paths.graph_json relocation resolves a real ab-id"
-
-make_repo TMP_D
-_ALL_TMPS+=("$TMP_D")
-mkdir -p "${TMP_D}/relocated"
-cat > "${TMP_D}/home/.fno/config.toml" <<EOF
-[paths]
-graph_json = "${TMP_D}/relocated/graph.json"
-EOF
-cat > "${TMP_D}/relocated/graph.json" <<'JSON'
-{"entries":[{"id":"ab-1100b0b0","title":"real node in a relocated graph","session_id":null}]}
-JSON
-printf '{"entries":[]}\n' > "${TMP_D}/home/.fno/graph.json"
-
-(cd "$TMP_D" && \
-  HOME="${TMP_D}/home" \
-  PATH="${TMP_D}/bin:$PATH" \
-  FNO_TEST_SPACE="${TMP_D}/space" \
-  FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  FNO_TARGET_INIT_GATED=1 \
-  FNO_GLOBAL_SETTINGS_PATH="${TMP_D}/home/.fno/config.toml" \
-  TARGET_START=1 \
-  TARGET_INPUT="ab-1100b0b0" \
-  TARGET_LOCATION_OK="main-acknowledged" \
-  bash "$INIT" >/dev/null 2>&1) \
-  || fail "(d): init exited non-zero"
-
-STATE_D="${TMP_D}/space/target-state.md"
-[[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
-GNID_D="$(graph_node_id_of "$STATE_D")"
-[[ "$GNID_D" == "ab-1100b0b0" ]] \
-  || fail "(d): expected graph_node_id 'ab-1100b0b0' from the relocated graph, got '${GNID_D}'"
-pass "(d): ab-id in a config-relocated graph resolves (not hard-coded to \$HOME/.fno)"
-
 # ── (e) AC4-HP: spawn-handover pre-claim, env UNSET, name proven => fallback ──
 # The spawner's launch-window claim is the only claim on the node, but
 # FNO_NODE_CLAIM_HOLDER does not always reach the worker. init used to pass no
@@ -233,7 +199,7 @@ log "(e): spawn-handover claim + env unset + own name => init acquires via the d
 
 make_repo TMP_E
 _ALL_TMPS+=("$TMP_E")
-cat > "${TMP_E}/home/.fno/graph.json" <<'JSON'
+seed_graph "${TMP_E}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-ca7471","title":"handover fallback test node","session_id":null}]}
 JSON
 
@@ -263,7 +229,7 @@ _HOLDER_E="$(HOME="${TMP_E}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   || fail "(e): claim holder is '${_HOLDER_E}', expected the init acquire to land via the handover fallback"
 pass "(e): init acquire took over the launch-window claim (holder=${_HOLDER_E})"
 
-_LOCKED_BY_E="$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["entries"][0]; print(e.get("locked_by") or "")' "${TMP_E}/home/.fno/graph.json" 2>/dev/null || true)"
+_LOCKED_BY_E="$(HOME="${TMP_E}/home" uv run --project "${REPO_ROOT}/cli" python -c 'import sys; from pathlib import Path; from fno.graph.store import read_graph_strict; print(read_graph_strict(Path(sys.argv[1]))[0].get("locked_by") or "")' "${TMP_E}/home/.fno/graph.json" 2>/dev/null || true)"
 [[ -n "$_LOCKED_BY_E" ]] \
   || fail "(e): locked_by is empty; the stamp never ran (AC4-HP)"
 pass "(e): locked_by stamped (${_LOCKED_BY_E})"
@@ -275,7 +241,7 @@ log "(g): spawn-handover claim naming another worker + own name proven => no tak
 
 make_repo TMP_G
 _ALL_TMPS+=("$TMP_G")
-cat > "${TMP_G}/home/.fno/graph.json" <<'JSON'
+seed_graph "${TMP_G}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-feed42","title":"bystander control node","session_id":null}]}
 JSON
 
@@ -310,7 +276,7 @@ log "(f): non-handover claim + env unset => ordinary acquire still refuses (no t
 
 make_repo TMP_F
 _ALL_TMPS+=("$TMP_F")
-cat > "${TMP_F}/home/.fno/graph.json" <<'JSON'
+seed_graph "${TMP_F}/home/.fno/graph.json" <<'JSON'
 {"entries":[{"id":"tst-c0ffee","title":"no-takeover control node","session_id":null}]}
 JSON
 
