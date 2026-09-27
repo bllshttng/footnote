@@ -53,7 +53,7 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-@pytest.mark.skipif(RUST_BIN is None, reason="fno-agents binary not built (cargo build -p fno-agents)")
+@pytest.mark.dev_build
 def test_native_path_reaps_a_backgrounded_group_mate(tmp_path, monkeypatch):
     monkeypatch.setattr(test_runner, "_native_owner_binary", lambda: str(RUST_BIN))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
@@ -70,7 +70,7 @@ def test_native_path_reaps_a_backgrounded_group_mate(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.skipif(RUST_BIN is None, reason="fno-agents binary not built (cargo build -p fno-agents)")
+@pytest.mark.dev_build
 def test_native_path_timeout_kills_a_hung_leader(tmp_path, monkeypatch):
     monkeypatch.setattr(test_runner, "_native_owner_binary", lambda: str(RUST_BIN))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))

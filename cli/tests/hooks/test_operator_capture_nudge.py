@@ -19,10 +19,7 @@ import pytest
 from fno.rust_binary import find_dev_binary
 
 #: The three real-pipeline tests reach the binary; the stub-exit tests do not.
-requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
-)
+requires_rust = pytest.mark.dev_build
 
 REPO_ROOT = Path(__file__).parents[3]
 HOOK = REPO_ROOT / "hooks" / "operator-capture-nudge.sh"
