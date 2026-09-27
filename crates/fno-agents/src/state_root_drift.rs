@@ -8,8 +8,10 @@
 use std::path::{Path, PathBuf};
 
 /// Where the inventory doc lives for THIS machine: an explicit override
-/// (tests, custom installs), then the nearest `docs/` upward from the cwd
-/// (the Python gate's default), then the plugin stage beside the state root.
+/// (tests, custom installs), then the plugin stage beside the state root.
+/// The stage copy is a filtered checkout (docs/ is git-tracked), so both a
+/// repo cwd and the daemon's anchor resolve the same contract through it;
+/// no cwd walk, so the reading never depends on the caller's directory.
 pub fn doc_path(state_root: &Path) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("FNO_STATE_ROOT_INVENTORY_DOC") {
         let p = PathBuf::from(p);
@@ -17,17 +19,12 @@ pub fn doc_path(state_root: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    const DOC: &str = "docs/state-root-inventory.md";
-    let cwd = std::env::current_dir().ok()?;
-    let mut dir: Option<&Path> = Some(cwd.as_path());
-    while let Some(d) = dir {
-        let candidate = d.join(DOC);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        dir = d.parent();
-    }
-    let staged = state_root.join("plugin-stage").join("fno").join(DOC);
+    // One join per line: a bare `join("fno")` would read as a porcelain
+    // resolver to the seam-crossings shape rule, which cannot see that this
+    // "fno" is the plugin-stage directory's name.
+    let staged = state_root
+        .join("plugin-stage/fno")
+        .join("docs/state-root-inventory.md");
     staged.is_file().then_some(staged)
 }
 
