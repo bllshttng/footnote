@@ -408,17 +408,7 @@ One line plus a node pointer (law d-59af3235)."
         // operator-only retraction is not the asker's to settle, whatever
         // the file says: the same authority rule decides here.
         if parsed.reversible.trim().eq_ignore_ascii_case("yes") {
-            let why = parsed.why_user.to_ascii_lowercase();
-            let user_only = [
-                "irreversible",
-                "money",
-                "credential",
-                "outside",
-                "product",
-                "taste",
-            ]
-            .iter()
-            .any(|k| why.contains(k));
+            let user_only = crate::escalation::why_user_is_user_only(&parsed.why_user);
             if !user_only && !retraction_ask {
                 let decide = match node {
                     Some(n) => format!("fno backlog decide {n} \"<ruling>\""),
@@ -517,6 +507,12 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     }
     if let Some(subject) = subject {
         data.insert("subject".into(), json!(subject));
+    }
+    let why_user = parsed.why_user.trim();
+    if !why_user.is_empty() {
+        // The sweep reads this to spare a user-only question from its node's
+        // closing.
+        data.insert("why_user".into(), json!(why_user));
     }
 
     // The structured context: every non-empty field the projection reads.
@@ -1051,6 +1047,61 @@ stops
             .is_some_and(|id| id.starts_with("q-")));
         // Nothing new recorded.
         assert_eq!(journal_text(&root).lines().count(), 1);
+    }
+
+    #[test]
+    fn frontmatter_only_why_user_passes_the_gate_and_lands_in_the_row() {
+        // The frontmatter key alone passes the decide-it-yourself gate; the
+        // row carries why_user so the sweep can spare it.
+        let home = tmp_home("fm-why");
+        let root = tmp_root("fm-why");
+        let question = QUESTION_FILE
+            .replace("## Reversible\ncostly", "## Reversible\nyes")
+            .replace(
+                "---\nrecommend: 1\n---",
+                "---\nrecommend: 1\nwhy_user: a product or taste call\n---",
+            );
+        let mut r = req(&question, &root);
+        r.node = Some("x-aaaa".to_string());
+        let answer = run_intake(&r, &home);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
+        let row: Value = journal_text(&root)
+            .lines()
+            .last()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .unwrap();
+        assert_eq!(
+            row.pointer("/data/why_user").and_then(Value::as_str),
+            Some("a product or taste call")
+        );
+    }
+
+    #[test]
+    fn a_cleared_question_lets_the_re_ask_through() {
+        // The clear commits store-only, so the dedup must read committed
+        // rows; the re-ask of the same subject and node records.
+        let home = tmp_home("re-ask");
+        let root = tmp_root("re-ask");
+        let mut first = req("first", &root);
+        first.subject = Some("subject-r".to_string());
+        first.node = Some("x-aaaa".to_string());
+        first.ask = Some("finish the lane".to_string());
+        let a1 = run_intake(&first, &home);
+        assert_eq!(a1.exit_code, 0, "lines: {:?}", a1.lines);
+        let close = json!({
+            "ts": "2026-09-26T00:00:00Z",
+            "type": "operator_question_closed",
+            "source": "agent",
+            "data": {"question_id": a1.qid.clone().unwrap()}
+        });
+        crate::provider_cap::append_questions_row(&questions_path(&home), &close).unwrap();
+        let mut second = req("second", &root);
+        second.subject = Some("subject-r".to_string());
+        second.node = Some("x-aaaa".to_string());
+        second.ask = Some("finish the lane".to_string());
+        let a2 = run_intake(&second, &home);
+        assert_eq!(a2.refusal, None, "lines: {:?}", a2.lines);
+        assert_eq!(a2.exit_code, 0, "lines: {:?}", a2.lines);
     }
 
     #[test]
