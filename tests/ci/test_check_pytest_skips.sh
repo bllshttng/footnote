@@ -56,7 +56,7 @@ check() {
 }
 
 # --- the happy paths ----------------------------------------------------------
-fresh; commit
+fresh
 check 'a tree with no skip sites matches a header-only baseline' 0 'ok (0 site(s) match the baseline)'
 
 fresh

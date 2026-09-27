@@ -70,7 +70,10 @@ ALWAYS_ATTRS = {"skipTest", "skipIf", "skipUnless", "expectedFailure"}
 for rel in files:
     try:
         tree = ast.parse((root / rel).read_text(encoding="utf-8"))
-    except (SyntaxError, ValueError, UnicodeDecodeError) as exc:
+    except (SyntaxError, ValueError, UnicodeDecodeError, OSError) as exc:
+        # OSError: a tracked file missing from a dirty working tree (mid-rebase)
+        # is named and skipped, never a traceback; its baseline lines then read
+        # as stale and fail the run, so the skip direction stays safe.
         print(f"check-pytest-skips: skipping unparseable file {rel}: {exc}", file=sys.stderr)
         continue
 
