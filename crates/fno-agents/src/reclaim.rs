@@ -87,13 +87,22 @@ fn temp_root() -> PathBuf {
 /// parent in the default layout. The env override lets tests and custom state
 /// roots point the gate and the receipt at the same place.
 fn receipt_path(home: &AgentsHome) -> PathBuf {
+    reclaim_state_root(home)
+        .join("reclaim")
+        .join("last-run.json")
+}
+
+/// The state root the reclaim surfaces read: the agents home's parent in the
+/// default layout, overridable by env so tests and custom roots can point the
+/// gate, the receipt, and the drift lane at one place.
+fn reclaim_state_root(home: &AgentsHome) -> PathBuf {
     if let Some(root) = std::env::var_os("FNO_RECLAIM_STATE_ROOT") {
-        return PathBuf::from(root).join("reclaim").join("last-run.json");
+        return PathBuf::from(root);
     }
-    match home.root().parent() {
-        Some(state_root) => state_root.join("reclaim").join("last-run.json"),
-        None => home.root().join("reclaim").join("last-run.json"),
-    }
+    home.root()
+        .parent()
+        .unwrap_or_else(|| home.root())
+        .to_path_buf()
 }
 
 fn tagged_crate_targets(root: &Path) -> Vec<PathBuf> {
@@ -480,6 +489,31 @@ fn claude_config_tmp_lane(apply: bool) -> Lane {
     lane
 }
 
+/// The state-root drift lane: a READING, never a sweeper. It reports the
+/// top-level entries the inventory doc does not name and removes nothing;
+/// anything with a deleter has it named in the doc's own rows. Gate and
+/// check-in share the reading through [`crate::state_root_drift::drift_report`].
+fn state_root_drift_lane(home: &AgentsHome) -> Lane {
+    let mut lane = Lane::new("state_root_drift", Vec::new());
+    match crate::state_root_drift::drift_report(&reclaim_state_root(home)) {
+        Ok(rep) => {
+            lane.note = if rep.entries.is_empty() {
+                "clean: every top-level entry is documented".to_string()
+            } else {
+                let preview: Vec<String> = rep.entries.iter().take(5).cloned().collect();
+                format!(
+                    "{} undocumented top-level entr(y|ies): {}{}",
+                    rep.entries.len(),
+                    preview.join(", "),
+                    if rep.entries.len() > 5 { ", ..." } else { "" }
+                )
+            };
+        }
+        Err(e) => lane.note = format!("reading failed: {e}"),
+    }
+    lane
+}
+
 fn write_receipt(home: &AgentsHome, lanes: &[Lane]) -> std::io::Result<()> {
     let path = receipt_path(home);
     if let Some(parent) = path.parent() {
@@ -634,6 +668,7 @@ fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_
     drop(codex_lock);
     lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     lanes.push(claude_config_tmp_lane(apply));
+    lanes.push(state_root_drift_lane(home));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {
         None => uv.note = "uv not found".to_string(),

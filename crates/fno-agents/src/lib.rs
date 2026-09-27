@@ -359,6 +359,7 @@ pub mod spawn_phase;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
+pub mod state_root_drift;
 pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
