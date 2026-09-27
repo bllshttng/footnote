@@ -103,6 +103,30 @@ def _opencode_serve_spawn(
     return str(short_id)
 
 
+def _confirm_seal_honored(binary: Path, env: Mapping[str, str]) -> None:
+    """Handshake before a sealed spawn relies on the seal: the binary's
+    ``state-root`` door must echo the pinned FNO_STATE_DIR back; a stale
+    binary would resolve under the moved HOME, so refuse.
+    """
+    from fno.agents.dispatch import DispatchAskError
+
+    try:
+        proc = subprocess.run(
+            [str(binary), "state-root"],
+            capture_output=True, text=True, timeout=30, env=dict(env),
+        )
+    except subprocess.TimeoutExpired:
+        proc = None
+    lines = (proc.stdout if proc else "").strip().splitlines()
+    if proc is None or proc.returncode != 0 or (lines[-1:] or [""])[0] != env["FNO_STATE_DIR"]:
+        raise DispatchAskError(
+            f"sealed spawn refused: {binary} does not honor FNO_STATE_DIR "
+            f"(state-root answered {(lines[-1:] or [''])[0]!r}); the seal cannot "
+            "hold - run `fno doctor update` to refresh the binary",
+            exit_code=13,
+        )
+
+
 def _codex_thread_spawn(
     name: str,
     message: str,
@@ -185,6 +209,8 @@ def _codex_thread_spawn(
     # app-server child, so the override stays; seal_state_root's docstring says
     # what that leaves open.
     env = seal_state_root(env)
+    if env.get("HOME") != os.environ.get("HOME") and env.get("FNO_STATE_DIR"):
+        _confirm_seal_honored(binary, env)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
     except subprocess.TimeoutExpired as exc:

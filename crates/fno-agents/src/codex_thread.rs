@@ -587,6 +587,24 @@ pub(crate) fn sandbox_policy_with_roots(resolved: &Value, state_dirs: &[String])
     policy
 }
 
+/// Join the typed `--add-dir` ahead of the seam-published state-root grant on
+/// a daemon-bound codex thread spawn. The operator's own grant leads, the same
+/// precedence the argv lanes give it. Kept here with the thread's other
+/// state-root joins so the ordering contract stays unit-testable.
+pub fn attach_codex_thread_state_dirs(params: &mut Value) {
+    let mut roots = crate::claude_ask::state_dirs_from_env();
+    if let Some(add_dir) = params
+        .get("add_dir")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        roots.insert(0, add_dir.to_string());
+    }
+    if !roots.is_empty() {
+        params["state_dirs"] = Value::from(roots);
+    }
+}
+
 /// The `writableRoots` a policy object already carries, as owned strings.
 fn posture_roots(policy: &Value) -> Vec<String> {
     policy

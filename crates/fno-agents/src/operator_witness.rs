@@ -218,6 +218,92 @@ pub(crate) fn submitted_since(
     false
 }
 
+/// How far back an unfinished draft counts (C11): the newest
+/// `operator_typing` row later than the newest submit holds mail this long,
+/// even past the recent window, because a draft left mid-edit is exactly
+/// what a delivery must not land over.
+pub(crate) const DRAFT_MAX_MS: i64 = 600_000;
+
+/// A typing row younger than this means the operator is typing right now.
+pub(crate) const TYPING_RECENT_MS: i64 = 15_000;
+
+/// Whether the operator is typing at `session_id` right now (`recent`) and
+/// whether an unfinished draft sits in the composer (`draft`: the newest
+/// typing row is later than the newest submit row). Both read the C11
+/// `operator_typing` feed plus the submit witness since
+/// `now_ms - DRAFT_MAX_MS`, under the same case rule as
+/// [`submitted_since`]. A read error answers false/false, so a broken
+/// journal never blocks mail.
+pub(crate) struct TypingState {
+    pub(crate) recent: bool,
+    pub(crate) draft: bool,
+    /// The newest `typed_ms` in the window, if any: the "typed since the
+    /// inject" guard reads this directly.
+    pub(crate) newest_typing_ms: Option<i64>,
+}
+
+pub(crate) fn typing_state(journal: &Path, session_id: &str, now_ms: i64) -> TypingState {
+    let quiet = TypingState {
+        recent: false,
+        draft: false,
+        newest_typing_ms: None,
+    };
+    let query = crate::event_store::EventQuery {
+        since_ms: Some(now_ms - DRAFT_MAX_MS - 1_000),
+        ..crate::event_store::EventQuery::of_types(&["operator_typing", "operator_submit"])
+    };
+    let Ok(text) = crate::event_store::journal_text_checked(journal, &query) else {
+        return quiet;
+    };
+    let wanted = crate::mail_hold::identity_key(session_id);
+    let mut newest_typing: Option<i64> = None;
+    let mut newest_submit: Option<i64> = None;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if kind != "operator_typing" && kind != "operator_submit" {
+            continue;
+        }
+        if v.pointer("/data/resolution").and_then(|r| r.as_str()) != Some("ok") {
+            continue;
+        }
+        let Some(session) = v.pointer("/data/harness_session").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        if crate::mail_hold::identity_key(session) != wanted {
+            continue;
+        }
+        let field = if kind == "operator_typing" {
+            "typed_ms"
+        } else {
+            "submit_ms"
+        };
+        let Some(ms) = v
+            .pointer(&format!("/data/{field}"))
+            .and_then(|m| m.as_i64())
+        else {
+            continue;
+        };
+        // The store's filter keys on the row envelope; the join key here is
+        // typed_ms/submit_ms. Bound the draft window on the field itself.
+        if ms < now_ms - DRAFT_MAX_MS {
+            continue;
+        }
+        if kind == "operator_typing" {
+            newest_typing = Some(newest_typing.map_or(ms, |t: i64| t.max(ms)));
+        } else {
+            newest_submit = Some(newest_submit.map_or(ms, |t: i64| t.max(ms)));
+        }
+    }
+    TypingState {
+        recent: newest_typing.is_some_and(|t| now_ms - t <= TYPING_RECENT_MS),
+        draft: newest_typing.is_some_and(|t| newest_submit.is_none_or(|s| t > s)),
+        newest_typing_ms: newest_typing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +427,85 @@ mod tests {
             "another session's in-window row never binds"
         );
         assert!(!submitted_since(&journal, "missing", since, now));
+    }
+
+    fn typing_row(session: Option<&str>, typed_ms: i64) -> serde_json::Value {
+        serde_json::json!({
+            "ts": "2026-09-27T18:00:00Z",
+            "type": "operator_typing",
+            "source": "daemon",
+            "data": {
+                "mux_session": "main",
+                "pane": 7,
+                "via": "pane",
+                "typed_ms": typed_ms,
+                "resolution": "ok",
+                "harness_session": session,
+            }
+        })
+    }
+
+    #[test]
+    fn typing_state_reads_recent_and_draft_from_the_feed() {
+        let dir = test_dir("typing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = dir.join("events.jsonl");
+        let now = 1_000_000i64;
+        // Typing 3s ago, submit 10s ago: typing now AND an open draft.
+        write_journal(
+            &journal,
+            &[
+                submit_row(Some("s1"), now - 10_000),
+                typing_row(Some("s1"), now - 3_000),
+            ],
+        );
+        let ts = typing_state(&journal, "s1", now);
+        assert!(ts.recent && ts.draft);
+        // A submit AFTER the typing row closes the draft; the 8s-old typing
+        // row is still recent, so only the draft flag clears.
+        write_journal(
+            &journal,
+            &[
+                submit_row(Some("s2"), now - 10_000),
+                typing_row(Some("s2"), now - 8_000),
+                submit_row(Some("s2"), now - 1_000),
+            ],
+        );
+        let ts = typing_state(&journal, "s2", now);
+        assert!(ts.recent && !ts.draft, "a later submit ends the draft");
+        // Old typing with a later submit: neither recent nor draft, so the
+        // quiet gate proceeds.
+        write_journal(
+            &journal,
+            &[
+                typing_row(Some("s6"), now - 16_000),
+                submit_row(Some("s6"), now - 1_000),
+            ],
+        );
+        let ts = typing_state(&journal, "s6", now);
+        assert!(!ts.recent && !ts.draft);
+        // A draft older than DRAFT_MAX_MS ages out entirely.
+        write_journal(
+            &journal,
+            &[typing_row(Some("s3"), now - DRAFT_MAX_MS - 5_000)],
+        );
+        let ts = typing_state(&journal, "s3", now);
+        assert!(!ts.recent && !ts.draft, "a stale draft does not block");
+        // Another session's typing never binds.
+        write_journal(&journal, &[typing_row(Some("s4"), now - 1_000)]);
+        let ts = typing_state(&journal, "s5", now);
+        assert!(!ts.recent && !ts.draft);
+    }
+
+    #[test]
+    fn typing_state_survives_a_broken_journal() {
+        let dir = test_dir("typing-broken");
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = dir.join("missing");
+        let ts = typing_state(&journal, "s1", 1_000_000);
+        assert!(
+            !ts.recent && !ts.draft,
+            "a broken journal never blocks mail"
+        );
     }
 }
