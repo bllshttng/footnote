@@ -304,3 +304,76 @@ def test_every_granted_row_is_counted_once(tmp_path, monkeypatch):
     locked = [e for e in events if e["type"] == "pr_watch_skipped"
               and e["data"].get("reason") == "locked"]
     assert locked and locked[0]["data"]["pr"] == 13, events
+
+
+def test_a_gh_budget_backoff_holds_every_grant_without_attempting_it(
+    tmp_path, monkeypatch
+):
+    """A fleet gh-budget backoff must not burn the merge slice.
+
+    One PR waiting out a 50s+ local hold per grant is how merge:execute
+    spent its whole 240s slice with acted=0 and starved every arm after
+    merge. The drain must hold each granted row fast, touch no store
+    state, and never reach the merge core.
+    """
+    events = []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    keys = ["owner/repo#31", "owner/repo#32"]
+    for key in keys:
+        _open_row(store, key)
+    monkeypatch.setattr(d, "_gh_budget_backoff_left", lambda: 42.0)
+
+    def _boom(argv, cwd=None, **kw):
+        raise AssertionError("merge core must not run during a budget backoff")
+
+    monkeypatch.setattr(_merge, "run_merge", _boom)
+    queue = [(_cand(tmp_path, 31, "x-hold1"), keys[0], _grant_fields()),
+             (_cand(tmp_path, 32, "x-hold2"), keys[1], _grant_fields())]
+    counts = _drain(queue, events, store_path=store_path)
+
+    assert counts == {"executed": 0, "held": 2, "failed": 0,
+                      "skipped": 0, "budget": 0}, counts
+    holds = [e for e in events if e["type"] == "merge_grant_execution"]
+    assert [e["data"]["phase"] for e in holds] == ["held", "held"], events
+    for event in holds:
+        assert "backoff 42s" in event["data"]["reason"], event
+    for key in keys:
+        entry = store.get(key)
+        assert entry["retries"] == 0, "a budget hold never spends retries"
+        assert not entry.get("parked"), entry
+
+
+def test_a_short_gh_budget_backoff_still_attempts_the_merge(
+    tmp_path, monkeypatch
+):
+    """A hold under the skip threshold waits out inside the call as before."""
+    events = []
+    store_path = tmp_path / "state.json"
+    store = _store(tmp_path)
+    key = "owner/repo#33"
+    _open_row(store, key)
+    monkeypatch.setattr(d, "_gh_budget_backoff_left", lambda: 5.0)
+    calls = []
+    monkeypatch.setattr(
+        _merge, "run_merge", lambda argv, cwd=None, **kw: calls.append(argv) or 0)
+    counts = _drain([(_cand(tmp_path, 33, "x-hold3"), key, _grant_fields())],
+                    events, store_path=store_path)
+
+    assert counts["executed"] == 1, counts
+    assert calls, "a short backoff belongs inside the merge call"
+
+
+def test_gh_budget_backoff_left_reads_the_shared_ledger(tmp_path):
+    """The reader mirrors gh_budget.rs: future backoff wins, anything
+    unreadable fail-opens to free."""
+    from fno.pr_watch._dispatch import _gh_budget_backoff_left
+
+    ledger = tmp_path / "github-request-budget.json"
+    ledger.write_text('{"backoff_until_ms": 90000, "stamps": []}')
+    assert _gh_budget_backoff_left(path=ledger, now_s=30.0) == 60.0
+    assert _gh_budget_backoff_left(path=ledger, now_s=120.0) == 0.0
+    missing = tmp_path / "absent.json"
+    assert _gh_budget_backoff_left(path=missing, now_s=30.0) == 0.0
+    ledger.write_text("not json at all")
+    assert _gh_budget_backoff_left(path=ledger, now_s=30.0) == 0.0

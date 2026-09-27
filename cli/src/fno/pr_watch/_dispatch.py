@@ -525,6 +525,44 @@ def _ritual_timeout() -> float:
     return min(300.0, left - 10)
 
 
+#: A fleet gh-budget hold longer than this holds a granted merge fast
+#: instead of attempting it. Under a hold the gh shim refuses (or the
+#: subprocess is killed) after tens of seconds per call, and five queued
+#: grants then burn the whole merge slice at merge:execute with acted=0,
+#: starving every arm after merge.
+_GH_BUDGET_HOLD_SKIP_S = 10.0
+
+#: The ledger crates/fno-agents/src/gh_budget.rs owns; read-only from here.
+_GH_BUDGET_LEDGER_NAME = "github-request-budget.json"
+
+
+def _gh_budget_backoff_left(
+    path: Optional[Path] = None, *, now_s: Optional[float] = None
+) -> float:
+    """Seconds until the fleet gh budget's backoff lifts; 0.0 when free.
+
+    Read-only mirror of gh_budget.rs's ledger at
+    ``locks_dir()/github-request-budget.json``. Fails open on anything
+    unreadable, matching the Rust reader: the budget protects the fleet,
+    it is not a stop.
+    """
+    try:
+        if path is None:
+            from fno.paths import locks_dir
+
+            path = locks_dir() / _GH_BUDGET_LEDGER_NAME
+        import time as _wall_time
+
+        now_ms = int(
+            (now_s if now_s is not None else _wall_time.time()) * 1000
+        )
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        left_ms = int(raw.get("backoff_until_ms") or 0) - now_ms
+        return max(0.0, left_ms / 1000.0)
+    except (OSError, ValueError, TypeError):
+        return 0.0
+
+
 #: Partial-work notes a phase body writes as it runs (the scan loop writes
 #: "scanned=N of M" per rich read), so a deadline cut hands back what the
 #: phase did instead of evaporating with its locals. The tick's _run_phase
@@ -1308,6 +1346,16 @@ def run_execute_queue(
             if why:
                 emit("pr_watch_skipped", {"pr": pr, "reason": why})
                 counts["budget" if why == "execute-budget" else "skipped"] += 1
+                continue
+            backoff_left = _gh_budget_backoff_left()
+            if backoff_left > _GH_BUDGET_HOLD_SKIP_S:
+                # Hold fast. No attempt, no retries bump, no store
+                # write; the durable grant comes back next tick, when the
+                # budget window has likely rolled over.
+                _grant("held", pr, cand, grant_fields,
+                       reason=(f"gh budget held locally: backoff "
+                               f"{backoff_left:.0f}s left; merge not attempted"))
+                counts["held"] += 1
                 continue
             try:
                 prior_retries = int(entry.get("retries") or 0)
