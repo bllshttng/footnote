@@ -1379,6 +1379,8 @@ pub fn parse_idea(tail: &[String]) -> ParsedIdea {
 }
 
 /// Read --details from a file ("-" = stdin) when --details-file names one.
+/// The refusal texts are the shared seam's (fno/text_or_file.py), which the
+/// intake and capture verbs still serve: the twin must stay byte-equal.
 fn read_text_arg(
     details: &Option<String>,
     details_file: &Option<String>,
@@ -1388,7 +1390,7 @@ fn read_text_arg(
     }
     if details.is_some() {
         return Err(refused(
-            "Error: pass --details or --details-file, not both",
+            "error: provide the details once - inline or as a file, not both",
             1,
         ));
     }
@@ -1398,11 +1400,11 @@ fn read_text_arg(
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
-            .map_err(|e| refused(format!("Error: could not read stdin: {e}"), 1))?;
+            .map_err(|e| refused(format!("error: cannot read -: {e}"), 1))?;
         buf
     } else {
         std::fs::read_to_string(&path)
-            .map_err(|e| refused(format!("Error: could not read {path}: {e}"), 1))?
+            .map_err(|e| refused(format!("error: cannot read {path}: {e}"), 1))?
     };
     Ok(Some(body))
 }
@@ -1513,13 +1515,37 @@ fn file_wave(
         Ok(())
     };
     let char_count = text.chars().count();
-    run().map_err(|e| {
-        if e.starts_with("wave target") {
-            refused(format!("Error: {e}"), 2)
-        } else {
-            refused(format!("Error: {e}"), 2)
-        }
-    })?;
+    run().map_err(|e| refused(format!("Error: {e}"), 2))?;
+    // The receipt prints only after a read-back confirms the note landed:
+    // an op that reports success without persisting is a refusal, never a
+    // folded-as-wave receipt (the Python leg's _confirm_note_landed).
+    let readback = crate::graph_store::read_rows(&graph).ok().and_then(|rows| {
+        rows.iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(target_id))
+            .cloned()
+    });
+    let landed = readback
+        .as_ref()
+        .and_then(|row| row.get("progress_notes"))
+        .and_then(Value::as_array)
+        .map(|notes| notes.iter().any(|n| n.get("ts") == note.get("ts")))
+        .unwrap_or(false);
+    if readback.is_none() {
+        return Err(refused(
+            "Error: wave append reported success but the read-back could not confirm it \
+             (store read failed); verify the target before retrying",
+            2,
+        ));
+    }
+    if !landed {
+        return Err(refused(
+            format!(
+                "Error: wave append reported success but the note is not in the published \
+                 target ('{target_id}' read back without it); the write did not land"
+            ),
+            2,
+        ));
+    }
     if json_out {
         println!(
             "{}",

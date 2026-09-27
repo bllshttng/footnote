@@ -18,6 +18,7 @@ import yaml
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -67,44 +68,6 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # resolver to the same hermetic file (module-attr pins do not reach it).
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
-
-
-class _AddResult:
-    def __init__(self, code: int, out: str, err: str):
-        self.exit_code = code
-        self.output = out
-        self.stdout = out
-        self.stderr = err
-
-
-def _native_add(tmp_graph, *args: str) -> _AddResult:
-    """The create leaf answers natively; drive the dev binary over the same
-    store the fixture seeded."""
-    import os as _os
-    import subprocess as _sp
-
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    argv = ["backlog", "add", *args]
-    if "--difficulty" not in argv:
-        argv.extend(["--difficulty", "medium"])
-    env = dict(_os.environ)
-    env.pop("FNO_CONFIG", None)
-    env["HOME"] = str(tmp_graph.parent)
-    env["FNO_STATE_DIR"] = str(tmp_graph.parent)
-    env["FNO_TRACKER_BACKEND"] = "graph"
-    proc = _sp.run(
-        [str(binary), *argv],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-        cwd=str(tmp_graph.parent),
-    )
-    return _AddResult(proc.returncode, proc.stdout, proc.stderr)
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
@@ -167,7 +130,7 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
         _epic("x-0a01", "mission"),
         _epic("x-0e02", "epic", parent="x-0a01"),
     ])
-    res = _native_add(tmp_graph, "Third level epic", "--type", "epic", "--parent", "x-0e02")
+    res = run_native_create(tmp_graph, "add", "Third level epic", "--type", "epic", "--parent", "x-0e02")
     assert res.exit_code != 0
     assert "cap" in (res.output + res.stderr).lower()
     # No new node was appended.
@@ -179,7 +142,7 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
 def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
     """A non-epic child under an epic is unaffected by the create-path cap."""
     _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic", parent="x-0a01")])
-    res = _native_add(tmp_graph, "A feature", "--type", "feature", "--parent", "x-0e02")
+    res = run_native_create(tmp_graph, "add", "A feature", "--type", "feature", "--parent", "x-0e02")
     assert res.exit_code == 0, res.output
 
 
@@ -206,7 +169,7 @@ def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
     """codex P2: creating a child via `add --parent <epic>` repaints the epic."""
     epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
     _seed(tmp_graph, [epic])
-    res = _native_add(tmp_graph, "A child", "--parent", "x-0e0e")
+    res = run_native_create(tmp_graph, "add", "A child", "--parent", "x-0e0e")
     assert res.exit_code == 0, res.output
     _, fe, _ = read_plan_file(e_doc)
     assert fe["children_total"] == "1"

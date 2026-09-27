@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -52,73 +53,6 @@ def _read_entries(g: Path) -> list[dict]:
     from fno.graph.store import read_graph_strict
 
     return read_graph_strict(g)
-
-
-class _AddResult:
-    """The CliRunner-shaped face of a native add run."""
-
-    def __init__(self, code: int, out: str, err: str):
-        self.exit_code = code
-        self.output = out
-        self.stdout = out
-        self.stderr = err
-
-
-def _native_add(tmp_graph, *args: str) -> _AddResult:
-    """The create leaf answers natively; drive the dev binary over the same
-    store the fixture seeded (in-process monkeypatches cannot reach a
-    subprocess)."""
-    import os as _os
-    import subprocess as _sp
-
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    argv = ["backlog", "add", *args]
-    if "--difficulty" not in argv:
-        argv.append("--difficulty")
-        argv.append("medium")
-    env = dict(_os.environ)
-    env.pop("FNO_CONFIG", None)
-    env["HOME"] = str(tmp_graph.parent)
-    env["FNO_STATE_DIR"] = str(tmp_graph.parent)
-    env["FNO_TRACKER_BACKEND"] = "graph"
-    proc = _sp.run(
-        [str(binary), *argv],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-    )
-    return _AddResult(proc.returncode, proc.stdout, proc.stderr)
-
-
-def _native_idea(tmp_graph, *args: str, input: str | None = None) -> _AddResult:
-    """The idea leaf answers natively; same door as _native_add."""
-    import os as _os
-    import subprocess as _sp
-
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
-    env = dict(_os.environ)
-    env.pop("FNO_CONFIG", None)
-    env["HOME"] = str(tmp_graph.parent)
-    env["FNO_STATE_DIR"] = str(tmp_graph.parent)
-    env["FNO_TRACKER_BACKEND"] = "graph"
-    proc = _sp.run(
-        [str(binary), "backlog", "idea", *args],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-        input=input,
-    )
-    return _AddResult(proc.returncode, proc.stdout, proc.stderr)
 
 
 def _native_update(tmp_graph, *args: str):
@@ -156,7 +90,7 @@ def _native_update(tmp_graph, *args: str):
 
 def test_idea_status_derived_from_no_plan_path(tmp_graph):
     """A node added without a plan_path derives to status: idea."""
-    r = _native_add(tmp_graph, "Just an idea")
+    r = run_native_create(tmp_graph, "add", "Just an idea")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
 
@@ -170,7 +104,7 @@ def test_idea_status_derived_from_no_plan_path(tmp_graph):
 
 def test_idea_status_overridden_by_in_progress(tmp_graph):
     """An idea-shaped node that gets claimed (session_id set) derives to in_progress."""
-    add = _native_add(tmp_graph, "Claimed idea")
+    add = run_native_create(tmp_graph, "add", "Claimed idea")
     node_id = json.loads(add.stdout)["id"]
 
     r = _native_update(tmp_graph, node_id, "--locked-by", "session-X")
@@ -193,9 +127,9 @@ def test_idea_status_overridden_by_blocked_at_read_time(tmp_graph):
     """
     from fno.graph.store import read_graph_strict
 
-    a = _native_add(tmp_graph, "Blocker A")
+    a = run_native_create(tmp_graph, "add", "Blocker A")
     blocker_id = json.loads(a.stdout)["id"]
-    b = _native_add(tmp_graph, "Idea blocked by A", "--blocked-by", blocker_id)
+    b = run_native_create(tmp_graph, "add", "Idea blocked by A", "--blocked-by", blocker_id)
     node_id = json.loads(b.stdout)["id"]
 
     entries = read_graph_strict(tmp_graph)
@@ -235,7 +169,7 @@ def test_node_with_plan_path_derives_to_ready(tmp_graph, tmp_path):
 
 def _seed_one_idea_one_ready(tmp_graph, tmp_path) -> tuple[str, str]:
     """Helper: add one idea (no plan) and one ready (with plan). Returns (idea_id, ready_id)."""
-    idea = _native_add(tmp_graph, "Pure idea")
+    idea = run_native_create(tmp_graph, "add", "Pure idea")
     idea_id = json.loads(idea.stdout)["id"]
     plan = tmp_path / "ready-plan.md"
     plan.write_text("---\ncreated: 2026-05-05\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
@@ -288,7 +222,7 @@ def test_linked_idea_stub_excluded_from_next_by_default(tmp_graph, tmp_path):
 def test_plan_less_idea_surfaces_in_next_by_default(tmp_graph):
     """x-e24a: a plan-less idea (Rung.NONE) is cold-dispatchable, so bare
     `backlog next` returns it without --include-ideas."""
-    add = _native_add(tmp_graph, "Pure idea")
+    add = run_native_create(tmp_graph, "add", "Pure idea")
     idea_id = json.loads(add.stdout)["id"]
 
     r = _invoke("backlog", "next", "--all")
@@ -304,8 +238,7 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
     plan.write_text("---\ncreated: 2026-05-05\ntitle: Low Prio Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan), "--priority", "p3")
 
-    high = _native_add(
-        tmp_graph, "High-prio idea",
+    high = run_native_create(tmp_graph, "add", "High-prio idea",
         "--priority", "p1",
     )
     assert high.exit_code == 0
@@ -353,7 +286,7 @@ def test_linked_idea_stub_excluded_from_ready_listing_by_default(tmp_graph, tmp_
 
 def test_plan_less_idea_surfaces_in_ready_listing_by_default(tmp_graph):
     """x-e24a: a plan-less idea (Rung.NONE) appears in bare `backlog ready`."""
-    add = _native_add(tmp_graph, "Pure idea")
+    add = run_native_create(tmp_graph, "add", "Pure idea")
     idea_id = json.loads(add.stdout)["id"]
 
     r = _invoke("backlog", "ready", "--all")
@@ -408,7 +341,7 @@ def test_idea_included_in_ready_with_flag(tmp_graph, tmp_path):
 
 def test_status_summary_shows_idea_count(tmp_graph, tmp_path):
     """`backlog status` prints `ideas: N` after the ready count."""
-    _native_add(tmp_graph, "Idea one")
+    run_native_create(tmp_graph, "add", "Idea one")
     plan = tmp_path / "plan.md"
     plan.write_text("---\ncreated: 2026-05-05\ntitle: A Plan\n---\n# Body\n")
     _invoke("backlog", "intake", str(plan))
@@ -428,8 +361,8 @@ def test_status_summary_shows_idea_count(tmp_graph, tmp_path):
 
 def test_description_flag_aliases_details(tmp_graph):
     """`--description X` and `--details X` produce the same node."""
-    r1 = _native_add(tmp_graph, "Has description", "--description", "a description")
-    r2 = _native_add(tmp_graph, "Has details", "--details", "a description")
+    r1 = run_native_create(tmp_graph, "add", "Has description", "--description", "a description")
+    r2 = run_native_create(tmp_graph, "add", "Has details", "--details", "a description")
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
 
@@ -441,8 +374,7 @@ def test_description_flag_aliases_details(tmp_graph):
 
 def test_description_and_details_mutually_exclusive(tmp_graph):
     """Passing both --description and --details errors out."""
-    r = _native_add(
-        tmp_graph, "Both flags",
+    r = run_native_create(tmp_graph, "add", "Both flags",
         "--description", "A",
         "--details", "B",
     )
@@ -472,7 +404,7 @@ def test_auto_detect_project_from_settings(tmp_graph, tmp_path, monkeypatch):
     fno_dir.mkdir()
     (fno_dir / "settings.yaml").write_text(settings.read_text())
 
-    r = _native_add(tmp_graph, "Auto-detect test")
+    r = run_native_create(tmp_graph, "add", "Auto-detect test")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
 
@@ -504,7 +436,7 @@ def test_explicit_project_overrides_auto_detect(tmp_graph, tmp_path, monkeypatch
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    r = _native_add(tmp_graph, "Explicit override", "--project", "explicit-proj")
+    r = run_native_create(tmp_graph, "add", "Explicit override", "--project", "explicit-proj")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
 
@@ -535,7 +467,7 @@ def test_relative_cwd_resolves_to_absolute(tmp_graph, tmp_path, monkeypatch):
 
     # Pass relative `--cwd .` and verify the stored cwd is absolute and
     # the project auto-detected via the absolute target.
-    r = _native_add(tmp_graph, "Relative cwd test", "--cwd", ".")
+    r = run_native_create(tmp_graph, "add", "Relative cwd test", "--cwd", ".")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
 
@@ -556,7 +488,7 @@ def test_no_match_in_settings_leaves_project_none(tmp_graph, tmp_path, monkeypat
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    r = _native_add(tmp_graph, "No-match test")
+    r = run_native_create(tmp_graph, "add", "No-match test")
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
 
@@ -661,7 +593,7 @@ def test_dash_a_is_shorthand_for_all_in_next(tmp_graph, tmp_path):
 
 def test_dash_a_is_shorthand_for_all_in_status(tmp_graph):
     """`backlog status -A` is equivalent to `--all`."""
-    _native_add(tmp_graph, "Idea")
+    run_native_create(tmp_graph, "add", "Idea")
     r = _invoke("backlog", "status", "-A")
     assert r.exit_code == 0, r.output
 
@@ -677,8 +609,7 @@ def test_ideas_long_flag_accepted_for_ready(tmp_graph, tmp_path):
 
 def test_dash_i_is_shorthand_for_ideas_in_next(tmp_graph, tmp_path):
     """`-I` is the short flag for --ideas (alias of --include-ideas)."""
-    high = _native_add(
-        tmp_graph, "High idea",
+    high = run_native_create(tmp_graph, "add", "High idea",
         "--priority", "p1",
     )
     high_id = json.loads(high.stdout)["id"]
@@ -757,9 +688,9 @@ def test_update_on_unknown_id_still_reads_not_found(tmp_graph):
 def test_supersede_persists_old_row_superseded(tmp_graph):
     """Positive marker for x-e8f3: a fresh supersede leaves the old row
     persisting status superseded, never blocked on an unverified record."""
-    a = _native_add(tmp_graph, "old work")
+    a = run_native_create(tmp_graph, "add", "old work")
     old_id = json.loads(a.stdout)["id"]
-    b = _native_add(tmp_graph, "new work")
+    b = run_native_create(tmp_graph, "add", "new work")
     new_id = json.loads(b.stdout)["id"]
 
     r = _invoke(
@@ -782,7 +713,7 @@ def test_supersede_persists_old_row_superseded(tmp_graph):
 
 def test_backlog_idea_creates_plan_less_node(tmp_graph):
     """`backlog idea "X"` creates an idea-stage node (no plan_path)."""
-    r = _native_idea(tmp_graph, "Capture this thought", "--difficulty", "low")
+    r = run_native_create(tmp_graph, "idea", "Capture this thought", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     payload = json.loads(r.stdout)
     node_id = payload["id"]
@@ -796,7 +727,7 @@ def test_backlog_idea_creates_plan_less_node(tmp_graph):
 
 def test_backlog_idea_requires_difficulty_noninteractive(tmp_graph):
     """AC2-ERR: non-interactive filing must name the work difficulty."""
-    r = _native_idea(tmp_graph, "Missing difficulty")
+    r = run_native_create(tmp_graph, "idea", "Missing difficulty")
     assert r.exit_code != 0
     assert "--difficulty" in (r.output + r.stderr)
     assert _read_entries(tmp_graph) == []
@@ -804,7 +735,7 @@ def test_backlog_idea_requires_difficulty_noninteractive(tmp_graph):
 
 def test_backlog_idea_records_filed_difficulty(tmp_graph):
     """AC1-HP: the filing estimate is stored with attributable history."""
-    r = _native_idea(tmp_graph, "Difficulty recorded", "--difficulty", "HIGH")
+    r = run_native_create(tmp_graph, "idea", "Difficulty recorded", "--difficulty", "HIGH")
     assert r.exit_code == 0, r.output
     node = _read_entries(tmp_graph)[0]
     assert node["difficulty"] == "high"
@@ -814,10 +745,9 @@ def test_backlog_idea_records_filed_difficulty(tmp_graph):
 
 def test_backlog_idea_wave_appends_without_minting(tmp_graph):
     """AC5-HP: a wave appends one structured note and mints no node."""
-    target = _native_add(tmp_graph, "Existing work")
+    target = run_native_create(tmp_graph, "add", "Existing work")
     target_id = json.loads(target.stdout)["id"]
-    r = _native_idea(
-        tmp_graph, "--json", "New finding",
+    r = run_native_create(tmp_graph, "idea", "--json", "New finding",
         "--wave-of", target_id,
         "--difficulty", "high",
         "--details", "append this finding",
@@ -839,7 +769,7 @@ def test_backlog_idea_wave_appends_without_minting(tmp_graph):
 def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
     """x-6a2c AC1-HP: the reported scenario - wave-of into an in_progress
     target carrying a live claim - lands the note (positive marker), exit 0."""
-    add = _native_add(tmp_graph, "Running work")
+    add = run_native_create(tmp_graph, "add", "Running work")
     target_id = json.loads(add.stdout)["id"]
     upd = _native_update(
         tmp_graph, target_id,
@@ -847,8 +777,7 @@ def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
     )
     assert upd[0] == 0, upd[1]
 
-    r = _native_idea(
-        tmp_graph, "--json", "Claimed finding",
+    r = run_native_create(tmp_graph, "idea", "--json", "Claimed finding",
         "--wave-of", target_id,
         "--difficulty", "medium",
         "--details", "payload X6A2C-TOKEN",
@@ -873,7 +802,7 @@ def test_wave_append_readback_read_failure_names_uncertainty(tmp_graph, monkeypa
     uncertainty named - never asserting the note is (or is not) on disk."""
     import fno.graph.store as gs
 
-    add = _native_add(tmp_graph, "Target work")
+    add = run_native_create(tmp_graph, "add", "Target work")
     target_id = json.loads(add.stdout)["id"]
 
     def unreadable(path):
@@ -897,13 +826,12 @@ def test_wave_append_readback_read_failure_names_uncertainty(tmp_graph, monkeypa
 def test_wave_receipt_names_where_the_payload_went(tmp_graph):
     """x-ce1b AC1-HP: the non-JSON receipt names node, field, size and the
     read-back command - never a minted_id line beside a successful fold."""
-    add = _native_add(tmp_graph, "Host work")
+    add = run_native_create(tmp_graph, "add", "Host work")
     target_id = json.loads(add.stdout)["id"]
 
     payload = "MARKER-CE1B first line\n" + ("ce1b payload filler for length\n" * 80)
     assert len(payload) >= 2300
-    r = _native_idea(
-        tmp_graph, "Measured finding",
+    r = run_native_create(tmp_graph, "idea", "Measured finding",
         "--wave-of", target_id,
         "--difficulty", "medium",
         "--details-file", "-",
@@ -928,13 +856,12 @@ def test_wave_receipt_names_where_the_payload_went(tmp_graph):
 
 def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
-    target = _native_add(tmp_graph, "Done work")
+    target = run_native_create(tmp_graph, "add", "Done work")
     target_id = json.loads(target.stdout)["id"]
     _native_update(tmp_graph, target_id, "--locked-by", "null")
     _native_update(tmp_graph, target_id, "--completion-note", "terminal fixture")
     _invoke("backlog", "done", target_id)
-    r = _native_idea(
-        tmp_graph, "Late finding",
+    r = run_native_create(tmp_graph, "idea", "Late finding",
         "--wave-of", target_id,
         "--difficulty", "low",
         "--parent", target_id,
@@ -946,15 +873,13 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
 
 def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monkeypatch, tmp_path):
     """AC7-HP: a related live sibling produces a choice-required receipt."""
-    target = _native_add(
-        tmp_graph, "Difficulty routing filing surface", "--difficulty", "medium"
+    target = run_native_create(tmp_graph, "add", "Difficulty routing filing surface", "--difficulty", "medium"
     )
     target_id = json.loads(target.stdout)["id"]
     sidecar = tmp_path / "relatedness.json"
     sidecar.write_text(json.dumps({target_id: []}))
     monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
-    r = _native_idea(
-        tmp_graph, "--json", "Difficulty routing filing surface estimate",
+    r = run_native_create(tmp_graph, "idea", "--json", "Difficulty routing filing surface estimate",
         "--difficulty", "high",
     )
     assert r.exit_code == 0, r.output
@@ -971,8 +896,7 @@ def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monke
 
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
-    r = _native_idea(
-        tmp_graph, "Idea with body",
+    r = run_native_create(tmp_graph, "idea", "Idea with body",
         "--description", "explain the idea here",
         "--difficulty", "medium",
     )
@@ -985,8 +909,7 @@ def test_backlog_idea_accepts_description(tmp_graph):
 
 def test_backlog_idea_accepts_priority(tmp_graph):
     """`backlog idea "X" --priority p1` is honored."""
-    r = _native_idea(
-        tmp_graph, "Urgent idea",
+    r = run_native_create(tmp_graph, "idea", "Urgent idea",
         "--priority", "p1",
         "--difficulty", "high",
     )
