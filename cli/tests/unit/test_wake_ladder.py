@@ -786,7 +786,7 @@ def test_wake_if_asleep_propagates_the_refusal_detail(monkeypatch):
     # so neither caller could name why the wake did not happen.
     from fno.agents import discover as discover_mod
 
-    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda t: None)
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda *t: None)
     monkeypatch.setattr(
         discover_mod,
         "resolve_reachable",

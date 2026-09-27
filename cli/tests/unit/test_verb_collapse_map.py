@@ -269,7 +269,7 @@ def test_map_covers_current_surface_once():
     # The `backlog rank` T1 row stays: the mux menu binds the leaf and
     # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
     # is required even though the python leg is gone.
-    assert len(mapped) == 603, (
+    assert len(mapped) == 602, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -336,7 +336,8 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # command-tree cutover deleted the 29 mux rows (the native tree declares
     # those paths; the ratchet reads the generated inventory): 82 -> 81.
     # The update cut-over retired the `backlog update` KEEP row: 81 -> 80.
-    assert projected == 80
+    # The native retract port retired the old `decide retract` Python alias: 80 -> 79.
+    assert projected == 79
     assert projected <= 99
 
 

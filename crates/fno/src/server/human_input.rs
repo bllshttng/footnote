@@ -186,6 +186,41 @@ fn submit_row(
     })
 }
 
+/// The `operator_typing` journal row (C11 feed): where and when a human typed
+/// without pressing Enter, so mail can wait for a live edit instead of
+/// landing mid-draft. Same envelope as [`submit_row`]; `typed_ms` replaces
+/// `submit_ms`. No typed text is ever recorded. Pure so tests can assert the
+/// envelope.
+fn typing_row(
+    mux_session: &str,
+    pane: u64,
+    via: &str,
+    resolution: &str,
+    harness_session: Option<&str>,
+    harness: Option<&str>,
+    fno_id: Option<&str>,
+) -> serde_json::Value {
+    let typed_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    serde_json::json!({
+        "ts": crate::review_invocation::review_invocation_timestamp(),
+        "type": "operator_typing",
+        "source": "daemon",
+        "data": {
+            "mux_session": mux_session,
+            "pane": pane,
+            "via": via,
+            "typed_ms": typed_ms,
+            "resolution": resolution,
+            "harness_session": harness_session,
+            "harness": harness,
+            "fno_id": fno_id,
+        }
+    })
+}
+
 impl Core {
     /// (graph node id, squad cwd) for a `human_touch` emit on `pane`. Node id:
     /// the pane's `FNO_NODE` provenance; fallback, the owning squad's
@@ -286,9 +321,49 @@ impl Core {
     /// join it. A failed append bumps `touch_emit_failures` and never
     /// touches the keystroke path.
     pub(super) fn witness_submit(&self, pane: u64) {
+        let Some(event) = self.witness_row(pane, "operator_submit") else {
+            return;
+        };
+        // ponytail: the append runs inline on the core loop, one O_APPEND
+        // line per Enter; move it off-loop if keystroke latency ever shows it.
+        if crate::pane_send_audit::append_agents_event(
+            &crate::pane_send_audit::pane_send_audit_events_path(),
+            &event,
+        )
+        .is_err()
+        {
+            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("fno mux: operator_submit emit failed ({n} this session)");
+        }
+    }
+
+    /// One `operator_typing` witness row for a burst of keystrokes with no
+    /// Enter on `pane` (C11 feed): the same binding and journal append as
+    /// [`Self::witness_submit`], throttled to the touch burst window by the
+    /// caller. Honors the same `FNO_TOUCH_EMIT=0` kill switch.
+    pub(super) fn witness_typing(&self, pane: u64) {
+        let Some(event) = self.witness_row(pane, "operator_typing") else {
+            return;
+        };
+        if crate::pane_send_audit::append_agents_event(
+            &crate::pane_send_audit::pane_send_audit_events_path(),
+            &event,
+        )
+        .is_err()
+        {
+            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("fno mux: operator_typing emit failed ({n} this session)");
+        }
+    }
+
+    /// The witness envelope for `pane` (`operator_submit` or
+    /// `operator_typing`): bind the pane to its registry row (mux ref, then
+    /// attach), else its portal row. `None` only when the operator kill
+    /// switch `FNO_TOUCH_EMIT=0` is set.
+    fn witness_row(&self, pane: u64, kind: &str) -> Option<serde_json::Value> {
         // The same operator kill switch `touch` honors.
         if std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
-            return;
+            return None;
         }
         let bound = super::agent_rows_join::bind_agent_to_pane(
             &self.agents,
@@ -319,31 +394,32 @@ impl Core {
             ),
             None => (None, None, None),
         };
-        let event = submit_row(
-            &self.session_name,
-            pane,
-            via,
-            resolution,
-            harness_session.as_deref(),
-            harness.as_deref(),
-            fno_id.as_deref(),
-        );
-        // ponytail: the append runs inline on the core loop, one O_APPEND
-        // line per Enter; move it off-loop if keystroke latency ever shows it.
-        if crate::pane_send_audit::append_agents_event(
-            &crate::pane_send_audit::pane_send_audit_events_path(),
-            &event,
-        )
-        .is_err()
-        {
-            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
-            eprintln!("fno mux: operator_submit emit failed ({n} this session)");
-        }
+        Some(match kind {
+            "operator_submit" => submit_row(
+                &self.session_name,
+                pane,
+                via,
+                resolution,
+                harness_session.as_deref(),
+                harness.as_deref(),
+                fno_id.as_deref(),
+            ),
+            _ => typing_row(
+                &self.session_name,
+                pane,
+                via,
+                resolution,
+                harness_session.as_deref(),
+                harness.as_deref(),
+                fno_id.as_deref(),
+            ),
+        })
     }
 
     /// The tail of the `CoreMsg::Input` arm, one call from `handle_msg` so
-    /// server.rs only shrinks: touch telemetry and the submit witness. The
-    /// mux arms no hold - a keystroke only witnesses a human Enter, and the
+    /// server.rs only shrinks: touch telemetry, the typing witness and the
+    /// submit witness. The mux arms no hold - a keystroke only witnesses a
+    /// human Enter (or a live draft, `operator_typing`), and the
     /// conversation hold is armed by the harness prompt hook. A keystroke
     /// here is past the relay guard - PaneSend and relay writes never reach
     /// this - and past the reply classifier: terminal-generated loopback
@@ -353,8 +429,19 @@ impl Core {
         if !has_human_keystroke(bytes) {
             return;
         }
-        self.touch(focus, "inject", true);
-        if is_submit(bytes) {
+        // One verdict per burst drives touch, typing witness and the burst
+        // window: a submit writes `operator_submit` only (the Enter IS the
+        // end of the draft); a non-submit burst writes one `operator_typing`
+        // row per [`TOUCH_COALESCE_WINDOW`].
+        let submit = is_submit(bytes);
+        let burst = touch_coalesce(&mut self.touch_last_emit, focus, Instant::now());
+        if burst {
+            self.touch(focus, "inject", false);
+            if !submit {
+                self.witness_typing(focus);
+            }
+        }
+        if submit {
             self.witness_submit(focus);
         }
     }
@@ -718,6 +805,166 @@ mod tests {
             1,
             "one typed line with Enter writes exactly one witness row"
         );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pinned-journal env for the typing-witness tests: the
+    /// `FNO_AGENTS_HOME_GUARD` plus a fresh temp agents home.
+    fn witness_env(tag: &str) -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+        let guard = crate::pane_send_audit::FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fno-typing-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+        (guard, dir)
+    }
+
+    fn journal_rows(dir: &Path, event_type: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == event_type)
+            .collect()
+    }
+
+    fn typing_client_core() -> super::super::Core {
+        let mut core = witness_test_core(7);
+        core.clients.push(crate::server::Client {
+            id: 1,
+            reliable_tx: tokio::sync::mpsc::channel(1).0,
+            dirty: Default::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            synced_modes: Default::default(),
+            view: (1, 1),
+            visible: Default::default(),
+            dims: (24, 80),
+            passive: false,
+            last_press: None,
+        });
+        core
+    }
+
+    #[test]
+    fn a_typing_burst_without_enter_writes_one_operator_typing_row() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("burst");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"abc".to_vec(),
+        });
+        let rows = journal_rows(&dir, "operator_typing");
+        assert_eq!(rows.len(), 1, "one non-submit burst, one typing row");
+        let data = &rows[0]["data"];
+        assert_eq!(data["pane"], 7);
+        assert_eq!(data["via"], "pane");
+        assert_eq!(data["resolution"], "ok");
+        assert_eq!(
+            data["harness_session"],
+            "ccccdddd-1111-2222-3333-444455556666"
+        );
+        assert!(
+            data["typed_ms"].as_u64().is_some(),
+            "typed_ms is the millisecond join key"
+        );
+        assert!(
+            journal_rows(&dir, "operator_submit").is_empty(),
+            "no Enter, no submit row"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_bursts_within_the_window_write_one_typing_row() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("coalesce");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"a".to_vec(),
+        });
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"b".to_vec(),
+        });
+        assert_eq!(
+            journal_rows(&dir, "operator_typing").len(),
+            1,
+            "bursts inside the coalesce window ride one row"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_after_the_window_writes_a_second_typing_row() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("window");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"a".to_vec(),
+        });
+        std::thread::sleep(super::TOUCH_COALESCE_WINDOW + std::time::Duration::from_secs(1));
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"b".to_vec(),
+        });
+        assert_eq!(
+            journal_rows(&dir, "operator_typing").len(),
+            2,
+            "a burst past the window opens a new one"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_submit_writes_operator_submit_and_no_typing_row() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("submit");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"abc\r".to_vec(),
+        });
+        assert_eq!(journal_rows(&dir, "operator_submit").len(), 1);
+        assert!(
+            journal_rows(&dir, "operator_typing").is_empty(),
+            "the Enter ends the draft: submit rows only"
+        );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_focus_report_writes_neither_typing_nor_submit_rows() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("focus");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"\x1b[I".to_vec(),
+        });
+        assert!(journal_rows(&dir, "operator_typing").is_empty());
+        assert!(journal_rows(&dir, "operator_submit").is_empty());
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
