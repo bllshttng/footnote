@@ -52,7 +52,7 @@ Verbs that exist only for a crowned session. One reign ran a whole territory wit
 | Find where a handle lives | `fno mux where <handle>` | Pane-only. Any thread agent answers `hosts no live pane` (exit 17). That is a true answer, not an error. |
 | Read a worker that has no pane | `fno agents peek <handle> --follow` | Tails the transcript. This is the read that works after `where` says there is no pane. |
 | Read a worker's output log | `fno agents logs <name> --tail <n>` | Registry-scoped output log, distinct from `peek` (a transcript tail through the mux ref). |
-| Place a squad in one visible tab | `fno agents spawn --workspace <name> --split <dir>` | Short forms `-s` and `-x`. Without them every spawn scatters across tabs. A too-small split falls back to a tab in the same workspace. |
+| Place a group of workers in one visible tab | `fno agents spawn --workspace <name> --split <dir>` | Short forms `-s` and `-x`. Without them every spawn scatters across tabs. A too-small split falls back to a tab in the same workspace. |
 
 `focus` takes a pane number, not a handle. Resolve the handle with `fno mux where` first, or read the number off `fno mux pane ls`.
 

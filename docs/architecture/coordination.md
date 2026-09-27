@@ -188,7 +188,7 @@ state; the events log is for observability and forensics.
 
 ### Mux sideline member identity
 
-The mux squad store uses the exact worker identity pair `(harness, harness_session_id)` for non-Claude members. `attach_id` is a display or legacy Claude roster identity, not a cross-harness binding key, and a short session-id prefix is never sufficient for restore.
+The mux workspace store (`squads.json`) uses the exact worker identity pair `(harness, harness_session_id)` for non-Claude members. `attach_id` is a display or legacy Claude roster identity, not a cross-harness binding key, and a short session-id prefix is never sufficient for restore.
 
 The agents lifecycle store at `~/.fno/agents/events.jsonl` owns `agent_spawned` receipts. The repository-local `.fno/events.jsonl` is a project event journal and is not a spawn-receipt source. Persistent thread receipts emit `substrate: thread`; `bg` remains an input alias during the compatibility window, while pane receipts continue to emit `substrate: pane`.
 
@@ -208,7 +208,7 @@ Mail `origin` is a channel claim and is floored to `peer` whenever the caller ha
 
 Every registry row removal announces itself at the write choke point, whatever door drops the row. The remover stages a recovery receipt under `<agents home>/reap-receipts/` first. It then emits one `registry_row_removed` event per row into the same lifecycle store, naming the row and the remover. A row with no resumable identity still announces, with `receipt_staged: false`. `update_registry` is the only removal door in both languages (Rust `state.rs`, Python `registry.py`), so a removal with no event cannot exist. `agent_row_reaped` remains the reap door's own richer event. `registry_row_removed` fires for every door beside it. A reaped row finds its node through the one provenance cascade the sweep already trusts (the sessions witness, the registry field, then the name route). The event's `node_id` carries the answer and `node_resolution` names the source that answered, so `node_id` null reads as "no node", never "we did not look".
 
-Squad cleanup uses positive member liveness. A tombstone or exact terminal identity is dead, a current exact identity is live, and an unreadable or unjoinable identity is unknown and remains stored. A missing row alone is not proof of death.
+Workspace cleanup uses positive member liveness. A tombstone or exact terminal identity is dead, a current exact identity is live, and an unreadable or unjoinable identity is unknown and remains stored. A missing row alone is not proof of death.
 
 ## Contract with gates
 

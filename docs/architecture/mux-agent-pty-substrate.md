@@ -36,8 +36,8 @@ The undo, if a real crash ever makes it worth building, is a supervisor that kee
 
 A mux launched from the macOS GUI (Dock, Spotlight, a login item) inherits the `launchctl limit maxfiles` soft cap of 256 open file descriptors.
 A terminal-launched mux does not hit it: zsh raises the soft limit (a shell reports 1048576), so the cap is invisible from a terminal and bites only the GUI-launched process.
-With enough live panes, restored squads, and subprocess churn, a GUI mux can exhaust the 256-descriptor table and fail as `attach failed: no spawnable shell: ... Too many open files (os error 24)`.
-State that accumulates across restarts lowers the headroom that makes the default livable; a squad store that grew one row per restart was one such accumulator (closed by deriving a squad's durable key from its origin, so one repo holds one row across unbounded restarts).
+With enough live panes, restored workspaces, and subprocess churn, a GUI mux can exhaust the 256-descriptor table and fail as `attach failed: no spawnable shell: ... Too many open files (os error 24)`.
+State that accumulates across restarts lowers the headroom that makes the default livable; a workspace store that grew one row per restart was one such accumulator (closed by deriving a workspace's durable key from its origin, so one repo holds one row across unbounded restarts).
 Raising the ceiling is an operator decision (`launchctl limit maxfiles <soft> <hard>`, or a `SoftResourceLimits` key on a LaunchDaemon), not a code change.
 
 ## Badge lattice: the three state producers
