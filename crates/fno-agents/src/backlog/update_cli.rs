@@ -22,8 +22,6 @@ use crate::graph_store::{
 /// The lock deadline every update write rides.
 const LOCK_TIMEOUT: Duration = DEFAULT_LOCK_TIMEOUT;
 
-/// One parsed invocation. A `None` from [`UpdateArgs::parse`] is the forward
-/// shape: any token outside [`NATIVE_UPDATE_FLAGS`].
 /// The parse outcome: usable args, or a usage refusal this verb owns.
 enum ParsedUpdate {
     Args(UpdateArgs),
@@ -51,8 +49,7 @@ struct UpdateArgs {
     cwd: Option<String>,
     completion_note: Option<String>,
     acknowledge_collisions: Option<String>,
-    /// Raw token: a non-int value rides the forward, which carries typer's
-    /// usage error until the cut-over wave owns it.
+    /// Raw token; parse validates the int shape with typer's message.
     fixes_pr: Option<String>,
     reverted: Option<bool>,
     difficulty: Option<String>,
@@ -144,6 +141,27 @@ impl UpdateArgs {
                 Some((n, v)) if n.starts_with('-') => (n.to_string(), Some(v.to_string())),
                 _ => (raw.to_string(), None),
             };
+            macro_rules! take_bool_value {
+                ($name:expr, $inline:expr, $i:expr, $bare:expr) => {{
+                    $i += 1;
+                    match $inline {
+                        Some(ref v) => match parse_click_bool(v) {
+                            Some(b) => b,
+                            None => {
+                                return ParsedUpdate::Refusal {
+                                    message: format!(
+                                        "Error: Invalid value for '{}': '{v}' \
+                                     is not a valid boolean.",
+                                        $name
+                                    ),
+                                    exit: 2,
+                                }
+                            }
+                        },
+                        None => $bare,
+                    }
+                }};
+            }
             macro_rules! take_value {
                 ($slot:expr) => {{
                     match inline {
@@ -200,21 +218,15 @@ impl UpdateArgs {
                 "--model" => take_value!(a.model),
                 "--model-tier" => take_value!(a.model_tier),
                 "--type" => take_value!(a.type_),
-                "--public" => {
-                    a.public = Some(true);
-                    i += 1;
-                }
-                "--no-public" => {
-                    a.public = Some(false);
-                    i += 1;
+                "--public" | "--no-public" => {
+                    a.public = Some(take_bool_value!(name, inline, i, name == "--public"));
                 }
                 "--batch" => take_value!(a.batch),
                 "--orphan-ok" => take_value!(a.orphan_ok),
                 "--has-brief" => take_value!(a.has_brief),
                 "--priority" | "-p" => take_value!(a.priority),
                 "--blocks-everything" => {
-                    a.blocks_everything = true;
-                    i += 1;
+                    a.blocks_everything = take_bool_value!(name, inline, i, true);
                 }
                 "--project" => take_value!(a.project),
                 "--cwd" | "-c" => take_value!(a.cwd),
@@ -234,13 +246,8 @@ impl UpdateArgs {
                         }
                     }
                 }
-                "--reverted" => {
-                    a.reverted = Some(true);
-                    i += 1;
-                }
-                "--no-reverted" => {
-                    a.reverted = Some(false);
-                    i += 1;
+                "--reverted" | "--no-reverted" => {
+                    a.reverted = Some(take_bool_value!(name, inline, i, name == "--reverted"));
                 }
                 "--difficulty" => take_value!(a.difficulty),
                 "--tag" | "--untag" => {
@@ -275,8 +282,7 @@ impl UpdateArgs {
                 "--locked-by-harness-session" => take_value!(a.locked_by_harness_session),
                 "--plan-path" => take_value!(a.plan_path),
                 "--force" | "-F" => {
-                    a.force = true;
-                    i += 1;
+                    a.force = take_bool_value!(name, inline, i, true);
                 }
                 "--parent" => take_value!(a.parent),
                 "--caused-by" => take_value!(a.caused_by),
@@ -366,6 +372,15 @@ fn flag_value(_name: &str, tail: &[String], i: &mut usize) -> Option<String> {
     }
     *i += 1;
     Some(next.clone())
+}
+
+/// The boolean spellings click's BOOL type accepts on a `--flag=value`.
+fn parse_click_bool(v: &str) -> Option<bool> {
+    match v.to_lowercase().as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "f" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// A validation refusal: one stderr line, then the exit.
@@ -472,6 +487,13 @@ fn run_door_relay(args: &UpdateArgs) -> i32 {
         !args.remove_blocker.is_empty(),
         &mut legacy,
     );
+    note("--pr-number", args.pr_number.is_some(), &mut legacy);
+    note("--pr-url", args.pr_url.is_some(), &mut legacy);
+    note("--repo", args.repo.is_some(), &mut legacy);
+    note("--add-pr", args.add_pr.is_some(), &mut legacy);
+    note("--add-pr-url", args.add_pr_url.is_some(), &mut legacy);
+    note("--add-pr-note", args.add_pr_note.is_some(), &mut legacy);
+    note("--remove-pr", args.remove_pr.is_some(), &mut legacy);
     if !legacy.is_empty() {
         legacy.sort_unstable();
         eprintln!(
@@ -953,7 +975,6 @@ fn write_update(
             pr,
         )?;
         match planned {
-            MutationPlan::Refused(r) => return Err(r),
             MutationPlan::Applied {
                 working,
                 rungs,
@@ -1057,7 +1078,6 @@ fn write_update(
 }
 
 enum MutationPlan {
-    Refused(Refusal),
     Applied {
         working: Vec<Value>,
         rungs: BTreeMap<String, String>,
@@ -1079,19 +1099,6 @@ fn plan_mutation(
     pr: &DerivedPr,
 ) -> Result<MutationPlan, Refusal> {
     let _ = graph;
-    let rungs: BTreeMap<String, String> = rows
-        .iter()
-        .filter_map(|e| {
-            entry_id(e).map(|id| {
-                (
-                    id.to_string(),
-                    crate::backlog_ready::plan_rung(e).to_string(),
-                )
-            })
-        })
-        .collect();
-    recompute_statuses_with_plan_rungs(&mut rows, Some(&rungs));
-
     // The lookup runs over the RAW snapshot, archived residents included -
     // the captured Python behavior: an archived node takes the write, the
     // write lands, and the LIVE read-back below refuses it (never a silent
@@ -1125,6 +1132,22 @@ fn plan_mutation(
         linked_size,
         pr,
     )?;
+
+    // The status recompute runs over the POST-write rows: a plan this call
+    // just bound must carry its rung, or the repaint would demote a node
+    // the write itself made plan-bound (the captured Python order).
+    let rungs: BTreeMap<String, String> = rows
+        .iter()
+        .filter_map(|e| {
+            entry_id(e).map(|id| {
+                (
+                    id.to_string(),
+                    crate::backlog_ready::plan_rung(e).to_string(),
+                )
+            })
+        })
+        .collect();
+    recompute_statuses_with_plan_rungs(&mut rows, Some(&rungs));
 
     Ok(MutationPlan::Applied {
         working: rows,
@@ -1342,7 +1365,7 @@ fn apply_mutators(
             obj.insert("pr_url".into(), json!(u));
         }
     }
-    let mut warnings: Vec<String> = {
+    let warnings: Vec<String> = {
         let obj = rows[idx].as_object_mut().expect("row is an object");
         if let Some(v) = &args.batch {
             obj.insert(
@@ -1362,7 +1385,7 @@ fn apply_mutators(
                 obj.insert("orphan_ok".into(), json!(v));
             }
         }
-        let mut warnings: Vec<String> = super::fields::apply_dispatch_overrides(
+        let warnings: Vec<String> = super::fields::apply_dispatch_overrides(
             obj,
             args.dispatch_verb.as_deref(),
             args.dispatch_brief.as_deref(),

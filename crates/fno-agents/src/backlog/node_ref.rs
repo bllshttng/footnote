@@ -212,9 +212,9 @@ pub fn validate_blockers(
         .filter_map(|e| e.get("id").and_then(Value::as_str).map(|id| (id, e)))
         .collect();
     for bid in blockers {
-        let Some(entry) = id_to_entry.get(bid.as_str()) else {
+        if !id_to_entry.contains_key(bid.as_str()) {
             return Err((format!("Error: unknown blocker id '{bid}'"), 2));
-        };
+        }
         if bid == task_id {
             return Err((format!("Error: node cannot block itself ({task_id})"), 2));
         }
