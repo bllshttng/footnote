@@ -757,6 +757,30 @@ def test_resume_unpinned_refusal_reports_wake_unpinned(monkeypatch):
     assert "-P zai" in detail
 
 
+def test_lost_route_file_refusal_reports_wake_unrouted(monkeypatch):
+    # A route-restore refusal carries exit 2 like the name collision, but it
+    # started NOTHING - the recorded route file is gone and the relaunch
+    # refused before it spawned. The receipt must say wake-unrouted(...), never
+    # wake-already-in-flight, which claims a concurrent wake won the race.
+    from fno.agents.dispatch_errors import RouteRestoreRefused
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+
+    def _refuse(**k):
+        raise RouteRestoreRefused(
+            "agent 'wk-abc12345' was launched on the route recorded at "
+            "/tmp/gone.json, and it cannot be restored (...)",
+            exit_code=2,
+        )
+
+    monkeypatch.setattr(dispatch, "dispatch_spawn", _refuse)
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is False
+    assert detail.startswith("wake-unrouted(")
+    assert "/tmp/gone.json" in detail
+
+
 def test_wake_if_asleep_propagates_the_refusal_detail(monkeypatch):
     # The drain/heads-up sibling path used to drop the token at (False, None),
     # so neither caller could name why the wake did not happen.
