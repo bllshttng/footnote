@@ -155,12 +155,12 @@ struct CachedModel {
 }
 
 /// The reign page path plus whether its root resolved FAITHFULLY (see
-/// [`crate::proto::reign_state_root`]): an unfaithful root is served as a
+/// [`crate::reign_root::reign_state_root`]): an unfaithful root is served as a
 /// miss but never written through.
 fn reign_html_path() -> (PathBuf, bool) {
     #[cfg(not(test))]
     {
-        crate::proto::reign_state_root()
+        crate::reign_root::reign_state_root()
     }
     #[cfg(test)]
     {

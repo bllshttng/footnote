@@ -2941,85 +2941,6 @@ pub(crate) fn mux_sidecar_root() -> PathBuf {
     resolved_state_root()
 }
 
-/// The state root Python's renderer writes `reign.html` to, plus whether the
-/// resolution is FAITHFUL: the PROJECT-AWARE `state_dir` ladder (Python
-/// `fno.paths.state_dir()`), not the mux's explicit-only tier. Writer and
-/// reader must walk the same chain or /crown serves the global dir's stale
-/// page while the project render lands elsewhere. A miss is faithful (both
-/// sides land on Python's `~/.fno` default); a DECLINED value - a form the
-/// mirror refuses to duplicate, like a `{vault}`/`{project}` template, a
-/// `~user` or relative anchor, or an unset `$VAR` - falls back to
-/// `legacy_state_root()` with `false`: the caller must never WRITE through
-/// an unfaithful root, or the /crown refresh overwrites the global page
-/// with this project's court data.
-#[cfg(not(test))]
-pub(crate) fn reign_state_root() -> (PathBuf, bool) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match crate::digest_overlay::config_top_str(&cwd, "state_dir") {
-        Some(raw) => match expand_reign_state_dir(&raw) {
-            Some(root) => (root, true),
-            None => {
-                warn_once_unexpandable_state_dir(&raw);
-                (legacy_state_root(), false)
-            }
-        },
-        None => {
-            warn_once_legacy_yaml_state_dir();
-            (legacy_state_root(), true)
-        }
-    }
-}
-
-/// Expand a state_dir the way Python's renderer does for the reign page: the
-/// expandvars pass FIRST (see [`expand_reign_state_vars`]), then the shared
-/// `~`/absolute expansion. `None` still means declined: a form this crate
-/// does not duplicate (`{vault}`/`{project}` templates, `~user`, relative
-/// anchors, an unset variable). The caller must treat the declined root as
-/// unfaithful and never write through it.
-fn expand_reign_state_dir(raw: &str) -> Option<PathBuf> {
-    let expanded = expand_reign_state_vars(raw.trim());
-    expand_state_dir(&expanded)
-}
-
-/// The `$VAR`/`${VAR}` pass Python's `_resolve` runs FIRST on a state_dir,
-/// mirroring `os.path.expandvars`: a set variable substitutes (an empty
-/// value allowed), an UNSET one stays literal so the result keeps its `$`
-/// and the shared expansion declines it instead of guessing a root.
-/// Reign-only: the mux's own expansion deliberately declines `$` forms
-/// (see [`expand_state_dir`]).
-fn expand_reign_state_vars(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.char_indices().peekable();
-    while let Some((i, ch)) = chars.next() {
-        if ch != '$' || i + 1 >= raw.len() {
-            out.push(ch);
-            continue;
-        }
-        let rest = &raw[i + 1..];
-        let (name, consumed) = if let Some(inner) = rest.strip_prefix('{') {
-            match inner.find('}') {
-                Some(end) => (Some(&inner[..end]), inner[..end].chars().count() + 2),
-                None => (None, 0),
-            }
-        } else {
-            let end = rest
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or(rest.len());
-            (Some(&rest[..end]), end)
-        };
-        match name.and_then(|n| std::env::var(n).ok()) {
-            Some(value) => {
-                out.push_str(&value);
-                for _ in 0..consumed {
-                    chars.next();
-                }
-            }
-            None => out.push('$'),
-        }
-    }
-    out
-}
-
 /// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
 /// (anchored against cwd so a bare relative pin resolves to one dir per
 /// invocation site), else the pre-config-chain global root. `warn` names the
@@ -3043,7 +2964,7 @@ fn fallback_state_root(cwd: &std::path::Path, warn: bool) -> PathBuf {
 /// final fallback, `mux doctor`'s stranding check, and the sidecar root, so
 /// they can never drift apart.
 #[cfg(not(test))]
-fn legacy_state_root() -> PathBuf {
+pub(crate) fn legacy_state_root() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
@@ -3125,7 +3046,7 @@ fn config_state_root() -> Option<StateRoot> {
 /// (this crate is TOML-only by convention), so it warns like the other
 /// decline cases instead of splitting silently.
 #[cfg(not(test))]
-fn warn_once_legacy_yaml_state_dir() {
+pub(crate) fn warn_once_legacy_yaml_state_dir() {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         if let Some(yaml) = legacy_global_yaml_state_dir_hint() {
@@ -3152,7 +3073,7 @@ fn warn_once_legacy_yaml_state_dir() {
 /// runs first there; this mirror expands neither) and `~user` forms (Python
 /// resolves them through the passwd database; `$HOME/user` would be a
 /// different root).
-fn expand_state_dir(raw: &str) -> Option<PathBuf> {
+pub(crate) fn expand_state_dir(raw: &str) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() || raw.contains('{') || raw.contains('$') {
         return None;
@@ -3210,7 +3131,7 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
 /// every Python surface expands it and moves elsewhere. Say so once instead
 /// of leaving the split silent.
 #[cfg(not(test))]
-fn warn_once_unexpandable_state_dir(raw: &str) {
+pub(crate) fn warn_once_unexpandable_state_dir(raw: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         record_config_warning(
@@ -3915,49 +3836,6 @@ fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn reign_expansion_resolves_env_vars_python_order() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("FNO_TEST_STATE_BASE", "/srv/fno-state");
-        assert_eq!(
-            expand_reign_state_dir("$FNO_TEST_STATE_BASE"),
-            Some(PathBuf::from("/srv/fno-state"))
-        );
-        assert_eq!(
-            expand_reign_state_dir("${FNO_TEST_STATE_BASE}/reign"),
-            Some(PathBuf::from("/srv/fno-state/reign"))
-        );
-        // A set-but-empty variable substitutes to the empty string, exactly
-        // like os.path.expandvars: the remainder reads as its own root.
-        std::env::set_var("FNO_TEST_STATE_BASE", "");
-        assert_eq!(
-            expand_reign_state_dir("$FNO_TEST_STATE_BASE/x"),
-            Some(PathBuf::from("/x"))
-        );
-        std::env::remove_var("FNO_TEST_STATE_BASE");
-        // An UNSET variable stays literal, so the value keeps its `$` and
-        // declines instead of guessing a root.
-        assert_eq!(expand_reign_state_dir("$FNO_TEST_STATE_BASE/x"), None);
-    }
-
-    #[test]
-    fn reign_expansion_still_declines_owner_owned_forms() {
-        // Templates, ~user and relative anchors stay declined: this crate
-        // does not duplicate their owner.
-        assert_eq!(expand_reign_state_dir("{vault}/state"), None);
-        assert_eq!(expand_reign_state_dir("{project}/state"), None);
-        assert_eq!(expand_reign_state_dir("~user/state"), None);
-        assert_eq!(expand_reign_state_dir("relative/state"), None);
-        // Absolute and ~-rooted values pass through untouched.
-        assert_eq!(
-            expand_reign_state_dir("/abs/state"),
-            Some(PathBuf::from("/abs/state"))
-        );
-    }
 
     fn test_frame() -> Frame {
         let mut cells = vec![Cell::default(); 2 * 3];
