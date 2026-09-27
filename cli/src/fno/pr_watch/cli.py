@@ -243,6 +243,11 @@ def _run_notify_watch_phase(
                        acted=int(payload.get("acted") or 0),
                        skip_reason=payload.get("skip_reason"),
                        detail=(payload.get("detail") or "")[:200])
+    except subprocess.TimeoutExpired as exc:
+        # A bound overrun is a budget cut; "notify_failed" would read FAIL.
+        _emit_tick_row("notify_watch", interval_s=interval_s,
+                       skip_reason="starved",
+                       detail=f"arm pass exceeded its {exc.timeout:.0f}s bound"[:200])
     except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
         log.warning("pr-watch: notify_watch phase failed: %s", exc)
         _emit_tick_row("notify_watch", interval_s=interval_s,
@@ -425,12 +430,9 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     "sweep": 150,
     "king_wake": 45,
     # The notify phase pays the arm subprocess over every catch-up root
-    # (idle: 2.03s roots scan over 12 roots + 0.13s subprocess). The old
-    # 10s cap fired on a loaded machine and paged a healthy arm (the
-    # 12:35Z specimen read "phase slice 10s spent"). 15s is the largest value
-    # the caps-fit invariant allows: sum(caps) + fleet max + the 150s
-    # merge floor must stay inside the 480s deadline (test_phase_caps_fit).
-    "notify_watch": 15,
+    # (armed pass: 23.1s measured over 12 roots 2026-09-27). 15s still cut
+    # it mid-arm; 30s fits at the 0.85x deadline.
+    "notify_watch": 30,
     "heal": 10,
     "evals": 10,
 }
@@ -458,7 +460,7 @@ def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signat
 
 
 def _resolve_tick_deadline(cfg) -> int:
-    """Env seam first, then config, then 0.8x the interval (min 60s).
+    """Env seam first, then config, then 0.85x the interval (min 60s).
 
     Config and derived values are clamped BELOW interval_seconds: launchd
     never runs a StartInterval job concurrently, so a deadline at or above
@@ -472,7 +474,7 @@ def _resolve_tick_deadline(cfg) -> int:
     ceiling = max(1, int(cfg.interval_seconds) - 5)
     if cfg.tick_timeout_seconds:
         return min(int(cfg.tick_timeout_seconds), ceiling)
-    derived = max(60, int(cfg.interval_seconds * 0.8))
+    derived = max(60, int(cfg.interval_seconds * 0.85))
     return min(derived, ceiling)
 
 
@@ -632,8 +634,9 @@ def tick() -> None:
                 cut.append(name)
                 phase_s[name] = 0.0
                 if arm is not None:
+                    # starved, not broken: timeout is a FAILURE_SKIPS token.
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"deadline exceeded before phase {name}")
                 return False
             if ceiling_box["v"] is None:
@@ -674,8 +677,9 @@ def tick() -> None:
                             f"{int(slice_s)}s" if wall_limited else
                             f"phase slice {int(slice_s)}s spent") + at
                     note = progress.get(name) or sweep_progress.get(name) or ""
+                    # The slice was the binding budget: starved, not FAIL.
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
-                                   skip_reason="timeout",
+                                   skip_reason="starved",
                                    detail=f"{base} {note}" if note else base)
             finally:
                 if alarm_ok:
