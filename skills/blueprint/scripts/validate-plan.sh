@@ -12,15 +12,24 @@ TMPDIR_BASE_VAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
 _DECISION_READS=""
 _DECISION_VERDICT=""
+_DECISION_SUBJECTS=""
+_DECISION_SUBJECT=""
+_DECISION_TEXTS=""
+_DECISION_TEXT=""
 
 _decision_read() {
-    local id="$1" cached="" out="" rc=0 stderr_line="" verdict=""
+    local id="$1" cached="" cached_subject="" cached_text="" out="" rc=0
+    local stderr_line="" parsed="" verdict="" detail="" subject="" decision_text=""
     cached=$(grep -m1 "^${id}"$'\t' <<< "$_DECISION_READS" || true)
     if [[ -n "$cached" ]]; then
         _DECISION_VERDICT="${cached#*$'\t'}"
+        cached_subject=$(grep -m1 "^${id}"$'\t' <<< "$_DECISION_SUBJECTS" || true)
+        cached_text=$(grep -m1 "^${id}"$'\t' <<< "$_DECISION_TEXTS" || true)
+        _DECISION_SUBJECT="${cached_subject#*$'\t'}"
+        _DECISION_TEXT="${cached_text#*$'\t'}"
         return 0
     fi
-    if out=$(fno backlog decisions "$id" 2>"$TMPDIR_BASE_VAL/decisions.err"); then
+    if out=$(fno backlog decisions "$id" --json 2>"$TMPDIR_BASE_VAL/decisions.err"); then
         rc=0
     else
         rc=$?
@@ -28,13 +37,74 @@ _decision_read() {
     if (( rc != 0 )); then
         stderr_line=$(sed -n '$p' "$TMPDIR_BASE_VAL/decisions.err")
         verdict="unread exit $rc: ${stderr_line:-no stderr}"
-    elif grep -qE "^LIVE[[:space:]].*$id" <<< "$out"; then
-        verdict="live"
-    else
+    elif [[ -z "$out" ]]; then
         verdict="notlive"
+    elif ! command -v python3 >/dev/null 2>&1; then
+        verdict="unread no python3"
+    else
+        if parsed=$(printf '%s\n' "$out" | python3 -c '
+import json
+import sys
+
+def unread(reason):
+    print("unread")
+    print(reason)
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    unread("decisions JSON did not parse")
+    raise SystemExit(0)
+
+rows = payload.get("decisions") if isinstance(payload, dict) else None
+if not isinstance(rows, list):
+    unread("decisions JSON did not parse")
+    raise SystemExit(0)
+
+matches = [row for row in rows if isinstance(row, dict) and row.get("decision_id") == sys.argv[1]]
+if not matches:
+    print("notlive")
+    raise SystemExit(0)
+
+row = matches[0]
+lifecycle = row.get("lifecycle")
+if lifecycle == "unknown":
+    unread("lifecycle unknown, the graph was not read")
+elif lifecycle == "live":
+    def one_line(value):
+        return " ".join(value.split()) if isinstance(value, str) else ""
+    print("live")
+    print("")
+    print(one_line(row.get("subject")))
+    print(one_line(row.get("decision")))
+else:
+    print("notlive")
+' "$id" 2>"$TMPDIR_BASE_VAL/decisions-json.err"); then
+            verdict=$(printf '%s\n' "$parsed" | sed -n '1p')
+            case "$verdict" in
+                live)
+                    subject=$(printf '%s\n' "$parsed" | sed -n '3p')
+                    decision_text=$(printf '%s\n' "$parsed" | sed -n '4p')
+                    ;;
+                unread)
+                    detail=$(printf '%s\n' "$parsed" | sed -n '2p')
+                    verdict="unread ${detail:-decisions JSON did not parse}"
+                    ;;
+                notlive) ;;
+                *) verdict="unread decisions JSON did not parse" ;;
+            esac
+        else
+            rc=$?
+            stderr_line=$(sed -n '$p' "$TMPDIR_BASE_VAL/decisions-json.err")
+            verdict="unread exit $rc: ${stderr_line:-JSON parser failed}"
+        fi
     fi
     _DECISION_READS+="${id}"$'\t'"${verdict}"$'\n'
+    _DECISION_SUBJECTS+="${id}"$'\t'"${subject}"$'\n'
+    _DECISION_TEXTS+="${id}"$'\t'"${decision_text}"$'\n'
     _DECISION_VERDICT="$verdict"
+    _DECISION_SUBJECT="$subject"
+    _DECISION_TEXT="$decision_text"
 }
 
 # New single-doc plans carry either the canonical Execution Strategy YAML or
@@ -1576,6 +1646,7 @@ fi
 # operator grant. Only rows the plan writes count: Files to Modify, File
 # Ownership Map, and task surfaces. A path cited in prose writes nothing.
 python_row_gate_date="2026-09-16"
+grant_scope_gate_date="2026-09-27"
 check_python_rows_file() {
     local file="$1" label="$2"
     local rows surfaces
@@ -1594,8 +1665,10 @@ check_python_rows_file() {
         | grep -oE "cli/src/fno/[^]'\", ]*\.py" | sort -u || true)
     [[ -z "$rows" && -z "$surfaces" ]] && return 0
 
-    local created findings=()
+    local created findings=() scope_findings=()
     created=$(_plan_created_date "$file")
+    local node
+    node=$(_plan_node_id "$file")
     local has_crates_row=0
     awk -F'|' '
         /^##+[[:space:]]+(Files to Modify|File Ownership Map)[[:space:]]*$/ { t=1; next }
@@ -1628,23 +1701,67 @@ check_python_rows_file() {
                 (( has_crates_row )) || findings+=("$path is a Port, but no crates/ row in the table names where it lands") ;;
             delete) ;;
             grant)
-                id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
-                if [[ -z "$id" ]]; then
-                    findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                local cited_ids cited_id decision_verdict unread_id="" unread_detail=""
+                local scope_approved=0 has_live=0 scope_detail="" scope_node="" scope_node_arg="" scope_size=""
+                local live_ids="" notlive_ids="" first_notlive_id=""
+                cited_ids=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | awk '!seen[$0]++' || true)
+                id=$(printf '%s\n' "$cited_ids" | sed -n 1p)
+                declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
+                scope_size="${declared#+}"
+                [[ -n "$scope_size" ]] || scope_size="N"
+                scope_node="$node"
+                scope_node_arg="$node"
+                if [[ -z "$node" ]]; then
+                    scope_node="this plan's node (the frontmatter names none)"
+                    scope_node_arg="<node-id>"
+                fi
+                if [[ -z "$cited_ids" ]]; then
+                    findings+=("$path is a Grant, but no decision id reads no LIVE line in fno backlog decisions <id>")
                 else
-                    local decision_verdict decision_detail
-                    _decision_read "$id"
-                    decision_verdict="$_DECISION_VERDICT"
-                    case "$decision_verdict" in
-                        live) ;;
-                        notlive)
-                            findings+=("$path is a Grant, but $id reads no LIVE line in fno backlog decisions $id")
-                            ;;
-                        unread\ *)
-                            decision_detail="${decision_verdict#unread }"
-                            findings+=("$path is a Grant, but fno backlog decisions $id could not be read ($decision_detail) - re-run; this is not a verdict on the ruling")
-                            ;;
-                    esac
+                    while IFS= read -r cited_id; do
+                        [[ -z "$cited_id" ]] && continue
+                        _decision_read "$cited_id"
+                        decision_verdict="$_DECISION_VERDICT"
+                        case "$decision_verdict" in
+                            live)
+                                live_ids+="${live_ids:+ }$cited_id"
+                                has_live=1
+                                if [[ -n "$node" && "$_DECISION_SUBJECT" == "$node" ]] \
+                                    || [[ -n "$node" && " $_DECISION_TEXT " =~ [^a-z0-9-]"$node"[^a-z0-9-] ]] \
+                                    || [[ "$_DECISION_TEXT" == *"$path"* ]]; then
+                                    scope_approved=1
+                                fi
+                                ;;
+                            notlive)
+                                notlive_ids+="${notlive_ids:+ }$cited_id"
+                                [[ -n "$first_notlive_id" ]] || first_notlive_id="$cited_id"
+                                ;;
+                            unread\ *)
+                                if [[ -z "$unread_id" ]]; then
+                                    unread_id="$cited_id"
+                                    unread_detail="${decision_verdict#unread }"
+                                fi
+                                ;;
+                        esac
+                    done <<< "$cited_ids"
+                    if (( ! scope_approved )); then
+                        if [[ -n "$unread_id" ]]; then
+                            findings+=("$path is a Grant, but fno backlog decisions $unread_id could not be read ($unread_detail) - re-run; this is not a verdict on the ruling")
+                        elif (( has_live )); then
+                            for cited_id in $live_ids; do
+                                [[ -z "$scope_detail" ]] || scope_detail+="; "
+                                scope_detail+="$cited_id names neither $scope_node nor $path"
+                            done
+                            for cited_id in $notlive_ids; do
+                                [[ -z "$scope_detail" ]] || scope_detail+="; "
+                                scope_detail+="$cited_id reads no LIVE line"
+                            done
+                            scope_findings+=("$path is a Grant, but no ruling it cites approves this change: $scope_detail. A law that allows repairs in general approves none by itself. Cite the ruling that approves this repair: a live decision whose subject is $scope_node or whose text names $path. A king records one with: fno inbox decide $scope_node_arg \"approve the +$scope_size repair to $path\"")
+                        elif [[ -n "$first_notlive_id" ]]; then
+                            cited_id="$first_notlive_id"
+                            findings+=("$path is a Grant, but $cited_id reads no LIVE line in fno backlog decisions $cited_id")
+                        fi
+                    fi
                 fi
                 declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
                 if [[ -z "$declared" ]]; then
@@ -1653,7 +1770,7 @@ check_python_rows_file() {
                     grant_total=$((grant_total + ${declared#+}))
                 fi ;;
             *)
-                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX +N naming a live operator ruling and the added lines it covers, or move the change to crates/") ;;
+                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX +N citing the live ruling that approves this change (its subject is this plan's node, or its text names this file), or move the change to crates/") ;;
         esac
     done <<< "$rows"
     if (( grant_total > grant_budget )); then
@@ -1676,6 +1793,15 @@ check_python_rows_file() {
             error "$label: $f"
         else
             warn "$label: $f (created $created, not after the $python_row_gate_date gate)"
+        fi
+    done
+    for f in ${scope_findings[@]+"${scope_findings[@]}"}; do
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            error "$label: $f (and no readable created: date to tell this plan from a pre-gate one)"
+        elif [[ "$created" > "$grant_scope_gate_date" ]]; then
+            error "$label: $f"
+        else
+            warn "$label: $f (created $created, not after the $grant_scope_gate_date gate)"
         fi
     done
 }

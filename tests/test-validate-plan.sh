@@ -1047,31 +1047,52 @@ else
     fail "AC11d: expected a clean section: $NNPY_OUT"
 fi
 
-# The stub fno for the Grant cases: LIVE line for d-1234abcd, the
-# no-decision line for any other id, real fno for every other argv.
+# The stub carries the decisions fields used by the Grant gate. Its plain-text
+# responses remain available to callers that have not moved to --json yet.
 REAL_FNO="$(command -v fno || true)"
+export REAL_FNO
 STUBBIN="$TMPDIR_BASE/stubbin"
 mkdir -p "$STUBBIN"
-{
-    echo '#!/bin/bash'
-    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
-    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
-    echo '    exit 0'
-    echo 'fi'
-    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then'
-    echo '    echo "no decision carries it"'
-    echo '    exit 0'
-    echo 'fi'
-    echo 'if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then'
-    echo '    echo 30'
-    echo '    exit 0'
-    echo 'fi'
-    if [[ -n "$REAL_FNO" ]]; then
-        printf 'exec %q "$@"\n' "$REAL_FNO"
-    else
-        echo 'exit 3'
+cat > "$STUBBIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    decision_id="${3:-}"
+    if [[ "${4:-}" == "--json" ]]; then
+        case "$decision_id" in
+            d-1234abcd)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-1234abcd","decision":"The ruling approves cli/src/fno/mail/cli.py and cli/src/fno/mail/send.py.","subject":"new-code-language","lifecycle":"live"}]}' ;;
+            d-b6cc1a2a)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-b6cc1a2a","decision":"All new code lands in Rust under crates. No new Python in cli/src/fno. Existing Python is ported, never extended.","subject":"new-code-language","lifecycle":"live"}]}' ;;
+            d-a9cddc93)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-a9cddc93","decision":"A king may approve a repair to existing cli/src/fno Python that fixes a blocking bug.","subject":"python-repair","lifecycle":"live"}]}' ;;
+            d-7e57a11a)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-7e57a11a","decision":"approve the +2 repair","subject":"x-a1b2","lifecycle":"live"}]}' ;;
+            d-5ca1ab1e)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-5ca1ab1e","decision":"approve the +2 repair","subject":"x-a1b2","lifecycle":"expired"}]}' ;;
+            d-0dd0beef)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-0dd0beef","decision":"approve the repair for x-a1b2c","subject":"x-ffff","lifecycle":"live"}]}' ;;
+            d-0b5c0b5c)
+                printf '%s\n' '{"decisions":[{"decision_id":"d-0b5c0b5c","decision":"approve the +2 repair","subject":"x-a1b2","lifecycle":"unknown"}]}' ;;
+            *) printf '%s\n' '{"decisions":[]}' ;;
+        esac
+        exit 0
     fi
-} > "$STUBBIN/fno"
+    case "$decision_id" in
+        d-1234abcd|d-b6cc1a2a|d-a9cddc93|d-7e57a11a|d-0dd0beef)
+            printf 'LIVE  LAW  %s  2026-09-12T00:00:00Z  stub  stub\n' "$decision_id" ;;
+        d-5ca1ab1e) echo "EXPIRED  COORD  $decision_id  2026-09-12T00:00:00Z  x-a1b2  stub" ;;
+        d-0b5c0b5c) echo "UNKNOWN  COORD  $decision_id  2026-09-12T00:00:00Z  x-a1b2  stub" ;;
+        *) echo "no decision carries it" ;;
+    esac
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+if [[ -n "${REAL_FNO:-}" ]]; then exec "$REAL_FNO" "$@"; fi
+exit 3
+STUB
 chmod +x "$STUBBIN/fno"
 
 # AC11e (AC5-HP): Grant naming a live ruling -> nothing.
@@ -1117,6 +1138,116 @@ if grep -q "d-9999abcd" <<< "$NNPY_OUT" && grep -q "fno backlog decisions d-9999
     pass "AC11f: Grant without a LIVE ruling errors naming the id and the read"
 else
     fail "AC11f: expected the Grant ERROR: $NNPY_OUT"
+fi
+
+# AC1-ERR: a live general law does not approve this node or file.
+PLAN_SCOPE_1="$TMPDIR_BASE/nnpy_scope_1.md"
+cat > "$PLAN_SCOPE_1" <<'EOF'
+---
+claims: x-a1b2
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-b6cc1a2a +2 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_1" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "d-b6cc1a2a" <<< "$NNPY_OUT" \
+    && grep -q "x-a1b2" <<< "$NNPY_OUT" \
+    && grep -q "cli/src/fno/mail/cli.py" <<< "$NNPY_OUT" \
+    && grep -q "fno inbox decide" <<< "$NNPY_OUT"; then
+    pass "AC1-ERR: a live general law does not approve a file grant"
+else
+    fail "AC1-ERR: expected the scoped Grant ERROR: $NNPY_OUT"
+fi
+
+# AC2-ERR: the general repair law permits no individual change by itself.
+PLAN_SCOPE_2="$TMPDIR_BASE/nnpy_scope_2.md"
+sed 's/Grant d-b6cc1a2a/Grant d-a9cddc93/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_2"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_2" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "d-a9cddc93" <<< "$NNPY_OUT" \
+    && grep -q "x-a1b2" <<< "$NNPY_OUT" \
+    && grep -q "cli/src/fno/mail/cli.py" <<< "$NNPY_OUT"; then
+    pass "AC2-ERR: a general repair law does not approve a file grant"
+else
+    fail "AC2-ERR: expected the scoped Grant ERROR: $NNPY_OUT"
+fi
+
+# AC3-HP: a live ruling whose subject is the plan node approves the repair.
+PLAN_SCOPE_3="$TMPDIR_BASE/nnpy_scope_3.md"
+sed 's/Grant d-b6cc1a2a/Grant d-7e57a11a/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_3"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_3" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC3-HP: a live node-scoped ruling approves the repair"
+else
+    fail "AC3-HP: expected a clean No New Python section: $NNPY_OUT"
+fi
+
+# AC4-HP: every cited id is read, and a valid approval beside a general law passes.
+PLAN_SCOPE_4="$TMPDIR_BASE/nnpy_scope_4.md"
+sed 's/Grant d-b6cc1a2a +2/Grant d-a9cddc93 (king ruling d-7e57a11a) +2/' \
+    "$PLAN_SCOPE_1" > "$PLAN_SCOPE_4"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_4" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC4-HP: a cited approval beside a general law passes"
+else
+    fail "AC4-HP: expected a clean No New Python section: $NNPY_OUT"
+fi
+
+# AC6-ERR: a longer node id in the ruling text is not a whole-node match.
+PLAN_SCOPE_6="$TMPDIR_BASE/nnpy_scope_6.md"
+sed 's/Grant d-b6cc1a2a/Grant d-0dd0beef/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_6"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_6" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "d-0dd0beef" <<< "$NNPY_OUT" \
+    && grep -q "names neither x-a1b2 nor cli/src/fno/mail/cli.py" <<< "$NNPY_OUT"; then
+    pass "AC6-ERR: a longer node id does not approve this plan"
+else
+    fail "AC6-ERR: expected the whole-node scope ERROR: $NNPY_OUT"
+fi
+
+# AC7-EDGE: a plan created before the scope gate warns instead of erroring.
+PLAN_SCOPE_7="$TMPDIR_BASE/nnpy_scope_7.md"
+sed 's/created: 2099-01-01/created: 2026-09-26/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_7"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_7" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "WARN:.*d-b6cc1a2a" <<< "$NNPY_OUT" \
+    && grep -q "created 2026-09-26" <<< "$NNPY_OUT" \
+    && ! grep -q "ERROR:.*d-b6cc1a2a" <<< "$NNPY_OUT"; then
+    pass "AC7-EDGE: a pre-gate plan warns with its created date"
+else
+    fail "AC7-EDGE: expected a dated scope WARN: $NNPY_OUT"
+fi
+
+# AC8-EDGE: an expired approval retains the existing no-LIVE finding.
+PLAN_SCOPE_8="$TMPDIR_BASE/nnpy_scope_8.md"
+sed 's/Grant d-b6cc1a2a/Grant d-5ca1ab1e/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_8"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_8" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "d-5ca1ab1e reads no LIVE line" <<< "$NNPY_OUT" \
+    && ! grep -q "no ruling it cites approves" <<< "$NNPY_OUT"; then
+    pass "AC8-EDGE: an expired ruling remains a no-LIVE finding"
+else
+    fail "AC8-EDGE: expected the no-LIVE finding: $NNPY_OUT"
+fi
+
+# AC11-EDGE: an unknown lifecycle means the decision read was inconclusive.
+PLAN_SCOPE_11="$TMPDIR_BASE/nnpy_scope_11.md"
+sed 's/Grant d-b6cc1a2a/Grant d-0b5c0b5c/' "$PLAN_SCOPE_1" > "$PLAN_SCOPE_11"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_SCOPE_11" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "d-0b5c0b5c could not be read (lifecycle unknown" <<< "$NNPY_OUT" \
+    && ! grep -q "reads no LIVE line" <<< "$NNPY_OUT"; then
+    pass "AC11-EDGE: an unknown decision lifecycle is reported unread"
+else
+    fail "AC11-EDGE: expected the unread finding: $NNPY_OUT"
 fi
 
 # AC11g (AC6-ERR): task surface naming a Python path with no table row.
@@ -1331,9 +1462,15 @@ STUB_FNO_SLOW="$STUB_FNO_SLOW_DIR/fno"
 cat > "$STUB_FNO_SLOW" <<'STUB'
 #!/bin/bash
 if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then
-    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
-    sleep 0.3
-    echo "    rationale: stub"
+    if [[ "${4:-}" == "--json" ]]; then
+        printf '%s' '{"decisions":[{"decision_id":"d-1234abcd",'
+        sleep 0.3
+        printf '%s\n' '"decision":"The ruling approves cli/src/fno/mail/cli.py and cli/src/fno/mail/send.py.","subject":"new-code-language","lifecycle":"live"}]}'
+    else
+        echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+        sleep 0.3
+        echo "    rationale: stub"
+    fi
     exit 0
 fi
 if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
@@ -1411,7 +1548,11 @@ cat > "$STUB_FNO_CACHE" <<'STUB'
 #!/bin/bash
 if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
     printf '%s\n' "${3:-}" >> "$DECISION_LOG"
-    echo "LIVE  LAW  ${3:-}  2026-09-12T00:00:00Z  new-code-language  stub"
+    if [[ "${4:-}" == "--json" ]]; then
+        printf '%s\n' '{"decisions":[{"decision_id":"d-1234abcd","decision":"The ruling approves cli/src/fno/mail/cli.py and cli/src/fno/mail/send.py.","subject":"new-code-language","lifecycle":"live"}]}'
+    else
+        echo "LIVE  LAW  ${3:-}  2026-09-12T00:00:00Z  new-code-language  stub"
+    fi
     exit 0
 fi
 if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
@@ -1449,7 +1590,11 @@ STUB_FNO_BUDGET="$STUB_FNO_BUDGET_DIR/fno"
 cat > "$STUB_FNO_BUDGET" <<'STUB'
 #!/bin/bash
 if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
-    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    if [[ "${4:-}" == "--json" ]]; then
+        printf '%s\n' '{"decisions":[{"decision_id":"d-1234abcd","decision":"The ruling approves cli/src/fno/mail/cli.py and cli/src/fno/mail/send.py.","subject":"new-code-language","lifecycle":"live"}]}'
+    else
+        echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    fi
     exit 0
 fi
 if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
@@ -1616,14 +1761,18 @@ fi
 # AC12i: a missing config key falls back to 30, so the gate still bites.
 FAILBIN="$TMPDIR_BASE/failbin"
 mkdir -p "$FAILBIN"
-{
-    echo '#!/bin/bash'
-    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
-    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
-    echo '    exit 0'
-    echo 'fi'
-    echo 'exit 1'
-} > "$FAILBIN/fno"
+cat > "$FAILBIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then
+    if [[ "${4:-}" == "--json" ]]; then
+        printf '%s\n' '{"decisions":[{"decision_id":"d-1234abcd","decision":"The ruling approves cli/src/fno/mail/cli.py and cli/src/fno/mail/send.py.","subject":"new-code-language","lifecycle":"live"}]}'
+    else
+        echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    fi
+    exit 0
+fi
+exit 1
+STUB
 chmod +x "$FAILBIN/fno"
 PLAN_BIND_I="$TMPDIR_BASE/20990101-binding-i.md"
 sed 's/Grant d-1234abcd +101/Grant d-1234abcd +31/' "$PLAN_BIND_F" > "$PLAN_BIND_I"
