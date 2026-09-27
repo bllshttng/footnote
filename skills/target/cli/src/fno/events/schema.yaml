@@ -3582,7 +3582,7 @@ event_types:
           description: "The Stop decision after continuation arbitration."
         class:
           type: string
-          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow]
+          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow, foreign-manifest]
           description: "Typed reason class for the decision."
         correlation_id:
           type: string

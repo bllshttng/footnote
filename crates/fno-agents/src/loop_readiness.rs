@@ -303,7 +303,19 @@ fn stop_leg_from_events(events: &str, harness: &str, session: &str) -> Readiness
         .and_then(Value::as_str)
         .unwrap_or("");
     let complete = data.get("measurement_complete").and_then(Value::as_bool) == Some(true);
-    if !complete || !matches!(entry_state, "startup" | "resume" | "clear" | "post_compact") {
+    // A slow startup producer times out and lands in measurement_errors: the
+    // snapshot is then a MEASURED partial, not an unobserved hook. Blocking
+    // crown admission on it starved a fresh heir for its whole session life.
+    let errors: Vec<&str> = data
+        .get("measurement_errors")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let measured_partial =
+        !complete && !errors.is_empty() && errors.iter().all(|e| e.contains("timed out after"));
+    if (!complete && !measured_partial)
+        || !matches!(entry_state, "startup" | "resume" | "clear" | "post_compact")
+    {
         return ReadinessLeg::blocked(format!(
             "session-hook-unobserved: newest context snapshot for {session} is incomplete or has no lifecycle marker"
         ));
@@ -589,5 +601,52 @@ mod tests {
         let events = format!("{snapshot}\n{stop}\n");
         let refreshed = stop_leg_from_events(&events, "codex", "thread-a");
         assert!(refreshed.state.is_ready());
+    }
+
+    /// A slow startup producer times out and lands in
+    /// measurement_errors; the snapshot is a MEASURED partial, not an
+    /// unobserved hook, and must not block crown admission.
+    #[test]
+    fn a_producer_timeout_is_a_measured_partial_not_an_unobserved_hook() {
+        let snapshot = serde_json::json!({
+            "ts": "2026-09-27T10:00:00Z",
+            "type": "context_snapshot",
+            "source": "hook",
+            "data": {
+                "session_id": "thread-a",
+                "harness": "claude",
+                "entry_state": "startup",
+                "measurement_complete": false,
+                "measurement_errors": ["worktree-peers-session-start: timed out after 45s"]
+            }
+        });
+        let stop = serde_json::json!({
+            "ts": "2026-09-27T10:01:00Z",
+            "type": "stop_decision",
+            "source": "hook",
+            "data": {
+                "session_id": "thread-a",
+                "correlation_id": "stop:thread-a:turn-1"
+            }
+        });
+        let events = format!("{snapshot}\n{stop}\n");
+        let leg = stop_leg_from_events(&events, "claude", "thread-a");
+        assert!(leg.state.is_ready(), "{:?}", leg.reason);
+
+        // A non-timeout producer error is still an incomplete snapshot.
+        let crashed = serde_json::json!({
+            "ts": "2026-09-27T10:00:00Z",
+            "type": "context_snapshot",
+            "source": "hook",
+            "data": {
+                "session_id": "thread-a",
+                "harness": "claude",
+                "entry_state": "startup",
+                "measurement_complete": false,
+                "measurement_errors": ["codex-machine: exited 1"]
+            }
+        });
+        let leg = stop_leg_from_events(&format!("{crashed}\n"), "claude", "thread-a");
+        assert_eq!(leg.state, LegState::Blocked);
     }
 }
