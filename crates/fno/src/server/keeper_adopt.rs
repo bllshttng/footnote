@@ -359,9 +359,11 @@ impl Core {
     /// - its name matches `^portal[0-9]+$` (the old restore naming);
     /// - its argv carried `FNO_PORTAL_HELD=` but no portal entry claims it;
     /// - its argv carried `FNO_VIEW_TRANSIENT=` (a killed caller's view);
-    /// - it wears a worker name whose registry row is gone or hosts no
-    ///   pane (a thread row's shell stand-in - the row's resume door is
-    ///   `fno agents resume`, never the shell);
+    /// - it wears a worker name whose registry row is live and paneless
+    ///   (a thread row's shell stand-in - the row's resume door is
+    ///   `fno agents resume`, never the shell). A name no row answers is
+    ///   absence, never `gone`: a `mux pane run --worker` pane has no row
+    ///   by design, and absence must not kill the child its keeper holds;
     /// and a pane-substrate worker hold (its row hosts a pane) is kept on
     /// purpose: it is that worker's resume door, not a portal. Unknown
     /// process state never prunes.
@@ -415,16 +417,19 @@ impl Core {
             // from the file: the off-loop snapshot is empty at startup, and
             // an empty read must mean "unknown", never "gone" (it would eat
             // every held worker's placeholder). `None` (unreadable) is
-            // unknown too.
+            // unknown too. The arm fires on a POSITIVE record only: at
+            // least one row answers the name and none hosts a pane. A name
+            // no row answers is absence, never `gone` - a `mux pane run
+            // --worker` pane has no registry row by design, and pruning on
+            // absence would kill the child its keeper holds.
             let registry = crate::restore_gate::restore_registry_rows();
-            let named_row_gone = entry.name.as_deref().is_some_and(|n| {
+            let named_row_paneless = entry.name.as_deref().is_some_and(|n| {
                 registry.as_deref().is_some_and(|rows| {
-                    rows.iter()
-                        .find(|a| a.name == n)
-                        .is_none_or(|row| row.mux.is_none())
+                    let named: Vec<_> = rows.iter().filter(|a| a.name == n).collect();
+                    !named.is_empty() && named.iter().all(|a| a.mux.is_none())
                 })
             });
-            if !(portal_number || orphan_hold || transient || named_row_gone) {
+            if !(portal_number || orphan_hold || transient || named_row_paneless) {
                 continue;
             }
             let why = if portal_number {

@@ -188,6 +188,26 @@ fn restore_prunes_the_old_stand_in_shapes() {
 }
 
 #[test]
+fn a_pane_worker_named_after_no_row_is_never_pruned() {
+    // A `mux pane run --worker foo` pane has no registry row by design:
+    // its name matching nothing is absence, not a gone row. The prune
+    // keeps it, and the child its keeper holds, alive.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let worker = core.spawn_pane(24, 40, "/tmp/seen").expect("pane worker");
+    core.panes.get_mut(&worker).unwrap().name = Some("proof-pane".into());
+    let _rows = crate::restore_gate::RestoreRegistryRowsGuard;
+    crate::restore_gate::set_restore_registry_rows(vec![bg_row("proof-claude", "/tmp/seen", None)]);
+
+    core.prune_portal_standins();
+
+    assert!(
+        core.panes.contains_key(&worker),
+        "a pane whose name no row answers is kept"
+    );
+}
+
+#[test]
 fn a_pane_substrate_row_shell_is_kept_and_a_leftover_view_is_reaped() {
     // A worker hold whose row hosts a pane is that worker's resume door,
     // kept on purpose. An unplaced adopted leftover that is a portal
