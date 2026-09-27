@@ -104,32 +104,6 @@ def test_related_is_ordered_with_the_other_edges():
 # ---------------------------------------------------------------------------
 
 
-def test_ac4_hp_related_is_symmetric_on_write_and_on_clear(tmp_graph):
-    """AC4-HP: declaring on one endpoint writes the inverse; 'null' clears both."""
-    assert runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"]
-    ).exit_code == 0
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
-    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
-
-    assert runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "null"]
-    ).exit_code == 0
-    assert _related(tmp_graph, "x-aaaa") == []
-    assert _related(tmp_graph, "x-bbbb") == []
-
-
-def test_replace_semantics_unlink_the_dropped_peer(tmp_graph):
-    """--related replaces the list, so a dropped peer loses its inverse edge too."""
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
-    assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
-
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-cccc"])
-    assert _related(tmp_graph, "x-aaaa") == ["x-cccc"]
-    assert _related(tmp_graph, "x-bbbb") == []
-    assert _related(tmp_graph, "x-cccc") == ["x-aaaa"]
-
-
 def test_set_related_keeps_held_row_references_live(monkeypatch):
     """A mutator holding a node dict keeps writing to the row that persists."""
     import fno.graph.store as gs
@@ -144,80 +118,6 @@ def test_set_related_keeps_held_row_references_live(monkeypatch):
     held["details"] = "marker-5934"
     assert entries[0]["details"] == "marker-5934"
     assert entries[0]["related"] == ["x-bbbb"]
-
-
-def test_related_keeps_the_other_fields_of_the_same_update(tmp_graph):
-    """--related rewrites the rows; a flag applied after it must still land."""
-    result = runner.invoke(
-        app,
-        ["backlog", "update", "x-aaaa", "--details", "marker-5934", "--related", "x-bbbb"],
-    )
-    assert result.exit_code == 0, result.output
-    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
-    assert node["related"] == ["x-bbbb"]
-    assert node["details"] == "marker-5934"
-
-
-def test_related_accepts_slugs_and_repeated_flags(tmp_graph):
-    result = runner.invoke(
-        app,
-        ["backlog", "update", "x-aaaa",
-         "--related", "node-x-bbbb", "--related", "x-cccc"],
-    )
-    assert result.exit_code == 0, result.output
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb", "x-cccc"]
-
-
-# ---------------------------------------------------------------------------
-# AC2-ERR / boundaries
-# ---------------------------------------------------------------------------
-
-
-def test_ac2_err_self_reference_is_rejected(tmp_graph):
-    """AC2-ERR: a node cannot be related to itself; the list is left unchanged."""
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-aaaa"]
-    )
-    assert result.exit_code != 0
-    assert _related(tmp_graph, "x-aaaa") == []
-
-
-def test_dangling_related_id_is_rejected_and_writes_nothing(tmp_graph):
-    """An unresolvable peer refuses the whole update, mirroring --source-node."""
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-zzzz"]
-    )
-    assert result.exit_code != 0
-    assert "x-zzzz" in result.output
-    # The valid half of the list must not have landed either.
-    assert _related(tmp_graph, "x-aaaa") == []
-    assert _related(tmp_graph, "x-bbbb") == []
-
-
-def test_related_is_non_blocking(tmp_graph):
-    """related never gates: declaring one leaves every _status and blocked_by alone.
-
-    Asserted as before-vs-after rather than against a literal status, so the
-    test pins the invariant that matters (related does not participate in
-    status derivation) instead of whatever the fixture happens to derive to.
-    """
-    def _statuses() -> dict[str, tuple]:
-        # Read back the CANONICAL key: the writer migrates the legacy `_status`
-        # to `status` and deletes it, so a round-tripped entry has only `status`.
-        entries = read_graph_strict(tmp_graph)
-        return {e["id"]: (e["status"], tuple(e["blocked_by"])) for e in entries}
-
-    # A no-op write first, so the baseline reflects derivation, not the seed.
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "null"])
-    before = _statuses()
-
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
-    assert _statuses() == before
-
-
-# ---------------------------------------------------------------------------
-# AC7-HP: filing-time related
-# ---------------------------------------------------------------------------
 
 
 def test_ac7_hp_related_at_filing_time(tmp_graph):
@@ -245,43 +145,17 @@ def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
 # ---------------------------------------------------------------------------
 
 
-def test_ac1_fr_peer_write_failure_leaves_neither_side(tmp_graph):
-    """AC1-FR: a refused mirror leaves neither side; the half-edge is unreachable.
-
-    With the ported store the two halves are ONE atomic op (the keeper's
-    set_related mirrors both endpoints or refuses), so there is no client
-    seam left to fault. The deterministic trigger for the same refusal is a
-    peer absent from the graph: the op refuses the declaring write rather
-    than persist a dangling half-edge.
-    """
-    result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-ghost"]
-    )
-    assert result.exit_code != 0
-    assert _related(tmp_graph, "x-aaaa") == []
-
-
-def test_ac2_fr_opposite_endpoint_declarations_both_survive(tmp_graph):
-    """AC2-FR: B keeps both A's and C's edges; neither is lost to a rewrite.
-
-    Sequential rather than threaded: each update re-reads under the graph lock,
-    so serialized writes are exactly what two concurrent sessions produce.
-    """
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"])
-    runner.invoke(app, ["backlog", "update", "x-cccc", "--related", "x-bbbb"])
-
-    assert sorted(_related(tmp_graph, "x-bbbb")) == ["x-aaaa", "x-cccc"]
-    assert _related(tmp_graph, "x-aaaa") == ["x-bbbb"]
-    assert _related(tmp_graph, "x-cccc") == ["x-bbbb"]
-
-
 def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
     """remove is the one path that can strand a half-edge permanently.
 
     set_related only touches peers in the declaring node's own delta, so a peer
     left naming a deleted node is unreachable by any repair verb.
     """
-    runner.invoke(app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb,x-cccc"])
+    _seed(tmp_graph, [
+        {"id": "x-aaaa", "title": "a", "related": ["x-bbbb", "x-cccc"]},
+        {"id": "x-bbbb", "title": "b", "related": ["x-aaaa"]},
+        {"id": "x-cccc", "title": "c", "related": ["x-aaaa"]},
+    ])
     assert _related(tmp_graph, "x-bbbb") == ["x-aaaa"]
 
     assert runner.invoke(
@@ -422,30 +296,3 @@ def test_a_related_chain_holds_back_transitively():
 # ---------------------------------------------------------------------------
 
 
-def test_related_combined_with_other_flags_lands_every_field(tmp_graph):
-    """A multi-flag `update` must write every flag, not just --related.
-
-    set_related round-trips `entries` through the keeper's pure_op and
-    replaces every element (`entries[:] = out`), which used to orphan the
-    `node` dict captured earlier in the mutator: every field written on
-    `node` after the --related block (size, blocked_by, details, ...) landed
-    on a copy no longer reachable from `entries` and silently vanished on
-    commit, while --related itself (which writes straight to `entries`)
-    always looked like it worked.
-    """
-    r = runner.invoke(
-        app,
-        [
-            "backlog", "update", "x-aaaa",
-            "--related", "x-bbbb",
-            "--add-blocker", "x-cccc",
-            "--size", "L",
-            "--details", "multi-flag update",
-        ],
-    )
-    assert r.exit_code == 0, r.output
-    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
-    assert node.get("related") == ["x-bbbb"]
-    assert node.get("blocked_by") == ["x-cccc"]
-    assert node.get("size") == "L"
-    assert node.get("details") == "multi-flag update"

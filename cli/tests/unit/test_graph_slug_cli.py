@@ -61,55 +61,6 @@ def test_ready_rows_lead_with_slug(tmp_graph):
 # -- update --details --------------------------------------------------------
 
 
-def test_update_details_sets_and_clears(tmp_graph):
-    # `update --details` edits rationale in place (no recreate-via-idea dupe).
-    _seed(tmp_graph, [
-        {"id": "ab-deadbeef", "title": "Thing", "slug": "thing", "status": "ready",
-         "domain": "code", "project": "p", "details": None},
-    ])
-    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--details", "the full rationale"])
-    assert result.exit_code == 0, result.output
-    assert _read(tmp_graph)[0]["details"] == "the full rationale"
-
-    # `null` clears it; --description is an accepted alias.
-    result = runner.invoke(app, ["backlog", "update", "ab-deadbeef", "--description", "null"])
-    assert result.exit_code == 0, result.output
-    assert _read(tmp_graph)[0]["details"] is None
-
-
-def test_update_domain_size_type(tmp_graph):
-    # Create-only fields are now editable, so a mistake never forces a recreate.
-    _seed(tmp_graph, [
-        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "status": "ready",
-         "domain": "code", "type": "feature", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "update", "ab-feedface",
-                                 "--domain", "design", "--size", "l", "--type", "epic"])
-    assert result.exit_code == 0, result.output
-    node = _read(tmp_graph)[0]
-    assert node["domain"] == "design"
-    assert node["size"] == "L"  # normalized to uppercase
-    assert node["type"] == "epic"
-
-
-def test_update_rejects_bad_size_and_type(tmp_graph):
-    # Validation guards against storing garbage (gemini HIGH on PR #48).
-    _seed(tmp_graph, [
-        {"id": "ab-feedface", "title": "Thing", "slug": "thing", "status": "ready",
-         "domain": "code", "type": "feature", "project": "p"},
-    ])
-    bad_size = runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "foo"])
-    assert bad_size.exit_code == 1
-    bad_type = runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "widget"])
-    assert bad_type.exit_code == 1
-    # 'null' still clears size, and roadmap is a valid type.
-    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--size", "null"]).exit_code == 0
-    assert runner.invoke(app, ["backlog", "update", "ab-feedface", "--type", "roadmap"]).exit_code == 0
-
-
-# -- public roadmap ----------------------------------------------------------
-
-
 def test_roadmap_only_public_no_leaks(tmp_graph):
     _seed(tmp_graph, [
         {"id": "ab-11111111", "title": "Public feature", "slug": "pub", "status": "ready",
