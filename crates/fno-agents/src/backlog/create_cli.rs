@@ -409,8 +409,44 @@ fn session_provenance(
         None,
         &crate::paths::AgentsHome::from_env(),
     );
-    let session = ident.session_id.clone().filter(|s| !s.trim().is_empty());
-    let harness = ident.harness.clone().filter(|s| !s.trim().is_empty());
+    let mut session = ident.session_id.clone().filter(|s| !s.trim().is_empty());
+    let mut harness = ident.harness.clone().filter(|s| !s.trim().is_empty());
+    if session.is_none() {
+        // The Python identity's vendor fallback: a lone ambient marker names
+        // its harness and session without proof (single family, one value).
+        // Two families or two ids of one family stay unresolved.
+        let markers: [(&str, &str); 6] = [
+            ("CODEX_THREAD_ID", "codex"),
+            ("CLAUDE_CODE_SESSION_ID", "claude"),
+            ("CODEX_SESSION_ID", "codex"),
+            ("GEMINI_SESSION_ID", "gemini"),
+            ("OPENCODE_SESSION_ID", "opencode"),
+            ("CLAUDE_SESSION_ID", "claude"),
+        ];
+        let mut winner: Option<(&str, String)> = None;
+        let mut conflicted = false;
+        for (marker, family) in markers {
+            let Some(value) = get(marker)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            if winner.is_none() {
+                winner = Some((family, value));
+            } else if let Some((f, v)) = &winner {
+                if f != &family || v != &value {
+                    conflicted = true;
+                }
+            }
+        }
+        if !conflicted {
+            if let Some((family, value)) = winner {
+                harness = Some(family.to_string());
+                session = Some(value);
+            }
+        }
+    }
 
     let mut source_node_id: Option<String> = None;
     let mut source_plan_path: Option<String> = None;
@@ -797,145 +833,164 @@ fn create(args: &AddArgs) -> Result<(), Refusal> {
         .or_else(|| detect_project(&PathBuf::from(&resolved_cwd)));
 
     // One snapshot read feeds the fail-closed assertions, the mint, and the
-    // mutation: an unresolvable assertion must leave the graph untouched.
+    // mutation: an unresolvable assertion must leave the graph untouched. The
+    // write cycle retries on conflict the way the keeper's op loop does: a
+    // peer publish between this read and the lock re-runs the whole decision
+    // body (mint, rollup resolution, related edges) over a fresh snapshot,
+    // so two concurrent filings both persist.
     let graph = super::settings::graph_path();
-    let base_version = crate::graph_store::base_version(&graph)
-        .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
-    let rows = crate::graph_store::read_rows(&graph)
-        .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
-    let known_ids: std::collections::BTreeSet<String> = rows
-        .iter()
-        .filter_map(|r| r.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect();
+    let mut retry = 0u8;
+    let (minted, node, rollup_lines, dropped, source_node_id) = loop {
+        retry += 1;
+        let base_version = crate::graph_store::base_version(&graph)
+            .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+        let rows = crate::graph_store::read_rows(&graph)
+            .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
+        let known_ids: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
 
-    // Fail closed BEFORE minting: an unresolvable assertion names the flag.
-    let resolved_source_node: Option<String> = match &args.source_node {
-        Some(token) => {
-            let resolved = node_ref::resolve_asserted_id(token, &rows, "--source-node", None)
-                .map_err(|e| refused(e.0, e.1))?;
-            Some(resolved)
-        }
-        None => None,
-    };
+        // Fail closed BEFORE minting: an unresolvable assertion names the flag.
+        let resolved_source_node: Option<String> = match &args.source_node {
+            Some(token) => {
+                let resolved = node_ref::resolve_asserted_id(token, &rows, "--source-node", None)
+                    .map_err(|e| refused(e.0, e.1))?;
+                Some(resolved)
+            }
+            None => None,
+        };
 
-    let minted = mint_node_id(&known_ids).map_err(|e| refused(e, 1))?;
+        let minted = mint_node_id(&known_ids).map_err(|e| refused(e, 1))?;
 
-    // Build the node (the builder's field set, byte-shaped like Python's).
-    let now = crate::graph_store::now_isoformat();
-    let provenance =
-        session_provenance(&cwd_root, resolved_source_node.as_deref(), Some(&known_ids));
-    let (source_session_id, source_harness, source_cwd, source_node_id, source_plan_path, dropped) =
-        provenance;
-    let mut node = json!({
-        "id": minted,
-        "parent": args.parent,
-        "tags": dedup_tags,
-        "title": args.title,
-        "type": args.type_,
-        "project": resolved_project,
-        "cwd": resolved_cwd,
-        // Plan-less birth: the derived status the Python write stored.
-        "status": "idea",
-        "priority": args.priority,
-        "blocks_everything": args.blocks_everything,
-        "difficulty": difficulty,
-        "difficulty_history": [{"value": difficulty, "source": "filed", "ts": now}],
-        "domain": args.domain,
-        "blocked_by": parse_blocker_list(args.blocked_by.as_deref()),
-        "session_id": Value::Null,
-        "locked_at": Value::Null,
-        "completed_at": Value::Null,
-        "has_brief": false,
-        "roadmap_id": args.roadmap_id,
-        "vision_path": args.vision_path,
-        "details": details,
-        "size": args.size,
-        "batch": args.batch,
-        "cost_usd": Value::Null,
-        "cost_sessions": [],
-        "plan_path": Value::Null,
-        "pr_number": Value::Null,
-        "pr_url": Value::Null,
-        "merge_status": Value::Null,
-        "created_at": now,
-        "source": Value::Null,
-        "source_kind": args.source_kind,
-        "source_project": Value::Null,
-        "source_inbox_msg": Value::Null,
-        "artifact_url": Value::Null,
-        "completion_note": Value::Null,
-        "source_session_id": source_session_id,
-        "source_harness": source_harness,
-        "source_cwd": source_cwd,
-        "source_node_id": source_node_id,
-        "source_plan_path": source_plan_path,
-        "request_origin": origin,
-        "origin_evidence": origin_evidence_ref,
-    });
+        // Build the node (the builder's field set, byte-shaped like Python's).
+        let now = crate::graph_store::now_isoformat();
+        let provenance =
+            session_provenance(&cwd_root, resolved_source_node.as_deref(), Some(&known_ids));
+        let (
+            source_session_id,
+            source_harness,
+            source_cwd,
+            source_node_id,
+            source_plan_path,
+            dropped,
+        ) = provenance;
+        let mut node = json!({
+            "id": minted,
+            "parent": args.parent,
+            "tags": dedup_tags,
+            "title": args.title,
+            "type": args.type_,
+            "project": resolved_project,
+            "cwd": resolved_cwd,
+            // Plan-less birth: the derived status the Python write stored.
+            "status": "idea",
+            "priority": args.priority,
+            "blocks_everything": args.blocks_everything,
+            "difficulty": difficulty,
+            "difficulty_history": [{"value": difficulty, "source": "filed", "ts": now}],
+            "domain": args.domain,
+            "blocked_by": parse_blocker_list(args.blocked_by.as_deref()),
+            "session_id": Value::Null,
+            "locked_at": Value::Null,
+            "completed_at": Value::Null,
+            "has_brief": false,
+            "roadmap_id": args.roadmap_id,
+            "vision_path": args.vision_path,
+            "details": details,
+            "size": args.size,
+            "batch": args.batch,
+            "cost_usd": Value::Null,
+            "cost_sessions": [],
+            "plan_path": Value::Null,
+            "pr_number": Value::Null,
+            "pr_url": Value::Null,
+            "merge_status": Value::Null,
+            "created_at": now,
+            "source": Value::Null,
+            "source_kind": args.source_kind,
+            "source_project": Value::Null,
+            "source_inbox_msg": Value::Null,
+            "artifact_url": Value::Null,
+            "completion_note": Value::Null,
+            "source_session_id": source_session_id,
+            "source_harness": source_harness,
+            "source_cwd": source_cwd,
+            "source_node_id": source_node_id,
+            "source_plan_path": source_plan_path,
+            "request_origin": origin,
+            "origin_evidence": origin_evidence_ref,
+        });
 
-    // Refuse a birth --parent that cannot hold the child; the scope and
-    // lenient pass-through cases are named in strand.birth_parent_refusal.
-    if let Some(parent) = &args.parent {
-        if let Some(message) = birth_parent_refusal(&rows, &node, parent) {
-            return Err(refused(message, 1));
-        }
-    }
-
-    // Rollup resolution reads the same snapshot the node was born into and
-    // its parent edge lands in the SAME write, so no window exists where the
-    // node is linked without a receipt. Strictly non-fatal: any failure
-    // degrades to the orphan line.
-    let mut working = rows.clone();
-    let rollup_lines: Vec<String>;
-    {
-        let mut entries = working.clone();
-        entries.push(node.clone());
-        let resolution = autolink::resolve(&node, &entries, None);
-        rollup_lines = autolink::receipt_lines(&resolution, &minted, &entries);
-        if matches!(resolution.kind, "linked" | "crown") {
-            if let Some(epic_id) = &resolution.epic_id {
-                // The edge lands on the row INSIDE the write, so the node
-                // never exists linked-without-receipt (or vice versa).
-                if let Some(obj) = entries.last_mut().and_then(Value::as_object_mut) {
-                    obj.insert("parent".into(), Value::String(epic_id.clone()));
-                }
-                if let Some(obj) = node.as_object_mut() {
-                    obj.insert("parent".into(), Value::String(epic_id.clone()));
-                }
+        // Refuse a birth --parent that cannot hold the child; the scope and
+        // lenient pass-through cases are named in strand.birth_parent_refusal.
+        if let Some(parent) = &args.parent {
+            if let Some(message) = birth_parent_refusal(&rows, &node, parent) {
+                return Err(refused(message, 1));
             }
         }
-        working = entries;
-    }
 
-    // The symmetric related edges, resolved against the mint's own snapshot
-    // (self-references refuse with the flag's name).
-    if !args.related.is_empty() {
-        let mut tokens: Vec<String> = Vec::new();
-        for token in parse_blocker_list_args(&args.related) {
-            let resolved =
-                node_ref::resolve_asserted_id(&token, &working, "--related", Some(&minted))
-                    .map_err(|e| refused(e.0, e.1))?;
-            tokens.push(resolved);
+        // Rollup resolution reads the same snapshot the node was born into and
+        // its parent edge lands in the SAME write, so no window exists where the
+        // node is linked without a receipt. Strictly non-fatal: any failure
+        // degrades to the orphan line.
+        let mut working = rows.clone();
+        let rollup_lines: Vec<String>;
+        {
+            let mut entries = working.clone();
+            entries.push(node.clone());
+            let resolution = autolink::resolve(&node, &entries, None);
+            rollup_lines = autolink::receipt_lines(&resolution, &minted, &entries);
+            if matches!(resolution.kind, "linked" | "crown") {
+                if let Some(epic_id) = &resolution.epic_id {
+                    // The edge lands on the row INSIDE the write, so the node
+                    // never exists linked-without-receipt (or vice versa).
+                    if let Some(obj) = entries.last_mut().and_then(Value::as_object_mut) {
+                        obj.insert("parent".into(), Value::String(epic_id.clone()));
+                    }
+                    if let Some(obj) = node.as_object_mut() {
+                        obj.insert("parent".into(), Value::String(epic_id.clone()));
+                    }
+                }
+            }
+            working = entries;
         }
-        let _ = crate::graph_keeper::set_related(&mut working, &minted, &tokens);
-    }
 
-    // The shared write pipeline recomputes statuses across the graph on
-    // every commit (a plan-less filing's stored status lands as idea), the
-    // same recompute commit_rows_via_store ran.
-    crate::graph_store::recompute_statuses_with_plan_rungs(&mut working, None);
-    crate::graph_store::locked_mutate(
-        &graph,
-        crate::graph_store::MutateInput {
-            entries: working,
-            canonical_path: None,
-            base_version,
-            plan_rungs: None,
-        },
-        crate::graph_store::DEFAULT_LOCK_TIMEOUT,
-    )
-    .map_err(|e| refused(format!("graph write failed: {e}"), 1))?;
+        // The symmetric related edges, resolved against the mint's own snapshot
+        // (self-references refuse with the flag's name).
+        if !args.related.is_empty() {
+            let mut tokens: Vec<String> = Vec::new();
+            for token in parse_blocker_list_args(&args.related) {
+                let resolved =
+                    node_ref::resolve_asserted_id(&token, &working, "--related", Some(&minted))
+                        .map_err(|e| refused(e.0, e.1))?;
+                tokens.push(resolved);
+            }
+            let _ = crate::graph_keeper::set_related(&mut working, &minted, &tokens);
+        }
+
+        // The shared write pipeline recomputes statuses across the graph on
+        // every commit (a plan-less filing's stored status lands as idea), the
+        // same recompute commit_rows_via_store ran.
+        crate::graph_store::recompute_statuses_with_plan_rungs(&mut working, None);
+        match crate::graph_store::locked_mutate(
+            &graph,
+            crate::graph_store::MutateInput {
+                entries: working,
+                canonical_path: None,
+                base_version,
+                plan_rungs: None,
+            },
+            crate::graph_store::DEFAULT_LOCK_TIMEOUT,
+        ) {
+            Ok(_) => break (minted, node, rollup_lines, dropped, source_node_id),
+            Err(crate::graph_store::StoreError::Conflict) if retry < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(refused(format!("graph write failed: {e}"), 1)),
+        }
+    };
 
     // The creation vote lands right after the write, before the receipts.
     if let Some(evidence) = &args.evidence {

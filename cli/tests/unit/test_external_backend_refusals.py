@@ -47,7 +47,7 @@ def test_every_live_verb_is_classified_exactly_once():
     # Positive controls - absence means the registry drifted and the census
     # must be re-pinned, not silently passed.
     labels = dict(_registry_labels())
-    assert getattr(labels["add"].callback, "_fno_tracker_owned", False)
+    assert getattr(labels["new"].callback, "_fno_tracker_owned", False)
     assert getattr(labels["get"].callback, "_fno_footnote_owned", False)
     assert tracker_owned > 10 and footnote_owned > 10
 
@@ -76,9 +76,9 @@ def test_tracker_owned_verbs_refuse_under_external(argv, tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
-    if argv[:2] == ["backlog", "update"]:
-        # The update leaf answers natively now; its guard rode along, so the
-        # refusal asserts at the binary under the same backend env.
+    if argv[:2] == ["backlog", "update"] or argv[:2] == ["backlog", "add"]:
+        # The update and add leaves answer natively now; their guard rode
+        # along, so the refusal asserts at the binary under the same env.
         from fno.rust_binary import find_dev_binary
 
         binary = find_dev_binary()

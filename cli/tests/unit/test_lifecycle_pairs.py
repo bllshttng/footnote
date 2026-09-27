@@ -78,8 +78,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         "an encounter is a thing that happened and cannot be edited or withdrawn",
     ),
     # -- existence transitions --
-    Pair("backlog", "add", "remove"),
-    Pair("backlog", "idea", "remove"),
     Pair("backlog", "new", "remove"),
     Pair("backlog", "intake", "remove"),
     # -- self-inverse: the same verb reverses itself --
