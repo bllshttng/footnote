@@ -525,26 +525,13 @@ def _ritual_timeout() -> float:
     return min(300.0, left - 10)
 
 
-#: A fleet gh-budget hold longer than this holds a granted merge fast
-#: instead of attempting it. Under a hold the gh shim refuses (or the
-#: subprocess is killed) after tens of seconds per call, and five queued
-#: grants then burn the whole merge slice at merge:execute with acted=0,
-#: starving every arm after merge.
-_GH_BUDGET_HOLD_SKIP_S = 10.0
-
-
 def _gh_budget_backoff_left() -> float:
-    """Seconds left on the fleet gh budget's local backoff; 0.0 when free.
-
-    The same status op pr/_quota reads. The budget protects the fleet, it
-    is not a stop, so an unreadable answer fail-opens to free.
-    """
+    """Seconds left on the fleet gh budget's backoff; 0.0 when free or unreadable."""
     try:
         from fno.rust_binary import verb_call
-
         answer = verb_call("fleet-incident", {"op": "status"}, timeout=5)
         return max(0.0, float((answer or {}).get("backoff_remaining_s") or 0))
-    except Exception:  # noqa: BLE001 - a dead budget reader never blocks a merge
+    except Exception:  # noqa: BLE001 - the budget protects the fleet, not the tick
         return 0.0
 
 
@@ -1332,14 +1319,9 @@ def run_execute_queue(
                 emit("pr_watch_skipped", {"pr": pr, "reason": why})
                 counts["budget" if why == "execute-budget" else "skipped"] += 1
                 continue
-            backoff_left = _gh_budget_backoff_left()
-            if backoff_left > _GH_BUDGET_HOLD_SKIP_S:
-                # Hold fast. No attempt, no retries bump, no store
-                # write; the durable grant comes back next tick, when the
-                # budget window has likely rolled over.
+            if (backoff_left := _gh_budget_backoff_left()) > 10.0:
                 _grant("held", pr, cand, grant_fields,
-                       reason=(f"gh budget held locally: backoff "
-                               f"{backoff_left:.0f}s left; merge not attempted"))
+                       reason=f"gh budget backoff {backoff_left:.0f}s left")
                 counts["held"] += 1
                 continue
             try:

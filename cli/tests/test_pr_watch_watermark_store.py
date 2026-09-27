@@ -155,27 +155,3 @@ class TestWatermarkStore:
         assert store.load()["owner/repo#9"]["last_seen_state"] == "MERGED"
         assert receipt.normalized
 
-    def test_persist_survives_a_removed_tmp_file(self, tmp_path, monkeypatch):
-        """A tmp file removed between write and replace aborts the
-        whole merge queue walk. Retry the persist once instead."""
-        import os as os_mod
-
-        from fno.pr_watch import _state as state_mod
-        from fno.pr_watch._state import WatermarkStore
-
-        store = WatermarkStore(path=tmp_path / "pr-watcher-state.json")
-        real_replace = os_mod.replace
-        calls = {"n": 0}
-
-        def flaky_replace(src, dst):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise FileNotFoundError(src)
-            return real_replace(src, dst)
-
-        monkeypatch.setattr(state_mod.os, "replace", flaky_replace)
-        store.set("owner/repo#1", {"retries": 1})
-
-        assert calls["n"] == 2, "the retry must have run"
-        assert store.get("owner/repo#1")["retries"] == 1
-
