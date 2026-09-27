@@ -2017,21 +2017,6 @@ fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(),
     Ok(())
 }
 
-/// Does a claim lockfile for `key` exist in any swept root? The global root
-/// plus the cwd/env default - the same pair the Python probe sweeps.
-fn node_has_live_claim(key: &str) -> bool {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = crate::claims::claim_path(key, None) {
-        candidates.push(p);
-    }
-    if let Some(root) = crate::claims::global_claims_root() {
-        if let Ok(p) = crate::claims::claim_path(key, Some(&root)) {
-            candidates.push(p);
-        }
-    }
-    candidates.iter().any(|p| p.exists())
-}
-
 /// The plan repaint: graph-authoritative fields flow onto the linked plan
 /// when a mirrored or status-affecting field changed - ownership, blockers,
 /// plan binding, parentage and tags included, the trigger set the python

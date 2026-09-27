@@ -11,10 +11,13 @@ depending on the installed `fno` snapshot. Proves:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from tests._init_space import install_state_path_stub
 from tests.fixtures.graph_seed import seed_graph
@@ -35,21 +38,7 @@ NODE_ID = "ab-deadbeef"  # matches ^ab-[0-9a-f]{8}$
 MOCK_ABI = """#!/usr/bin/env bash
 # Mock `fno`: log argv + the claims-root env, control claim-acquire exit code.
 echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
-if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "session-pid" ]]; then
-  # The identity walk fronts this verb; the launcher-stamped proof pair is
-  # the answer a real binary would derive, so say it instead of silence.
-  if [[ -n "${FNO_SESSION_PID:-}" && -n "${FNO_SESSION_HARNESS:-}" ]]; then
-    printf '{"session_pid": %s, "harness": "%s"}\n' "$FNO_SESSION_PID" "$FNO_SESSION_HARNESS"
-  fi
-  exit 0
-fi
 if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "acquire" ]]; then
-  # Opt-in REAL acquire: the claim projection is the graph's only session_id
-  # source since the mirror writers left, so tests asserting the graph leg
-  # need a lockfile the mock alone never writes.
-  if [[ "${MOCK_ABI_REAL_ACQUIRE:-0}" == "1" && "${MOCK_ABI_ACQUIRE_RC:-0}" == "0" ]]; then
-    exec python3 "$MOCK_ABI_CLAIMS_CLI" acquire "${@:4}"
-  fi
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
 # `backlog get` is how the node guard establishes that a token IS a graph node.
@@ -66,6 +55,19 @@ if [[ "$1" == "do" && "$2" == "target" && "$3" == "resolve-owned-identity" ]]; t
     printf '%s\n' "$MOCK_ABI_OWNED_OUT"
   fi
   exit 0
+fi
+# The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
+# it as a bare success would hollow out the identity assertion. The update leaf
+# answers natively now, so delegate to this checkout's fno-agents dev build - the
+# same writer the installed fno front dispatches to.
+if [[ "$1" == "backlog" && "$2" == "update" ]]; then
+  # MOCK_ABI_STALE simulates an installed fno predating the harness flags.
+  if [[ -n "${MOCK_ABI_STALE:-}" && "$*" == *--locked-by-harness* ]]; then
+    echo "Error: No such option: --locked-by-harness" >&2
+    exit 2
+  fi
+  export FNO_STATE_DIR="${MOCK_ABI_STATE_DIR}"
+  exec "${MOCK_ABI_NATIVE:?no dev fno-agents build}" "${@:1}"
 fi
 exit 0
 """
@@ -228,7 +230,7 @@ def test_self_blind_refusal_says_the_session_cannot_see_itself(tmp_path):
     assert "claim acquire" not in log.read_text()
 
 
-def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path, monkeypatch):
+def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
     repo, home, log, env = _sandbox(tmp_path)
     (repo / "scripts").symlink_to(REPO_ROOT / "scripts", target_is_directory=True)
     thread_id = "019f48e4-codex-owner"
@@ -241,26 +243,10 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path, monkeyp
     )
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env.pop("TARGET_SESSION_ID", None)
-    # A real codex thread PROVES its identity through the process tree; the
-    # mock world has no codex ancestor, so hand the delegated real acquire
-    # the launcher-stamped proof pair the production init path honors.
-    env["FNO_SESSION_PID"] = str(os.getpid())
-    env["FNO_SESSION_HARNESS"] = "codex"
-
-    # The graph leg of this alignment reads through the claim projection, so
-    # the mock's acquire must write a REAL lockfile (opt-in) and the reader
-    # must resolve the SAME root the init script pinned for the acquire.
-    helper = tmp_path / "real_acquire.py"
-    helper.write_text(
-        "import sys\nfrom fno.claims.cli import cli\nsys.exit(cli())\n"
-    )
-    env["MOCK_ABI_CLAIMS_CLI"] = str(helper)
-    env["MOCK_ABI_REAL_ACQUIRE"] = "1"
 
     result = _run_init(repo, env)
     state = _state(repo)
     assert state, result.stderr
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(home))
     # The store owns state; the json mirror can lag the last write.
     from fno.graph.store import read_graph_strict
 
@@ -284,29 +270,25 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path, monkeyp
     assert f'target_claim_holder: "target-session:{thread_id}"' in state
 
 
-def test_init_reads_owner_from_claim_without_graph_stamp(tmp_path, monkeypatch):
-    """AC11-HP: init acquires the lockfile and never stamps a second owner."""
+def test_stale_installed_fno_stamps_owner_only_and_says_so(tmp_path, monkeypatch):
+    """An fno predating the harness flags must still stamp the owner - but must
+    NOT pass for a clean stamp, or the missing harness metadata goes silent."""
     repo, home, log, env = _sandbox(tmp_path)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(home / ".fno" / "claims"))
     env["MOCK_ABI_ACQUIRE_RC"] = "0"
-    env["FNO_CLAIMS_ROOT"] = str(home)
-    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(home))
+    env["MOCK_ABI_STALE"] = "1"
 
     r = _run_init(repo, env)
+    # The store owns state; the json mirror can lag the last write.
     from fno.graph.store import read_graph_strict
 
     graph = read_graph_strict(home / ".fno" / "graph.json")[0]
-    log_text = log.read_text()
 
-    assert r.returncode == 0, r.stderr
-    assert any(
-        "claim acquire" in line and NODE_ID in line for line in log_text.splitlines()
-    )
-    assert not any(
-        "backlog update" in line
-        for line in log_text.splitlines()
-    )
-    assert graph.get("locked_by") is None
-    assert graph.get("locked_at") is None
+    assert graph.get("locked_by"), f"owner must survive a stale fno: {graph}"
+    assert not graph.get("locked_by_harness"), \
+        "the stale fno rejected the harness flag; it must not appear stamped"
+    assert "WITHOUT harness metadata" in r.stderr, \
+        "degraded stamp must be announced, not silent: " + r.stderr[-600:]
 
 
 def test_held_by_other_refuses(tmp_path):

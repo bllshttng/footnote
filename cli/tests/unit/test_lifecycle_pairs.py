@@ -83,6 +83,18 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     Pair("backlog", "new", "remove"),
     Pair("backlog", "intake", "remove"),
     # -- self-inverse: the same verb reverses itself --
+    # requeue releases a dead worker's wedge (open do row + claim) and its
+    # wedge refusal names requeue itself as the settling call.
+    Pair("backlog", "requeue", "requeue"),
+    # contain stamps contained_in + parent; its correction names the native
+    # update verb (`fno backlog update <id> --parent null`), which the python
+    # app no longer serves.
+    Pair(
+        "backlog",
+        "contain",
+        None,
+        "a verb the native binary serves after the python update leg retired",
+    ),
     # -- corrections whose forward transition is not a verb in this app --
     Pair(
         "backlog",
@@ -211,9 +223,8 @@ def test_the_help_check_can_fail():
 def test_a_transition_with_no_inverse_states_why_in_its_own_help():
     """`inverse=None` is allowed, silence is not.
 
-    The requeue row takes this branch (its re-lock door retired with the
-    graph claim mirror), so the positive control below keeps the test from
-    being a green light that never ran.
+    No row currently takes this branch, so the positive control below is what
+    keeps the test from being a green light that never ran.
     """
     unexplained: list[str] = []
     for pair in LIFECYCLE_PAIRS:

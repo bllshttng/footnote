@@ -440,11 +440,10 @@ def backlog_decide_retract(
     authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
     origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
 ) -> None:
-    """Compatibility forward to the native retract door (fno-agents).
+    """Compatibility forward to the native retract door (fno-agents); retractions are append-only and have no inverse.
 
     The retraction logic is native; this leaf exists so the old spellings
-    keep resolving and the pinned surface sets do not shift. Retractions
-    are append-only and have no inverse.
+    keep resolving and the pinned surface sets do not shift.
     """
     import os
 
