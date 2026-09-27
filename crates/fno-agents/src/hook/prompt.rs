@@ -2,10 +2,12 @@
 //!
 //! Reads `prompt` from the hook payload. A turn that carries the mail
 //! envelope, or that the provenance classifier reads as machine-shaped,
-//! renders nothing. Otherwise it prints one `hookSpecificOutput` whose
-//! `additionalContext` lists the cached projection (top five ready items)
-//! and a count. It never folds a journal: the daemon's `attention` arm
-//! writes `~/.fno/attention/items.json`, this reads it.
+//! renders nothing. Otherwise it arms the conversation hold (a real
+//! message whose Enter the mux witnessed) and prints one
+//! `hookSpecificOutput` whose `additionalContext` lists the cached
+//! projection (top five ready items) and a count. It never folds a
+//! journal: the daemon's `attention` arm writes `~/.fno/attention/items.json`,
+//! this reads it.
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -27,6 +29,16 @@ pub fn run(_args: &[String]) -> i32 {
         || crate::provenance::classify(prompt).is_err()
     {
         return 0;
+    }
+    // A real user message whose Enter the mux witnessed arms the
+    // conversation hold (C2). Past the machine-prompt skip, silent, and
+    // before the attention render.
+    let session_id = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !session_id.is_empty() {
+        crate::mail_hold::conversation_prompt(session_id, prompt);
     }
     let event_name = payload
         .get("hook_event_name")
@@ -156,5 +168,29 @@ mod tests {
     fn an_empty_projection_renders_one_calm_line() {
         let text = render_block(&[]);
         assert_eq!(text, "Nothing is waiting on you.");
+    }
+
+    /// A mail-tagged payload returns before the arm call (the skip lives in
+    /// `run`); the same payload must not arm through `conversation_prompt`
+    /// either. Drives the env-pinned harness the mail-hold tests use.
+    #[test]
+    fn a_mail_tagged_prompt_arms_nothing() {
+        const SID: &str = "cccccccc-1111-2222-3333-444455556666";
+        crate::mail_hold::tests::with_hold_env(|dir| {
+            crate::mail_hold::tests::write_registry(
+                dir,
+                serde_json::json!([crate::mail_hold::tests::registry_row("worker", SID)]),
+            );
+            crate::mail_hold::tests::witness_row(
+                SID,
+                chrono::Utc::now().timestamp_millis() - 1_000,
+            );
+            let mail = "<fno_mail from=\"x\">hello</fno_mail>";
+            crate::mail_hold::conversation_prompt(SID, mail);
+            assert!(
+                !dir.join("mail-hold").join(format!("{SID}.json")).exists(),
+                "a mail-tagged prompt never arms the conversation hold"
+            );
+        });
     }
 }
