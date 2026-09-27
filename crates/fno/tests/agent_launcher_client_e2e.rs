@@ -278,12 +278,13 @@ fn narrow_terminal_wraps_the_right_chip_group() {
     open_composer(&mut h);
     h.wait_screen(10, |s| s.contains("new agent"));
     let screen = h.wait_screen(35, |s| s.contains("agy"));
-    // The left group's `+` and the right group's harness chip sit on
-    // different screen rows.
+    // The left group's `+  auto` row and the right group's harness chip sit
+    // on different screen rows. The two-space gap pins the match to the
+    // sheet's chip row, never the sidebar's `+ new workspace`.
     let plus_row = screen
         .lines()
-        .position(|l| l.contains('+'))
-        .expect("the plus chip paints");
+        .position(|l| l.contains("+  auto"))
+        .expect("the left chip group paints");
     let harness_row = screen
         .lines()
         .position(|l| l.contains("agy"))
