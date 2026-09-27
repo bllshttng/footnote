@@ -7,6 +7,7 @@ use super::agent_launcher::{
     apply_launch_update, close, open, CatalogOutcome, Focus, HarnessChoice, LauncherEsc, Phase,
 };
 use super::*;
+use crate::model_catalog::ModelState;
 use crate::proto::agent_launch::{AgentLaunchUpdate, LaunchState};
 use ratatui_core::buffer::Buffer as RtBuffer;
 use ratatui_core::layout::Rect as RtRect;
@@ -186,7 +187,9 @@ fn tab_walks_the_field_order() {
             model: "anthropic/claude-sonnet".into(),
             route: String::new(),
             provider: Some("anthropic".into()),
-            verdict: "ok".into(),
+            state: ModelState::Ready,
+                key_env: None,
+                key_file: None,
         });
     }
     v.launcher_catalog = Some(one_provider);
@@ -638,14 +641,18 @@ fn model_tab_lists_catalog_rows_and_picking_one_pins_the_row() {
                 model: "claude-opus-5".into(),
                 route: String::new(),
                 provider: None,
-                verdict: "ok".into(),
+                state: ModelState::Ready,
+                key_env: None,
+                key_file: None,
             },
             super::agent_launcher::ModelChoice {
                 name: "qwen3-coder".into(),
                 model: "qwen/qwen3-coder".into(),
                 route: "openrouter/qwen/qwen3-coder".into(),
                 provider: Some("openrouter".into()),
-                verdict: "ok".into(),
+                state: ModelState::Ready,
+                key_env: None,
+                key_file: None,
             },
         ];
     }
@@ -830,7 +837,7 @@ fn codex_models_cache_skips_hidden_slugs_and_empty_is_not_an_error() {
     assert!(
         models
             .iter()
-            .all(|m| m.provider.is_none() && m.verdict == "ok"),
+            .all(|m| m.provider.is_none() && matches!(m.state, ModelState::Ready)),
         "cache slugs are harness-native choices"
     );
     let (empty_models, empty_hidden) = super::agent_launcher::parse_codex_models("not json");
@@ -851,7 +858,9 @@ fn account_pins_merge_over_the_model_floor_without_duplicates() {
         model: "opus".into(),
         route: String::new(),
         provider: None,
-        verdict: "ok".into(),
+        state: ModelState::Ready,
+                key_env: None,
+                key_file: None,
     }];
     let pins = super::agent_launcher::parse_configured_account_models(
         r#"{"value":[{"id":"a","harness":"claude","route_provider_id":"zai","model_name":"glm-5.3-flash[1m]","route":"zai/glm-5.3-flash[1m]"}]}"#,
