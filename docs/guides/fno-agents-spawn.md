@@ -111,7 +111,7 @@ A repeated attach focuses the existing pane and reports `already attached`; it n
 
 ## Place a pane next to the calling pane (`--at current`)
 
-`--workspace`/`--split` place a pane relative to the workspace's *focused* pane, which is unsuitable for automation: another client can move focus between command construction and execution. `--at current` pins the new pane to the calling pane (the one the command runs inside), so focus races cannot redirect it.
+A bare `--split` anchors on the caller's own pane (FNO_PANE), not on whatever the workspace has focused, so focus races cannot redirect it; a pane-less caller names `--from <cell>` or is refused naming the flag. `--at current` pins the new pane to the calling pane (the one the command runs inside) the same way, and both spellings exist because `--at current` predates the split default.
 
 ```bash
 fno agents spawn "investigate the failing test" --name digger \
@@ -147,7 +147,7 @@ When the command completes, portal 1 is open and already shows the new worker, a
 fno mux thread w2 --portal new --split right --from portal 0
 ```
 
-`--portal new` opens the next free index. If N is not open, `--portal N` opens it. If N is open, the reach tunes it. `--split DIR --from CELL` halves the named cell: `portal 0`, a worker name, or `current`. When the command runs inside a pane, it resolves `current` itself. Split right from portal 0, then down from portal 0, then down from portal 1: that is the 2x2.
+`--portal new` opens the next free index. If N is not open, `--portal N` opens it. If N is open, the reach tunes it. A bare `--split DIR` halves the caller's own pane. `--from CELL` names another cell: `portal 0`, a worker name, or `current`. A caller with no pane names it or is refused. When the command runs inside a pane, it resolves `current` itself. Split right from portal 0, then down from portal 0, then down from portal 1: that is the 2x2.
 
 If the named portal already shows a live viewer, the reach tunes it. The portal keeps its geometry. The server prints the notice `a portal takes no split, target, or anchor`, so you see the refusal instead of a silent move.
 

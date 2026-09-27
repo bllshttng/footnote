@@ -61,6 +61,40 @@ fn sargs_of(args: &[OsString]) -> Result<Vec<String>, String> {
         .ok_or_else(|| "non-UTF-8 argument".to_string())
 }
 
+/// FNO_PANE as the calling pane's id (trimmed, `%N` stripped), or None when
+/// the caller has no pane of its own.
+pub(crate) fn pane_from_env() -> Option<u64> {
+    std::env::var("FNO_PANE")
+        .ok()
+        .map(|s| s.trim().trim_start_matches('%').to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// The line a split with no anchor refuses with when the caller has no pane.
+pub(crate) const SPLIT_ANCHOR_HELP: &str = "a --split needs an anchor: pass \
+--from <portal N|worker name|current> to name the cell it halves";
+
+/// The split default: a split with no anchor halves the caller's own pane,
+/// as tmux splits the current pane. A caller with no pane of its own names
+/// `--from` or is refused with the flag named. Returns the pane to anchor
+/// on (Some only when the default fired); pure over the FNO_PANE read so
+/// tests pass the value.
+pub(crate) fn anchor_or_refuse(
+    split: bool,
+    at: Option<u64>,
+    from: Option<&str>,
+    fno_pane: Option<u64>,
+) -> Result<Option<u64>, String> {
+    if !split || at.is_some() || from.is_some_and(|f| !f.trim().is_empty()) {
+        return Ok(None);
+    }
+    match fno_pane {
+        Some(pane) => Ok(Some(pane)),
+        None => Err(SPLIT_ANCHOR_HELP.to_string()),
+    }
+}
+
 pub fn parse_pane_args(
     op: &crate::cli_args::PaneOp,
     args: &[OsString],
@@ -259,7 +293,7 @@ pub fn parse_pane_args(
             at = Some(fno_pane);
             fallback = PlacementFallback::Refuse;
         }
-        let placement = PanePlacement {
+        let mut placement = PanePlacement {
             target: squad
                 .map(PaneTarget::SquadName)
                 .unwrap_or(PaneTarget::CurrentRoute),
@@ -274,6 +308,19 @@ pub fn parse_pane_args(
         };
         if let Some((_, msg)) = crate::server::placement_fit::refuse_fit_with_geometry(&placement) {
             return Err(msg);
+        }
+        // A split that named no anchor defaults to the caller's own pane; a
+        // pane-less caller is refused with --from named. After the fit
+        // refusal: it is a flag-combination complaint and wins precedence.
+        match anchor_or_refuse(
+            placement.split.is_some(),
+            placement.at,
+            placement.from.as_deref(),
+            pane_from_env(),
+        ) {
+            Ok(Some(pane)) => placement.at = Some(pane),
+            Ok(None) => {}
+            Err(e) => return Err(e),
         }
         return Ok(ParsedPane {
             session,

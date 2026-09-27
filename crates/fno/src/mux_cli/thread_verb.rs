@@ -19,10 +19,12 @@ use super::*;
 /// multiply from a reach).
 ///
 /// The placement flags reuse the pane path's spellings and ride the
-/// verb's `placement` field. `--from portal N|worker|current` names the
-/// cell a `--split` halves. They steer a FRESH open; a portal that already
-/// has a live seat keeps its geometry (the server says so) - same contract
-/// the server holds for the TUI.
+/// verb's `placement` field. A `--split DIR` halves the caller's own pane
+/// (FNO_PANE); `--from portal N|worker|current` names another cell. A
+/// caller with no pane of its own names `--from` or is refused with the
+/// flag named. They steer a FRESH open; a portal that already has a live
+/// seat keeps its geometry (the server says so) - same contract the server
+/// holds for the TUI.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     let (session_flag, parsed) = match parse_thread_args(args) {
         Ok(t) => t,
@@ -116,6 +118,21 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
             }
         } else {
             placement.from = Some(v.clone());
+        }
+    }
+    // A split that named no anchor defaults to the caller's own pane; a
+    // pane-less caller is refused with --from named.
+    match super::pane_args::anchor_or_refuse(
+        placement.split.is_some(),
+        placement.at,
+        placement.from.as_deref(),
+        super::pane_args::pane_from_env(),
+    ) {
+        Ok(Some(pane)) => placement.at = Some(pane),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("fno mux thread: {e}");
+            return EXIT_USAGE;
         }
     }
     let Some(name) = parsed
@@ -224,5 +241,25 @@ mod tests {
     fn thread_still_refuses_its_own_unknown_flags() {
         let err = parse_thread_args(&os(&["--wat", "myagent"])).expect_err("unknown flag refuses");
         assert!(err.contains("--wat"), "{err}");
+    }
+
+    #[test]
+    fn a_split_with_no_anchor_halves_the_callers_pane_or_refuses() {
+        use super::super::pane_args::anchor_or_refuse;
+        // The default: split + no anchor + a calling pane = the caller's cell.
+        assert_eq!(
+            anchor_or_refuse(true, None, None, Some(7)).ok(),
+            Some(Some(7))
+        );
+        // A caller with no pane names --from or is refused with the flag named.
+        let err = anchor_or_refuse(true, None, None, None).expect_err("pane-less refuses");
+        assert!(err.contains("--from"), "{err}");
+        // No split, or an anchor already named: no default, no refusal.
+        assert_eq!(anchor_or_refuse(false, None, None, None).ok(), Some(None));
+        assert_eq!(anchor_or_refuse(true, Some(3), None, None).ok(), Some(None));
+        assert_eq!(
+            anchor_or_refuse(true, None, Some("portal 0"), None).ok(),
+            Some(None)
+        );
     }
 }
