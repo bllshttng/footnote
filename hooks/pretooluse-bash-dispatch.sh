@@ -4,7 +4,9 @@
 stdin=$(cat)
 root="$(cd "$(dirname "$0")/.." && pwd)"
 errfile=$(mktemp -t pbd-stderr.XXXXXX) || errfile=/dev/null
-trap 'rm -f "$errfile"' EXIT
+if [[ "$errfile" != /dev/null ]]; then
+    trap 'rm -f "$errfile"' EXIT
+fi
 for bin in "$(command -v fno-agents 2>/dev/null)" "${FNO_AGENTS_BIN:-}" \
     "$PWD"/crates/fno-agents/target/{release,debug}/fno-agents; do
     [[ -n "$bin" && -x "$bin" ]] || continue
