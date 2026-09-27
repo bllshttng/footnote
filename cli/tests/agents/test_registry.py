@@ -3048,3 +3048,50 @@ def test_session_report_fields_round_trip(monkeypatch, tmp_path) -> None:
     reloaded = load_registry(path=registry_path)[0]
     assert reloaded.transcript_path == "/t/w1.jsonl"
     assert reloaded.start_source == "resume"
+
+
+def test_x48ae_guard_refuses_probe_and_mass_drop_on_shared_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A probe (a process under a test marker) writing the real shared
+    registry is refused, and so is a write that drops most live rows without
+    the override; the refusal leaves the file intact."""
+    import tempfile
+
+    from fno.agents.registry import (
+        AgentEntry,
+        RegistryWriteRefused,
+        load_registry,
+        write_registry,
+    )
+
+    def probe_row(name: str) -> AgentEntry:
+        return AgentEntry(
+            name=name,
+            harness="claude",
+            cwd="/repo",
+            log_path=f"/tmp/{name}.log",
+        )
+
+    # Seed with the guard standing down: HOME sits under the temp dir view,
+    # which is the sandbox shape the carve-out exists for.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    shared = tmp_path / "home" / ".fno" / "agents" / "registry.json"
+    write_registry([probe_row(f"worker-{i}") for i in range(5)], path=shared)
+
+    # Arm the guard: present a "real" home OUTSIDE the temp dir view.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "not-temp"))
+
+    with pytest.raises(RegistryWriteRefused, match="test or probe process"):
+        write_registry([probe_row("fixture-probe")], path=shared)
+    assert len(load_registry(path=shared)) == 5
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    with pytest.raises(RegistryWriteRefused, match="drops live registry rows from 5 to 1"):
+        write_registry([probe_row("fixture-probe")], path=shared)
+    assert len(load_registry(path=shared)) == 5
+
+    monkeypatch.setenv("FNO_REGISTRY_ALLOW_ROW_LOSS", "1")
+    write_registry([probe_row("fixture-probe")], path=shared)
+    assert len(load_registry(path=shared)) == 1
