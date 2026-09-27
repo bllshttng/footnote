@@ -6,6 +6,7 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
