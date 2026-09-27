@@ -2399,9 +2399,10 @@ mod tests {
     }
 
     #[test]
-    fn scoped_checkin_survives_live_journal_rotation() {
+    fn scoped_checkin_survives_vanished_live_journal() {
         // The durable-history acceptance: the check-in lives in the store,
-        // so a rotated-away live journal never blanks the reign history.
+        // so a vanished live journal (the rotation-era failure mode) never
+        // blanks the reign history.
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("events.jsonl");
         let checkin = json!({
@@ -2412,8 +2413,9 @@ mod tests {
         });
         std::fs::write(&live, format!("{checkin}\n")).unwrap();
         crate::event_store::sync(&live).unwrap();
-        // Rotate the live journal away: the row survives in the SQL store.
-        std::fs::rename(&live, live.with_file_name("events.jsonl.1")).unwrap();
+        // The live journal leaves its path: the row survives in the SQL
+        // store. Removal, not a rename, so only the store can serve the row.
+        std::fs::remove_file(&live).unwrap();
         let payload = scan(&[live], "x-bbbb").unwrap();
         assert_eq!(payload["matched"], 1, "{payload}");
         assert_eq!(payload["complete_since"].as_str().is_some(), true);
