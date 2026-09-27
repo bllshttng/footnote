@@ -112,8 +112,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # a developer's terminal reports its own palette, and a suite must not
     # resolve the theme from the machine it happens to run on.
     "COLORFGBG",
-    # The splash renderer's animation gate (splash.rs): a developer's reduced-motion
-    # preference changes what the renderer draws; scrubbed like NO_COLOR above.
+    # The splash renderer's animation gate; the dev's pref is not a test input.
     "REDUCED_MOTION",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",

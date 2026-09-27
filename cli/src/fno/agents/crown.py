@@ -639,9 +639,7 @@ def _locked_identity(rows, row) -> Any:
             "expect": {"name": row.name, "harness_session_id": session},
         })
     except SpawnOverlayUnavailable as exc:
-        raise CrownPromotionError(
-            f"lock-time identity check unavailable ({exc}); the name may have been rebound"
-        ) from exc
+        raise CrownPromotionError(f"identity check unavailable ({exc})") from exc
     return rows[answer["index"]] if answer.get("matched") else None
 
 
