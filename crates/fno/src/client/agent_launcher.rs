@@ -788,6 +788,43 @@ async fn submit(
         l.phase = Phase::Refused { request_id, reason };
         return Ok(());
     }
+    // The launch check: a provider-pinned pick whose key does not resolve
+    // (env var, then api_key_file) refuses pre-wire naming the env var.
+    // The draft stays intact; rows with no key_env are not checked, and
+    // the spawn door stays the final gate.
+    if !l.draft.provider.is_empty() {
+        let needle = l
+            .draft
+            .model_row
+            .clone()
+            .unwrap_or_else(|| l.draft.model.clone());
+        if let Some(CatalogOutcome::Ok(rows, _)) = &view.launcher_catalog {
+            let row = rows.iter().find(|r| r.name == selected).and_then(|h| {
+                h.models.iter().chain(h.more.iter()).find(|m| {
+                    m.name == needle && m.provider.as_deref() == Some(l.draft.provider.as_str())
+                })
+            });
+            if let Some(row) = row {
+                if let Some(key_env) = row.key_env.as_deref().filter(|k| !k.is_empty()) {
+                    if !crate::provider_key::key_present(key_env, row.key_file.as_deref()) {
+                        let checked = row
+                            .key_file
+                            .as_deref()
+                            .map(|f| format!(" (checked the env and {f})"))
+                            .unwrap_or_default();
+                        let provider = l.draft.provider.clone();
+                        l.phase = Phase::Refused {
+                            request_id,
+                            reason: format!(
+                                "{provider}: {key_env} is not set{checked}; nothing launched"
+                            ),
+                        };
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
     let mut request = l.draft.request(request_id);
     request.extra_flags = extra_flags;
     if (request.provider.is_some() || !request.extra_flags.is_empty())

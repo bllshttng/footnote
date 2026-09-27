@@ -2144,3 +2144,110 @@ fn unreachable_row_enter_names_the_gap_and_picks_nothing() {
     super::agent_launcher::show_steps(&mut l, title, lines, anchor);
     assert_eq!(l.draft.model, "", "nothing was picked");
 }
+#[test]
+fn launch_refuses_a_pinned_pick_whose_key_does_not_resolve() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![keyed("deepseek-chat", "deepseek", "FNO_TEST_DS_KEY", None)];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        let idx = l.draft.harnesses.iter().position(|h| h == "claude").unwrap();
+        l.draft.harness_idx = idx;
+    }
+    let mut l = v.launcher.take().unwrap();
+    let pin = super::agent_launcher::PickerAction::PickRow {
+        harness: "claude".to_string(),
+        name: "deepseek-chat".to_string(),
+        model: "deepseek-chat".to_string(),
+        route: String::new(),
+        provider: Some("deepseek".to_string()),
+    };
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, pin, 0, Focus::Model);
+    v.launcher = Some(l);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    match &l.phase {
+        Phase::Refused { reason, .. } => {
+            assert!(
+                reason.contains("FNO_TEST_DS_KEY is not set"),
+                "the refusal names the env var: {reason}"
+            );
+        }
+        other => panic!("expected a key refusal, got {other:?}"),
+    }
+    assert!(sock.is_empty(), "nothing went on the wire");
+}
+#[test]
+fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "fno-aad3-keyfile-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join(".env");
+    std::fs::write(&key_file, "FNO_TEST_DS_KEY=file-secret\n").unwrap();
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![keyed(
+            "deepseek-chat",
+            "deepseek",
+            "FNO_TEST_DS_KEY",
+            Some(key_file.display().to_string()),
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        let idx = l.draft.harnesses.iter().position(|h| h == "claude").unwrap();
+        l.draft.harness_idx = idx;
+    }
+    let mut l = v.launcher.take().unwrap();
+    let pin = super::agent_launcher::PickerAction::PickRow {
+        harness: "claude".to_string(),
+        name: "deepseek-chat".to_string(),
+        model: "deepseek-chat".to_string(),
+        route: String::new(),
+        provider: Some("deepseek".to_string()),
+    };
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, pin, 0, Focus::Model);
+    v.launcher = Some(l);
+    let (session, _fx) = current_wire_fixture();
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(
+        matches!(l.phase, Phase::Submitting { .. }),
+        "the file-only key passes the launch check: {:?}",
+        l.phase,
+    );
+    assert!(!sock.is_empty(), "the request went to the wire");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+fn keyed(
+    name: &str,
+    provider: &str,
+    env: &str,
+    key_file: Option<String>,
+) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.key_env = Some(env.to_string());
+    m.key_file = key_file;
+    m
+}
