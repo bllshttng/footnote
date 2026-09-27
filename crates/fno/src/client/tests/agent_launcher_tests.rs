@@ -771,7 +771,8 @@ fn account_rows_supply_model_and_provider_options() {
     );
 }
 
-/// The regression behind x-644c: a claude account with no pinned model
+/// The regression behind the model-floor contract: a claude account with no
+/// pinned model
 /// emptied the Model tab, because the catalog read every harness but
 /// opencode solely from account records. The capability table now floors
 /// each harness's list with its own measured model ids.

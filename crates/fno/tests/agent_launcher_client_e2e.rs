@@ -410,7 +410,8 @@ fn arrows_in_the_model_body_move_and_up_never_launches() {
     );
 }
 
-/// The regression behind x-644c: with claude chosen, the Model tab listed
+/// The regression behind the model-floor contract: with claude chosen, the
+/// Model tab listed
 /// only "harness default" because no account record pinned a model. Each
 /// harness now floors its list off the capability table; configured rows
 /// merge over. One test per harness: the launcher retains focus across a
