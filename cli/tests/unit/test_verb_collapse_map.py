@@ -260,7 +260,8 @@ def test_map_covers_current_surface_once():
     # `backlog find`, `backlog notes`, `agents backlog-note`,
     # `agents backlog-notes` and `agents graph-get` no longer resolve on the
     # live surface; their stale rows freed five: 609 -> 604.
-    assert len(mapped) == 604, (
+    # `agents transcript-paths` joined as a hidden T1 leaf: 604 -> 605.
+    assert len(mapped) == 605, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

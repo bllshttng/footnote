@@ -122,6 +122,7 @@ agents target-family	T1	agents target-family	2
 agents test-run	T1	agents test-run	3
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
+agents transcript-paths	T1	agents transcript-paths	0
 agents truth	T1	agents truth	16
 agents verify-evidence	T1	agents verify-evidence	7
 agents wait	T1	agents wait	10
