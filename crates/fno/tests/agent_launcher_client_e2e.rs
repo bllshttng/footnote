@@ -443,7 +443,9 @@ fn agent_list_shows_route_hint_for_a_routing_row() {
         screen.contains("glm-5.3-flash[1m]") || screen.contains("model list unavailable"),
         "a configured row or the named unavailable surface: {screen}"
     );
-    // Escape closes the sheet itself; the draft is retained.
+    // Escape closes the open model picker, then the sheet itself; the draft
+    // is retained.
+    type_and_settle(&mut h, b"\x1b");
     type_and_settle(&mut h, b"\x1b");
     let screen = h.wait_screen(10, |s| !s.contains("new agent"));
     assert!(

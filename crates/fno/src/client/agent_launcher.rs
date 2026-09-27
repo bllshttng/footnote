@@ -1759,7 +1759,8 @@ fn filtered_popup(
     let mut popup = Popup::new(rows, anchor)
         .footer(footer)
         .full_chrome()
-        .full_width_selection();
+        .full_width_selection()
+        .label_first();
     if !filter.is_empty() {
         popup = popup.title(format!(
             "{title} \u{b7} filter: {filter}",
