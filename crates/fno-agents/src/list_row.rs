@@ -147,21 +147,15 @@ mod tests {
 
     #[test]
     fn node_primary_prs_maps_prs_for_requested_nodes() {
-        let dir = std::env::temp_dir().join(format!("fno-list-row-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let graph = dir.join("graph.json");
-        std::fs::write(
-            &graph,
-            json!({"entries": [
-                {"id": "x-1", "title": "a", "status": "ready", "pr_number": 2136},
-                {"id": "x-2", "title": "b", "status": "ready"}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
+        let dir = tempfile::TempDir::new().expect("temporary graph root");
+        let graph = dir.path().join("graph.json");
+        let rows = [
+            json!({"id": "x-1", "title": "a", "status": "ready", "pr_number": 2136}),
+            json!({"id": "x-2", "title": "b", "status": "ready"}),
+        ];
+        crate::graph_store::seed_rows(&graph, &rows).expect("seed sqlite graph");
         let map = node_primary_prs(&graph, ["x-1", "x-2"]).expect("graph reads");
         assert_eq!(map.get("x-1"), Some(&Some(2136)));
         assert_eq!(map.get("x-2"), Some(&None));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
