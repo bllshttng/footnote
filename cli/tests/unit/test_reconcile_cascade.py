@@ -37,7 +37,7 @@ PLAN = "/p/containment.md"
 def _node(node_id: str, **overrides) -> dict:
     base = {
         "id": node_id,
-        "title": f"node {node_id}",
+        "title": "sample node",
         "type": "feature",
         "project": "fno",
         "cwd": None,
@@ -99,7 +99,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         complete = []
         for e in entries:
             row = {"type": "feature", "priority": "p2", "status": "idea", **e}
-            row.setdefault("title", e.get("id", "node"))
+            row.setdefault("title", "sample node")
             row.setdefault("slug", e.get("id", "node"))
             if row["status"] == "done" and not row.get("completed_at"):
                 row["completed_at"] = "2026-09-01T00:00:00Z"
