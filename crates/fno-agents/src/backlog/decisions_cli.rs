@@ -113,10 +113,20 @@ fn parse_options(argv: &[String]) -> Result<Options, String> {
             }
             "--lane" => opts.lane = Some(value()?),
             "--state" => opts.state = Some(value()?),
-            "--review-list" => opts.review_list = true,
+            "--review-list" => {
+                if inline.is_some() {
+                    return Err(format!("{flag} takes no value"));
+                }
+                opts.review_list = true;
+            }
             "--output" => opts.output = Some(value()?),
             "--format" => opts.format = Some(value()?),
-            "--json" | "-J" => opts.json = true,
+            "--json" | "-J" => {
+                if inline.is_some() {
+                    return Err(format!("{flag} takes no value"));
+                }
+                opts.json = true;
+            }
             _ if arg.starts_with('-') && arg != "-" => {
                 return Err(format!("no such option: {arg}"));
             }
@@ -179,10 +189,6 @@ struct ListOut {
     label: String,
     rows: Vec<Value>,
     damaged: usize,
-    /// The unfiltered flattened store rows, decisions and retractions
-    /// alike: the near-miss scan reads the whole machine index, never the
-    /// subject's filtered answer.
-    raw: Vec<Value>,
 }
 
 fn decisions_jsonl() -> PathBuf {
@@ -636,7 +642,6 @@ fn list_core_over(
         label,
         rows,
         damaged,
-        raw: all_rows.iter().cloned().collect(),
     }
 }
 
@@ -927,8 +932,19 @@ pub fn run(argv: &[String]) -> i32 {
     };
     let truncated = decisions.len() < uncapped;
 
+    // The near-miss scan reads the whole machine index, never the subject's
+    // filtered answer: its own store read, the same second read the deleted
+    // Python verb paid, taken only when a subject query can use it.
     let near = match &subject {
-        Some(s) => near_miss_subjects(s, &found.raw, entries.as_deref()),
+        Some(s) => {
+            let raw = crate::decision_index::read_store_rows(
+                &crate::graph_get::default_graph_path(),
+                &decisions_jsonl(),
+            )
+            .map(|(rows, _)| rows)
+            .unwrap_or_default();
+            near_miss_subjects(s, &raw, entries.as_deref())
+        }
         None => Vec::new(),
     };
 
@@ -1906,7 +1922,8 @@ mod tests {
     #[test]
     fn derivation_covers_every_lane_and_retirement() {
         let rows = seed_fixture();
-        let mut entries: Option<Vec<Value>> = None;
+        // Some(empty): the derivation never reads the ambient machine graph.
+        let mut entries: Option<Vec<Value>> = Some(Vec::new());
         let out = list_core_over(rows, 0, &mut entries, None, None, None, true);
         // newest first, duplicate id folded
         assert_eq!(
@@ -1924,9 +1941,10 @@ mod tests {
         assert_eq!(lane_of(&out, "d-aaaa0001"), "law");
         assert_eq!(lifecycle_of(&out, "d-aaaa0001"), "live");
         assert_eq!(lane_of(&out, "d-bbbb0002"), "coord");
-        // no graph in this fixture: an unresolvable coord row reads UNKNOWN
-        // with the named reason, never silently unscoped
-        assert_eq!(lifecycle_of(&out, "d-bbbb0002"), "unknown");
+        // The fixture passes Some(empty) entries so the run never consults
+        // the ambient machine graph: the coord row resolves to nothing and
+        // reads unscoped. The UNKNOWN degrade has its own env-guarded test.
+        assert_eq!(lifecycle_of(&out, "d-bbbb0002"), "unscoped");
         assert_eq!(lane_of(&out, "d-cccc0003"), "unattributed");
         assert_eq!(lifecycle_of(&out, "d-cccc0003"), "unscoped");
         assert_eq!(lifecycle_of(&out, "d-dddd0004"), "superseded");
