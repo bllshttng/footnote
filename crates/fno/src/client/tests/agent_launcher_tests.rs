@@ -5,6 +5,7 @@
 
 use super::agent_launcher::{
     apply_launch_update, close, open, CatalogOutcome, Focus, HarnessChoice, LauncherEsc, Phase,
+    ProjectFacts,
 };
 use super::*;
 use crate::model_catalog::ModelState;
@@ -21,6 +22,10 @@ impl Drop for WireVersionFixture {
 }
 
 fn current_wire_fixture() -> (String, WireVersionFixture) {
+    wire_fixture_at(91)
+}
+
+fn wire_fixture_at(version: u32) -> (String, WireVersionFixture) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -29,7 +34,7 @@ fn current_wire_fixture() -> (String, WireVersionFixture) {
     let socket = crate::proto::socket_path(&session).unwrap();
     let sidecar = crate::proto::version_sidecar_path(&socket);
     std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
-    std::fs::write(&sidecar, "91\n").unwrap();
+    std::fs::write(&sidecar, format!("{version}\n")).unwrap();
     (session, WireVersionFixture(sidecar))
 }
 
@@ -189,8 +194,10 @@ fn tab_walks_the_chip_row_and_wraps() {
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     // A fresh open focuses the input. The cycle is Message -> Plus ->
-    // Permission -> Harness -> Model -> Effort -> Where -> Project -> back:
-    // eight stops, so eight tabs land on Message again.
+    // Permission -> Harness -> Model -> Effort -> Where -> Project ->
+    // Branch -> Worktree -> back: ten stops (facts unread, so the Branch
+    // chip and worktree box paint `?` until the probe lands), so ten tabs
+    // land on Message again.
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
@@ -205,7 +212,7 @@ fn tab_walks_the_chip_row_and_wraps() {
         "three more tabs reach the Model chip"
     );
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
@@ -226,10 +233,11 @@ fn the_effort_chip_drops_when_the_harness_has_no_effort_surface() {
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Seven stops without Effort: Message -> Plus -> Permission -> Harness
-    // -> Model -> Where -> Project -> Message.
+    // Nine stops without Effort: Message -> Plus -> Permission -> Harness
+    // -> Model -> Where -> Project -> Branch -> Worktree -> Message.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t", &mut sock).await;
+        let _ =
+            super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
@@ -597,14 +605,17 @@ fn motion_over_the_project_chip_shows_the_cwd_line_and_a_press_outside_closes_th
     sync_catalog(&mut v);
     type_message(&mut v, "keep me");
     // Open the Where picker by Enter on the chip (Tab from Message walks
-    // the cycle backwards: shift-tab from Message is Project).
+    // the cycle backwards: shift-tab from Message is the worktree box, a
+    // second shift-tab the Branch chip, a third Project).
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Shift-Tab walks back to Project; motion over the chip shows the cwd
-    // line BEFORE any picker opens.
+    // Shift-tab lands on the worktree box, a second on the Branch chip, a
+    // third on Project; motion over the chip shows the cwd line BEFORE any
+    // picker opens.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
+        let _ =
+            super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z\x1b[Z\x1b[Z", &mut sock).await;
     });
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Project);
     let l = v.launcher.as_ref().unwrap();
@@ -731,15 +742,17 @@ fn chips_carry_values_not_axis_names() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    assert_eq!(l.chip_label(Focus::Harness), "claude");
-    assert_eq!(l.chip_label(Focus::Model), "default");
-    assert_eq!(l.chip_label(Focus::Where), "Local");
-    assert_eq!(l.chip_label(Focus::Permission), "auto");
-    assert_eq!(l.chip_label(Focus::Effort), "default");
+    assert_eq!(l.chip_label(Focus::Harness, &v.launcher_catalog), "claude");
+    assert_eq!(l.chip_label(Focus::Model, &v.launcher_catalog), "default");
+    assert_eq!(l.chip_label(Focus::Where, &v.launcher_catalog), "Local");
+    assert_eq!(l.chip_label(Focus::Permission, &v.launcher_catalog), "auto");
+    assert_eq!(l.chip_label(Focus::Effort, &v.launcher_catalog), "default");
     // A non-default placement rides the Where chip's value.
     let mut l = l.clone();
     l.draft.placement = super::agent_launcher::Placement::ThreadSplitBeside;
-    assert!(l.chip_label(Focus::Where).contains("split beside"));
+    assert!(l
+        .chip_label(Focus::Where, &v.launcher_catalog)
+        .contains("split beside"));
 }
 
 #[test]
@@ -904,11 +917,11 @@ fn account_rows_supply_model_and_provider_options() {
     assert!(
         !sl.chips
             .iter()
-            .any(|(f, _)| l.chip_label(*f) == "openrouter"),
+            .any(|(f, _)| l.chip_label(*f, &v.launcher_catalog) == "openrouter"),
         "providers never become chips: {:?}",
         sl.chips
             .iter()
-            .map(|(f, _)| l.chip_label(*f))
+            .map(|(f, _)| l.chip_label(*f, &v.launcher_catalog))
             .collect::<Vec<_>>()
     );
 }
@@ -1107,9 +1120,31 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
 #[test]
 fn extra_flags_chip_parses_argv_without_shell_expansion() {
     let mut v = view_with_launcher();
-    let (session, _wire_fixture) = current_wire_fixture();
+    // Wire 94: the worktree default (checked, policy external) must ride
+    // the request, so the sidecar answers at the worktree generation.
+    let (session, _wire_fixture) = wire_fixture_at(94);
     v.session = session;
-    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    let own = std::env::current_dir().unwrap().display().to_string();
+    v.launcher_catalog = Some(CatalogOutcome::Ok(
+        vec![HarnessChoice {
+            name: "claude".into(),
+            native: true,
+            installed: true,
+            models: Vec::new(),
+            more: Vec::new(),
+            catalog_error: None,
+            models_error: None,
+            efforts: Some(Vec::new()),
+            permission_modes: Some(Vec::new()),
+        }],
+        None,
+        vec![super::agent_launcher::ProjectFacts {
+            cwd: own,
+            current: Some("main".into()),
+            branches: vec!["main".into(), "feature/x".into()],
+            policy: Ok("external".into()),
+        }],
+    ));
     sync_catalog(&mut v);
     v.launcher.as_mut().unwrap().focus = Focus::ExtraFlags;
     let mut sock = Vec::new();
@@ -1203,9 +1238,10 @@ fn where_picker_lists_local_and_the_placement_rows() {
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.placement_portal, 2);
     assert!(
-        l.chip_label(Focus::Where).contains("split beside"),
+        l.chip_label(Focus::Where, &v.launcher_catalog)
+            .contains("split beside"),
         "the Where chip shows the picked view: {:?}",
-        l.chip_label(Focus::Where)
+        l.chip_label(Focus::Where, &v.launcher_catalog)
     );
 }
 
@@ -1748,10 +1784,10 @@ fn the_right_chip_group_wraps_to_its_own_row_when_narrow() {
             continue;
         }
         assert!(
-            l.chip_label(*f).chars().count() + 1 <= r.width as usize,
+            l.chip_label(*f, &v.launcher_catalog).chars().count() + 1 <= r.width as usize,
             "chip {:?} rect fits its value: {:?} width {}",
             f,
-            l.chip_label(*f),
+            l.chip_label(*f, &v.launcher_catalog),
             r.width
         );
     }
@@ -1784,9 +1820,11 @@ fn the_cwd_line_shows_while_project_is_focused_or_hovered() {
         !paint_row0(&v).contains("Working directory"),
         "the cwd line hides while Message holds focus"
     );
-    // Shift-Tab walks back to Project; the line paints with the full path.
+    // Shift-Tab walks back: worktree box, Branch chip, then Project; the
+    // line paints with the full path.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
+        let _ =
+            super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z\x1b[Z\x1b[Z", &mut sock).await;
     });
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Project);
     let line = paint_row0(&v);
@@ -1859,4 +1897,255 @@ fn a_picker_open_across_the_catalog_landing_refreshes_on_input() {
         picker.all_rows
     );
     assert_eq!(picker.filter, "x", "the query survives the refresh");
+}
+
+/// One git project's facts row for the draft cwd, with a knobbed policy
+/// word: the shape every worktree-box test starts from.
+fn git_facts(policy: &str) -> Vec<ProjectFacts> {
+    let own = std::env::current_dir().unwrap().display().to_string();
+    vec![ProjectFacts {
+        cwd: own,
+        current: Some("main".into()),
+        branches: vec!["main".into(), "feature/x".into()],
+        policy: Ok(policy.into()),
+    }]
+}
+
+#[test]
+fn the_box_defaults_to_the_policy_and_never_greys_out() {
+    // AC6-HP: an `external` project defaults to checked with Branch `main`;
+    // a `never` project paints unchecked and greyed with its reason on the
+    // facts line, and the box never toggles there.
+    let mut v = view_with_launcher();
+    let never = catalog(&[("claude", true, true)]).unwrap();
+    let mut never = never;
+    if let CatalogOutcome::Ok(rows, err, facts) = &mut never {
+        *facts = git_facts("never");
+        let _ = (rows, err);
+    }
+    v.launcher_catalog = Some(never);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[ ] worktree",
+        "never keeps the box unchecked"
+    );
+    assert_eq!(
+        l.chip_label(Focus::Branch, &v.launcher_catalog),
+        "main",
+        "the Branch chip reads the current branch under never"
+    );
+    // The facts line names the policy: the greyed state carries its reason.
+    let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
+    v.launcher.as_mut().unwrap().focus = Focus::Worktree;
+    let l = v.launcher.as_ref().unwrap();
+    let sl = l.sheet_layout(&v).unwrap();
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+    let row0: String = (0..60)
+        .map(|x| cells[(sl.origin.0 as usize + 1) * cols + sl.origin.1 as usize + 1 + x].c)
+        .collect();
+    assert!(
+        row0.contains("policy never: runs in place"),
+        "the greyed box names its reason: {row0}"
+    );
+    // Enter toggles nothing under never.
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[ ] worktree",
+        "never never toggles"
+    );
+
+    // The same draft on an `external` project defaults to checked, Branch
+    // `main`, and Enter toggles the box off.
+    let mut v = view_with_launcher();
+    let mut ext = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(_, _, facts) = &mut ext {
+        *facts = git_facts("external");
+    }
+    v.launcher_catalog = Some(ext);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[x] worktree",
+        "external defaults to checked"
+    );
+    assert_eq!(
+        l.chip_label(Focus::Branch, &v.launcher_catalog),
+        "main",
+        "a checked box launches `main` by default"
+    );
+    // Shift-tab once: Message -> Worktree. Enter toggles the box off.
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
+    });
+    assert_eq!(
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Worktree,
+        "shift-tab reaches the box"
+    );
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    assert_eq!(
+        v.launcher
+            .as_ref()
+            .unwrap()
+            .chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[ ] worktree",
+        "Enter on the box toggles it off"
+    );
+}
+
+#[test]
+fn unread_facts_refuse_the_launch_instead_of_guessing() {
+    // AC6-EDGE: with the facts unread and no explicit pick, the box reads
+    // `worktree ?` and the submit refuses with its reason; toggling the box
+    // resolves the state and the launch proceeds.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.chip_label(Focus::Worktree, &v.launcher_catalog),
+        "worktree ?",
+        "the unknown state names itself"
+    );
+    let (session, _wire_fixture) = wire_fixture_at(94);
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    match &v.launcher.as_ref().unwrap().phase {
+        Phase::Refused { reason, .. } => assert!(
+            reason.contains("worktree policy unread"),
+            "the refusal names the unread policy: {reason}"
+        ),
+        other => panic!("expected a pre-wire refusal, got {other:?}"),
+    }
+    // An explicit toggle resolves it: the box turns on and the draft
+    // launches past the policy gate.
+    v.launcher.as_mut().unwrap().phase = Phase::Editing;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
+    });
+    assert_eq!(
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Worktree,
+        "shift-tab reaches the box"
+    );
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b" ", &mut sock).await;
+    });
+    assert_eq!(
+        v.launcher
+            .as_ref()
+            .unwrap()
+            .chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[x] worktree",
+        "the explicit pick clears the ? state"
+    );
+}
+
+#[test]
+fn picking_a_non_current_branch_checks_the_box() {
+    // AC8-EDGE: the Branch picker lists main first, then the project's local
+    // branches; committing a branch other than the current one turns the box
+    // on. The composer never moves the checkout in place.
+    let mut v = view_with_launcher();
+    let mut ext = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(_, _, facts) = &mut ext {
+        *facts = git_facts("external");
+    }
+    v.launcher_catalog = Some(ext);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let (rows, actions) =
+        super::agent_launcher::picker_rows(&l, Focus::Branch, &v.launcher_catalog, &v.backlog);
+    let labels: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["main", "main", "feature/x"],
+        "main leads, then the facts' local branches"
+    );
+    let branch_action = actions
+        .iter()
+        .filter_map(|a| a.clone())
+        .find(
+            |a| matches!(a, super::agent_launcher::PickerAction::SetBranch(b) if b == "feature/x"),
+        )
+        .expect("the feature/x row carries SetBranch");
+    let mut l = v.launcher.take().unwrap();
+    super::agent_launcher::apply_picker_action(
+        &mut l,
+        &v.launcher_catalog,
+        branch_action,
+        0,
+        Focus::Branch,
+    );
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.chip_label(Focus::Worktree, &v.launcher_catalog),
+        "[x] worktree",
+        "a non-current pick checks the box"
+    );
+    assert_eq!(
+        l.chip_label(Focus::Branch, &v.launcher_catalog),
+        "feature/x",
+        "the chip shows the picked branch"
+    );
+}
+
+#[test]
+fn worktree_launches_need_the_worktree_wire_generation() {
+    // AC9-HP: under a wire-91 sidecar a checked box refuses before the wire
+    // with the reconnect reason; the same draft on wire 94 submits.
+    let mut v = view_with_launcher();
+    let mut ext = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(_, _, facts) = &mut ext {
+        *facts = git_facts("external");
+    }
+    v.launcher_catalog = Some(ext);
+    sync_catalog(&mut v);
+    let (session, _wire_fixture) = wire_fixture_at(91);
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    match &v.launcher.as_ref().unwrap().phase {
+        Phase::Refused { reason, .. } => assert!(
+            reason.contains("does not support worktree launches"),
+            "the refusal names the reconnect: {reason}"
+        ),
+        other => panic!("expected the wire refusal, got {other:?}"),
+    }
 }
