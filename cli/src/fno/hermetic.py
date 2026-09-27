@@ -108,6 +108,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # value instead of the one the code under test states. Keeping NO_COLOR
     # visible here reproduces that false positive on the Python side.
     "NO_COLOR",
+    # The mux client's light-background probe (digest_overlay.rs theme_for):
+    # a developer's terminal reports its own palette, and a suite must not
+    # resolve the theme from the machine it happens to run on.
+    "COLORFGBG",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
     "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
