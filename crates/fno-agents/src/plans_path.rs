@@ -579,7 +579,10 @@ pub fn run_plan_dir(args: &[String]) -> i32 {
 /// [--now EPOCH] [cwd]`: the save path (or bare filename) for a new plan
 /// doc. The `fno do plan path` verb forwards here.
 pub fn run_plan_path(args: &[String]) -> i32 {
-    let mut slug = String::new();
+    // An empty --slug is a real input the chain renders (an id-less,
+    // slug-less date file); only a MISSING --slug is a usage error, which is
+    // what the deleted Python verb's typer requirement did too.
+    let mut slug: Option<String> = None;
     let mut node = String::new();
     let mut name_only = false;
     let mut now: Option<LocalTimestamp> = None;
@@ -589,7 +592,7 @@ pub fn run_plan_path(args: &[String]) -> i32 {
         match args[i].as_str() {
             "--slug" if i + 1 < args.len() => {
                 i += 1;
-                slug = args[i].clone();
+                slug = Some(args[i].clone());
             }
             "--node" if i + 1 < args.len() => {
                 i += 1;
@@ -618,10 +621,10 @@ pub fn run_plan_path(args: &[String]) -> i32 {
         }
         i += 1;
     }
-    if slug.is_empty() {
+    let Some(slug) = slug else {
         eprintln!("usage: fno-agents state plan-path --slug <slug> [--node <id>] [--name-only] [--now <epoch>] [cwd]");
         return 2;
-    }
+    };
     let anchor = anchor_of(&pos);
     match plan_doc_path(&anchor, &slug, &node, now) {
         Ok(path) => {
