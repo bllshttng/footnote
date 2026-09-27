@@ -260,6 +260,13 @@ impl AgentsHome {
         self.root.join("registry.json")
     }
 
+    /// The capped spool of session-start reports a harness hook wrote while
+    /// the daemon was down; the next successful `session-report` send drains
+    /// it. Lives under the agents home so a test-declared root fences it.
+    pub fn agent_hooks_spool(&self) -> PathBuf {
+        self.root.join("agent-hooks").join("spool.jsonl")
+    }
+
     /// The crown name store (`crown_names.json`), beside `registry.json`.
     /// The mux reads this file as a contract - see [`crate::crown_names`].
     pub fn crown_names_json(&self) -> PathBuf {

@@ -2083,3 +2083,62 @@ def test_a_cut_inside_the_compile_reports_the_board_step(tmp_path, monkeypatch):
 
     assert summary["evaluated"] == 2
     assert steps == ["court", "answers", "mail", "graph", "board", "mail", "board"], steps
+
+
+def test_a_blocked_truth_read_yields_the_crown_and_still_wakes_the_next(
+    tmp_path, monkeypatch
+):
+    # One crown's hung truth read used to spend the whole phase slice: the
+    # alarm cut the pass mid-read and the clock-keyed rotation reopened on
+    # the same crown every tick, so 0 of 5 crowns were ever evaluated. The
+    # read now runs under a wait bound and the timed-out crown yields to the
+    # rest of the pass.
+    import threading
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rec = _Recorder()
+    blocked = threading.Event()
+
+    def truth(holder):
+        if holder == "king-a":
+            blocked.wait(timeout=60)
+        return {"state": "done"}
+
+    try:
+        summary = run_king_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+            rows_fn=lambda: [
+                SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
+                SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
+            ],
+            truth_fn=truth,
+            unread_fn=lambda address: [object()],
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+            answered_fn=lambda: [],
+        )
+    finally:
+        blocked.set()
+
+    assert {"scope": "epic-a1", "refusal": "truth-timeout"} in summary["refused"]
+    assert sorted(scope for scope, *_ in rec.dispatches) == ["epic-b1"]
+    assert summary["evaluated"] >= 1
+    assert summary["truth_reads"] == 1
