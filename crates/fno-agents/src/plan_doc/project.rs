@@ -20,6 +20,8 @@ pub const MIRROR_KEYS: &[&str] = &[
     "size",
     "parent",
     "parent_slug",
+    "parent_link",
+    "related_links",
 ];
 
 /// Mirror keys that are always lists; an empty list is meaningful (it clears a
@@ -28,8 +30,14 @@ pub const LIST_MIRROR_KEYS: &[&str] = &["blocked_by", "tags"];
 
 /// Mirror keys whose graph value can legitimately be cleared to None. For
 /// these, an explicit None means "clear the stale doc mirror", not "skip".
-/// parent_slug is tied to parent and clears in lockstep.
-pub const CLEARABLE_KEYS: &[&str] = &["size", "parent", "parent_slug"];
+/// Parent and link mirrors clear when their graph relation or target disappears.
+pub const CLEARABLE_KEYS: &[&str] = &[
+    "size",
+    "parent",
+    "parent_slug",
+    "parent_link",
+    "related_links",
+];
 
 /// One per-node projection. `mirror_keys` opts the NAMED node into writing
 /// extra keys beyond MIRROR_KEYS; `clear_keys` names keys to delete; `force`
@@ -101,7 +109,10 @@ pub fn project_node(
             }
             v => Fv::Scalar(na::py_str(v)),
         };
-        if fields.get(key) != Some(&value) {
+        if !fields
+            .get(key)
+            .is_some_and(|current| mirror_values_equal(current, &value))
+        {
             fields.insert(key, value);
             changed = true;
         }
@@ -220,6 +231,8 @@ pub fn project_graph_nodes(
         .filter(|n| n.is_object())
         .map(|n| (na::s_field(n, "id").unwrap_or(""), na::s_field(n, "slug")))
         .collect();
+    let mut doc_stem_cache: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
 
     let mut rewritten = 0usize;
     for nid in &ids {
@@ -245,7 +258,8 @@ pub fn project_graph_nodes(
         if !p.is_file() {
             continue;
         }
-        let mut augmented = with_parent_slug(node, &slug_by_id);
+        let mut augmented =
+            with_parent_fields(node, &slug_by_id, entries, root, &mut doc_stem_cache);
         if na::s_field(node, "type") == Some("epic") {
             let r = rollup::compute_rollup(nid, entries);
             let (_map, max_wave) = rollup::compute_waves(nid, entries);
@@ -351,29 +365,93 @@ fn expand_repaint_targets(entries: &[Value], ids: &mut Vec<String>) {
     }
 }
 
-/// A shallow copy of `node` with `parent_slug` tied to `parent`: a
-/// resolvable parent sets the slug; a null, absent, or dangling parent sets
-/// `parent_slug` to Null so a stale slug mirror CLEARS in lockstep.
-fn with_parent_slug<'a>(
-    node: &'a Value,
+/// A shallow copy with parent-derived fields and links to existing plan files.
+fn with_parent_fields(
+    node: &Value,
     slug_by_id: &std::collections::HashMap<&str, Option<&str>>,
+    entries: &[Value],
+    root: Option<&str>,
+    doc_stem_cache: &mut std::collections::HashMap<String, Option<String>>,
 ) -> Value {
     let mut copy = node.clone();
-    if let Some(obj) = copy.as_object_mut() {
-        let parent_id = na::s_field(node, "parent").map(str::to_string);
-        let slug = match &parent_id {
-            Some(pid) => slug_by_id.get(pid.as_str()).copied().flatten(),
-            None => None,
-        };
-        obj.insert(
-            "parent_slug".to_string(),
-            match slug {
-                Some(s) => Value::String(s.to_string()),
-                None => Value::Null,
-            },
-        );
-    }
+    let Some(obj) = copy.as_object_mut() else {
+        return copy;
+    };
+
+    let parent_id = na::s_field(node, "parent");
+    let slug = parent_id.and_then(|pid| slug_by_id.get(pid).copied().flatten());
+    obj.insert(
+        "parent_slug".to_string(),
+        slug.map(|s| Value::String(s.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    let parent_link = parent_id.and_then(|pid| {
+        doc_stem_for_id(pid, entries, root, doc_stem_cache)
+            .map(|stem| Value::String(format!("[[{stem}|{pid}]]")))
+    });
+    obj.insert(
+        "parent_link".to_string(),
+        parent_link.unwrap_or(Value::Null),
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    let related_links: Vec<String> = node
+        .get("related")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| seen.insert(*id))
+        .filter_map(|id| {
+            doc_stem_for_id(id, entries, root, doc_stem_cache)
+                .map(|stem| format!("[[{stem}|{id}]]"))
+        })
+        .collect();
+    obj.insert(
+        "related_links".to_string(),
+        if related_links.is_empty() {
+            Value::Null
+        } else {
+            json!(related_links)
+        },
+    );
     copy
+}
+
+/// Return the stem for an existing linked plan, resolving relative paths at the projection root.
+fn doc_stem_for_id(
+    node_id: &str,
+    entries: &[Value],
+    root: Option<&str>,
+    cache: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(cached) = cache.get(node_id) {
+        return cached.clone();
+    }
+    let stem = na::find_node(entries, node_id)
+        .and_then(|node| na::s_field(node, "plan_path"))
+        .and_then(|plan_path| {
+            let path = PathBuf::from(plan_path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(root?).join(path)
+            };
+            if !path.is_file() {
+                return None;
+            }
+            path.file_stem()?.to_str().map(str::to_string)
+        });
+    cache.insert(node_id.to_string(), stem.clone());
+    stem
+}
+
+/// List formatting is presentation; equal list values keep their existing YAML form.
+fn mirror_values_equal(current: &Fv, projected: &Fv) -> bool {
+    match (current, projected) {
+        (Fv::List(a) | Fv::BlockList(a), Fv::List(b) | Fv::BlockList(b)) => a == b,
+        _ => current == projected,
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +532,131 @@ mod tests {
         assert_eq!(s(&f, "parent"), "x-epic");
         assert_eq!(s(&f, "parent_slug"), "the-epic");
         assert_eq!(s(&f, "size"), "M");
+    }
+
+    #[test]
+    fn projects_parent_and_related_wikilinks() {
+        let dir = tmp_dir("links");
+        write_plan(
+            &dir,
+            "20260801-epic-parent.md",
+            &EPIC_PLAN.replace("x-epic", "x-parent"),
+        );
+        let related_a = write_plan(&dir, "20260802-related-a.md", &child_doc("x-a"));
+        let related_b = write_plan(&dir, "20260803-related-b.md", &child_doc("x-b"));
+        let child = write_plan(
+            &dir,
+            "child.md",
+            "---\nnode: x-child\nstatus: ready\ntype: feature\nrelated: [manual, note]\n---\n\n# child\n",
+        );
+        let entries = vec![
+            json!({"id": "x-parent", "slug": "parent-slug", "plan_path": "20260801-epic-parent.md", "type": "epic", "status": "ready"}),
+            json!({"id": "x-a", "slug": "related-a", "plan_path": related_a.to_string_lossy(), "type": "feature", "status": "ready"}),
+            json!({"id": "x-b", "slug": "related-b", "plan_path": related_b.to_string_lossy(), "type": "feature", "status": "ready"}),
+            json!({"id": "x-missing", "slug": "missing", "plan_path": null}),
+            json!({"id": "x-child", "slug": "child", "plan_path": child.to_string_lossy(), "parent": "x-parent", "related": ["x-a", "x-missing", "x-b", "x-a"], "status": "ready", "priority": "p2", "type": "feature"}),
+        ];
+
+        assert!(project(entries, &["x-child"], &dir) > 0);
+        let f = fields_of(&child);
+        assert_eq!(s(&f, "parent"), "x-parent");
+        assert_eq!(s(&f, "parent_slug"), "parent-slug");
+        assert_eq!(s(&f, "parent_link"), "[[20260801-epic-parent|x-parent]]");
+        assert_eq!(
+            list(&f, "related_links"),
+            &[
+                "[[20260802-related-a|x-a]]".to_string(),
+                "[[20260803-related-b|x-b]]".to_string(),
+            ]
+        );
+        assert_eq!(
+            list(&f, "related"),
+            &["manual".to_string(), "note".to_string()]
+        );
+    }
+
+    #[test]
+    fn clears_stale_link_properties_when_target_docs_are_missing() {
+        let dir = tmp_dir("stale-links");
+        let child = write_plan(
+            &dir,
+            "child.md",
+            "---\nnode: x-child\nstatus: ready\ntype: feature\nparent_link: \"[[old-parent|x-parent]]\"\nrelated_links: [\"[[old-related|x-related]]\"]\n---\n\n# child\n",
+        );
+        let entries = vec![
+            json!({"id": "x-parent", "slug": "parent", "plan_path": null, "type": "feature"}),
+            json!({"id": "x-related", "slug": "related", "plan_path": null, "type": "feature"}),
+            json!({"id": "x-child", "slug": "child", "plan_path": child.to_string_lossy(), "parent": "x-parent", "related": ["x-related"], "status": "ready", "type": "feature"}),
+        ];
+
+        assert_eq!(project(entries, &["x-child"], &dir), 1);
+        let f = fields_of(&child);
+        assert!(!f.contains_key("parent_link"));
+        assert!(!f.contains_key("related_links"));
+    }
+
+    #[test]
+    fn keeps_projected_related_links_idempotent_in_block_form() {
+        let dir = tmp_dir("block-links");
+        let parent = write_plan(&dir, "parent.md", &child_doc("x-parent"));
+        let related = write_plan(&dir, "20260802-related.md", &child_doc("x-related"));
+        let child = write_plan(&dir, "child.md", &child_doc("x-child"));
+        let entries = vec![
+            json!({"id": "x-parent", "slug": "parent", "plan_path": parent.to_string_lossy(), "status": "ready", "type": "feature"}),
+            json!({"id": "x-related", "slug": "related", "plan_path": related.to_string_lossy(), "status": "ready", "type": "feature"}),
+            json!({"id": "x-child", "slug": "child", "plan_path": child.to_string_lossy(), "parent": "x-parent", "related": ["x-related"], "status": "ready", "type": "feature"}),
+        ];
+
+        assert_eq!(project(entries.clone(), &["x-child"], &dir), 1);
+        assert_eq!(
+            list(&fields_of(&child), "related_links"),
+            &["[[20260802-related|x-related]]".to_string()]
+        );
+
+        let current = std::fs::read_to_string(&child).unwrap();
+        assert_eq!(project(entries.clone(), &["x-child"], &dir), 0);
+        assert_eq!(std::fs::read_to_string(&child).unwrap(), current);
+
+        let mut found = false;
+        let mut lines = Vec::new();
+        for line in current.lines() {
+            if line.starts_with("related_links:") {
+                lines.push("related_links:".to_string());
+                lines.push("  - \"[[20260802-related|x-related]]\"".to_string());
+                found = true;
+            } else {
+                lines.push(line.to_string());
+            }
+        }
+        assert!(
+            found,
+            "projection must write related_links before formatting"
+        );
+        std::fs::write(&child, format!("{}\n", lines.join("\n"))).unwrap();
+        let block_form = std::fs::read_to_string(&child).unwrap();
+
+        assert_eq!(project(entries, &["x-child"], &dir), 0);
+        assert_eq!(std::fs::read_to_string(&child).unwrap(), block_form);
+    }
+
+    #[test]
+    fn projection_unescapes_doubled_apostrophes_in_single_quoted_lists() {
+        let dir = tmp_dir("single-quoted-list");
+        let child = write_plan(
+            &dir,
+            "child.md",
+            "---\nnode: x-child\nstatus: ready\ntype: feature\npriority: p2\nclose_probes: ['grep -c ''cargo admission: taking over'' \"$(command -v fno-agents)\"']\n---\n\n# child\n",
+        );
+        let entries = vec![
+            json!({"id": "x-child", "slug": "child", "plan_path": child.to_string_lossy(), "priority": "p0", "status": "ready", "type": "feature"}),
+        ];
+
+        assert_eq!(project(entries, &["x-child"], &dir), 1);
+        let f = fields_of(&child);
+        assert_eq!(
+            list(&f, "close_probes"),
+            &[r#"grep -c 'cargo admission: taking over' "$(command -v fno-agents)""#.to_string()]
+        );
     }
 
     #[test]

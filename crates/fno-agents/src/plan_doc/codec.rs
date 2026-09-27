@@ -202,7 +202,7 @@ fn parse_scalar(raw: &str) -> String {
         return resolve_dq_escapes(&raw[1..raw.len() - 1]);
     }
     if bytes.len() >= 2 && bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'' {
-        return raw[1..raw.len() - 1].to_string();
+        return raw[1..raw.len() - 1].replace("''", "'");
     }
     raw.to_string()
 }
