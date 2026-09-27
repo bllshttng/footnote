@@ -2076,13 +2076,6 @@ fn parse_retract_door(
     let mut i = 0;
     while i < args.len() {
         match (args[i].as_str(), allow_authority) {
-            ("--reason", _) => {
-                i += 1;
-                door.reason = args
-                    .get(i)
-                    .ok_or_else(|| format!("--reason needs a value\n{usage}"))?
-                    .clone();
-            }
             // One arm takes both spellings, so the value error and the
             // stored field cannot diverge between --reason and -R.
             ("--reason", _) | ("-R", true) => {
@@ -2123,6 +2116,14 @@ fn parse_retract_door(
 
 fn row_id(row: &Value) -> &str {
     row.get("decision_id").and_then(Value::as_str).unwrap_or("")
+}
+
+/// A retraction event rendered as a flattened row: same subject as its
+/// target, no `decision_id` of its own. Subject-addressed reads and writes
+/// skip it, or a fully retracted subject still answers to its own
+/// retraction.
+fn is_retraction_row(row: &Value) -> bool {
+    row.get("_event_type").and_then(Value::as_str) == Some("decision_retracted")
 }
 
 fn row_subject(row: &Value) -> &str {
@@ -2283,6 +2284,7 @@ fn retract_target(
     let subject_cf = token.to_lowercase();
     let hits: Vec<&Value> = rows
         .iter()
+        .filter(|r| !is_retraction_row(r))
         .filter(|r| !retired.contains_key(&row_id(r).to_lowercase()))
         .filter(|r| !law_only || decision_index::is_law(r))
         .filter(|retract| {
@@ -2360,6 +2362,7 @@ fn near_miss_subject_lines(token: &str, rows: &[Value], law_only: bool) -> Vec<S
     let mut near: Vec<String> = Vec::new();
     for row in rows
         .iter()
+        .filter(|r| !is_retraction_row(r))
         .filter(|r| !law_only || decision_index::is_law(r))
     {
         let subject = row_subject(row);
@@ -2529,6 +2532,7 @@ fn history_answer(token: &str, rows: &[Value]) -> Value {
         }
     } else {
         rows.iter()
+            .filter(|r| !is_retraction_row(r))
             .filter(|r| decision_index::is_law(r))
             .filter(|r| row_subject(r).trim().eq_ignore_ascii_case(&subject_cf))
             .collect()
@@ -4447,6 +4451,37 @@ mod scope_tests {
             "banana".to_string(),
         ]);
         assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn a_retracted_subject_answers_nothing_instead_of_its_own_retraction_row() {
+        // The retraction event flattens to a row with the target's subject
+        // and no decision_id of its own; a subject retract over it must read
+        // as an empty answer, never resolve to a row with an empty id.
+        let rows = vec![
+            serde_json::json!({
+                "decision_id": "d-aaaa0001", "subject": "coord-topic",
+                "decision": "coordinate this node", "authority_source": "agent",
+                "ts": "2026-08-20T00:00:00Z", "_event_type": "operator_decision"
+            }),
+            serde_json::json!({
+                "target_decision_id": "d-aaaa0001", "subject": "coord-topic",
+                "reason": "done", "authority_source": "agent",
+                "ts": "2026-08-21T00:00:00Z", "_event_type": "decision_retracted"
+            }),
+        ];
+        let retired = decision_index::retirement_map(&rows);
+        let err = retract_target(
+            "coord-topic",
+            &rows,
+            &retired,
+            false,
+            "chat_attested",
+            None,
+            |t, r, only| near_miss_subject_lines(t, r, only),
+        )
+        .expect_err("a fully retracted subject has nothing live");
+        assert!(err.contains("no live decision under the subject"), "{err}");
     }
 
     #[test]

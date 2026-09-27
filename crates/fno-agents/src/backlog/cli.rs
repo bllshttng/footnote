@@ -172,7 +172,10 @@ pub fn run(args: &[String]) -> i32 {
         // The retraction door is native: every lane through the same door
         // `fno inbox law retract` uses, laws still operator-only. The
         // Python twin this arm replaces is deleted in the same change
-        // (d-e11b2b3e).
+        // (d-e11b2b3e). A help tail keeps the Python surface, whose parser
+        // renders the argument and option help the door's usage line does
+        // not (the same split the `get` arm makes).
+        "decide-retract" if carries(resolved.tail, &["--help", "-h"]) => forward_python(&resolved),
         "decide-retract" => crate::law_match::run_backlog_retract(resolved.tail),
         _ => forward_python(&resolved),
     }
