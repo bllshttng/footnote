@@ -10,40 +10,6 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 use super::*;
 
 impl Core {
-    /// The squad of the parent a paneless row's spawn edge names, one level
-    /// deep: the row's `spawned_by_session` joins the registry row whose
-    /// harness session id it names (trimmed, case-insensitive - the same
-    /// tolerance `spawned_by_name` and `spawn_edge::live_child_of` apply), and
-    /// that parent's own attribution (membership, then cwd) answers. A spawn
-    /// joins the spawner's workspace, so the edge outranks the row's cwd. An
-    /// edge naming an absent parent keeps `None` - the `~ elsewhere` reader
-    /// must still see that absence - and so does an id two parent rows claim
-    /// that resolve to DIFFERENT squads: an ambiguous parent reads as absent,
-    /// never as a confident wrong answer (the spawned_by_name rule).
-    fn parent_edge_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
-        let edge = agent.spawned_by_session.as_deref()?.trim();
-        if edge.is_empty() {
-            return None;
-        }
-        let mut squads = self
-            .agents
-            .iter()
-            .filter(|p| {
-                agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
-            })
-            .filter_map(|p| {
-                self.member_squad_for_agent(p)
-                    .or_else(|| self.session.find_by_cwd(&p.cwd))
-            });
-        let first = squads.next()?;
-        if squads.any(|s| s != first) {
-            return None;
-        }
-        Some(first)
-    }
-}
-
-impl Core {
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
@@ -288,13 +254,11 @@ impl Core {
                             .is_some_and(|entry| entry.pty.is_child_alive())
                     });
                     let resumable = !detached_live && self.row_resumable_in_session(a);
-                    // Attribute the row to the squad holding its recorded
-                    // membership FIRST (cwd ownership only as a fallback), so
-                    // the panel shows it where ResumeAgent will actually place
+                    // Attribute the row to its workspace (recorded member,
+                    // then the spawner's, then the project default), so the
+                    // panel shows it where ResumeAgent will actually place
                     // the pane - the two lookups must agree.
-                    let squad = self
-                        .member_squad_for_agent(a)
-                        .or_else(|| self.session.find_by_cwd(&a.cwd));
+                    let squad = self.thread_workspace(a);
                     out.push(AgentRow {
                         harness: a.harness.clone(),
                         model: a.model.clone(),
@@ -359,12 +323,9 @@ impl Core {
                     // Never a mission squad: that id names a render-time header
                     // the client draws from names alone, so a row grouped under
                     // one is drawn by no section at all and disappears.
-                    // Membership, then the spawn edge (the spawner's squad),
-                    // then cwd as the legacy fallback.
-                    let squad = self
-                        .member_squad_for_agent(a)
-                        .or_else(|| self.parent_edge_squad_for_agent(a))
-                        .or_else(|| self.session.find_by_cwd(&a.cwd));
+                    // Membership, then the spawner's workspace, then the
+                    // project default - the one thread-workspace resolver.
+                    let squad = self.thread_workspace(a);
                     // (US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (AC2-UI), a squad-matched row for the foreign-cwd

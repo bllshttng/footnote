@@ -918,7 +918,10 @@ impl Core {
             },
             None => None,
         };
-        let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
+        // Owner routing asks the one thread-workspace resolver: the row's
+        // recorded member, then its spawner's workspace, then the project
+        // default for its cwd; the viewed squad answers only when none does.
+        let owner = self.thread_workspace(&row).unwrap_or(view.0);
         let (dest, effective) = match remembered_tab {
             Some((sid, tid)) => {
                 // The remembered tab still wins over a caller tab, but the
@@ -1560,8 +1563,9 @@ impl Core {
         };
         self.name_thread_viewer_pane(pid, &row, &tier);
         // The view owns a fresh tab; the caller's split/at/from geometry
-        // is not a view's to honor.
-        let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
+        // is not a view's to honor. Owner routing asks the one
+        // thread-workspace resolver (member, then spawner, then cwd).
+        let owner = self.thread_workspace(&row).unwrap_or(view.0);
         let effective = PanePlacement {
             tab: Some(crate::proto::TabSel::New),
             ..Default::default()

@@ -465,7 +465,7 @@ fn multiclient_mux_ls_reports_live_counts_and_stale_without_unlinking() {
     assert!(out.status.success(), "ls exits 0: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("main: 1 clients, 1 squads, 1 panes"),
+        stdout.contains("main: 1 clients, 1 workspaces, 1 panes"),
         "live row with counts; got: {stdout}"
     );
     assert!(stdout.contains("dead: stale"), "stale row; got: {stdout}");
