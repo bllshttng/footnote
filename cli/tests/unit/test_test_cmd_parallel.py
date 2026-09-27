@@ -108,6 +108,9 @@ def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
             self.markers.append(marker)
 
         def get_closest_marker(self, name):
+            return next(
+                (marker for marker in self.markers if marker.name == name), None
+            )
 
     racer = _Item(
         "cli/tests/unit/test_graph_sidecar_window.py::"

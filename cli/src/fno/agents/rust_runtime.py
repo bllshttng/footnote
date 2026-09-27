@@ -464,10 +464,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # owns the snapshot, the decision ladder and the journal. Hidden on the
     # help surface (menu cap), so it is registered but never advertised.
     "provider-cap",
-    # The batch transcript-path answer the daemon's fleet readouts shell out
-    # to. Pure Python (fno.agents.transcript_paths reads project manifests);
-    # no Rust client port, so it must never auto-route to the daemon.
-    "transcript-paths",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
