@@ -51,10 +51,12 @@ pub(crate) fn identity_key(session_id: &str) -> String {
     }
 }
 
-/// The state root the Python `hold_dir()` resolves to: `$FNO_HOME`, else
-/// `paths.state_dir` from the global config's `[paths] table (`~` expands),
-/// else `$HOME/.fno`. The project-local config override is unread here, the
-/// same bound every other Rust writer in the fleet runs under.
+/// The state root the sidecar clock lives under: `$FNO_HOME`, else
+/// `paths.state_dir` from the global config's `[paths]` table (`~` expands),
+/// else `$HOME/.fno`. The Python resolver reads `FNO_STATE_DIR` and its full
+/// settings stack instead of `FNO_HOME`, so the two agree wherever the
+/// global config (or the default) carries the root, and a test env must pin
+/// both variables to aim both legs at one directory.
 fn state_root() -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_HOME") {
         return PathBuf::from(home);
