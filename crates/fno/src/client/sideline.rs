@@ -101,6 +101,13 @@ impl View {
     /// sideline geometry exactly so the highlight lands where a click would
     ///.
     pub(super) fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
+        // The board column paints its own surface and owns no agents display
+        // rows: every resolver that answers "which sideline row is this"
+        // (hover, right-click menu, drag pickup, press-hold) must answer
+        // none there, or a press on the board acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
         // The sideline owns row 0 in normal mode (the strip moved right of
         // the divider), so display row `i` maps directly from `row`. A cell
         // on the divider or in the strip's content columns returns None.

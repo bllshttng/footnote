@@ -4329,7 +4329,13 @@ impl View {
             return None;
         }
         // Sideline: the painted width minus its divider (the full terminal
-        // in full-screen mode). Off/narrow => no panel.
+        // in full-screen mode). Off/narrow => no panel. Under the docked
+        // board the column is the board's own surface: no agents rows, no
+        // footer, no density button - a click must resolve nothing here or
+        // it acts on a phantom row.
+        if self.sideline_view == crate::view_store::SidelineView::Backlog {
+            return None;
+        }
         let paint_w = self.sideline_paint_w();
         if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
@@ -9342,29 +9348,12 @@ async fn attach_and_run(
                 // held: release it to the pane.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
-                    // The composer holds the keyboard while open: a flushed
-                    // candidate feeds its folder (Esc closes the composer),
-                    // never a pane that may not even be painted.
-                    if view.launcher.is_some() {
-                        match event {
-                            Event::Forward(chunk) => {
-                                if let Err(e) = agent_launcher::launcher_keys(
-                                    &mut view, &chunk, &mut sock_w,
-                                )
-                                .await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                            event => {
-                                if let Err(e) =
-                                    dispatch_event(&mut view, event, &mut sock_w).await
-                                {
-                                    break Err(e);
-                                }
-                            }
-                        }
-                    } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                    // A flushed candidate feeds the overlay that holds the
+                    // keyboard (the composer's folder, the board's), never a
+                    // pane that may not even be painted.
+                    if let Err(e) =
+                        overlay_keys::flush_released_chord(&mut view, event, &mut sock_w).await
+                    {
                         break Err(e);
                     }
                 }
