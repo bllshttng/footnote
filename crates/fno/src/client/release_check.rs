@@ -120,11 +120,12 @@ pub(crate) fn parse_brew_outdated(json: &str) -> Result<Option<(String, String)>
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "missing formulae array".to_string())?;
     for formula in formulae {
-        let Some(name) = formula.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
+        let name = formula
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "formula row is missing its name".to_string())?;
         if name != "fno" && !name.ends_with("/fno") {
-            continue;
+            return Err(format!("unexpected formula in fno outdated output: {name}"));
         }
         let installed = formula
             .get("installed_versions")
@@ -360,6 +361,10 @@ mod tests {
     fn malformed_brew_output_is_not_a_current_result() {
         assert!(parse_brew_outdated("{").is_err());
         assert!(parse_brew_outdated(r#"{"formulae":[{"name":"fno"}],"casks":[]}"#).is_err());
+        assert!(parse_brew_outdated(
+            r#"{"formulae":[{"name":"other","installed_versions":["0.1"],"current_version":"0.2"}],"casks":[]}"#
+        )
+        .is_err());
         assert!(parse_brew_outdated(r#"{"formulae":[],"casks":[]}"#)
             .unwrap()
             .is_none());
