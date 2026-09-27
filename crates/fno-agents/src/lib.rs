@@ -285,6 +285,7 @@ pub mod provenance;
 pub mod provider;
 pub mod provider_cap;
 pub mod provider_cap_verbs;
+pub mod provider_key;
 pub mod publish_review;
 pub mod quarantine;
 pub mod question_clear;

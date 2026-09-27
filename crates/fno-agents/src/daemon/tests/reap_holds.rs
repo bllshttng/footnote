@@ -227,7 +227,7 @@ fn ac2_edge_unmeasured_hold_never_escalates() {
         7,
         &move |_| graph.clone(),
         &|_| None,
-        &staged_ages(&|_| None),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &|_| None),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -351,10 +351,13 @@ fn ac3_hp_the_release_retires_the_ruled_row_and_keeps_the_rest() {
         7,
         &move |_| graph.clone(),
         &|_| None,
-        &staged_ages(&|e| match e.harness_session_id.as_deref() {
-            Some("sess-act") => Some(vec![fresh.clone()]),
-            _ => None,
-        }),
+        &staged_ages_at(
+            crate::daemon::now_epoch_secs(),
+            &|e| match e.harness_session_id.as_deref() {
+                Some("sess-act") => Some(vec![fresh.clone()]),
+                _ => None,
+            },
+        ),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -416,7 +419,9 @@ fn ac3_edge_stop_release_issues_and_names_an_unconfirmed_stop() {
         7,
         &move |_| graph.clone(),
         &|_| Some(vec![quiet.clone()]),
-        &staged_ages(&|_| Some(vec![quiet.clone()])),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &|_| {
+            Some(vec![quiet.clone()])
+        }),
         &|_| false,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -463,7 +468,7 @@ fn ac3_edge_a_changed_hold_refuses_the_release() {
         7,
         &move |_| graph.clone(),
         &|_| None,
-        &staged_ages(&|_| None),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &|_| None),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
@@ -620,7 +625,9 @@ fn ac3_the_conflict_release_reads_all_done_over_bare_witness_nodes() {
         7,
         &move |_| graph.clone(),
         &|_| Some(vec![quiet.clone()]),
-        &staged_ages(&|_| Some(vec![quiet.clone()])),
+        &staged_ages_at(crate::daemon::now_epoch_secs(), &|_| {
+            Some(vec![quiet.clone()])
+        }),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_e| crate::daemon::CascadeOutcome::NotApplicable,
