@@ -59,6 +59,34 @@ def _read_entries(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
+def _native_update(tmp_graph, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess). Returns (code, combined output)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_graph.parent),
+            "FNO_STATE_DIR": str(tmp_graph.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_graph.parent),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
 # ---------------------------------------------------------------------------
 # Status derivation cascade
 # ---------------------------------------------------------------------------
@@ -83,8 +111,8 @@ def test_idea_status_overridden_by_in_progress(tmp_graph):
     add = _invoke("--json", "backlog", "add", "Claimed idea")
     node_id = json.loads(add.stdout)["id"]
 
-    r = _invoke("backlog", "update", node_id, "--locked-by", "session-X")
-    assert r.exit_code == 0, r.output
+    r = _native_update(tmp_graph, node_id, "--locked-by", "session-X")
+    assert r[0] == 0, r[1]
 
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
@@ -659,9 +687,9 @@ def test_update_on_archived_node_names_the_remedy(tmp_graph, tmp_path):
 
 
 def test_update_on_unknown_id_still_reads_not_found(tmp_graph):
-    r = _invoke("backlog", "update", "ab-99999999", "--priority", "p1")
-    assert r.exit_code == 1
-    assert "not found" in r.output
+    code, out = _native_update(tmp_graph, "ab-99999999", "--priority", "p1")
+    assert code == 1
+    assert "not found" in out
 
 
 def test_supersede_persists_old_row_superseded(tmp_graph):
@@ -751,11 +779,11 @@ def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
     target carrying a live claim - lands the note (positive marker), exit 0."""
     add = _invoke("--json", "backlog", "add", "Running work")
     target_id = json.loads(add.stdout)["id"]
-    upd = _invoke(
-        "backlog", "update", target_id,
+    upd = _native_update(
+        tmp_graph, target_id,
         "--locked-by", "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
     )
-    assert upd.exit_code == 0, upd.output
+    assert upd[0] == 0, upd[1]
 
     r = _invoke(
         "--json", "backlog", "idea", "Claimed finding",
@@ -894,8 +922,8 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
     target_id = json.loads(target.stdout)["id"]
-    _invoke("backlog", "update", target_id, "--locked-by", "null")
-    _invoke("backlog", "update", target_id, "--completion-note", "terminal fixture")
+    _native_update(tmp_graph, target_id, "--locked-by", "null")
+    _native_update(tmp_graph, target_id, "--completion-note", "terminal fixture")
     _invoke("backlog", "done", target_id)
     r = _invoke(
         "--json", "backlog", "idea", "Late finding",

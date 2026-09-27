@@ -700,8 +700,8 @@ def test_update_difficulty_reaches_the_plan_doc(tmp_graph, tmp_path):
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "high"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--difficulty", "high")
+    assert code == 0, out
     assert "difficulty: high" in plan.read_text()
 
 
@@ -712,8 +712,8 @@ def test_update_difficulty_null_clears_the_plan_doc(tmp_graph, tmp_path):
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: high\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "null"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--difficulty", "null")
+    assert code == 0, out
     assert "difficulty" not in plan.read_text()
 
 
@@ -725,6 +725,34 @@ def test_update_priority_keeps_a_persisted_null_band_off_the_doc(tmp_graph, tmp_
     plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: medium\n---\n\n# a plan\n")
     _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, difficulty=None, plan_path=str(plan)))
 
-    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--priority", "p1"])
-    assert res.exit_code == 0, res.output
+    code, out = _native_update(tmp_graph, tmp_path, "ab-11111111", "--priority", "p1")
+    assert code == 0, out
     assert "difficulty: medium" in plan.read_text()
+
+
+def _native_update(graph: Path, tmp_path, *args: str):
+    """The update leaf answers natively; drive the dev binary over the same
+    store the fixture seeded (in-process monkeypatches cannot reach a
+    subprocess)."""
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FNO_STATE_DIR": str(tmp_path),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_path),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
