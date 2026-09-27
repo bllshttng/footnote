@@ -434,6 +434,7 @@ def backlog_decide(
     )
 
 
+@shim_app.command("retract")
 def backlog_decide_retract(
     decision_id: str = typer.Argument(..., help="Subject or decision id to retract."),
     reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Why it no longer counts."),
