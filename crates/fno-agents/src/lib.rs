@@ -90,6 +90,7 @@ pub mod claims_root;
 pub mod claude_adopt;
 pub mod claude_ask;
 pub mod claude_attach;
+pub mod claude_config_tmp;
 pub mod claude_drive;
 pub mod claude_login;
 pub mod claude_resume;
