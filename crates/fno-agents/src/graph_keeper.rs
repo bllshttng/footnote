@@ -2817,7 +2817,11 @@ fn session_reap_open(
 /// store.set_related + _mirror_related: symmetric edges stored on both
 /// endpoints; a missing peer in `added` is a programming error and fails
 /// loudly rather than writing a dangling half-edge.
-fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Result<(), StoreError> {
+pub(crate) fn set_related(
+    entries: &mut [Value],
+    node_id: &str,
+    desired: &[String],
+) -> Result<(), StoreError> {
     let idx = find_exact(entries, node_id)
         .ok_or_else(|| StoreError::Invalid(format!("no node resolves to '{node_id}'")))?;
     let before: std::collections::HashSet<String> = entries[idx]

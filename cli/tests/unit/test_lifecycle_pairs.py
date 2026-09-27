@@ -83,20 +83,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     Pair("backlog", "new", "remove"),
     Pair("backlog", "intake", "remove"),
     # -- self-inverse: the same verb reverses itself --
-    Pair("backlog", "update", "update"),
-    # requeue releases a dead worker's wedge (open do row + claim). Its old
-    # re-lock correction (update --locked-by) retired with the graph mirror:
-    # the next holder takes a claim store lock instead (fno agents claim
-    # acquire node:<node>), an operation outside this app.
-    Pair(
-        "backlog",
-        "requeue",
-        None,
-        "the re-lock door retired with the graph claim mirror; re-acquisition is a claim store acquire, not a backlog verb",
-    ),
-    # contain stamps contained_in + parent; its correction is update's
-    # --parent null flag, which the contain epilog names verbatim.
-    Pair("backlog", "contain", "update"),
     # -- corrections whose forward transition is not a verb in this app --
     Pair(
         "backlog",
@@ -126,7 +112,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "ready", "reconcile", "reconcile-findings", "requeue", "retro",
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "retract", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
-        "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
+        "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede",
         "version", "view", "worked",
     }),
     "carveout": frozenset({"add", "list", "resolve", "update"}),

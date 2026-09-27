@@ -112,14 +112,156 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
 }
 
 /// `config.mux.theme`: the chrome palette name, latched once at client
-/// startup. An unset key reads as `None` (meaning "no preference") and resolves
-/// to `terminal`. An UNKNOWN name also resolves to `terminal` but carries a
+/// startup. An unset key reads as `None` (meaning "no preference") and
+/// resolves to the brand default: `footnote-superscript`, or
+/// `footnote-paper` when the terminal reports a light background through
+/// `COLORFGBG`. An UNKNOWN name also resolves to the default but carries a
 /// notice through the same channel a refused keymap rebind uses, because a
-/// config that is quietly ignored is indistinguishable from one never written.
+/// config that is quietly ignored is indistinguishable from one never
+/// written. The `mux.theme.brand` / `mux.theme.needs_you` role overrides
+/// fold in here and at the settings modal's swap, so they hold under every
+/// theme.
 pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
-    match mux_str(cwd, "theme") {
-        Some(name) => crate::theme::Theme::from_name(&name),
-        None => (crate::theme::Theme::default_theme(), None),
+    let resolved = match mux_str(cwd, "theme").as_deref() {
+        // An empty value is "no preference", the same as the unset key: it
+        // rides the light-background ladder instead of pinning the dark
+        // default.
+        Some(name) if !name.trim().is_empty() => crate::theme::Theme::from_name(name),
+        _ => {
+            let env = std::env::var("COLORFGBG").ok();
+            (
+                crate::theme::Theme::default_for(colorfgbg_is_light(env.as_deref())),
+                None,
+            )
+        }
+    };
+    theme_role_overrides(cwd, resolved)
+}
+
+/// Whether `COLORFGBG` reports a light terminal background. The rxvt
+/// convention every terminal that sets the var follows: `fg;bg`, and a bg of
+/// 7 or 15 is white. Absent or unparseable means "no signal" -> dark.
+fn colorfgbg_is_light(v: Option<&str>) -> bool {
+    matches!(
+        v.and_then(|s| s.split(';').next_back())
+            .and_then(|b| b.parse::<u8>().ok()),
+        Some(7) | Some(15)
+    )
+}
+
+/// Parse one theme-role override value: the sideline palette's color
+/// vocabulary (`#rrggbb`, an ANSI-16 name, or `indexed(<n>)`), so an
+/// operator writes the same forms the sideline already accepts.
+fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
+    crate::sideline_color::parse_color(s)
+}
+
+/// Fold the `mux.theme.brand` / `mux.theme.needs_you` role overrides into
+/// `t`: the two roles are config's to pin under ANY theme -
+/// brand recolors selection, the active tab and the focused frame;
+/// needs_you recolors the waiting-on-you accent. The tab-bar mark's stamp
+/// takes NO override - the mark keeps its theme's own label. In TOML the
+/// keys are quoted dotted keys inside `[mux]` (`"theme.brand" =
+/// "#ff3434"`), which coexists with the scalar `theme` name. An unparseable
+/// value is reported, never silently ignored (the keymap-notice channel).
+/// Injectable so tests never touch process env.
+fn apply_overrides_to(
+    t: &mut crate::theme::Theme,
+    brand: Option<&str>,
+    needs_you: Option<&str>,
+) -> Option<crate::keys::KeymapWarning> {
+    let mut bad: Vec<String> = Vec::new();
+    for (raw, role) in [(brand, "brand"), (needs_you, "needs_you")] {
+        let Some(raw) = raw else { continue };
+        match parse_override_color(raw) {
+            Some(c) if role == "brand" => t.brand = c,
+            Some(c) => t.needs_you = c,
+            None => bad.push(format!(
+                "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
+            )),
+        }
+    }
+    (!bad.is_empty()).then(|| crate::keys::KeymapWarning(bad.join("; ")))
+}
+
+/// Read the role overrides through the config ladder and apply them to a
+/// resolved theme. The one fold both the startup latch and the settings
+/// modal's in-memory swap ride, so an override survives a theme switch.
+pub fn theme_role_overrides(
+    cwd: &Path,
+    (mut t, warn): (crate::theme::Theme, Option<crate::keys::KeymapWarning>),
+) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
+    let brand = mux_str(cwd, "theme.brand");
+    let needs_you = mux_str(cwd, "theme.needs_you");
+    let override_warn = apply_overrides_to(&mut t, brand.as_deref(), needs_you.as_deref());
+    let warn = match (warn, override_warn) {
+        (Some(a), Some(b)) => Some(crate::keys::KeymapWarning(format!("{}; {}", a.0, b.0))),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    };
+    (t, warn)
+}
+
+#[cfg(test)]
+mod colorfgbg_tests {
+    use super::colorfgbg_is_light;
+
+    #[test]
+    fn only_a_white_background_is_light() {
+        assert!(!colorfgbg_is_light(None));
+        assert!(!colorfgbg_is_light(Some("")));
+        assert!(!colorfgbg_is_light(Some("15;0")), "black bg is dark");
+        assert!(!colorfgbg_is_light(Some("0;8")));
+        assert!(!colorfgbg_is_light(Some("nonsense")));
+        assert!(colorfgbg_is_light(Some("0;7")), "white bg is light");
+        assert!(colorfgbg_is_light(Some("15;15")));
+    }
+}
+
+#[cfg(test)]
+mod theme_role_override_tests {
+    use super::{apply_overrides_to, parse_override_color};
+    use crate::proto::Color;
+    use crate::theme::Theme;
+
+    #[test]
+    fn override_colors_take_the_sideline_palette_vocabulary() {
+        assert_eq!(
+            parse_override_color("#ff3434"),
+            Some(Color::Rgb(0xff, 0x34, 0x34))
+        );
+        // The sideline names resolve, trimmed and case-insensitive.
+        assert_eq!(parse_override_color(" RED "), Some(Color::Indexed(1)));
+        assert_eq!(parse_override_color("indexed(8)"), Some(Color::Indexed(8)));
+        assert_eq!(parse_override_color("#f34"), None);
+        assert_eq!(parse_override_color("#zzzzzz"), None);
+        assert_eq!(parse_override_color("ff3434"), None, "hex needs its #");
+        assert_eq!(parse_override_color(""), None);
+    }
+
+    #[test]
+    fn overrides_repin_the_two_roles_under_any_theme_and_the_stamp_is_untouched() {
+        for name in crate::theme::THEME_NAMES {
+            let (mut t, _) = Theme::from_name(name);
+            let (stamp, sel) = (t.stamp, t.sel);
+            let warn = apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"));
+            assert!(warn.is_none(), "{name}");
+            assert_eq!(t.brand, Color::Rgb(0x12, 0x34, 0x56), "{name}");
+            assert_eq!(t.needs_you, Color::Rgb(0xab, 0xcd, 0xef), "{name}");
+            assert_eq!(t.stamp, stamp, "{name}: the mark takes no override");
+            assert_eq!(t.sel, sel, "{name}: only the two roles move");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_override_is_reported_not_ignored() {
+        let (mut t, _) = Theme::from_name("terminal");
+        let warn =
+            apply_overrides_to(&mut t, Some("notacolor"), None).expect("a bad value must warn");
+        assert!(warn.0.contains("mux.theme.brand"), "{warn:?}");
+        assert!(warn.0.contains("notacolor"), "{warn:?}");
+        // The untouched role keeps its theme value.
+        assert_eq!(t.brand, Color::Indexed(3));
     }
 }
 

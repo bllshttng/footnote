@@ -17,7 +17,6 @@ idea
 new
 intake
 decompose
-update
 note
 # encounter appends to a node's graph record, exactly like note
 encounter

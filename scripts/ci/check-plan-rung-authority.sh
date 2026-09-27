@@ -377,11 +377,15 @@ fi
 echo "--- Rust: no plan-status reader ---"
 # blueprint_judge.rs grades plan prose against five product questions;
 # it never classifies `status:` frontmatter.
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/blueprint_judge.rs
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/backlog/update_cli.rs
+crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs
 crates/fno-agents/src/merge_hold.rs
 crates/fno-agents/src/surface_check.rs"
+# update_cli.rs reads only the plan frontmatter `size` (the doc->graph
+# linked-size flow on a plan relink); it never extracts a plan status, so
+# the shelling rule does not apply to it.
 # merge_hold.rs reads only the dispatch_hold block (the hold the merge gate
 # refuses on); it never extracts a plan status, so the shelling rule does not
 # apply to it.
@@ -446,6 +450,17 @@ while IFS= read -r reader; do
             printf '%s\n' "$matches" \
                 | grep -vE '^[0-9]+:[[:space:]]*"status":[[:space:]]*"ready",$' \
                 | grep -vE '"(type|slug|title|parent|priority|plan_path|cwd|id)":' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/update_cli.rs" ]; then
+        # update_cli's "status" literals are GRAPH-row reads (post-write
+        # receipts and the lock-wedge check on the node row), never plan
+        # frontmatter; its only plan read is the frontmatter `size` via the
+        # plan_doc codec, which the plan-doc writer exemption already covers.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '\.get\("status"\)|row\.get\("status"\)' \
                 || true
         )"
     fi
