@@ -1293,10 +1293,20 @@ pub fn run_heal(argv: &[String]) -> i32 {
         // the roots, so no drive loop outlives the tick that spawned it.
         let mut a = a;
         a.deadline = Some(std::time::Instant::now() + DRIVE_BUDGET);
-        if a.roots.len() > 1 {
-            return run_roots_apply(&a, a.dry_run);
+        let code = if a.roots.len() > 1 {
+            run_roots_apply(&a, a.dry_run)
+        } else {
+            run_all_apply(&a, a.dry_run)
+        };
+        // The writer deletes its own pid file: a clean loop leaves no
+        // top-level litter behind (crashed loops are covered by the sweep).
+        let pid_file = heal_pid_file(&a);
+        if let Ok(text) = std::fs::read_to_string(&pid_file) {
+            if text.trim() == std::process::id().to_string() {
+                let _ = std::fs::remove_file(&pid_file);
+            }
         }
-        return run_all_apply(&a, a.dry_run);
+        return code;
     }
     if a.dry_run {
         eprintln!(
@@ -1608,11 +1618,12 @@ fn events_dir(a: &Args) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// The pid file for THE drive loop. One process heals every root, so one
+/// The pid file for THE drive loop, in its own subfolder: nothing writes at
+/// the top level of the state root. One process heals every root, so one
 /// pid file: the in-flight guard sees the loop whatever root asked, and
 /// `live_heal_pids`' `pr-heal.` / `.pid` match still reads the name.
 fn heal_pid_file(a: &Args) -> std::path::PathBuf {
-    events_dir(a).join("pr-heal.pid")
+    events_dir(a).join("heal").join("pr-heal.pid")
 }
 
 // Test-only reader since the guard switched to live_heal_pids.
@@ -1764,31 +1775,37 @@ fn pid_names_a_healer(pid: u32) -> bool {
     out.contains("pr-heal") || out.contains("fno-agents")
 }
 
-/// Live pids across every `pr-heal.*.pid` file in `dir`. The pid lives in the
-/// file CONTENT, read as an integer; EPERM counts alive. The glob also sweeps
-/// the old per-root `pr-heal.<tag>.pid` files; they hold dead pids and skip,
-/// and a recycled pid that belongs to an unrelated process skips too.
+/// Live pids across every `pr-heal.*.pid` file in `dir` and its `heal/`
+/// subfolder. The pid lives in the file CONTENT, read as an integer; EPERM
+/// counts alive. The glob also sweeps the old per-root `pr-heal.<tag>.pid`
+/// files; a file whose pid is dead is the family's own litter and is deleted
+/// here (the reader is the deleter: nothing else owns these files), and a
+/// recycled pid that belongs to an unrelated process skips without deleting.
 fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for e in entries.flatten() {
-        let fname = e.file_name();
-        let Some(name) = fname.to_str() else {
+    for scan_dir in [dir.join("heal"), dir.to_path_buf()] {
+        let Ok(entries) = std::fs::read_dir(&scan_dir) else {
             continue;
         };
-        if !name.starts_with("pr-heal.") || !name.ends_with(".pid") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(e.path()) else {
-            continue;
-        };
-        let Ok(pid) = text.trim().parse::<u32>() else {
-            continue;
-        };
-        if crate::evals_arm::pid_alive(pid) && pid_names_a_healer(pid) {
-            out.push(pid);
+        for e in entries.flatten() {
+            let fname = e.file_name();
+            let Some(name) = fname.to_str() else {
+                continue;
+            };
+            if !name.starts_with("pr-heal.") || !name.ends_with(".pid") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(e.path()) else {
+                continue;
+            };
+            let Ok(pid) = text.trim().parse::<u32>() else {
+                continue;
+            };
+            if crate::evals_arm::pid_alive(pid) && pid_names_a_healer(pid) {
+                out.push(pid);
+            } else {
+                let _ = std::fs::remove_file(e.path());
+            }
         }
     }
     out.sort_unstable();
@@ -4451,7 +4468,9 @@ echo '[]'
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         let a = parse_args(&detach_args(d)).unwrap();
-        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        let pid_file = heal_pid_file(&a);
+        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
         let spawned = std::cell::RefCell::new(0);
         let spawn = |_: &[String]| -> std::io::Result<u32> {
             *spawned.borrow_mut() += 1;
@@ -4509,7 +4528,9 @@ echo '[]'
             pid
         };
         let a = parse_args(&detach_args(d)).unwrap();
-        std::fs::write(heal_pid_file(&a), format!("{dead}\n")).unwrap();
+        let pid_file = heal_pid_file(&a);
+        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+        std::fs::write(&pid_file, format!("{dead}\n")).unwrap();
         let spawned = std::cell::RefCell::new(0);
         let spawn = |_: &[String]| -> std::io::Result<u32> {
             *spawned.borrow_mut() += 1;
@@ -4566,8 +4587,8 @@ echo '[]'
         drop(calls);
         assert_eq!(
             heal_pid_file(&a),
-            events_dir(&a).join("pr-heal.pid"),
-            "one root-free pid file"
+            events_dir(&a).join("heal").join("pr-heal.pid"),
+            "one root-free pid file, in its own subfolder"
         );
         assert_eq!(
             read_pid_file(&heal_pid_file(&a)),
@@ -4587,7 +4608,9 @@ echo '[]'
         let other_s = other.path().to_str().unwrap();
         let argv = drive_args(d, &["--detach", "--cwd", other_s]);
         let a = parse_args(&argv).unwrap();
-        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        let pid_file = heal_pid_file(&a);
+        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
         let spawned = std::cell::RefCell::new(0);
         let spawn = |_: &[String]| -> std::io::Result<u32> {
             *spawned.borrow_mut() += 1;
@@ -4845,7 +4868,9 @@ echo '[]'
             events.to_string_lossy().into_owned(),
         ])
         .unwrap();
-        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        let pid_file = heal_pid_file(&a);
+        std::fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
         assert!(
             status_line(&a).contains(&format!("in-flight {}", std::process::id())),
             "{}",
