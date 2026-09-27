@@ -513,8 +513,9 @@ fn ts_re() -> &'static Regex {
 fn norm_text(s: &str, fixture: &Path) -> String {
     // The canonicalized cwd carries macOS's /private prefix in the capture;
     // a Linux replay produces the bare temp path, so fold both spellings.
-    let private_prefix = Path::new("/private").join(fixture);
-    let s = s.replace(private_prefix.to_string_lossy().as_ref(), "<FIXTURE>");
+    // (Path::join would discard the /private against an absolute fixture.)
+    let private_prefix = format!("/private{}", fixture.to_string_lossy());
+    let s = s.replace(private_prefix.as_str(), "<FIXTURE>");
     let s = s.replace(fixture.to_string_lossy().as_ref(), "<FIXTURE>");
     let s = path_re().replace_all(&s, "<PATH>").into_owned();
     ts_re().replace_all(&s, "<TS>").into_owned()
