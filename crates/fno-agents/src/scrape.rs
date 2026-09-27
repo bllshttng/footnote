@@ -196,6 +196,12 @@ pub fn fno_bin() -> std::ffi::OsString {
     declared_fno(std::env::var_os("FNO_BIN"))
 }
 
+/// The undeclared-`fno-py` twin of [`UNDECLARED_FNO`]: the same refusal for
+/// the Python half of the porcelain, whose uv-tools and bare-name fallback
+/// legs otherwise still reach the installed CLI from a lib unit test.
+pub(crate) const UNDECLARED_FNO_PY: &str =
+    "/nonexistent/fno-py-undeclared-in-this-unit-test--set-FNO_PY";
+
 /// The `fno-py` Python CLI console script, resolved without relying on PATH
 /// `FNO_PY` overrides for tests and nonstandard installs, then the
 /// script packaged beside this binary (every complete install - uv tool venv,
@@ -204,10 +210,15 @@ pub fn fno_bin() -> std::ffi::OsString {
 /// performs for the `fno` shim), then the uv tool venv's bin under its
 /// default tools dir, for a cargo/dev build of this binary with the wheel
 /// installed elsewhere. Bare `fno-py` last, so a genuinely missing install
-/// surfaces a real NotFound instead of a silent no-op.
+/// surfaces a real NotFound instead of a silent no-op. Under `cfg!(test)` an
+/// unset `FNO_PY` refuses through [`UNDECLARED_FNO_PY`], the same
+/// declared-only rule `fno_bin` applies.
 pub fn fno_py() -> std::ffi::OsString {
     if let Some(p) = std::env::var_os("FNO_PY").filter(|v| !v.is_empty()) {
         return p;
+    }
+    if cfg!(test) {
+        return std::ffi::OsString::from(UNDECLARED_FNO_PY);
     }
     if let Some(p) = std::env::current_exe()
         .ok()
@@ -1087,6 +1098,30 @@ mod tests {
         assert_ne!(resolved, std::ffi::OsString::from("fno"));
         assert!(!std::path::Path::new(&resolved).exists());
         assert!(resolved.to_string_lossy().contains("FNO_BIN"));
+        assert_eq!(declared_resolved, declared);
+    }
+
+    #[test]
+    fn an_undeclared_fno_py_is_refused_under_a_unit_test() {
+        // The Python half of the porcelain carries the same declared-only
+        // rule: unset FNO_PY refuses (its uv-tools leg would find the
+        // installed CLI), a declared path passes through.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_PY");
+        std::env::remove_var("FNO_PY");
+        let resolved = fno_py();
+        let dir = tempfile::tempdir().unwrap();
+        let declared = std::ffi::OsString::from(dir.path().join("fno-py"));
+        std::env::set_var("FNO_PY", &declared);
+        let declared_resolved = fno_py();
+        match prior {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        assert!(!std::path::Path::new(&resolved).exists());
+        assert!(resolved.to_string_lossy().contains("FNO_PY"));
         assert_eq!(declared_resolved, declared);
     }
 }

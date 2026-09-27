@@ -258,7 +258,9 @@ use watch_lease::{harness_can_idle, watch_target, watch_window_ms, CONTINUE_WORK
 /// answers a path that cannot exec (`scrape::declared_fno`): a lib unit
 /// test gets only the porcelain it declared.
 pub(crate) fn loopcheck_fno_bin() -> String {
-    crate::scrape::declared_fno(std::env::var("FNO_LOOPCHECK_FNO_BIN").ok())
+    crate::scrape::declared_fno(
+        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").map(|v| v.to_string_lossy().into_owned()),
+    )
 }
 
 /// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch

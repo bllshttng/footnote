@@ -3218,10 +3218,11 @@ mod tests {
         let prev_py = std::env::var_os("FNO_PY");
         let prev_path = std::env::var_os("PATH");
         let prev_bin = std::env::var_os("FNO_BIN");
-        std::env::set_var("FNO_PY", &stub); // non-truth fno-py reads answer at once
-                                            // The truth batch execs through scrape::fno_bin, which under
-                                            // cfg!(test) answers only a declared FNO_BIN: pin the same stub
-                                            // PATH pins.
+        // Non-truth fno-py reads answer at once.
+        std::env::set_var("FNO_PY", &stub);
+        // The truth batch execs through scrape::fno_bin, which under
+        // cfg!(test) answers only a declared FNO_BIN: pin the same stub
+        // PATH pins.
         std::env::set_var("FNO_BIN", &stub);
         std::env::set_var(
             "PATH",
