@@ -39,7 +39,7 @@ The keeper retains recent output in a bounded ring (default 1 MiB, `--ring-bytes
 At startup, before serving, the server scans `<state-root>/mux/panes/*.sock`. See [state-root-inventory](../state-root-inventory.md) for the owner + lifetime row.
 
 - A socket whose keeper answers Identify is adopted. The handshake drains the ring and learns the child pid, argv, cwd, and size. The pane is registered under a fresh pane id, its identity rebuilt from argv.
-- Worker-name and session-target joins rebind the adopted pane to its squad member. A restore then focuses it instead of spawning a second one.
+- Worker-name and session-target joins rebind the adopted pane to its workspace member. A restore then focuses it instead of spawning a second one.
 - A socket with no live listener is unlinked and named in the server log. That is the stale-socket contract.
 - `fno mux pane keeper list` also reports leftover sockets whose child is gone (`stale: true`). It answers with the server dead, so a done-probe can grep `keeper_pid` from its JSON.
 
@@ -65,7 +65,7 @@ A pane keeper cannot be refreshed on demand. It holds a live child process and i
 
 ## A hand-off moves the socket, not the process
 
-A pane keeper becomes a THREAD keeper by moving its socket. `fno mux pane kill --hand-off-to <path>` renames the socket from `mux/panes/` to `mux/threads/`. It then drops the pane from the layout and the persisted squad, and closes the server's connection without sending a Kill frame. A Kill makes the keeper kill its child and exit. A bare hangup is what the keeper is built to survive, so the child keeps running and keeps its pid. The daemon's keeper sweep then finds it at the new path and rebinds the row.
+A pane keeper becomes a THREAD keeper by moving its socket. `fno mux pane kill --hand-off-to <path>` renames the socket from `mux/panes/` to `mux/threads/`. It then drops the pane from the layout and the persisted workspace, and closes the server's connection without sending a Kill frame. A Kill makes the keeper kill its child and exit. A bare hangup is what the keeper is built to survive, so the child keeps running and keeps its pid. The daemon's keeper sweep then finds it at the new path and rebinds the row.
 
 The rename is safe because a renamed unix socket path still reaches the same listener, and the old path stops answering. That was measured on macOS 25.3 with a positive control on the old path, not assumed from the man page.
 

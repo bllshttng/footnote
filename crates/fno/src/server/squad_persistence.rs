@@ -49,7 +49,7 @@ impl Core {
         let id = if name.is_empty() { key } else { name };
         if self.shared_identity_notified.insert(id.to_string()) {
             let text = format!(
-                "squad {id}: two live workspaces share one stored identity; member write skipped"
+                "workspace {id}: two live workspaces share one stored identity; member write skipped"
             );
             eprintln!("fno mux: {text}");
             self.notice_all(text);

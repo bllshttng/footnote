@@ -295,7 +295,7 @@ pub(crate) fn mux_member_outcome(
         return match mux {
             None => CascadeOutcome::NotApplicable,
             Some(_) => CascadeOutcome::AlreadyAbsent(format!(
-                "no live squad member for {harness}:{session_id}"
+                "no live workspace member for {harness}:{session_id}"
             )),
         };
     }

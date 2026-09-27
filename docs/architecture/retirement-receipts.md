@@ -8,7 +8,7 @@ A retirement is one sequence shared by the scheduled sweep and the merge trigger
 
 The durable record comes first. The receipt is built from the registry row and the harness capability table. It is written to disk BEFORE any effect fires, and each effect appends its typed record and rewrites it. A crash after an effect leaves a receipt naming what happened, instead of a removal nothing recorded. A receipt that cannot be built or persisted refuses the retirement before the harness is touched, and the row is kept.
 
-The effects, in order: the confirmed stop, the native active-surface removal, the mux squad-member retirement, and the resumability evidence measured off the receipt itself. The planning lane adds a gate of its own. A planner row retires only after its own blueprint/think `sessions[]` entry carries `ended_at`. That field is the positive marker `fno backlog session close` writes. It stops a quiet replanning worker from inheriting a completion an earlier assignment wrote. Under the commit, the graph is re-read. Any session that has gained an open do row is held before the registry write.
+The effects, in order: the confirmed stop, the native active-surface removal, the mux workspace-member retirement, and the resumability evidence measured off the receipt itself. The planning lane adds a gate of its own. A planner row retires only after its own blueprint/think `sessions[]` entry carries `ended_at`. That field is the positive marker `fno backlog session close` writes. It stops a quiet replanning worker from inheriting a completion an earlier assignment wrote. Under the commit, the graph is re-read. Any session that has gained an open do row is held before the registry write.
 
 ## The receipt and its required ops
 
@@ -33,10 +33,10 @@ A receipt with an empty `removed_by` predates the required field. It ages out on
 |---|---|
 | `native-stop` | the held process was stopped, or confirmed already gone: a claude background thread gets `claude stop`, and every other row gets the removal's own process end (pane stop, mux pane kill, or worker socket stop) |
 | `active-surface` | the harness's own listing no longer carries the session |
-| `mux-member` | the session's squad membership is retired from the shared mux store through `fno mux retire-session`, or the store measures no live membership for it |
+| `mux-member` | the session's workspace membership is retired from the shared mux store through `fno mux retire-session`, or the store measures no live membership for it |
 | `resume-evidence` | the receipt names resume tokens and a transcript that exists on disk |
 
-`resume-evidence` is what separates a recovery record from an obituary. A `failed` outcome does not hold the row, because the session is already stopped. It marks the receipt unverifiable, so the gate refuses rather than certifies. A `failed` or `kept` `mux-member` outcome holds the row. A live squad member still answers for the session until a mux server confirms its removal.
+`resume-evidence` is what separates a recovery record from an obituary. A `failed` outcome does not hold the row, because the session is already stopped. It marks the receipt unverifiable, so the gate refuses rather than certifies. A `failed` or `kept` `mux-member` outcome holds the row. A live workspace member still answers for the session until a mux server confirms its removal.
 
 `--expect-sessions <a>,<b>` adds a cohort. Every named session must appear among the verified retirements, so a pass can cover a named set instead of whatever the window happens to hold. The report carries `expected` and `missing`.
 
