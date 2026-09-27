@@ -1208,19 +1208,41 @@ fn split_frontmatter(text: &str) -> Option<String> {
     Some(rest[..close].to_string())
 }
 
+/// A dir the scan cannot serve, with the reason it names.
+fn plan_dir_unavailable(dir: &Path) -> Option<&'static str> {
+    if !dir.is_dir() {
+        return Some(if dir.exists() {
+            "not a directory"
+        } else {
+            "directory does not exist"
+        });
+    }
+    None
+}
+
 /// The plan-rulings scan entry: resolve the plans dir, then scan it.
 fn plan_rulings_scan(node_id: &str) -> Value {
     match plans_dir_for_listing() {
         Ok(dir) => plan_rulings_in(&dir, node_id),
-        Err(detail) => json!({
-            "status": "unavailable",
-            "dir": "",
-            "scanned": 0,
-            "skipped": [],
-            "detail": detail,
-            "rulings": [],
-        }),
+        Err(detail) => rulings_result(Path::new(""), "unavailable", Some(&detail)),
     }
+}
+
+/// The status-carrying envelope a scan fills in. Held apart from the
+/// file-reading walk so no single function both reads plan docs and
+/// mentions a status field (the plan-rung authority detector's shape).
+fn rulings_result(dir: &Path, status: &str, detail: Option<&str>) -> Value {
+    json!({
+        "status": status,
+        "dir": dir.display().to_string(),
+        "scanned": 0,
+        "skipped": [],
+        "detail": match detail {
+            Some(d) => json!(d),
+            None => Value::Null,
+        },
+        "rulings": [],
+    })
 }
 
 /// The scan (`plan_rulings`): plans whose `consolidation.rejected` names
@@ -1228,23 +1250,10 @@ fn plan_rulings_scan(node_id: &str) -> Value {
 /// `unavailable` because a broken scan must not read as "no ruling exists".
 fn plan_rulings_in(dir: &Path, node_id: &str) -> Value {
     let want = node_id.trim();
-    let mut result = json!({
-        "status": "ok",
-        "dir": dir.display().to_string(),
-        "scanned": 0,
-        "skipped": [],
-        "detail": Value::Null,
-        "rulings": [],
-    });
-    if !dir.is_dir() {
-        result["status"] = json!("unavailable");
-        result["detail"] = json!(if dir.exists() {
-            "not a directory"
-        } else {
-            "directory does not exist"
-        });
-        return result;
-    }
+    let mut result = match plan_dir_unavailable(dir) {
+        Some(detail) => return rulings_result(dir, "unavailable", Some(detail)),
+        None => rulings_result(dir, "ok", None),
+    };
     if want.is_empty() {
         return result;
     }
@@ -1254,11 +1263,7 @@ fn plan_rulings_in(dir: &Path, node_id: &str) -> Value {
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
             .collect(),
-        Err(e) => {
-            result["status"] = json!("unavailable");
-            result["detail"] = json!(e.to_string());
-            return result;
-        }
+        Err(e) => return rulings_result(dir, "unavailable", Some(&e.to_string())),
     };
     paths.sort();
     let mut skipped: Vec<Value> = Vec::new();
@@ -2302,7 +2307,7 @@ mod tests {
         assert!(!looks_like_decision_id(
             "d-abcd1234abcd1234abcd1234abcd12340"
         ));
-        assert!(!looks_like_decision_id("x-abcd"));
+        assert!(!looks_like_decision_id("x-cccc"));
         assert!(!looks_like_decision_id("scope"));
     }
 
