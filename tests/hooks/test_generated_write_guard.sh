@@ -86,6 +86,9 @@ expect "AC6: codex apply_patch header blocks" block \
     "$(jq -nc --arg cwd "$REPO" --arg cmd $'*** Begin Patch\n*** Update File: .codex/agents/archer.toml\n@@\n-a\n+b\n*** End Patch' '{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}')" \
     "agents/*.md"
 
+expect "AC6: patch body mentioning a redirect is not read as a Bash write" approve \
+    "$(jq -nc --arg cwd "$REPO" --arg cmd $'*** Begin Patch\n*** Update File: docs/hand.md\n@@\n-a\n+run make gen > docs/gen.md\n*** End Patch' '{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}')"
+
 expect "AC7: installed plugin copy blocks" block \
     "$(edit "/tmp/x" "/tmp/x/.fno/plugin-stage/fno/hooks/a.sh")" "hooks/a.sh" "fno doctor update"
 

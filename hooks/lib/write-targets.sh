@@ -18,7 +18,10 @@ write_targets() {
                 ;;
         esac
     done <<< "$patch_command"
-    bash_write_targets "$patch_command"
+    # A patch BODY is file content, not shell: extracting write forms from it
+    # would block a legitimate patch whose added text merely mentions a
+    # redirect. Only a real Bash command goes through the shell grammar.
+    [[ "$patch_command" == *"*** Begin Patch"* ]] || bash_write_targets "$patch_command"
     return 0
 }
 
