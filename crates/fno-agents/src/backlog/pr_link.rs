@@ -230,6 +230,11 @@ pub fn stamp_ship_on_link(graph: &Path, node_id: &str) {
             None,
         )
         .map_err(|e| e.to_string())?;
+        // Version anchors before the row read, the conservative order: a
+        // concurrent commit between the two makes this attempt's version
+        // stale and the store refuses, instead of the stamp publishing a
+        // stale snapshot over the newer write.
+        let base_version = crate::graph_store::base_version(graph).map_err(|e| e.to_string())?;
         let mut entries = crate::graph_store::read_rows(graph).map_err(|e| e.to_string())?;
         let (found, _added) = crate::graph_keeper::session_append(&mut entries, node_id, row)
             .map_err(|e| e.to_string())?;
@@ -239,7 +244,7 @@ pub fn stamp_ship_on_link(graph: &Path, node_id: &str) {
         let input = crate::graph_store::MutateInput {
             entries,
             canonical_path: None,
-            base_version: crate::graph_store::base_version(graph).map_err(|e| e.to_string())?,
+            base_version,
             plan_rungs: None,
         };
         crate::graph_store::locked_mutate(graph, input, crate::graph_store::DEFAULT_LOCK_TIMEOUT)

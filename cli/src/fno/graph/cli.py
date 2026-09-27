@@ -5932,7 +5932,7 @@ def cmd_pick(
 @cli.command(
     "contain",
     hidden=True,
-    epilog="Inverse: `fno backlog update <id> --parent null` un-contains a node.",
+    epilog="Inverse: `fno backlog update <id> --parent null` un-contains a node - a verb the native binary serves after the python update leg retired.",
 )
 def cmd_contain(
     ctx: typer.Context,

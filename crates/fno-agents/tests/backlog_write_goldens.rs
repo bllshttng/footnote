@@ -394,6 +394,12 @@ fn run_case(case: &Case) {
     // repo_root()-relative reads like `--plan-path plans/...` resolve against.
     cmd.current_dir(&fx.fixture);
     cmd.env_clear();
+    // The replay owns the binary it spawns: mark the child as test-owned so
+    // the triad guard and the reaper read it as this test's own, never a
+    // stray daemon.
+    for (k, v) in fno_agents::test_run::self_owner_env() {
+        cmd.env(k, v);
+    }
     for (k, v) in &fx.env {
         cmd.env(k, v);
     }
@@ -435,6 +441,9 @@ fn run_case(case: &Case) {
             let mut get = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
             get.args(["backlog", "get", node, "--field", "rank"]);
             get.env_clear();
+            for (k, v) in fno_agents::test_run::self_owner_env() {
+                get.env(k, v);
+            }
             for (k, v) in &fx.env {
                 get.env(k, v);
             }

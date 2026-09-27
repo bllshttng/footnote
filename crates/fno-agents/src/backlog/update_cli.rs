@@ -210,8 +210,8 @@ impl UpdateArgs {
                     i += if inline.is_some() { 1 } else { 2 };
                     continue;
                 }
-                "--title" => take_value!(a.title),
-                "--details" | "--description" => take_value!(a.details),
+                "--title" | "-t" => take_value!(a.title),
+                "--details" | "--description" | "-d" => take_value!(a.details),
                 "--details-file" => take_value!(a.details_file),
                 "--domain" => take_value!(a.domain),
                 "--size" => take_value!(a.size),
@@ -494,6 +494,15 @@ fn run_door_relay(args: &UpdateArgs) -> i32 {
     note("--add-pr-url", args.add_pr_url.is_some(), &mut legacy);
     note("--add-pr-note", args.add_pr_note.is_some(), &mut legacy);
     note("--remove-pr", args.remove_pr.is_some(), &mut legacy);
+    note("--difficulty", args.difficulty.is_some(), &mut legacy);
+    note("--dispatch-verb", args.dispatch_verb.is_some(), &mut legacy);
+    note(
+        "--dispatch-brief",
+        args.dispatch_brief.is_some(),
+        &mut legacy,
+    );
+    note("--tag", !args.tag.is_empty(), &mut legacy);
+    note("--untag", !args.untag.is_empty(), &mut legacy);
     if !legacy.is_empty() {
         legacy.sort_unstable();
         eprintln!(
@@ -962,6 +971,13 @@ fn write_update(
 ) -> Result<(), Refusal> {
     const ATTEMPTS: usize = 3;
     for attempt in 0..ATTEMPTS {
+        // The version anchors BEFORE the row read: a commit that lands between
+        // the two makes this attempt's base_version stale, so the store
+        // refuses and the retry converges. The reverse order would publish
+        // the stale snapshot over the concurrent commit as a no-conflict
+        // write - a lost update.
+        let base_version = graph_store::base_version(graph)
+            .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
         let rows = graph_store::read_rows(graph)
             .map_err(|e| refused(format!("graph read failed: {e}"), 1))?;
         let planned = plan_mutation(
@@ -981,14 +997,14 @@ fn write_update(
                 node_id,
                 warnings,
                 ship_stamp,
+                repaint_old_parent,
             } => {
                 match graph_store::locked_mutate(
                     graph,
                     MutateInput {
                         entries: working,
                         canonical_path: None,
-                        base_version: graph_store::base_version(graph)
-                            .map_err(|e| refused(format!("graph read failed: {e}"), 1))?,
+                        base_version,
                         plan_rungs: Some(rungs),
                     },
                     LOCK_TIMEOUT,
@@ -1049,7 +1065,7 @@ fn write_update(
                         if let Some(target) = ship_stamp {
                             super::pr_link::stamp_ship_on_link(graph, &target);
                         }
-                        repaint(graph, args, &node_id);
+                        repaint(graph, args, &node_id, repaint_old_parent.as_deref());
                         return Ok(());
                     }
                     Err(StoreError::Conflict | StoreError::LockTimeout(..))
@@ -1084,6 +1100,7 @@ enum MutationPlan {
         node_id: String,
         warnings: Vec<String>,
         ship_stamp: Option<String>,
+        repaint_old_parent: Option<String>,
     },
 }
 
@@ -1122,7 +1139,7 @@ fn plan_mutation(
         .iter()
         .position(|r| entry_id(r) == Some(node_id.as_str()))
         .ok_or_else(|| refused(format!("Error: graph node {} not found", args.task_id), 1))?;
-    let (warnings, ship_stamp) = apply_mutators(
+    let (warnings, ship_stamp, repaint_old_parent) = apply_mutators(
         &mut rows,
         idx,
         args,
@@ -1134,8 +1151,8 @@ fn plan_mutation(
     )?;
 
     // The status recompute runs over the POST-write rows: a plan this call
-    // just bound must carry its rung, or the repaint would demote a node
-    // the write itself made plan-bound (the captured Python order).
+    // just bound must carry its rung, and the rungs map is rebuilt over the
+    // mutated rows so the repaint sees the write's own plan binding.
     let rungs: BTreeMap<String, String> = rows
         .iter()
         .filter_map(|e| {
@@ -1155,6 +1172,7 @@ fn plan_mutation(
         node_id,
         warnings,
         ship_stamp,
+        repaint_old_parent,
     })
 }
 
@@ -1171,7 +1189,7 @@ fn apply_mutators(
     derived_cwd: Option<&str>,
     linked_size: Option<&str>,
     pr: &DerivedPr,
-) -> Result<(Vec<String>, Option<String>), Refusal> {
+) -> Result<(Vec<String>, Option<String>, Option<String>), Refusal> {
     let node_id = rows[idx]
         .get("id")
         .and_then(Value::as_str)
@@ -1292,6 +1310,7 @@ fn apply_mutators(
     // -- U7: the plan binding, directly after has_brief in cmd_update's
     // order. 'null' clears; the one-plan-one-node conflict refuses naming
     // the owner, and --force binds anyway with the named note.
+    let mut warnings: Vec<String> = Vec::new();
     if let Some(v) = &args.plan_path {
         if v.to_lowercase() == "null" {
             rows[idx]
@@ -1313,10 +1332,13 @@ fn apply_mutators(
                         2,
                     ));
                 }
-                eprintln!(
+                // Rides the warnings vec, not a print: plan_mutation re-runs
+                // per write attempt, and a print here would repeat on every
+                // contention retry - the shape the Python caller avoided.
+                warnings.push(format!(
                     "note: plan {v} is also held by {owner}; binding {node_id} anyway \
                      (--force). Both will dispatch and cost independently."
-                );
+                ));
             }
             {
                 let obj = rows[idx].as_object_mut().expect("row is an object");
@@ -1385,12 +1407,13 @@ fn apply_mutators(
                 obj.insert("orphan_ok".into(), json!(v));
             }
         }
-        let warnings: Vec<String> = super::fields::apply_dispatch_overrides(
+        let dispatch_warnings: Vec<String> = super::fields::apply_dispatch_overrides(
             obj,
             args.dispatch_verb.as_deref(),
             args.dispatch_brief.as_deref(),
         )
         .map_err(|refusal| refused(refusal, 2))?;
+        warnings.extend(dispatch_warnings);
         if let Some(priority) = &args.priority {
             obj.insert("priority".into(), json!(priority));
         }
@@ -1655,6 +1678,7 @@ fn apply_mutators(
     // -- parent: last in cmd_update's order. A move that leaves the
     // containing subtree releases the containment (dropping the owner's
     // inherited PR refs); cycle and the epic-depth cap refuse.
+    let mut new_parent_id: Option<String> = None;
     if let Some(v) = &args.parent {
         let new_parent = null_if(v);
         let owner = node
@@ -1702,6 +1726,7 @@ fn apply_mutators(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                new_parent_id = Some(target_id.clone());
                 if node_ref::would_create_cycle(rows, &node_id, &target_id) {
                     return Err(refused(
                         format!(
@@ -1756,7 +1781,16 @@ fn apply_mutators(
             }
         }
     }
-    Ok((warnings, ship_stamp))
+    // A reparent leaves the OLD parent's stale rollup on its doc: the
+    // python verb repainted it alongside the node, so name it for the
+    // projector's target list.
+    let old_parent = node
+        .get("parent")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let repaint_old_parent =
+        old_parent.filter(|old| Some(old.as_str()) != new_parent_id.as_deref());
+    Ok((warnings, ship_stamp, repaint_old_parent))
 }
 
 /// The `_parse_blocker_list` twin: comma-split, trim, skip empties.
@@ -1889,10 +1923,15 @@ fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(),
         .and_then(Value::as_str);
     let expected = null_if(locked_by);
     if stored_owner != expected.as_deref() {
-        let show = |v: Option<&str>| v.map(|s| format!("'{s}'")).unwrap_or_else(|| "None".into());
+        let show = |v: Option<&str>| {
+            v.map(|s| format!("'{s}'"))
+                .unwrap_or_else(|| "'None'".into())
+        };
         return Err(refused(
             format!(
-                "error: {node_id} read back locked_by={}, not {}: the write did not persist.                  A concurrent claim transition may have cleared it; re-check before trusting.",
+                "error: {node_id} read back locked_by={}, not {}: the write did not \
+                 persist. A concurrent claim transition may have cleared it; \
+                 re-check before trusting.",
                 show(stored_owner),
                 show(expected.as_deref())
             ),
@@ -1916,7 +1955,9 @@ fn verify_lock_stamp(graph: &Path, node_id: &str, locked_by: &str) -> Result<(),
             let plural = if open_do != 1 { "s" } else { "" };
             return Err(refused(
                 format!(
-                    "update: {node_id} still reads in_progress after clearing the claim                      ({open_do} open do row{plural}). The claim was not what held it.                      Use: fno backlog requeue {node_id}"
+                    "update: {node_id} still reads in_progress after clearing the \
+                     claim ({open_do} open do row{plural}). The claim was not what \
+                     held it. Use: fno backlog requeue {node_id}"
                 ),
                 3,
             ));
@@ -1949,17 +1990,28 @@ fn node_has_live_claim(key: &str) -> bool {
 }
 
 /// The plan repaint: graph-authoritative fields flow onto the linked plan
-/// when a mirrored or status-affecting field changed. Best-effort.
-fn repaint(graph: &Path, args: &UpdateArgs, node_id: &str) {
+/// when a mirrored or status-affecting field changed - ownership, blockers,
+/// plan binding, parentage and tags included, the trigger set the python
+/// verb ran. Best-effort.
+fn repaint(graph: &Path, args: &UpdateArgs, node_id: &str, old_parent: Option<&str>) {
     let difficulty_clear = args
         .difficulty
         .as_deref()
         .is_some_and(|d| d.to_lowercase() == "null");
-    let mirror_triggers = args.priority.is_some()
+    let has_blocker_edit = args.blocked_by.is_some()
+        || !args.add_blocker.is_empty()
+        || !args.remove_blocker.is_empty();
+    let has_tag_edit = !args.tag.is_empty() || !args.untag.is_empty();
+    let mirror_triggers = args.locked_by.is_some()
+        || args.priority.is_some()
         || args.project.is_some()
         || args.type_.is_some()
+        || args.difficulty.is_some()
+        || has_blocker_edit
+        || args.plan_path.is_some()
         || args.size.is_some()
-        || args.difficulty.is_some();
+        || args.parent.is_some()
+        || has_tag_edit;
     if !mirror_triggers {
         return;
     }
@@ -1973,9 +2025,17 @@ fn repaint(graph: &Path, args: &UpdateArgs, node_id: &str) {
     if args.difficulty.is_some() {
         mirror_keys.push("difficulty".into());
     }
+    // A reparent repaints the old parent's rollup alongside the node: the
+    // converger walks each id's ancestors in the post-mutation graph, so the
+    // old chain is only reachable through this explicit target.
+    let mut targets: Vec<String> = Vec::new();
+    targets.push(node_id.to_string());
+    if let Some(old) = old_parent {
+        targets.push(old.to_string());
+    }
     crate::plan_doc::project::project_graph_nodes(
         &rows,
-        std::slice::from_ref(&node_id.to_string()),
+        &targets,
         None,
         Some((node_id.to_string(), mirror_keys)),
         None,
