@@ -1858,13 +1858,9 @@ struct Ctx {
     /// `None` on platforms/paths where it is unavailable (the guard degrades to
     /// a bare existence check, like the worker path).
     pid_start_time: Option<u64>,
-    /// Early-push buffer (inside-out E3.3, buffer-on-early-push): inside-leg
-    /// reports keyed by session_id that arrived before their registry row
-    /// existed (a per-turn hook can fire faster than the daemon registers the
-    /// pane). Flushed onto the row at creation (`handle_spawn` /
-    /// `spawn_claude_stream_lane`). Bounded by [`PENDING_INSIDE_LEG_CAP`] so a
-    /// flood of pushes for sessions that never register cannot grow without
-    /// limit. Highest seq wins per session.
+    /// Early-push buffer (E3.3): inside-leg reports that arrived before their
+    /// registry row existed; flushed onto the row at creation, highest seq
+    /// wins, bounded by [`PENDING_INSIDE_LEG_CAP`].
     pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
     /// Live connections to the SHARED codex app-server daemon, one per codex
     /// thread worker, keyed by registry name. Not children: this supervisor
@@ -1875,20 +1871,15 @@ struct Ctx {
     codex_threads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CodexThreadHandle>>>,
 }
 
-/// Cap on the early-push buffer (E3.3). A report for a NEW session is dropped
-/// (logged `buffer_full`) once the buffer is at cap; an already-buffered
-/// session's seq still advances (no new key). 64 covers any realistic burst of
-/// panes registering at once while staying a hard ceiling.
+/// Cap on the early-push buffer (E3.3): a report for a NEW session is dropped
+/// (logged `buffer_full`) at cap; an already-buffered session's seq still
+/// advances. 64 covers any realistic burst of panes registering at once.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-/// One actor task per thread owns its daemon connection exclusively.
-/// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
-/// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
-/// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
-/// active turn, the steer RPC was unreachable, the detached seed task held the
-/// same lock, and `stop` removed a handle whose turn task still owned a clone
-/// while stamping `Exited`. Consumers now send [`ThreadCommand`]s and never
-/// touch the driver; see `crates/fno-agents/src/codex_thread.rs`.
+/// One actor task per thread owns its daemon connection exclusively. The
+/// older `Arc<Mutex<CodexThread>>` baked whole-turn exclusion into the handle
+/// type: follow-up asks blocked behind the active turn and `stop` raced the
+/// turn task. Consumers send [`ThreadCommand`]s; see `codex_thread.rs`.
 type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
 use crate::codex_thread::InterruptOutcome;
@@ -2107,6 +2098,14 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
+        // SessionStart report: one thin per-harness hook posts the raw
+        // payload; the registry holds id/transcript/source additively.
+        Some("session-report") => {
+            run_blocking(ctx, req, |ctx: &Ctx, req: &Request| {
+                crate::session_report::handle_session_report(&ctx.home, &ctx.emitter, req)
+            })
+            .await
+        }
         _ => Response::err(
             req.id,
             ErrorCode::UnknownMethod,
@@ -6954,7 +6953,7 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an
 /// inside-leg report.
-enum UuidBackfill {
+pub(crate) enum UuidBackfill {
     None,
     One(usize),
     Ambiguous,
@@ -6968,7 +6967,7 @@ enum UuidBackfill {
 /// the leading hex group of `full_uuid` (`3228ccad` -> `3228ccad-c078-...`).
 /// Two rows sharing that short-id is ambiguous -> refuse rather than backfill
 /// the wrong row (AC1-ERR).
-fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
+pub(crate) fn find_uuid_backfill_row(entries: &[RegistryEntry], full_uuid: &str) -> UuidBackfill {
     let mut found = None;
     for (i, e) in entries.iter().enumerate() {
         // Only a claude bg row owns a jobId + uuid identity; skip any other
