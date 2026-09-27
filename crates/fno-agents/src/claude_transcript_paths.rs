@@ -124,8 +124,9 @@ fn choose_from(listing: &[Hit], id: &str) -> Option<PathBuf> {
     }
 }
 
-/// One id's transcript against its own fresh store walk: the shape the tests
-/// exercise.
+/// One id's transcript against its own fresh store walk: the shape the
+/// tests exercise.
+#[cfg(test)]
 fn resolve_one(projects_root: &Path, id: &str) -> Option<PathBuf> {
     // An empty id matches every transcript (the ambiguous branch would hand
     // back the store's first file); it reads missing-input, never an answer.
