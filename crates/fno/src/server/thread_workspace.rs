@@ -53,7 +53,11 @@ impl Core {
                 agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
             })
             .filter_map(|p| match &p.mux {
-                Some((sess, pane)) if sess == &self.session_name => self
+                // Only a LIVE parent owns its pane id: ids recycle after the
+                // pane dies (the bind_agent_to_pane rule), so an exited row's
+                // id can name an unrelated pane in another workspace. A dead
+                // parent answers through its own chain instead.
+                Some((sess, pane)) if sess == &self.session_name && !p.exited => self
                     .session
                     .find_pane(*pane)
                     .map(|(sid, _)| sid)
@@ -296,6 +300,36 @@ mod tests {
             None,
         )];
         assert_eq!(core.thread_workspace(&core.agents[0].clone()), Some(1));
+    }
+
+    #[test]
+    fn an_exited_parents_recycled_pane_id_cannot_capture_the_child() {
+        // The parent row exited and its pane id now lives in workspace 3's
+        // tab (recycled). find_pane(5) answers 3; the exited-parent guard
+        // skips that rung, and the parent's own cwd chain answers 1.
+        let mut core = empty_core();
+        squad_at(&mut core, 1, "/footnote", 6);
+        squad_at(&mut core, 3, "/other", 5);
+        let mut parent = row(
+            "lead",
+            "/footnote",
+            Some("claude"),
+            Some("sid-parent"),
+            None,
+        );
+        parent.mux = Some((core.session_name.clone(), 5));
+        parent.exited = true;
+        core.agents = vec![
+            parent,
+            row(
+                "probe",
+                "/nowhere",
+                Some("codex"),
+                Some("sid-child"),
+                Some("sid-parent"),
+            ),
+        ];
+        assert_eq!(core.thread_workspace(&core.agents[1].clone()), Some(1));
     }
 
     #[test]
