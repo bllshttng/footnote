@@ -1874,14 +1874,6 @@ fn row_labels(rows: &[crate::popup::PopupRow]) -> Vec<String> {
         })
         .collect()
 }
-fn row_glyphs(rows: &[crate::popup::PopupRow]) -> Vec<String> {
-    rows.iter()
-        .filter_map(|r| match r {
-            crate::popup::PopupRow::Entry { glyph, .. } => Some(glyph.clone()),
-            _ => None,
-        })
-        .collect()
-}
 
 fn glyph_of(rows: &[crate::popup::PopupRow], label: &str) -> String {
     rows.iter()
