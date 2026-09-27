@@ -33,6 +33,7 @@ const NATIVE_UPDATE_FLAGS: &[&str] = &[
     "--details-file",
     "--domain",
     "--size",
+    "--difficulty",
     "--model",
     "--model-tier",
     "--public",
@@ -51,6 +52,10 @@ const NATIVE_UPDATE_FLAGS: &[&str] = &[
     "--fixes-pr",
     "--reverted",
     "--no-reverted",
+    "--tag",
+    "--untag",
+    "--dispatch-verb",
+    "--dispatch-brief",
     "--help",
     "-h",
     "--status",
@@ -93,6 +98,11 @@ struct UpdateArgs {
     /// usage error until the cut-over wave owns it.
     fixes_pr: Option<String>,
     reverted: Option<bool>,
+    difficulty: Option<String>,
+    tag: Vec<String>,
+    untag: Vec<String>,
+    dispatch_verb: Option<String>,
+    dispatch_brief: Option<String>,
     door: Vec<String>,
 }
 
@@ -121,6 +131,11 @@ impl UpdateArgs {
             acknowledge_collisions: None,
             fixes_pr: None,
             reverted: None,
+            difficulty: None,
+            tag: Vec::new(),
+            untag: Vec::new(),
+            dispatch_verb: None,
+            dispatch_brief: None,
             door: Vec::new(),
         };
         let mut i = 0;
@@ -207,6 +222,29 @@ impl UpdateArgs {
                     a.reverted = Some(false);
                     i += 1;
                 }
+                "--difficulty" => take_value!(a.difficulty),
+                "--tag" | "--untag" => {
+                    match inline.clone().or_else(|| {
+                        if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
+                            i += 1;
+                            Some(tail[i].clone())
+                        } else {
+                            None
+                        }
+                    }) {
+                        Some(v) => {
+                            if name == "--tag" {
+                                a.tag.push(v);
+                            } else {
+                                a.untag.push(v);
+                            }
+                            i += 1;
+                        }
+                        None => return None,
+                    }
+                }
+                "--dispatch-verb" => take_value!(a.dispatch_verb),
+                "--dispatch-brief" => take_value!(a.dispatch_brief),
                 other => {
                     if !other.starts_with('-') && id.is_none() {
                         id = Some(other.to_string());
@@ -493,6 +531,7 @@ fn write_update(
                 working,
                 rungs,
                 node_id,
+                warnings,
             } => {
                 match graph_store::locked_mutate(
                     graph,
@@ -506,6 +545,12 @@ fn write_update(
                     LOCK_TIMEOUT,
                 ) {
                     Ok(_) => {
+                        // The dispatch-brief warning echoes once, after the
+                        // write lands and before the receipt - the shape the
+                        // Python caller ran.
+                        for w in &warnings {
+                            eprintln!("{w}");
+                        }
                         confirm_readback(graph, args, &node_id)?;
                         println!("Updated {node_id}");
                         repaint(graph, args, &node_id);
@@ -542,6 +587,7 @@ enum MutationPlan {
         working: Vec<Value>,
         rungs: BTreeMap<String, String>,
         node_id: String,
+        warnings: Vec<String>,
     },
 }
 
@@ -591,7 +637,7 @@ fn plan_mutation(
         .iter()
         .position(|r| entry_id(r) == Some(node_id.as_str()))
         .ok_or_else(|| refused(format!("Error: graph node {} not found", args.task_id), 1))?;
-    {
+    let warnings = {
         let obj = rows[idx].as_object_mut().expect("row is an object");
         apply_mutators(
             obj,
@@ -600,13 +646,14 @@ fn plan_mutation(
             details,
             details_from_file,
             derived_cwd,
-        )?;
-    }
+        )?
+    };
 
     Ok(MutationPlan::Applied {
         working: rows,
         rungs,
         node_id,
+        warnings,
     })
 }
 
@@ -619,7 +666,7 @@ fn apply_mutators(
     details: Option<&str>,
     details_from_file: bool,
     derived_cwd: Option<&str>,
-) -> Result<(), Refusal> {
+) -> Result<Vec<String>, Refusal> {
     if let Some(v) = &args.has_brief {
         obj.insert("has_brief".into(), Value::Bool(v.to_lowercase() == "true"));
     }
@@ -641,6 +688,12 @@ fn apply_mutators(
             obj.insert("orphan_ok".into(), json!(v));
         }
     }
+    let mut warnings: Vec<String> = super::fields::apply_dispatch_overrides(
+        obj,
+        args.dispatch_verb.as_deref(),
+        args.dispatch_brief.as_deref(),
+    )
+    .map_err(|refusal| refused(refusal, 2))?;
     if let Some(priority) = &args.priority {
         obj.insert("priority".into(), json!(priority));
     }
@@ -707,6 +760,25 @@ fn apply_mutators(
             },
         );
     }
+    if let Some(raw) = &args.difficulty {
+        let band = if raw.to_lowercase() == "null" {
+            None
+        } else {
+            match super::fields::normalize_difficulty(raw) {
+                Ok(band) => Some(band),
+                Err(exc) => {
+                    return Err(refused(format!("fno backlog update: {exc}"), 2));
+                }
+            }
+        };
+        super::fields::write_canonical_difficulty(
+            obj,
+            band.as_deref(),
+            "update",
+            &crate::graph_store::now_isoformat(),
+            "change",
+        );
+    }
     if let Some(model) = &args.model {
         obj.insert(
             "model".into(),
@@ -765,7 +837,41 @@ fn apply_mutators(
     if let Some(reverted) = args.reverted {
         obj.insert("reverted".into(), Value::Bool(reverted));
     }
-    Ok(())
+    if !args.tag.is_empty() || !args.untag.is_empty() {
+        // Idempotent set semantics, order-preserving: adds skip dupes,
+        // removes are no-ops if absent. Normalization refuses before the
+        // write lands, so a malformed tag never mutates.
+        let mut normalized_tag = Vec::new();
+        for t in &args.tag {
+            normalized_tag.push(
+                super::fields::normalize_tag(t).map_err(|e| refused(format!("Error: {e}"), 1))?,
+            );
+        }
+        let mut normalized_untag = Vec::new();
+        for t in &args.untag {
+            normalized_untag.push(
+                super::fields::normalize_tag(t).map_err(|e| refused(format!("Error: {e}"), 1))?,
+            );
+        }
+        let mut current: Vec<String> = obj
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for t in normalized_tag {
+            if !current.contains(&t) {
+                current.push(t);
+            }
+        }
+        current.retain(|t| !normalized_untag.contains(t));
+        obj.insert("tags".into(), json!(current));
+    }
+    Ok(warnings)
 }
 
 /// The `null` clear-sentinel: "null" (any case) clears, anything else passes.
@@ -835,10 +941,15 @@ fn confirm_readback(graph: &Path, args: &UpdateArgs, node_id: &str) -> Result<()
 /// The plan repaint: graph-authoritative fields flow onto the linked plan
 /// when a mirrored or status-affecting field changed. Best-effort.
 fn repaint(graph: &Path, args: &UpdateArgs, node_id: &str) {
+    let difficulty_clear = args
+        .difficulty
+        .as_deref()
+        .is_some_and(|d| d.to_lowercase() == "null");
     let mirror_triggers = args.priority.is_some()
         || args.project.is_some()
         || args.type_.is_some()
-        || args.size.is_some();
+        || args.size.is_some()
+        || args.difficulty.is_some();
     if !mirror_triggers {
         return;
     }
@@ -849,13 +960,18 @@ fn repaint(graph: &Path, args: &UpdateArgs, node_id: &str) {
     if args.type_.is_some() {
         mirror_keys.push("type".into());
     }
+    if args.difficulty.is_some() {
+        mirror_keys.push("difficulty".into());
+    }
     crate::plan_doc::project::project_graph_nodes(
         &rows,
         std::slice::from_ref(&node_id.to_string()),
         None,
         Some((node_id.to_string(), mirror_keys)),
         None,
-        None,
+        // An explicit `--difficulty null` is the ONE clear the projector
+        // honors for that key.
+        difficulty_clear.then(|| (node_id.to_string(), vec!["difficulty".to_string()])),
     );
 }
 

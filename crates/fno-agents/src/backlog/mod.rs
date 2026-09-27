@@ -13,6 +13,7 @@ pub mod done_evidence;
 pub mod encounters;
 pub mod entities;
 pub mod epic_cap;
+pub mod fields;
 pub mod find_cli;
 pub mod findings;
 pub mod get_cli;
