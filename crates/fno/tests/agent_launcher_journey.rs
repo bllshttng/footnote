@@ -56,12 +56,15 @@ fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, mess
     send_launch_with_flags(client, scratch, request_id, message, Vec::new());
 }
 
-fn send_launch_with_flags(
+#[allow(clippy::too_many_arguments)]
+fn send_launch_full(
     client: &mut FakeClient,
     scratch: &Scratch,
     request_id: u64,
     message: &str,
     extra_flags: Vec<String>,
+    worktree: bool,
+    branch: Option<String>,
 ) {
     client.raw(&ClientMsg::AgentLaunch(AgentLaunchRequest {
         request_id,
@@ -80,7 +83,27 @@ fn send_launch_with_flags(
         node: None,
         message: message.to_string(),
         extra_flags,
+        worktree,
+        branch,
     }));
+}
+
+fn send_launch_with_flags(
+    client: &mut FakeClient,
+    scratch: &Scratch,
+    request_id: u64,
+    message: &str,
+    extra_flags: Vec<String>,
+) {
+    send_launch_full(
+        client,
+        scratch,
+        request_id,
+        message,
+        extra_flags,
+        false,
+        None,
+    );
 }
 
 #[test]
@@ -119,6 +142,8 @@ fn launcher_journey_model_only_pin_omits_harness() {
         node: None,
         message: "hi".to_string(),
         extra_flags: Vec::new(),
+        worktree: false,
+        branch: None,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -273,6 +298,8 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
         node: None,
         message: "hi".to_string(),
         extra_flags: Vec::new(),
+        worktree: false,
+        branch: None,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -340,6 +367,8 @@ fn launcher_journey_node_prefill_rides_the_door() {
         node: Some("x-1".to_string()),
         message: message.to_string(),
         extra_flags: Vec::new(),
+        worktree: false,
+        branch: None,
     }));
     client.wait(15, "launch terminal state", |c| {
         c.launch_updates
@@ -392,4 +421,131 @@ fn launcher_journey_refusal_and_unknown_are_named() {
         }
         other => panic!("expected Unknown, got {other:?}"),
     }
+}
+
+/// A recording launch-workdir: the payload to `workdir-payload.log`, one
+/// `workdir` answer on stdout, exit 0. Non-launch-workdir invocations exit 1
+/// so a mid-test `fno-agents` gesture degrades fail-open instead of lying.
+const RECORDING_WD: &str = r#"#!/bin/sh
+if [ "$1" = "launch-workdir" ]; then
+  cat > "$RECORD_DIR/workdir-payload.log"
+  echo '{"workdir":"/tmp/fake-wt-x-276b"}'
+  exit 0
+fi
+exit 1
+"#;
+
+/// A holding launch-workdir: the valid `hold` answer, exit 0.
+const HOLDING_WD: &str = r#"#!/bin/sh
+if [ "$1" = "launch-workdir" ]; then
+  cat > "$RECORD_DIR/workdir-payload.log"
+  echo '{"hold":"no free tree"}'
+  exit 0
+fi
+exit 1
+"#;
+
+#[test]
+fn launcher_journey_worktree_launch_rides_the_resolved_cwd() {
+    // AC7-HP / AC8-HP: a worktree launch resolves its directory through
+    // `fno-agents launch-workdir` the door can never see around: the
+    // answered workdir replaces --cwd, and the payload carries the minted
+    // composer name, the harness and the picked branch.
+    let scratch = Scratch::new("launcher-journey-worktree");
+    let record_dir = scratch.0.join("records");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    let door = fake_door(&scratch.0, "fake-fno", RECORDING);
+    let wd = fake_door(&scratch.0, "fake-fno-agents", RECORDING_WD);
+    let sock = scratch.main_sock();
+    let _server = spawn_server(
+        &sock,
+        &[
+            ("FNO_BIN", door.to_string_lossy().as_ref()),
+            ("FNO_AGENTS_BIN", wd.to_string_lossy().as_ref()),
+            ("RECORD_DIR", record_dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let mut client = attach_and_launch(&scratch, &sock);
+    send_launch_full(
+        &mut client,
+        &scratch,
+        1,
+        "hi",
+        Vec::new(),
+        true,
+        Some("feature/x".into()),
+    );
+    wait_terminal(&mut client, "worktree launch terminal state");
+    match client.launch_updates.last().map(|u| &u.state) {
+        Some(fno::proto::LaunchState::Launched { .. }) => {}
+        other => panic!("expected Launched, got {other:?}"),
+    }
+    let payload = std::fs::read_to_string(record_dir.join("workdir-payload.log")).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        payload.get("recorded_cwd").and_then(|v| v.as_str()),
+        Some(scratch.home_cwd().as_str()),
+        "the project cwd rides the payload: {payload}"
+    );
+    assert!(
+        payload
+            .get("node")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.starts_with("composer-")),
+        "a bare launch mints a composer- name: {payload}"
+    );
+    assert_eq!(
+        payload.get("harness").and_then(|v| v.as_str()),
+        Some("claude"),
+        "{payload}"
+    );
+    assert_eq!(
+        payload.get("branch").and_then(|v| v.as_str()),
+        Some("feature/x"),
+        "{payload}"
+    );
+    let argv = std::fs::read_to_string(record_dir.join("argv.log")).unwrap();
+    let argv: Vec<String> = argv.lines().map(str::to_string).collect();
+    let cwd_pos = argv.iter().position(|a| a == "--cwd").expect("--cwd rides");
+    assert_eq!(
+        argv.get(cwd_pos + 1).map(String::as_str),
+        Some("/tmp/fake-wt-x-276b"),
+        "the answered workdir replaces --cwd: {argv:?}"
+    );
+}
+
+#[test]
+fn launcher_journey_worktree_hold_refuses_without_a_spawn() {
+    // AC7-ERR: a hold answer is a definitive no-birth refusal: the composer
+    // reads `refused: worktree: <reason>` and no spawn subprocess runs.
+    let scratch = Scratch::new("launcher-journey-worktree-hold");
+    let record_dir = scratch.0.join("records");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    let door = fake_door(&scratch.0, "fake-fno", RECORDING);
+    let wd = fake_door(&scratch.0, "fake-fno-agents", HOLDING_WD);
+    let sock = scratch.main_sock();
+    let _server = spawn_server(
+        &sock,
+        &[
+            ("FNO_BIN", door.to_string_lossy().as_ref()),
+            ("FNO_AGENTS_BIN", wd.to_string_lossy().as_ref()),
+            ("RECORD_DIR", record_dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let mut client = attach_and_launch(&scratch, &sock);
+    send_launch_full(&mut client, &scratch, 1, "hi", Vec::new(), true, None);
+    wait_terminal(&mut client, "hold terminal state");
+    match &client.launch_updates.last().unwrap().state {
+        fno::proto::LaunchState::Refused { reason } => {
+            assert!(
+                reason.contains("worktree: no free tree"),
+                "the hold reason rides the refusal: {reason}"
+            );
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    assert!(
+        !record_dir.join("argv.log").exists(),
+        "a held launch never spawns"
+    );
 }

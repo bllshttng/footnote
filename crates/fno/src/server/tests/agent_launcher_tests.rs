@@ -21,6 +21,8 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         node: None,
         message: String::new(),
         extra_flags: Vec::new(),
+        worktree: false,
+        branch: None,
     }
 }
 
@@ -124,6 +126,38 @@ async fn agent_launch_refuses_an_invalid_node_id_pre_birth() {
                 assert!(
                     reason.contains("invalid node id"),
                     "refusal names the bad id {bad:?}: {reason}"
+                );
+            }
+            other => panic!("expected a settled refusal for {bad:?}, got {other:?}"),
+        }
+    }
+    drop(out_tx);
+    drop(exit_tx);
+    assert!(
+        self_rx.try_recv().is_err(),
+        "a pre-birth refusal never spawns a task"
+    );
+}
+
+#[tokio::test]
+async fn agent_launch_refuses_an_invalid_branch_pre_birth() {
+    // A worktree launch's branch feeds `worktree ensure --branch`, so the
+    // node-id charset answers: empty, flag-shaped and splatting branches
+    // refuse BEFORE any effect - no task, no ensure, no spawn.
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
+    let (self_tx, mut self_rx) = mpsc::channel::<CoreMsg>(8);
+    let mut core = empty_core_with(self_tx);
+    for (i, bad) in ["", "-rf", "x 1"].iter().enumerate() {
+        let mut req = launch_req(i as u64 + 1, "/tmp", "claude");
+        req.worktree = true;
+        req.branch = Some(bad.to_string());
+        core.agent_launch(i as u64 + 1, req);
+        match core.launch_desk.settled_state(i as u64 + 1, i as u64 + 1) {
+            Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
+                assert!(
+                    reason.contains("invalid branch"),
+                    "refusal names the bad branch {bad:?}: {reason}"
                 );
             }
             other => panic!("expected a settled refusal for {bad:?}, got {other:?}"),

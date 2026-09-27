@@ -343,7 +343,10 @@ fn default_true() -> bool {
 /// transient machine view (`fno mux command`: a screen that is never a
 /// portal) and the named anchor cell (`--from portal N|worker|current`)
 /// a split halves; floor stays 58.
-pub const PROTO_VERSION: u32 = 93;
+/// v94: `AgentLaunchRequest.worktree` + `branch` (serde default), the
+/// composer's worktree choice the server resolves through `fno-agents
+/// launch-workdir` before the spawn argv is built; floor stays 58.
+pub const PROTO_VERSION: u32 = 94;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4057,7 +4060,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 93);
+        assert_eq!(PROTO_VERSION, 94);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
