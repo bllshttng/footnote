@@ -208,6 +208,68 @@ def test_ensure_idempotent_reuse(main_repo: Path, tmp_path: Path) -> None:
     assert before.count("worktree ") == after.count("worktree ")
 
 
+def test_ensure_reuse_honors_a_demanded_branch(main_repo: Path, tmp_path: Path) -> None:
+    """A reused tree whose checkout differs from --branch switches to it.
+
+    The composer's branch picker names an existing local branch; a tree the
+    ensure created earlier (default branch) must not silently launch a
+    branch the caller did not pick. A branch already checked out in another
+    tree refuses instead (one checkout per branch).
+    """
+    _git("branch", "-q", "feature/picked", cwd=main_repo)
+    first = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "switcher"],
+    )
+    assert first.exit_code == 0, first.stderr
+    wt = Path(first.stdout.strip())
+    assert _git("branch", "--show-current", cwd=wt).stdout.strip() != "feature/picked"
+
+    second = runner.invoke(
+        app,
+        [
+            "worktree", "ensure", "--repo", str(main_repo),
+            "--name", "switcher", "--branch", "feature/picked",
+        ],
+    )
+    assert second.exit_code == 0, second.stderr
+    assert second.stdout.strip() == str(wt)
+    assert _git("branch", "--show-current", cwd=wt).stdout.strip() == "feature/picked"
+    assert "created=false" in second.stderr, "reuse receipt keeps the caller's resume note"
+
+    # Idempotent: same branch again reuses without a switch line.
+    third = runner.invoke(
+        app,
+        [
+            "worktree", "ensure", "--repo", str(main_repo),
+            "--name", "switcher", "--branch", "feature/picked",
+        ],
+    )
+    assert third.exit_code == 0, third.stderr
+    assert third.stdout.strip() == str(wt)
+    assert "switched" not in third.stderr
+
+    # A branch checked out in ANOTHER worktree refuses the switch.
+    _git("branch", "-q", "feature/elsewhere", cwd=main_repo)
+    other = runner.invoke(
+        app,
+        [
+            "worktree", "ensure", "--repo", str(main_repo),
+            "--name", "elsewhere", "--branch", "feature/elsewhere",
+        ],
+    )
+    assert other.exit_code == 0, other.stderr
+    blocked = runner.invoke(
+        app,
+        [
+            "worktree", "ensure", "--repo", str(main_repo),
+            "--name", "switcher", "--branch", "feature/elsewhere",
+        ],
+    )
+    assert blocked.exit_code != 0
+    assert blocked.stdout.strip() == ""
+
+
 def test_ensure_stray_dir_non_clobber(main_repo: Path, tmp_path: Path) -> None:
     """AC1-FR: a same-named NON-worktree dir is never clobbered; verb fails."""
     stray = _default_wt(tmp_path, main_repo, "stray")
