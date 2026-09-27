@@ -75,6 +75,70 @@ impl View {
         }
     }
 
+    /// Sideline rows the cursor can occupy: the full terminal height (the
+    /// sideline owns row 0 since US1) minus the bottom chrome row,
+    /// minus the court block's rows at the bottom. The block is the
+    /// subtraction point's only second customer, so `clamp_sideline_scroll`
+    /// and `reveal_focus_row` inherit the shrunk window without a second
+    /// fix.
+    pub(super) fn sideline_visible_rows(&self) -> usize {
+        // The questions block and the sticky menu footer both come off the
+        // region before the scroll math runs (h): scrolling to the end lands
+        // the last row above the footer, never under the block.
+        let rows = (self.term.0 as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
+            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let pinned = self.painted_rows().len() > rows;
+        rows.saturating_sub(pinned as usize)
+    }
+
+    /// The `display_rows()` index a hover cell falls on in the sideline, or
+    /// `None` when the cell is not a sideline text cell - a pane, the divider
+    /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
+    /// sideline geometry exactly so the highlight lands where a click would
+    ///.
+    pub(super) fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
+        // The sideline owns row 0 in normal mode (the strip moved right of
+        // the divider), so display row `i` maps directly from `row`. A cell
+        // on the divider or in the strip's content columns returns None.
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
+            return None;
+        }
+        // Full-screen sideline paints below the strip; invert the same
+        // offset the painter used.
+        let top = self.sideline_top();
+        if (row as usize) < top {
+            return None;
+        }
+        if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
+            return None;
+        }
+        // The sticky menu footer (h): when the rows overflow, the
+        // menu/add-workspace row pins directly above the questions block, so
+        // a click or hover there is the footer's row even though its display
+        // row has scrolled away. Checked ahead of the offset path: the
+        // covered display row must never win.
+        let region = (self.term.0 as usize)
+            .saturating_sub(self.court_block_rows())
+            .saturating_sub(self.questions_block_rows());
+        let pinned = self.painted_rows().len() > self.sideline_visible_rows();
+        if pinned && row as usize >= top && row as usize == top + region.saturating_sub(1) {
+            return self
+                .painted_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::NewSquad));
+        }
+        let i = row as usize - top + self.sideline_offset();
+        if i < self.painted_rows().len() {
+            return Some(i);
+        }
+        None
+    }
+
     pub(super) fn draw_sideline(
         &self,
         cells: &mut [Cell],

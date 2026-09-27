@@ -10,6 +10,70 @@
 
 use super::*;
 
+/// The questions block's operator prefs, each persisted through the view
+/// store; the block reads them at layout time.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BlockPrefs {
+    pub(super) visible: bool,
+    pub(super) height: u16,
+    pub(super) show_done: bool,
+}
+
+impl Default for BlockPrefs {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            height: crate::view_store::QUESTIONS_DEFAULT_HEIGHT,
+            show_done: false,
+        }
+    }
+}
+
+impl BlockPrefs {
+    pub(super) fn load() -> Self {
+        Self {
+            visible: crate::view_store::load_questions_block(),
+            height: crate::view_store::load_questions_height(),
+            show_done: crate::view_store::load_questions_show_done(),
+        }
+    }
+}
+
+/// prefix+q: show or hide the whole block; the choice persists.
+pub(super) fn toggle_block(view: &mut View) {
+    view.questions_block.visible = !view.questions_block.visible;
+    crate::view_store::save_questions_block(view.questions_block.visible);
+    view.set_notice(if view.questions_block.visible {
+        "questions block: shown".into()
+    } else {
+        "questions block: hidden".into()
+    });
+}
+
+/// prefix+{ / prefix+}: grow or shrink the block by a row; the height
+/// persists, and the court rule still caps what renders.
+pub(super) fn resize_block(view: &mut View, delta: i8) {
+    let step = u16::from(delta.unsigned_abs());
+    let next = if delta > 0 {
+        view.questions_block.height.saturating_add(step)
+    } else {
+        view.questions_block.height.saturating_sub(step)
+    };
+    view.questions_block.height = next.clamp(2, 60);
+    crate::view_store::save_questions_height(view.questions_block.height);
+}
+
+/// prefix+X: show or hide answered and done questions in the block.
+pub(super) fn toggle_show_done(view: &mut View) {
+    view.questions_block.show_done = !view.questions_block.show_done;
+    crate::view_store::save_questions_show_done(view.questions_block.show_done);
+    view.set_notice(if view.questions_block.show_done {
+        "questions block: answered shown".into()
+    } else {
+        "questions block: answered hidden".into()
+    });
+}
+
 /// The open questions in the fold, ready first then projection order.
 pub(super) fn open_items(
     fold: &crate::needs_overlay::QuestionsFold,
@@ -148,7 +212,7 @@ pub(super) struct BlockRows {
 }
 
 pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
-    if !view.questions_visible {
+    if !view.questions_block.visible {
         return None;
     }
     let now = crate::digest_overlay::now_secs();
@@ -156,8 +220,9 @@ pub(super) fn block_rows(view: &View, term_rows: usize) -> Option<BlockRows> {
     let court = view.court_block_layout(term_rows).0;
     let chrome = view.bottom_row_is_chrome() as usize;
     let available = term_rows.saturating_sub(court + chrome);
-    let height = (view.questions_height as usize).clamp(2, available.saturating_sub(1).max(2));
-    let (lines, ids, more) = block_layout(height, view.questions_show_done, fold, now);
+    let height =
+        (view.questions_block.height as usize).clamp(2, available.saturating_sub(1).max(2));
+    let (lines, ids, more) = block_layout(height, view.questions_block.show_done, fold, now);
     if lines.is_empty() {
         return None;
     }
@@ -1371,15 +1436,15 @@ mod tests {
         v.questions_fold = Some(fold_with(
             (0..9).map(|i| item(&format!("q-{i}"), true)).collect(),
         ));
-        v.questions_visible = true;
-        v.questions_height = 4;
+        v.questions_block.visible = true;
+        v.questions_block.height = 4;
         let b = block_rows(&v, 60).expect("the block reserves rows");
         assert_eq!(b.n, 4);
         assert!(b.more, "nine questions at height 4 leave more");
-        v.questions_visible = false;
+        v.questions_block.visible = false;
         assert!(block_rows(&v, 60).is_none(), "the toggle hides the block");
-        v.questions_visible = true;
-        v.questions_height = 2;
+        v.questions_block.visible = true;
+        v.questions_block.height = 2;
         let b = block_rows(&v, 60).expect("the block reserves rows");
         assert_eq!(b.n, 2, "height 2: header plus one row");
     }
@@ -1390,8 +1455,8 @@ mod tests {
         v.questions_fold = Some(fold_with(
             (0..9).map(|i| item(&format!("q-{i}"), true)).collect(),
         ));
-        v.questions_visible = true;
-        v.questions_height = 4;
+        v.questions_block.visible = true;
+        v.questions_block.height = 4;
         // term_rows 40, court 0: the block paints [36..40): header, 2 rows,
         // the more line. Height 4 with nine items shows q-0 and q-1.
         let court = v.court_block_layout(40).0;
