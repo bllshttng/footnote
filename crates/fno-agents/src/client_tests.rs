@@ -2296,9 +2296,10 @@ fn render_list_table_shows_the_ten_roster_columns() {
     assert!(second.contains("- (unrequested)"), "{second}");
     assert!(second.contains("- (no-node)"), "{second}");
     let legacy = lines[3];
-    assert!(
-        legacy.contains("unknown"),
-        "legacy Claude id is unknown: {legacy}"
+    assert_eq!(
+        legacy.split_whitespace().nth(2),
+        Some("unknown"),
+        "SESSION must not show Claude's short transport id: {legacy}"
     );
     assert!(
         !legacy.contains("abc12345"),

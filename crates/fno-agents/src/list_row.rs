@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn node_primary_prs_reads_the_graph_once() {
+    fn node_primary_prs_maps_prs_for_requested_nodes() {
         let dir = std::env::temp_dir().join(format!("fno-list-row-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let graph = dir.join("graph.json");
