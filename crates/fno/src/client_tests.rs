@@ -674,23 +674,32 @@ fn sideline_marks_active_squad_and_focused_agent_row() {
 
 #[test]
 fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
-    // x-4374 / AC3-UI, restated for explicit bands: when the selector sits on
-    // the focused row, the chosen accent band wins - the cursor never masks
-    // the "you are here" signal (the card contract, list mode too).
+    // x-4374 / AC3-UI, restated: when the selector sits on the focused row,
+    // the standing band still paints - the cursor never masks the "you are
+    // here" signal (the card contract, list mode too). Since x-b5b8 the one
+    // band is the surface pair; the accent rides the glyph and state word.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11));
     view.selector = Some(1); // the focused agent row
     let frame = view.compose();
     let cols = frame.cols as usize;
     let lead = frame.cells[cols]; // outer row 1, col 0
-    assert_eq!(lead.bg, LATTICE_ACCENT, "the chosen band wins on selection");
+    assert_eq!(
+        lead.bg,
+        Color::Indexed(0),
+        "the chosen row keeps its standing surface band"
+    );
 }
 
 #[test]
 fn xf331_focus_band_and_selector_are_distinct_treatments() {
-    // x-f331 US2/AC1-UI: the focus band wears the ACCENT colour while a
-    // selector parked on a DIFFERENT row is the palette-following hover band -
-    // the distinction is colour (survives weak-BOLD themes), not weight.
+    // x-f331 US2/AC1-UI, restated: focus and selector are distinct
+    // treatments. The operator's color ruling (x-b5b8) retired the accent
+    // FILL for both - selection, hover, and focus now share the ONE surface
+    // band, and the focus row's distinction rides its glyph marks and state
+    // word, never a louder fill. This pin holds the unification: neither row
+    // regresses to an accent fill, and the focused row keeps its accent
+    // signal where the plain selector row has none.
     let mut view = two_pane_view();
     view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
     view.selector = Some(3); // notes squad header, a different actionable row
@@ -700,19 +709,20 @@ fn xf331_focus_band_and_selector_are_distinct_treatments() {
 
     let focus_cell = frame.cells[cols]; // display row 1: the focus band
     assert_eq!(
-        focus_cell.bg, LATTICE_ACCENT,
-        "the focus row still wears the accent band"
+        focus_cell.bg,
+        Color::Indexed(0),
+        "the focus row wears the surface band, never an accent fill"
     );
 
     let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
     assert_eq!(
         sel_cell.bg,
         Color::Indexed(0),
-        "the selector row is the palette-following cursor band"
+        "the selector row wears the same surface band"
     );
-    assert_ne!(
-        sel_cell.bg, LATTICE_ACCENT,
-        "the selector band is NOT the focus accent - the two read as distinct"
+    assert_eq!(
+        focus_cell.bg, sel_cell.bg,
+        "focus and selector share the one surface band"
     );
 }
 
