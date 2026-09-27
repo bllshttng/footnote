@@ -874,12 +874,10 @@ def find(
     from fno.paths import event_journals
 
     session = session_id or session_legacy
-    if kind and kinds:
-        typer.echo("error: pass KIND or --kinds, not both", err=True)
-        raise typer.Exit(code=2)
+    # KIND-vs---kinds is refused by the native verb itself; relaying keeps
+    # the refusal single-sourced. The value parsers stay local: their
+    # refusals read better than a spawned-binary error.
     try:
-        # Validation only: the native verb re-parses; a local refusal reads
-        # better than a spawned-binary error.
         _parse_find_fields(field)
         _parse_find_since(since)
     except ValueError as exc:
