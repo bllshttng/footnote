@@ -432,7 +432,7 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     from fno.agents import dispatch as dsp
 
     # The fake home sits under tmp_path so the hermetic guard allows the
-    # state_dir() resolution the seal performs (x-fa9e).
+    # state_dir() resolution the seal performs.
     fake_home = tmp_path / "real-home"
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
