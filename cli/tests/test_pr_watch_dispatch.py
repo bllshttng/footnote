@@ -2418,6 +2418,48 @@ class TestTickRecordsAndDeadline:
         # king_wake finished early and reads as quiet, not saturated.
         assert ends[-1].get("saturated") == ["sweep"]
 
+    def test_a_notify_slice_below_its_real_cost_mints_the_timeout_row(
+        self, monkeypatch, tmp_path
+    ):
+        """x-0fc2 (12:35Z specimen): the notify_watch phase spent its slice
+        on a loaded machine - the roots scan alone measured 2.03s idle over
+        12 roots - and the reign check-in read FAIL on the timeout row. A
+        slice below the phase's real cost fires the alarm and names the
+        slice, which is the row this test pins."""
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _slow_notify_body(_roots=None, timeout_s=None, **_kw) -> None:
+            _time.sleep(2)
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "notify_watch", 1)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", _slow_notify_body,
+                            raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path],
+                            raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert res.exit_code == 0, res.output
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
+        assert notify_rows, "notify_watch wrote no row"
+        assert notify_rows[-1].get("skip_reason") == "timeout"
+        assert "phase slice 1s spent" in notify_rows[-1]["detail"], notify_rows[-1]
+        # The cut phase does not stop the tick: the merge row still lands.
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows, "merge wrote no row after the notify cut"
+
     def _cut_sweep_world(self, monkeypatch, tmp_path):
         """The shared cheapness stubs behind a deliberately cut sweep: the
         phases after it must be cheap or the tick reads as a different cut."""

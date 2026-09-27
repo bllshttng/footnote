@@ -424,7 +424,13 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
     "king_wake": 45,
-    "notify_watch": 10,
+    # The notify phase pays the arm subprocess over every catch-up root
+    # (idle: 2.03s roots scan over 12 roots + 0.13s subprocess). The old
+    # 10s cap fired on a loaded machine and paged a healthy arm (x-0fc2,
+    # 12:35Z specimen: "phase slice 10s spent"). 15s is the largest value
+    # the caps-fit invariant allows: sum(caps) + fleet max + the 150s
+    # merge floor must stay inside the 480s deadline (test_phase_caps_fit).
+    "notify_watch": 15,
     "heal": 10,
     "evals": 10,
 }
