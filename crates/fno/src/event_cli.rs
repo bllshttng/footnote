@@ -565,10 +565,12 @@ fn run_find(args: &[OsString]) -> i32 {
         .map(|c| c["status"].as_str().unwrap_or("unknown"))
         .max_by_key(|s| status_rank(s))
         .unwrap_or("unknown");
+    // The joint answer is proven only from the LATEST proven start across
+    // the stores (RFC3339 strings order chronologically).
     let complete_since = coverages
         .iter()
         .filter_map(|c| c["complete_since"].as_str())
-        .min(); // RFC3339 strings order chronologically
+        .max();
     let observed_first = coverages
         .iter()
         .filter_map(|c| c["observed_first"].as_str())
