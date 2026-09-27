@@ -1825,16 +1825,37 @@ fn open_picker_at(
 /// away hides with them. Works off the picker's own captured row set, so it
 /// needs no View access.
 fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
-    let q = picker.filter.to_lowercase();
+    let (popup, actions) = filtered_popup(
+        picker.field,
+        &picker.all_rows,
+        &picker.all_actions,
+        &picker.filter,
+        picker.anchor,
+    );
+    picker.popup = popup;
+    picker.popup.sel = 0;
+    picker.actions = actions;
+    l.picker = Some(picker);
+}
+
+/// The filtered popup for a captured row set and live query: substring
+/// match on the entry labels, headers whose rows all filtered away hidden.
+/// Shared by [`rebuild_picker`] (which stores the result back) and the
+/// draw-time refresh in [`draw_overlay`] (which does not), so a catalog
+/// read landing mid-picker updates the open list live, the same way the
+/// old tab bodies re-derived their rows every render.
+fn filtered_popup(
+    field: Focus,
+    all_rows: &[PopupRow],
+    all_actions: &[Option<PickerAction>],
+    filter: &str,
+    anchor: Anchor,
+) -> (Popup, Vec<Option<PickerAction>>) {
+    let q = filter.to_lowercase();
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut actions: Vec<Option<PickerAction>> = Vec::new();
     let mut last_header: Option<(PopupRow, Option<PickerAction>)> = None;
-    for (row, action) in picker
-        .all_rows
-        .iter()
-        .cloned()
-        .zip(picker.all_actions.iter().cloned())
-    {
+    for (row, action) in all_rows.iter().cloned().zip(all_actions.iter().cloned()) {
         match &row {
             PopupRow::Header(_) => last_header = Some((row, action)),
             PopupRow::Entry { label, .. } => {
@@ -1854,31 +1875,27 @@ fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
             }
         }
     }
-    let footer = if picker.field == Focus::Model {
+    let footer = if field == Focus::Model {
         "up/down move \u{b7} left/right effort \u{b7} type to filter \u{b7} enter pick \u{b7} esc back"
     } else {
         "up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"
     };
-    let mut popup = Popup::new(rows, picker.anchor)
+    let mut popup = Popup::new(rows, anchor)
         .footer(footer)
         .full_chrome()
         .full_width_selection();
-    if !picker.filter.is_empty() {
+    if !filter.is_empty() {
         popup = popup.title(format!(
-            "{} \u{b7} filter: {}",
-            title_for(picker.field),
-            picker.filter
+            "{title} \u{b7} filter: {filter}",
+            title = title_for(field)
         ));
     } else {
-        let t = title_for(picker.field);
+        let t = title_for(field);
         if !t.is_empty() {
             popup = popup.title(t);
         }
     }
-    picker.popup = popup;
-    picker.popup.sel = 0;
-    picker.actions = actions;
-    l.picker = Some(picker);
+    (popup, actions)
 }
 
 /// The picker's base title, shared by open and rebuild so the filter state
@@ -2991,8 +3008,41 @@ pub(crate) fn draw_overlay(
         drew = true;
     }
     if let Some(pk) = l.picker.as_ref() {
-        crate::popup::draw(cells, rows, cols, &pk.popup.render(view.term), &view.theme);
-        drew = true;
+        // A chip picker's rows are a snapshot: when the axis's row source
+        // moved under it (a catalog read landing mid-picker), draw a popup
+        // rebuilt from the FRESH rows instead. No mutation, so the compose
+        // path stays immutable; the stored picker updates on the next key
+        // or click through rebuild_picker.
+        let draw_pk: Picker = if pk.field != Focus::Message {
+            let (fresh_rows, fresh_actions) =
+                picker_rows(l, pk.field, &view.launcher_catalog, &view.backlog);
+            if fresh_rows != pk.all_rows {
+                let mut updated = pk.clone();
+                updated.all_rows = fresh_rows;
+                updated.all_actions = fresh_actions;
+                let (popup, actions) = filtered_popup(
+                    updated.field,
+                    &updated.all_rows,
+                    &updated.all_actions,
+                    &updated.filter,
+                    updated.anchor,
+                );
+                updated.popup = popup;
+                updated.actions = actions;
+                updated
+            } else {
+                pk.clone()
+            }
+        } else {
+            pk.clone()
+        };
+        crate::popup::draw(
+            cells,
+            rows,
+            cols,
+            &draw_pk.popup.render(view.term),
+            &view.theme,
+        );
     }
     drew
 }
