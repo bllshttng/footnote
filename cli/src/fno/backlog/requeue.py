@@ -113,16 +113,24 @@ def _unclaim_node(task_id: str) -> None:
 
     node_id = task_id
     if _read_node(node_id, _graph_path()) is None:
-        raise typer.BadParameter(f"unclaim: graph node {node_id} not found")
+        typer.echo(f"Error: graph node {node_id} not found", err=True)
+        raise typer.Exit(code=1)
+    # The lockfile side is best-effort: a TOCTOU'd stale release ("lockfile
+    # changed") or a live foreign holder leaves the lock intact with its
+    # warning, while the graph settle still runs (the same contract the
+    # holder-verified release tests pin).
     lock_note = _release_node_lockfile(node_id)
-    if lock_note.startswith("lockfile"):
-        raise typer.BadParameter(f"unclaim refused: {lock_note}")
 
     _settle_status_after_release(node_id)
 
-    after = _read_node(node_id, _graph_path())
-    if (after or {}).get("persisted_status") == "in_progress":
-        _wedge_refusal("unclaim", node_id, sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or [])))
+    # The wedge refusal answers "your clear did not return the node to the
+    # queue". When the lockfile side stayed held (foreign holder, TOCTOU,
+    # unreadable), the node genuinely still reads held: the projection is
+    # true, not a wedge, so only a released-or-absent lock can wedge.
+    if not lock_note.startswith(("lockfile left", "lockfile changed", "lockfile untouched")):
+        after = _read_node(node_id, _graph_path())
+        if (after or {}).get("persisted_status") == "in_progress":
+            _wedge_refusal("unclaim", node_id, sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or [])))
 
     typer.echo(f"Unclaimed {node_id} ({lock_note})")
 
