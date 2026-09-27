@@ -5945,10 +5945,7 @@ def _mux_pane_send(
                 return False
         return True
 
-    def _mail_inject_pane_lane() -> bool:
-        from fno import rust_binary
-
-        binary = rust_binary.resolve_installed_binary()
+    def _mail_inject_pane_lane(binary) -> bool:
         if binary is None:
             print(
                 f"mux pane {pane} send demoted to durable: the mail-inject binary is missing",
@@ -6149,8 +6146,9 @@ def _mux_pane_send(
             # sends, digests and review keep the Python path below. No binary:
             # the Python lane below carries the same confirm contract.
             from fno import rust_binary as _rb
-            if _rb.resolve_installed_binary() is not None:
-                sent = _mail_inject_pane_lane()
+            binary = _rb.resolve_installed_binary()
+            if binary is not None:
+                sent = _mail_inject_pane_lane(binary)
                 if not sent:
                     _record_failure("pane-lane-not-confirmed")
                 return sent
