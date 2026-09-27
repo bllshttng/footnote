@@ -486,6 +486,17 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_client_actions_shrink.sh
 
+      # State-root tidiness: the inventory doc's root rows are shrink-only.
+      # The runtime half is hooks/claude-config-write-guard.sh, which refuses
+      # a NEW top-level write in either root; this gate is the review half,
+      # failing a PR whose diff adds a root pattern to the doc.
+      - name: State-root inventory rows are shrink-only
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash scripts/ci/check-state-root-rows.sh --self-test
+          bash scripts/ci/check-state-root-rows.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}
