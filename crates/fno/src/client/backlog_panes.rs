@@ -218,7 +218,7 @@ pub(crate) fn paint(
     );
 }
 #[allow(clippy::too_many_arguments)]
-fn framed_region(
+pub(crate) fn framed_region(
     cells: &mut [Cell],
     rows: usize,
     cols: usize,

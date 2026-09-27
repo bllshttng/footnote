@@ -23,6 +23,8 @@ assert.strictEqual(modelsMatch('claude-opus-4-8', 'claude-sonnet-4-5'), false)
 ok('different claude models are drift')
 assert.strictEqual(modelsMatch('', 'claude-opus-4-8'), true)
 ok('missing intended model -> no drift (fail open)')
+assert.strictEqual(modelsMatch('claude-opus-5', '<synthetic>'), true)
+ok("'<synthetic>' (claude's own error turns) -> no drift (fail open)")
 
 // --- guard (b): cap unset -> never warns, even over any spend ---
 let r = decideSpendDrift({ capUsd: null, cost: 999, intendedModel: null, actualModel: null, state: { ...FRESH } })
