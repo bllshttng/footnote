@@ -94,6 +94,12 @@ pub struct CapSnapshot {
     pub lanes: Vec<CapLane>,
     pub measured_at: String,
     pub measured_at_epoch: i64,
+    /// Why the claude transcript bridge failed this sweep, when it did. A
+    /// member then reads its own named unknown; this names the sweep-wide
+    /// cause so a broken resolver is visible in the readout and the tick row,
+    /// never a silent hold.
+    #[serde(default)]
+    pub resolver_unavailable: Option<String>,
 }
 
 impl CapSnapshot {
@@ -862,6 +868,7 @@ pub fn snapshot_with(
         lanes: out,
         measured_at: epoch_to_rfc3339(now_epoch),
         measured_at_epoch: now_epoch,
+        resolver_unavailable: bridge_error,
     })
 }
 
@@ -934,6 +941,7 @@ pub fn persist_snapshot(home: &AgentsHome, snap: &CapSnapshot) {
         "lanes": snap.lanes,
         "measured_at": snap.measured_at,
         "measured_at_epoch": snap.measured_at_epoch,
+        "resolver_unavailable": snap.resolver_unavailable,
     });
     let tmp = dir.join(format!(".snapshot.tmp-{}", std::process::id()));
     if std::fs::write(&tmp, body.to_string()).is_ok() {
@@ -948,6 +956,10 @@ pub fn read_persisted_snapshot(home: &AgentsHome) -> Option<CapSnapshot> {
         lanes: serde_json::from_value(v.get("lanes")?.clone()).ok()?,
         measured_at: v.get("measured_at")?.as_str()?.to_string(),
         measured_at_epoch: v.get("measured_at_epoch")?.as_i64()?,
+        resolver_unavailable: v
+            .get("resolver_unavailable")
+            .and_then(|r| r.as_str())
+            .map(String::from),
     })
 }
 
@@ -2258,6 +2270,11 @@ mod tests {
             lane.members[0]
         );
         assert_eq!(lane.state, "unmeasured");
+        assert_eq!(
+            snap.resolver_unavailable.as_deref(),
+            Some("transcript-paths child failed"),
+            "the sweep names its broken resolver, never a silent hold"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2282,6 +2299,7 @@ mod tests {
                 lanes: vec![lane("main", "closed"), lane("backup", "unmeasured")],
                 measured_at: epoch_to_rfc3339(100),
                 measured_at_epoch: 100,
+                resolver_unavailable: None,
             },
         );
 
@@ -3405,6 +3423,7 @@ mod tests {
             lanes: vec![lane],
             measured_at: epoch_to_rfc3339(base),
             measured_at_epoch: base,
+            resolver_unavailable: None,
         };
         let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
         let deps = rec_deps(calls.clone(), true);

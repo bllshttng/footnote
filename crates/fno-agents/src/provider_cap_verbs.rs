@@ -48,6 +48,7 @@ fn cap_status(args: &[String]) -> i32 {
                 "measured_at": snap.measured_at,
                 "fresh": true,
                 "source": "daemon-tick",
+                "resolver_unavailable": snap.resolver_unavailable,
             });
             emit_status(&v, json);
             return 0;
@@ -62,6 +63,7 @@ fn cap_status(args: &[String]) -> i32 {
                 "measured_at": snap.measured_at,
                 "fresh": true,
                 "source": "on-demand",
+                "resolver_unavailable": snap.resolver_unavailable,
             });
             emit_status(&v, json);
             0
@@ -92,6 +94,9 @@ fn render_text_snapshot(v: &Value) -> String {
         " source={}",
         v.get("source").and_then(Value::as_str).unwrap_or("?")
     ));
+    if let Some(reason) = v.get("resolver_unavailable").and_then(Value::as_str) {
+        out.push_str(&format!(" resolver_unavailable={reason}"));
+    }
     for lane in v.get("lanes").and_then(Value::as_array).unwrap_or(&vec![]) {
         let lane_name = lane.get("lane").and_then(Value::as_str).unwrap_or("?");
         let state = lane.get("state").and_then(Value::as_str).unwrap_or("?");
@@ -239,6 +244,11 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
         let (skip, detail) = match snapshot(&home, &config_cwd, now, &cfg) {
             Ok(snap) => {
                 crate::provider_cap::persist_snapshot(&home, &snap);
+                let resolver = snap
+                    .resolver_unavailable
+                    .as_deref()
+                    .map(|r| format!("resolver_unavailable={r}; "))
+                    .unwrap_or_default();
                 if cfg.enabled {
                     let d = run_armed(
                         &home,
@@ -247,11 +257,11 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
                         &cfg,
                         now,
                     );
-                    (None, d)
+                    (None, format!("{resolver}{d}"))
                 } else {
                     (
                         Some("provider_cap_off"),
-                        format!("open_lanes={}", open_lane_count(&snap)),
+                        format!("{resolver}open_lanes={}", open_lane_count(&snap)),
                     )
                 }
             }
