@@ -17,8 +17,10 @@
 #   not an overshoot.
 # - A job's header comment (contiguous comment lines whose next significant
 #   line is the job key) belongs to that job, not to the previous one.
-# - Compact "19m" is matched; "16m35s" is not (no word boundary after m), so
-#   write second-precision history in plain seconds and this guard stays quiet.
+# - Compact "19m" is matched, decimals included: "15.27m" reads as 15.27, not
+#   the 27 after the dot. "16m35s" is not matched (no word boundary after m),
+#   so write second-precision history in plain seconds and this guard stays
+#   quiet.
 # - A job whose cap is an expression (sized at runtime) is skipped: there is no
 #   static number to contradict.
 set -uo pipefail
@@ -49,6 +51,13 @@ jobs:          # file-header numbers like 'costs 4 minutes' name no job
     steps:
       # puts the shard back near 12 minutes
       - run: true
+  decimal-job:
+    timeout-minutes: 20
+    steps:
+      # a 15.27m cap kill on 2026-09-27 reads 15.27, under this cap
+      - run: true
+      # a decimal above the cap still refuses: 25.5m
+      - run: true
   dynamic-job:
     timeout-minutes: ${{ fromJSON(needs.sizer.outputs.timeout_minutes) }}
     steps:
@@ -57,7 +66,7 @@ jobs:          # file-header numbers like 'costs 4 minutes' name no job
 """
 
 MINUTES = re.compile(r"\b(\d{1,4})\s*(?:minutes?|mins?)\b", re.IGNORECASE)
-COMPACT = re.compile(r"\b(\d{1,3})m\b")
+COMPACT = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d+)?)m\b")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
 CAP = re.compile(r"^    timeout-minutes:\s*(\d+)\s*$")
 
@@ -120,24 +129,28 @@ def scan(text: str, source: str) -> list[str]:
         name, cap = own
         for pattern in (MINUTES, COMPACT):
             for dm in pattern.finditer(comment):
-                minutes = int(dm.group(1))
+                minutes = float(dm.group(1))
                 if minutes > cap:
                     fails.append(
-                        f"{source}: job {name}: comment names {minutes} minutes "
+                        f"{source}: job {name}: comment names {minutes:g} minutes "
                         f"above its {cap}-minute cap: {line.strip()}")
     return fails
 
 
 def selftest() -> int:
     fails = scan(FIXTURE, "fixture")
-    expected = 2  # over-job's header comment and its step comment; nothing else
-    if len(fails) != expected or sum("over-job" in f for f in fails) != expected:
-        print(f"FAIL: selftest expected exactly {expected} over-job refusals, got:",
-              file=sys.stderr)
+    expected = 3  # over-job's two comments and decimal-job's 25.5m; 15.27m passes
+    if (
+        len(fails) != expected
+        or sum("over-job" in f for f in fails) != 2
+        or sum("decimal-job" in f for f in fails) != 1
+    ):
+        print(f"FAIL: selftest expected over-job x2 plus decimal-job x1 "
+              f"(= {expected}), got:", file=sys.stderr)
         for f in fails:
             print(f"  {f}", file=sys.stderr)
         return 1
-    print(f"  ok: the selftest fixture yields exactly the {expected} over-job refusals")
+    print(f"  ok: the selftest fixture yields over-job x2 plus decimal-job x1")
     print("check-workflow-timeout-comments selftest: ALL PASS")
     return 0
 
