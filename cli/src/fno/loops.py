@@ -1,10 +1,9 @@
-"""Loop levels + global pause-all kill switch.
+"""Loop levels and pause control.
 
 Substrate only: no standing loop ships in this module. Every later loop is
 born with a pause button by reading ``loops_paused()`` at tick start (paused
 = log one line, exit 0) and its configured autonomy via ``loop_level(name)``.
-No daemon, no process registry - loops are cron/Actions-triggered CLI ticks;
-the sentinel file is the only coordination point.
+No daemon, no process registry - loops are cron/Actions-triggered CLI ticks.
 """
 from __future__ import annotations
 
@@ -12,7 +11,8 @@ import json
 import logging
 import subprocess
 import sys
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, cast
 
 import typer
 
@@ -21,8 +21,15 @@ from fno.config import LoopEntry, load_settings
 
 _LOG = logging.getLogger(__name__)
 
+
+def _epoch_ms_iso(value: object) -> str:
+    try:
+        return datetime.fromtimestamp(cast(int, value) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, TypeError, ValueError):
+        return "unknown"
+
 loops_app = typer.Typer(
-    name="loops", no_args_is_help=True, help="Loop level config + pause-all kill switch."
+    name="loops", no_args_is_help=True, help="Loop level config + pause control."
 )
 
 
@@ -43,7 +50,7 @@ def loop_level(name: str) -> str:
 
 
 def _rust_loops_call(action: str, args: list[str] | None = None) -> dict:
-    """Call the Rust owner of the global pause sentinel."""
+    """Call the Rust owner of loop pause state."""
     from fno.rust_binary import resolve_binary
 
     binary = resolve_binary()
@@ -164,13 +171,13 @@ def cmd_pause_all(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def cmd_resume_all(ctx: typer.Context) -> None:
-    """Remove the pause-all sentinel and lift the held mail."""
+    """Clear the pause-all breaker and remove any legacy sentinel."""
     raise typer.Exit(code=_run_loops_passthrough("resume-all", ctx.args))
 
 
 @loops_app.command("status")
 def cmd_status() -> None:
-    """Show the current pause-all sentinel, including an expired one."""
+    """Show the effective pause-all state, including an expired halt."""
     state = _rust_loops_call("status")
     if state.get("state") == "corrupt":
         typer.echo(
@@ -178,14 +185,22 @@ def cmd_status() -> None:
             "failing closed (treated as paused) - investigate"
         )
         return
+    if state.get("state") == "unavailable":
+        typer.echo(f"pause state unavailable; failing closed: {state.get('error', 'unknown')}")
+        return
     if state.get("state") == "clear":
         typer.echo("not paused")
         return
     if state.get("state") == "expired":
-        typer.echo(f"expired (was paused by {state['who']} at {state['paused_at']})")
+        typer.echo(
+            f"expired (was paused by {state['who']} at {_epoch_ms_iso(state.get('paused_at'))}, "
+            f"expired {_epoch_ms_iso(state.get('expires_at'))})"
+        )
         return
-    expiry = f", expires {state['expires_at']}" if state.get("expires_at") else ""
-    typer.echo(f"paused by {state.get('who', 'unknown')} since {state.get('paused_at', 'unknown')}{expiry}")
+    expires_at = state.get("expires_at")
+    expiry = f", expires {_epoch_ms_iso(expires_at)}" if expires_at is not None else ""
+    paused_at = _epoch_ms_iso(state.get("paused_at"))
+    typer.echo(f"paused by {state.get('who', 'unknown')} since {paused_at}{expiry}")
 
 
 @loops_app.command("ls")
