@@ -120,6 +120,7 @@ fn rust_plan_path(fx: &Fixture, pins: &[(String, String)]) -> (i32, String, Stri
         .arg("--now")
         .arg(NOW)
         .arg(fx.tmp.path().join("proj"))
+        .envs(fno_agents::test_run::self_owner_env())
         .envs(pins.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .output()
         .expect("run fno-agents state plan-path");
