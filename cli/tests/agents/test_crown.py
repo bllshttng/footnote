@@ -611,7 +611,8 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     from fno.projects import resolve as proj_resolve
 
     # The lock-time identity match runs through Rust's crown-identity kind
-    # (x-eb49), so pin this checkout's dev build like native_backlog_door
+    # (the lock-time identity match runs through Rust now), so pin this
+    # checkout's dev build like native_backlog_door
     # does; the smoke pytest legs skip by design when it has none.
     from fno.rust_binary import find_dev_binary
 
@@ -2249,7 +2250,7 @@ def test_racing_in_place_crowns_leave_exactly_one_live_holder(
 def test_in_place_crown_refuses_a_name_rebound_inside_the_lock_window(
     tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
-    """x-eb49: the target resolved before the lock is matched by name AND
+    """The target resolved before the lock is matched by name AND
     session under the lock. A row re-registered under the same name with a
     new session inside the window is not the session that gets crowned."""
     import fno.agents.registry as registry_mod
@@ -2289,7 +2290,7 @@ def test_in_place_crown_refuses_when_the_identity_check_is_unavailable(
     tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     """No crown-identity answer, no crown: the racy name-only match is never
-    the fallback (x-eb49)."""
+    the fallback (the lock-time identity match runs through Rust)."""
     from fno.agents import spawn_overlay_client
     from fno.agents.crown import CrownPromotionError, promote_existing_session
     from fno.agents.registry import load_registry

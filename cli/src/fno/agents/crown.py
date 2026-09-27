@@ -628,7 +628,7 @@ class CrownPromotionError(RuntimeError):
 
 
 def _locked_identity(rows, row) -> Any:
-    """Find the row resolved BEFORE the lock by name AND session (x-eb49); no answer refuses."""
+    """Find the row resolved BEFORE the lock by name AND session; no answer refuses."""
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
     ids = ("harness_session_id", "cc_session_id", "short_id")
     session = next((getattr(row, f) for f in ids if getattr(row, f)), None)

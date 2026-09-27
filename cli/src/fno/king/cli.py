@@ -426,8 +426,8 @@ def done_cmd(
                        and r.status not in _TERMINAL_ROW_STATUSES for r in rows):
                     raise ValueError("a live holder crowned mid-expiry")
                 return rows
-            # The caller's row, matched by name AND session (x-eb49); a name
-            # rebound to a successor inside the window refuses below.
+            # The caller's row, matched by name AND session under the lock; a
+            # name rebound to a successor inside the window refuses below.
             holder_row = None if attended_named else _locked_identity(rows, caller)
             for index, row in enumerate(rows):
                 if attended_named:

@@ -308,7 +308,7 @@ def test_an_attended_shell_reclaims_by_handle(court, monkeypatch) -> None:
 def test_a_reclaim_refuses_a_holder_name_rebound_inside_the_lock_window(
     court, monkeypatch
 ) -> None:
-    """x-eb49: the holder resolved before the lock is matched by name AND
+    """The holder resolved before the lock is matched by name AND
     session under the lock. A name rebound to a row crowned over the same
     scope passes the old scope-and-level check and would return the crown
     to the grantor from a session that never held it."""

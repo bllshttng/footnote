@@ -39,7 +39,7 @@ def _clear_parent_markers(monkeypatch):
 def court(tmp_path, monkeypatch, native_backlog_door):
     """An fno home with a fake claude, and the CALLER identified as a live
     king. Pins the lock-time identity match to this checkout's dev build
-    (the abdication vacate runs through Rust's crown-identity now, x-eb49)."""
+    (the abdication vacate runs through Rust's crown-identity now)."""
     from tests.agents._fake_claude import install_fake_claude
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -185,7 +185,7 @@ def test_done_refuses_when_the_crown_moved_before_the_write(court, monkeypatch) 
 
 
 def test_done_refuses_a_row_rebound_inside_the_lock_window(court, monkeypatch) -> None:
-    """x-eb49: the vacate matches the caller's row by name AND session under
+    """The vacate matches the caller's row by name AND session under
     the lock. A row re-registered under the same name with a new session (a
     successor crowned over the same scope) keeps its crown; the old name-only
     match vacated the wrong session's crown."""
