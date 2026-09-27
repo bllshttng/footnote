@@ -137,7 +137,7 @@ def test_probe_without_lanes_fails_closed_for_binding_and_width(monkeypatch):
 
     _wire(monkeypatch, limits={"zai": 7}, live={"zai": 3}, unreadable_lanes=True)
     budget = _spawn_budget()
-    assert _binding_provider() is None
+    assert _binding_provider(None) is None
     assert (budget.fleet, budget.vendor_remaining, budget.binding) == (0, {}, None)
 
 
@@ -171,10 +171,49 @@ def test_a_harness_pin_reads_the_vendor_keyed_table(monkeypatch):
 def test_an_unpinned_read_names_the_binding_provider(monkeypatch):
     _wire(monkeypatch, max_live=30, slots=0, limits={"openai": 7, "zai": 9},
           live={"openai": 7, "zai": 1})
-    from fno.backlog.advance import _binding_provider
+    from fno.backlog.advance import _spawn_budget
 
-    assert _binding_provider() == "openai"  # 0 remaining beats zai's 8
+    budget = _spawn_budget()
+    assert (budget.binding, budget.binding_remaining) == ("openai", 0)
     assert _spawn_headroom() == 0
+
+
+def test_spawn_budget_reuses_one_probe_snapshot_for_binding(monkeypatch):
+    from fno.agents import spawn_gate
+    from fno.backlog.advance import _spawn_budget
+
+    _wire(monkeypatch, max_live=30, slots=0, limits={"openai": 7, "zai": 9})
+    answers = [
+        {
+            "verdict": "accepted",
+            "slots": 0,
+            "lanes": {
+                "openai": {"cap": 7, "live": 7},
+                "zai": {"cap": 9, "live": 1},
+            },
+            "rows": [],
+        },
+        {
+            "verdict": "accepted",
+            "slots": 0,
+            "lanes": {
+                "openai": {"cap": 7, "live": 4},
+                "zai": {"cap": 9, "live": 9},
+            },
+            "rows": [],
+        },
+    ]
+    calls = 0
+
+    def probe(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return answers[min(calls - 1, len(answers) - 1)]
+
+    monkeypatch.setattr(spawn_gate, "probe_capacity", probe)
+    budget = _spawn_budget()
+    assert (budget.binding, budget.binding_remaining) == ("openai", 0)
+    assert calls == 1
 
 
 # ---------------------------------------------------------------------------

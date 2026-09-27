@@ -4141,11 +4141,8 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     return store_ready(parent=epic_id, all=True, repo_root=repo_root())["rows"]
 
 
-def _binding_provider() -> Optional[str]:
+def _binding_provider(probe_lanes: Optional[dict]) -> Optional[str]:
     """Pick the probe lane with least headroom for children whose lane is unknown."""
-    from fno.agents import spawn_gate
-
-    probe_lanes = spawn_gate.probe_capacity(only=["lanes"]).get("lanes")
     if not isinstance(probe_lanes, dict):
         return None  # an unreadable probe names no binding lane
     binding: Optional[str] = None
@@ -4254,7 +4251,7 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
         binding = pin_vendor
         binding_remaining = vendor_remaining.get(pin_vendor)
     else:
-        binding = _binding_provider()
+        binding = _binding_provider(probe_lanes)
         binding_remaining = vendor_remaining.get(binding) if binding else None
     return _LaneBudget(
         fleet=fleet,
