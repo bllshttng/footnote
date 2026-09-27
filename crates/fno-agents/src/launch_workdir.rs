@@ -247,7 +247,7 @@ mod tests {
             .unwrap();
         let args = dir.path().join("ensure-args");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho /wt/x-276b\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho /wt/branch-target\n",
             args.display()
         );
         let bin = crate::write_exec_stub(dir.path(), "fno-py", &script);
@@ -259,7 +259,7 @@ mod tests {
             "branch": "feature/x",
         });
         let (answer, _receipt) = decide(&payload);
-        assert_eq!(answer, json!({ "workdir": "/wt/x-276b" }));
+        assert_eq!(answer, json!({ "workdir": "/wt/branch-target" }));
         let recorded = std::fs::read_to_string(&args).unwrap();
         let recorded: Vec<String> = recorded.lines().map(str::to_string).collect();
         let branch_pos = recorded

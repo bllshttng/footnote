@@ -1844,7 +1844,7 @@ pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
         row.more = more;
         row.catalog_error = catalog_error.clone();
     }
-    let facts = probe_project_facts(projects, timeout, deadline).await;
+    let facts = probe_project_facts(projects, bin.as_str(), timeout, deadline).await;
     CatalogOutcome::Ok(rows, models_err, facts)
 }
 
@@ -1854,10 +1854,10 @@ pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
 /// the policy verb's failure lands in `policy` as the named reason.
 async fn probe_project_facts(
     projects: Vec<String>,
+    fno: &str,
     timeout: std::time::Duration,
     deadline: tokio::time::Instant,
 ) -> Vec<ProjectFacts> {
-    let fno = crate::server::fno_bin().to_string_lossy().into_owned();
     let mut facts = Vec::with_capacity(projects.len());
     for cwd in projects {
         let git_current = ["git", "-C", cwd.as_str(), "branch", "--show-current"];
@@ -1871,7 +1871,7 @@ async fn probe_project_facts(
             "refs/heads",
         ];
         let policy_argv = [
-            fno.as_str(),
+            fno,
             "agents",
             "workspace",
             "worktree",
