@@ -2365,7 +2365,7 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// exit code. `env_session` is `FNO_SESSION` (set in every pane).
 pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
     let args = op.tail();
-    let parsed = match parse_pane_args(&op, &args) {
+    let mut parsed = match parse_pane_args(&op, &args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fno mux pane: {e}");
@@ -2395,6 +2395,25 @@ pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
         }
     }
     let session = resolve_session(parsed.session.as_deref(), env_session);
+    // A split that named no anchor defaults to the caller's own pane; a
+    // pane-less caller is refused with --from named. Dispatch-time, not
+    // parse-time: the parse stays pure (no env read), and the fit refusal
+    // keeps its earlier say.
+    if let PaneCmd::Run { placement, .. } = &mut parsed.cmd {
+        match pane_args::anchor_or_refuse(
+            placement.split.is_some(),
+            placement.at,
+            placement.from.as_deref(),
+            pane_args::pane_from_env(),
+        ) {
+            Ok(Some(anchor)) => placement.at = Some(anchor),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("fno mux pane: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    }
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,
         Err(e) => {

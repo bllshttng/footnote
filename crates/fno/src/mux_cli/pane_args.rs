@@ -309,19 +309,6 @@ pub fn parse_pane_args(
         if let Some((_, msg)) = crate::server::placement_fit::refuse_fit_with_geometry(&placement) {
             return Err(msg);
         }
-        // A split that named no anchor defaults to the caller's own pane; a
-        // pane-less caller is refused with --from named. After the fit
-        // refusal: it is a flag-combination complaint and wins precedence.
-        match anchor_or_refuse(
-            placement.split.is_some(),
-            placement.at,
-            placement.from.as_deref(),
-            pane_from_env(),
-        ) {
-            Ok(Some(pane)) => placement.at = Some(pane),
-            Ok(None) => {}
-            Err(e) => return Err(e),
-        }
         return Ok(ParsedPane {
             session,
             json,
