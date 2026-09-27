@@ -2050,9 +2050,9 @@ fn text_cap(text: &str, cap: usize) -> String {
 }
 
 // The retract door: the `retract` mode carrying the `fno inbox law retract`
-// argv, and (since x-58a2) the `fno backlog decide-retract` argv through the
-// same door. Addresses a decision by its subject, the handle operators and
-// nodes actually hold; a decision id works too. The write is the port of
+// argv, and the `fno backlog decide-retract` argv through the same door.
+// Addresses a decision by its subject, the handle operators and nodes
+// actually hold; a decision id works too. The write is the port of
 // `retract_decision` (cli/src/fno/decide/__init__.py, deleted): the
 // retraction envelope lands in the project journal, the recall index, and
 // the graph store, and the original decision stays in the append-only
@@ -4434,6 +4434,20 @@ mod scope_tests {
     }
 
     #[test]
+    fn a_bad_stated_authority_refuses_before_any_read() {
+        // The value check sits ahead of caller resolution, so the refusal is
+        // env-free: exit 2 naming the accepted lanes, nothing read.
+        let code = run_backlog_retract(&[
+            "coord-topic".to_string(),
+            "-R".to_string(),
+            "why".to_string(),
+            "--authority".to_string(),
+            "banana".to_string(),
+        ]);
+        assert_eq!(code, 2);
+    }
+
+    #[test]
     fn near_miss_lines_name_lookalike_law_subjects() {
         let rows = vec![
             serde_json::json!({
@@ -4457,7 +4471,7 @@ mod scope_tests {
     fn the_backlog_retract_entry_resolves_a_subject_across_lanes() {
         let rows = vec![
             serde_json::json!({
-                "decision_id": "d-aaaa0001", "subject": "x-7d94",
+                "decision_id": "d-aaaa0001", "subject": "coord-topic",
                 "decision": "coordinate this node", "authority_source": "agent",
                 "ts": "2026-08-20T00:00:00Z"
             }),
@@ -4465,7 +4479,7 @@ mod scope_tests {
             // non-law subject query with a silent pick; the multi-live
             // refusal names both ids.
             serde_json::json!({
-                "decision_id": "d-bbbb0002", "subject": "x-7d94-extra",
+                "decision_id": "d-bbbb0002", "subject": "coord-topic-extra",
                 "decision": "One pane is never a portal", "authority_source": "operator",
                 "ts": "2026-09-01T00:00:00Z"
             }),
@@ -4473,7 +4487,7 @@ mod scope_tests {
         let retired = decision_index::retirement_map(&rows);
         // An agent-lane caller resolves a subject that names one coord row.
         let target = retract_target(
-            "x-7d94",
+            "coord-topic",
             &rows,
             &retired,
             false,
@@ -4486,19 +4500,19 @@ mod scope_tests {
         // Two live rows under one subject refuse naming both, across lanes.
         let two = vec![
             serde_json::json!({
-                "decision_id": "d-aaaa0001", "subject": "x-7d94",
+                "decision_id": "d-aaaa0001", "subject": "coord-topic",
                 "decision": "first", "authority_source": "agent",
                 "ts": "2026-08-20T00:00:00Z"
             }),
             serde_json::json!({
-                "decision_id": "d-bbbb0002", "subject": "x-7d94",
+                "decision_id": "d-bbbb0002", "subject": "coord-topic",
                 "decision": "second", "authority_source": "agent",
                 "ts": "2026-08-21T00:00:00Z"
             }),
         ];
         let retired_two = decision_index::retirement_map(&two);
         let err = retract_target(
-            "x-7d94",
+            "coord-topic",
             &two,
             &retired_two,
             false,
@@ -4555,7 +4569,7 @@ mod scope_tests {
     #[test]
     fn a_stated_authority_that_disagrees_with_the_session_refuses() {
         let coord = vec![serde_json::json!({
-            "decision_id": "d-aaaa0001", "subject": "x-7d94",
+            "decision_id": "d-aaaa0001", "subject": "coord-topic",
             "decision": "coordinate this node", "authority_source": "agent",
             "ts": "2026-08-20T00:00:00Z"
         })];
