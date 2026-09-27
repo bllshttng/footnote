@@ -1659,8 +1659,73 @@ fn the_cwd_line_shows_while_project_is_focused_or_hovered() {
     });
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Project);
     let line = paint_row0(&v);
+    let own = std::env::current_dir().unwrap().display().to_string();
+    // The first path characters prove the cwd painted beside the label on
+    // any host; the tail truncates when the sheet cannot admit the path.
+    let head = own.get(..10).unwrap_or(&own).to_string();
     assert!(
-        line.contains("Working directory") && line.contains("/Users/"),
-        "the cwd line paints the path beside the label: {line:?}"
+        line.contains("Working directory") && line.contains(head.as_str()),
+        "the cwd-line assert derives from the real cwd, never a host shape"
     );
+}
+
+#[test]
+fn a_narrow_sheet_clamps_chips_instead_of_overflowing() {
+    // 40 cols: inner 30, the right group alone is wider. The sheet lays out
+    // without overflowing a chip past the row, and paint stays in bounds.
+    let mut v = plain_view();
+    v.term = (24, 40);
+    open(&mut v);
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let sl = l.sheet_layout(&v).unwrap();
+    let inner_w = sl.framed_w.saturating_sub(2) as usize;
+    for (_, r) in &sl.chips {
+        assert!(r.width >= 1, "every chip keeps a paintable rect");
+        assert!(
+            r.x as usize + r.width as usize <= inner_w,
+            "chip rect {r:?} fits the {inner_w}-col row"
+        );
+    }
+    let (rows_n, cols) = (v.term.0 as usize, v.term.1 as usize);
+    let mut cells = vec![crate::proto::Cell::default(); rows_n * cols];
+    l.paint_sheet(&v, &mut cells, rows_n, cols, &sl);
+}
+
+#[test]
+fn a_picker_open_across_the_catalog_landing_refreshes_on_input() {
+    // The picker opens while the catalog read pends; when the read lands,
+    // the next key refreshes the STORED rows before it is handled, so a
+    // commit resolves through the rows the operator sees.
+    let mut v = view_with_launcher();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\r", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    assert!(
+        picker.all_rows.iter().any(
+            |r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "reading harnesses...")
+        ),
+        "opened on the pending rows"
+    );
+    // The catalog lands; one key refreshes the picker in place.
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"x", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    assert!(
+        picker
+            .all_rows
+            .iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "claude")),
+        "the stored rows refreshed: {:?}",
+        picker.all_rows
+    );
+    assert_eq!(picker.filter, "x", "the query survives the refresh");
 }

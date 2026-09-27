@@ -1105,6 +1105,9 @@ pub(crate) async fn launcher_keys(
     let mut esc = std::mem::take(&mut view.launcher_esc);
     let keys = esc.fold(bytes);
     view.launcher_esc = esc;
+    // A stale chip picker commits through the rows the operator SEES, so
+    // the snapshot refreshes before the first key is handled.
+    refresh_stale_picker(view);
     for key in keys {
         if view.launcher.is_none() {
             break;
@@ -1898,6 +1901,41 @@ fn title_for(field: Focus) -> String {
         Focus::Where => "where".to_string(),
         Focus::Effort => "effort".to_string(),
         _ => String::new(),
+    }
+}
+
+/// Persist a chip picker whose axis's row source moved under it (a catalog
+/// read landing mid-picker): the stored snapshot refreshes in place, filter
+/// intact, so input commits through the rows the operator actually sees.
+/// The draw path paints the same refresh immutably; this one runs before
+/// the first key or click lands.
+fn refresh_stale_picker(view: &mut View) {
+    let fresh = view.launcher.as_ref().and_then(|l| {
+        let pk = l.picker.as_ref()?;
+        if pk.field == Focus::Message {
+            return None;
+        }
+        let (rows, actions) = picker_rows(l, pk.field, &view.launcher_catalog, &view.backlog);
+        (rows != pk.all_rows).then_some((pk.field, rows, actions))
+    });
+    let Some((field, rows, actions)) = fresh else {
+        return;
+    };
+    if let Some(l) = view.launcher.as_mut() {
+        let Some(pk) = l.picker.as_mut() else {
+            return;
+        };
+        if pk.field != field {
+            return;
+        }
+        let filter = pk.filter.clone();
+        pk.all_rows = rows;
+        pk.all_actions = actions;
+        let (popup, rebuilt) =
+            filtered_popup(pk.field, &pk.all_rows, &pk.all_actions, &filter, pk.anchor);
+        pk.popup = popup;
+        pk.popup.sel = 0;
+        pk.actions = rebuilt;
     }
 }
 
@@ -2713,45 +2751,27 @@ impl Launcher {
             ((rows.saturating_sub(framed_h)) / 2) as u16,
             ((cols.saturating_sub(framed_w)) / 2) as u16,
         );
-        // Top chips at body row 1 (row 0 is the cwd line).
+        // Top chips at body row 1 (row 0 is the cwd line). A pathological
+        // narrow sheet clamps each chip to the row: the value truncates
+        // (paint_chip ellipsizes) rather than overflowing the buffer.
         let mut chips: Vec<(Focus, RtRect)> = Vec::new();
-        let mut x = 0usize;
-        for f in &top {
-            let w = chip_w(*f);
-            chips.push((*f, RtRect::new(x as u16, 1, w as u16, 1)));
-            x += w + 2;
-        }
+        let mut push_row = |row: usize, start: usize, group: &[Focus]| {
+            let mut x = start;
+            for f in group {
+                let w = chip_w(*f).min(inner_w.saturating_sub(x)).max(1);
+                chips.push((*f, RtRect::new(x as u16, row as u16, w as u16, 1)));
+                x = (x + w + 2).min(inner_w);
+            }
+        };
+        push_row(1, 0, &top);
         // Bottom chips.
         let bottom_y = 4 + editor_rows;
         if bottom_rows == 1 {
-            let mut x = 0usize;
-            for f in &left {
-                let w = chip_w(*f);
-                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
-                x += w + 2;
-            }
-            let mut x = inner_w - right_w;
-            for f in &right {
-                let w = chip_w(*f);
-                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
-                x += w + 2;
-            }
+            push_row(bottom_y, 0, &left);
+            push_row(bottom_y, inner_w.saturating_sub(right_w), &right);
         } else {
-            let mut x = 0usize;
-            for f in &left {
-                let w = chip_w(*f);
-                chips.push((*f, RtRect::new(x as u16, bottom_y as u16, w as u16, 1)));
-                x += w + 2;
-            }
-            let mut x = inner_w - right_w;
-            for f in &right {
-                let w = chip_w(*f);
-                chips.push((
-                    *f,
-                    RtRect::new(x as u16, (bottom_y + 1) as u16, w as u16, 1),
-                ));
-                x += w + 2;
-            }
+            push_row(bottom_y, 0, &left);
+            push_row(bottom_y + 1, inner_w.saturating_sub(right_w), &right);
         }
         // The editor window follows the cursor (1..=6 rows).
         let wrap_w = inner_w.saturating_sub(PROMPT_GUTTER);
@@ -2967,8 +2987,15 @@ impl Launcher {
             return "esc cancel".to_string();
         }
         // One grammar for the whole chip row: Tab moves, Enter opens a
-        // picker (or launches from the input), ^j is a newline.
-        "\u{21b5} open/launch \u{b7} tab next \u{b7} ^j newline \u{b7} esc close".to_string()
+        // picker (or launches from the input). ^j is a newline in the input
+        // and the launch-from-anywhere key from a chip, so the hint names
+        // the behavior the focused control actually has.
+        let ctrl_j = if self.focus == Focus::Message {
+            "^j newline"
+        } else {
+            "^j launch"
+        };
+        format!("\u{21b5} open/launch \u{b7} tab next \u{b7} {ctrl_j} \u{b7} esc close")
     }
 }
 
@@ -3097,7 +3124,9 @@ pub(crate) async fn launcher_mouse(
     use crate::proto::{MouseButton, MouseKind};
     // The open picker: a report OVER it is consumed whatever its kind (a
     // wheel there used to reach the pane under the popup); a press outside
-    // dismisses the picker; any other report outside falls through.
+    // dismisses the picker; any other report outside falls through. A stale
+    // snapshot refreshes first, so a click commits through the rows painted.
+    refresh_stale_picker(view);
     if view.launcher.as_ref().is_some_and(|l| l.picker.is_some()) {
         let over = view
             .launcher
