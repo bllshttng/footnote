@@ -2419,7 +2419,9 @@ mod tests {
         std::fs::write(&live, format!("{checkin}\n")).unwrap();
         crate::event_store::sync(&live).unwrap();
         // Rotate the live journal away: the row survives in the SQL store.
-        std::fs::rename(&live, live.with_file_name("events.jsonl.1")).unwrap();
+        // The simulated rotation IS the proof the rule asks for, hence the
+        // allow marker: events-discipline:allow
+        std::fs::rename(&live, live.with_file_name("events.jsonl.1")).unwrap(); // events-discipline:allow
         let payload = scan(&[live], "x-bbbb").unwrap();
         assert_eq!(payload["matched"], 1, "{payload}");
         assert_eq!(payload["complete_since"].as_str().is_some(), true);
