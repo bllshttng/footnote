@@ -358,8 +358,7 @@ def bounce_reason(recipient) -> Optional[str]:
     """
     from fno import rust_binary
 
-    # A row cannot ride the token door (str(row) matches no gate key), and
-    # with no binary the door cannot run at all: read in-process.
+    # A row cannot ride the token door (str(row) matches no gate key).
     row_like = hasattr(recipient, "harness_session_id") or hasattr(recipient, "name")
     binary = rust_binary.resolve_installed_binary()
     if row_like or binary is None:

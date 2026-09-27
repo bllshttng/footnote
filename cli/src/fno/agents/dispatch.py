@@ -6136,7 +6136,7 @@ def _mux_pane_send(
             return False
     try:
         if confirm and not raw and not review:
-            # Rust typed lane when a binary resolves; no binary: the Python
+            # Rust typed lane when a binary resolves; without one the Python
             # lane below carries the same confirm contract.
             from fno import rust_binary as _rb
             binary = _rb.resolve_installed_binary()
