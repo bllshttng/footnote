@@ -890,19 +890,12 @@ def _lane_key(row: dict) -> tuple[str, str, str]:
     )
 
 
-def _lane_cap(max_lanes: Mapping[str, object], provider: str) -> int | None:
-    """This provider's lane cap, or None when it has no cap here."""
-    from fno.agents.spawn_gate import provider_lanes_cap
-
-    return provider_lanes_cap(max_lanes.get(provider))
-
-
 def build_lanes(
     rows: list[dict],
     graph_nodes: list[dict],
     registry_rows: list[dict],
     rate_limit_events: list[dict],
-    max_lanes: Mapping[str, object],
+    caps: Mapping[str, int | None],
     *,
     since_days: int,
     now: datetime,
@@ -971,17 +964,13 @@ def build_lanes(
     live = []
     for key, count in sorted(occupancy.items()):
         provider, model, effort = key
-        cap = _lane_cap(max_lanes, provider)
+        cap = caps.get(provider)
         live.append(
             {
                 "provider": provider,
                 "model": model,
                 "effort": effort,
                 "occupancy": count,
-                # `.lanes` through the gate's own reader: the value is a
-                # ProviderBudget record, and a bare int reaches here from a
-                # caller that hand-builds the table. Rendering the record
-                # itself put an unformattable object into a `{:>3}` cell.
                 "cap": cap,
                 "headroom": None if cap is None else cap - count,
             }

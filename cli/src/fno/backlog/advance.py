@@ -4198,11 +4198,9 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
         # Resolver silent: only a raw vendor pin scopes; else the configured caps bind.
         pin_vendor = vendor or (provider if provider in limits else None)
         if pin_vendor is None:
-            scoped: dict = limits
-        elif pin_vendor in limits:
-            scoped = {pin_vendor: limits[pin_vendor]}
+            scoped = limits
         else:
-            scoped = {}
+            scoped = {pin_vendor: limits[pin_vendor]} if pin_vendor in limits else {}
     else:
         scoped = limits
     # One probe answer feeds the slot headroom, the per-vendor headroom and
