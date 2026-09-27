@@ -931,8 +931,8 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
     Value::Object(share)
 }
 
-/// The lanes block: every capped provider (the configured table, else the
-/// built-in budgets) AND every provider a live row names, capped or not.
+/// The lanes block: every provider the coerced table declares (including
+/// uncapped entries, or the built-in table when absent) and every live provider.
 /// `Err` = one lane count faulted, which is the probe's unknown verdict,
 /// never a zero.
 fn lanes_answer(
