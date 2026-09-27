@@ -70,7 +70,7 @@ pub(crate) fn run_logs_with<P: GhProbe>(
     full: bool,
     root: &Path,
 ) -> (i32, String, String) {
-    let pr_json = match super::read_pr(probe, cwd, slug, pr) {
+    let pr_json = match super::read_pr(probe, cwd, slug, pr, None) {
         Ok(v) => v,
         Err(reason) => {
             return (

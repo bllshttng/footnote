@@ -215,13 +215,13 @@ pub(crate) fn cached_status(
     let slug = git_slug(cwd);
     let (Some(slug), true) = (slug, pr > 0) else {
         let probe = fresh_probe();
-        let (code, out, lines) = super::status_payload(&probe, cwd, pr, None, "");
+        let (code, out, lines) = super::status_payload(&probe, cwd, pr, None, "", None, None);
         return (code, out, lines, probe.calls.load(Ordering::SeqCst));
     };
     let slug_key = slug.replace('/', "--");
     let Some(dir) = cache_dir(cwd) else {
         let probe = fresh_probe();
-        let (code, out, lines) = super::status_payload(&probe, cwd, pr, None, &slug);
+        let (code, out, lines) = super::status_payload(&probe, cwd, pr, None, &slug, None, None);
         return (code, out, lines, probe.calls.load(Ordering::SeqCst));
     };
     let _ = std::fs::create_dir_all(&dir);
@@ -244,7 +244,7 @@ pub(crate) fn cached_status(
     // newest row degraded, or the loud live read when there is no row.
     let probe = fresh_probe();
     let head = read_head(&probe, cwd, &slug, pr);
-    let (head_sha, pr_state) = match &head {
+    let (head_sha, pr_state, pulls) = match &head {
         Ok(info) => (
             info.get("head_sha")
                 .and_then(Value::as_str)
@@ -254,20 +254,38 @@ pub(crate) fn cached_status(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            info.get("pulls").cloned().unwrap_or(Value::Null),
         ),
         Err(_) => {
             if refresh {
-                return live_through(cwd, pr, None, &slug, &dir, "");
+                return live_through(cwd, pr, None, &slug, &dir, "", None, None);
             }
             if let Some(row) = newest_row(&dir, &slug_key, &pr.to_string()) {
                 if let Some(answer) = serve(&row, true) {
                     return into_answer(answer, probe.calls.load(Ordering::SeqCst));
                 }
             }
-            return live_through(cwd, pr, None, &slug, &dir, "");
+            return live_through(cwd, pr, None, &slug, &dir, "", None, None);
         }
     };
-    let key = mint_key(cwd, pr, &head_sha, &pr_state, &slug_key);
+    // ONE hold probe per read: its verdict feeds both the cache-key material
+    // and the payload, instead of `hold-check` spawning twice.
+    let hold_state = if pr_state == "OPEN" {
+        Some(super::seams::hold_verdict(cwd, pr))
+    } else {
+        None
+    };
+    let key = mint_key(
+        cwd,
+        pr,
+        &head_sha,
+        &pr_state,
+        &slug_key,
+        &hold_state
+            .as_ref()
+            .map(hold_word)
+            .unwrap_or_else(|| "unasked".to_string()),
+    );
     if !refresh {
         if let Some(row) = read_row(&dir, &key) {
             if now - num(&row, "ts") < ttl() as f64 {
@@ -293,7 +311,16 @@ pub(crate) fn cached_status(
             }
         }
     }
-    live_through(cwd, pr, prior.as_ref(), &slug, &dir, &key)
+    live_through(
+        cwd,
+        pr,
+        prior.as_ref(),
+        &slug,
+        &dir,
+        &key,
+        Some(&pulls),
+        hold_state,
+    )
 }
 
 fn fresh_probe() -> CountingProbe<crate::pr_status_facts::RealGhProbe> {
@@ -353,6 +380,8 @@ fn newest_row(dir: &Path, slug_key: &str, pr: &str) -> Option<Value> {
 }
 
 /// The light read that mints the key: the PR's head sha and state, one call.
+/// The full pulls payload rides along so the live read never re-fetches the
+/// same PR seconds later (one `pulls/{n}` read per status, not two).
 fn read_head<P: GhProbe>(probe: &P, cwd: &Path, slug: &str, pr: u64) -> Result<Value, RestReason> {
     let args = vec!["api".to_string(), format!("repos/{slug}/pulls/{pr}")];
     let (ok, stdout, stderr) = probe.run_gh(cwd, &args).map_err(|e| RestReason {
@@ -390,16 +419,36 @@ fn read_head<P: GhProbe>(probe: &P, cwd: &Path, slug: &str, pr: u64) -> Result<V
         }
         _ => "UNKNOWN".to_string(),
     };
-    Ok(json!({"head_sha": head_sha, "state": state}))
+    Ok(json!({"head_sha": head_sha, "state": state, "pulls": pulls}))
 }
 
-fn mint_key(cwd: &Path, pr: u64, head_sha: &str, pr_state: &str, slug_key: &str) -> String {
+/// The cache-key material for a hold verdict: changes whenever the hold
+/// changes, so a row written before a hold flip never serves after it.
+fn hold_word(verdict: &super::seams::HoldVerdict) -> String {
+    match verdict {
+        super::seams::HoldVerdict::Clear => "clear".to_string(),
+        super::seams::HoldVerdict::Held(reason) => format!("held:{reason}"),
+        super::seams::HoldVerdict::Unreadable => "unreadable".to_string(),
+    }
+}
+
+fn mint_key(
+    cwd: &Path,
+    pr: u64,
+    head_sha: &str,
+    pr_state: &str,
+    slug_key: &str,
+    hold_word: &str,
+) -> String {
     let payload = json!({
         "cwd": cwd.display().to_string(),
         "pr": pr,
         "head_sha": head_sha,
         "pr_state": pr_state,
         "slug": slug_key,
+        // The hold probe this read already ran; the key material keeps the
+        // hold in the key so a row written before a flip never serves after.
+        "hold_probe_word": hold_word,
     });
     let out = crate::pr_status_facts::status_cache_key(&payload);
     if let Some(key) = out
@@ -416,7 +465,10 @@ fn mint_key(cwd: &Path, pr: u64, head_sha: &str, pr_state: &str, slug_key: &str)
 }
 
 /// The live read the row is written from, plus the write and the prune of
-/// superseded heads' rows. A refused read (exit 4) writes nothing.
+/// superseded heads' rows. A refused read (exit 4) writes nothing. `pulls` is
+/// the payload the key-minting head read already fetched; the live read
+/// reuses it instead of paying a second `pulls/{n}` call seconds later.
+/// `hold_state` is the probe result the key material already used.
 fn live_through(
     cwd: &Path,
     pr: u64,
@@ -424,9 +476,11 @@ fn live_through(
     slug: &str,
     dir: &Path,
     key: &str,
+    pulls: Option<&Value>,
+    hold_state: Option<super::seams::HoldVerdict>,
 ) -> (i32, Value, Vec<String>, usize) {
     let probe = fresh_probe();
-    let (code, out, lines) = super::status_payload(&probe, cwd, pr, prior, slug);
+    let (code, out, lines) = super::status_payload(&probe, cwd, pr, prior, slug, pulls, hold_state);
     let calls = probe.calls.load(Ordering::SeqCst);
     if code == 4 && out.get("rate_limit_class").and_then(Value::as_str) == Some("secondary") {
         let _ = crate::gh_budget::record_refusal(&crate::gh_budget::ledger_path(), now_ms());
