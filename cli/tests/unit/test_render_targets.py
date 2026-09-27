@@ -405,6 +405,35 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     assert row["priority"] == "p1"
 
 
+def test_leak_refusal_fires_the_render_alert(_isolate, tmp_path, monkeypatch):
+    # The push script's bare exit 1 was invisible under launchd and
+    # the live page sat stale. A refused render alerts through the same
+    # `fno inbox notify` lane the push script uses.
+    target = _isolate["target"]
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"',
+        tmp_path,
+        monkeypatch,
+    )
+    fired: list[tuple[str, str]] = []
+
+    def fake_notify(title: str, message: str, pointer: str = "") -> tuple[int, str | None]:
+        fired.append((title, message))
+        return 0, None
+
+    monkeypatch.setattr("fno.notify._impl.send_notification", fake_notify)
+
+    graph = _isolate["graph"]
+    _write_graph(graph, [_entry("ab-leakalt0", title="x-1234 leaks here")])
+    commit_rows_via_store(graph, lambda nodes: nodes)
+    render_canonical_views()
+
+    assert not target.exists(), "the target must still be refused"
+    assert fired, "a refused render must alert"
+    assert fired[0][0] == "roadmap render refused"
+    assert "node-id" in fired[0][1] and "ab-leakalt0" in fired[0][1]
+
+
 def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):
     target = tmp_path / "out" / "empty.html"
     target.parent.mkdir(parents=True, exist_ok=True)
