@@ -6505,26 +6505,6 @@ impl Core {
             .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
     }
 
-    /// The squad of the parent a paneless row's spawn edge names, one level
-    /// deep: the row's `spawned_by_session` joins the registry row whose
-    /// harness session id it names (trimmed, case-insensitive - the same
-    /// tolerance `spawned_by_name` and `spawn_edge::live_child_of` apply), and
-    /// that parent's own attribution (membership, then cwd) answers. A spawn
-    /// joins the spawner's workspace, so the edge outranks the row's cwd. An
-    /// edge naming an absent parent keeps `None` - the `~ elsewhere` reader
-    /// must still see that absence.
-    fn parent_edge_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
-        let edge = agent.spawned_by_session.as_deref()?.trim();
-        if edge.is_empty() {
-            return None;
-        }
-        let parent = self.agents.iter().find(|p| {
-            agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
-        })?;
-        self.member_squad_for_agent(parent)
-            .or_else(|| self.session.find_by_cwd(&parent.cwd))
-    }
-
     fn member_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
         let exact: Vec<u64> = match (agent.harness.as_deref(), agent_harness_session_id(agent)) {
             (Some(harness), Some(session_id)) => self

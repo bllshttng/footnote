@@ -10,6 +10,28 @@ use crate::proto::{AgentRow, AgentRowReceipt};
 use super::*;
 
 impl Core {
+    /// The squad of the parent a paneless row's spawn edge names, one level
+    /// deep: the row's `spawned_by_session` joins the registry row whose
+    /// harness session id it names (trimmed, case-insensitive - the same
+    /// tolerance `spawned_by_name` and `spawn_edge::live_child_of` apply), and
+    /// that parent's own attribution (membership, then cwd) answers. A spawn
+    /// joins the spawner's workspace, so the edge outranks the row's cwd. An
+    /// edge naming an absent parent keeps `None` - the `~ elsewhere` reader
+    /// must still see that absence.
+    fn parent_edge_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
+        let edge = agent.spawned_by_session.as_deref()?.trim();
+        if edge.is_empty() {
+            return None;
+        }
+        let parent = self.agents.iter().find(|p| {
+            agent_harness_session_id(p).is_some_and(|sid| sid.trim().eq_ignore_ascii_case(edge))
+        })?;
+        self.member_squad_for_agent(parent)
+            .or_else(|| self.session.find_by_cwd(&parent.cwd))
+    }
+}
+
+impl Core {
     pub(crate) fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
