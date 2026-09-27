@@ -1686,7 +1686,7 @@ pub(crate) mod tests {
             let receipt = gate(SID, None, now).receipt.unwrap();
             assert!(receipt.starts_with("held until about "), "{receipt}");
             assert!(
-                receipt.ends_with("worker is in do-not-disturb; delivers itself then"),
+                receipt.ends_with("worker is in do-not-disturb (wall clock); delivers itself then"),
                 "{receipt}"
             );
             // Idle clock: "or later", because activity restarts it.
