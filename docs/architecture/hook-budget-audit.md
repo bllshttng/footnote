@@ -15,7 +15,7 @@ The command counts include every command entry in each harness event registratio
 | AGY | 2 command hooks | `crates/fno-agents/src/agy_hooks.rs` registers `Stop` and `PreInvocation` adapters. |
 | DeepSeek Harness | 0 in-repository hook registrations | none found |
 
-The Bash registration count drops by five commands per event. The dispatcher keeps all three Rust predicates in one `fno-agents` process and calls the same three Python guards in their existing order. This removes two `fno-agents` binary launches made by the former shell shims.
+The Bash registration count drops by five commands per event. The dispatcher keeps all three Rust predicates in one `fno-agents` process and calls the same three Python guards in their existing order. This removes two `fno-agents` binary launches made by the former shell shims. Other same-event guard groups remain separate. A generic shell dispatcher can start each existing script as a child, so it lowers registration counts without cutting process starts.
 
 | Harness | Event | Before | After | Notes |
 |---|---:|---:|---:|---|
