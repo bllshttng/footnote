@@ -277,7 +277,16 @@ def test_brief_levers_exist_on_the_real_cli(command, flags):
 
     root = typer.main.get_command(graph_cli)
     sub = root.get_command(click.Context(root), command)
-    assert sub is not None, f"`fno backlog {command}` does not exist"
+    if sub is None:
+        # Retired python leaves answer natively; bind the lever to the
+        # binary's own help surface instead.
+        from tests._native_door import run_native
+
+        code, out, err = run_native("backlog", command, "--help")
+        assert code == 0, f"`fno backlog {command}` does not exist natively"
+        missing = {f for f in flags if f not in out + err}
+        assert not missing, f"`fno backlog {command}` has no {sorted(missing)}"
+        return
 
     available: set[str] = set()
     for param in sub.params:

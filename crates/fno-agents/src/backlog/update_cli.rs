@@ -409,6 +409,18 @@ pub fn run(tail: &[String]) -> i32 {
         print!("{}", UPDATE_HELP);
         return 0;
     }
+    // The tracker-owned refusal the python leg carried at its callback:
+    // update owns graph state, so under any external tracker backend it
+    // refuses before any read or write.
+    let backend = crate::tracker::backend_name(None);
+    if backend != "graph" {
+        eprintln!(
+            "fno backlog update: this verb owns graph state; under the \
+             {backend} tracker backend it is refused. Track the item in the \
+             tracker by its id."
+        );
+        return 1;
+    }
     if !args.door.is_empty() {
         return run_door_relay(&args);
     }

@@ -3028,17 +3028,30 @@ def test_origin_ac2_edge_update_never_rewrites_birth(tmp_path, monkeypatch):
     )
     _patch_graph(monkeypatch, g)
 
-    from typer.testing import CliRunner
+    # The update leaf answers natively; drive the dev binary over the same
+    # store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
 
-    from fno.cli import app
+    from fno.rust_binary import find_dev_binary, resolve_binary
 
-    runner = CliRunner()
-    result = runner.invoke(
-        app,
-        ["backlog", "update", "ab-origin01", "--details", "a later ruling"],
-        catch_exceptions=False,
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    proc = _sp.run(
+        [str(binary), "backlog", "update", "ab-origin01", "--details", "a later ruling"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": _os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "FNO_STATE_DIR": str(tmp_path),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(tmp_path),
     )
-    assert result.exit_code == 0
+    assert proc.returncode == 0, proc.stderr
     from fno.graph.store import read_graph_strict
 
     node = next(e for e in read_graph_strict(g) if e["id"] == "ab-origin01")

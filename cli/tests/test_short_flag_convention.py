@@ -86,9 +86,9 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
         "--details": "-d", "--priority": "-p", "--cwd": "-c",
     },
     ("graph/cli.py", "cmd_intake"): {"--title": "-t", "--priority": "-p"},
-    ("graph/cli.py", "cmd_update"): {
-        "--priority": "-p", "--cwd": "-c", "--title": "-t",
-    },
+    # cmd_update's row moved with the update port: the native binary owns
+    # the surface now, and its short pins ride the committed UPDATE_HELP
+    # golden, the only scan that can see a Rust flag decl.
     ("graph/cli.py", "cmd_next"): {"--project": "-p"},
     ("graph/cli.py", "cmd_ready"): {"--project": "-p"},
     # cmd_find's row moved with the find port: the native binary owns
