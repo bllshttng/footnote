@@ -185,6 +185,7 @@ pub mod harness_matrix;
 pub mod harness_reader;
 pub mod harness_verbs;
 pub mod heal;
+pub mod heal_pid;
 pub mod honesty_sweep;
 pub mod hook;
 mod identity;

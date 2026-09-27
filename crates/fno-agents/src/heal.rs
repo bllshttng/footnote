@@ -1618,18 +1618,15 @@ fn events_dir(a: &Args) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// The pid file for THE drive loop, in its own subfolder: nothing writes at
-/// the top level of the state root. One process heals every root, so one
-/// pid file: the in-flight guard sees the loop whatever root asked, and
-/// `live_heal_pids`' `pr-heal.` / `.pid` match still reads the name.
+/// The pid file for THE drive loop; the pid-file family lives in `heal_pid`.
 fn heal_pid_file(a: &Args) -> std::path::PathBuf {
-    events_dir(a).join("heal").join("pr-heal.pid")
+    crate::heal_pid::pid_file(&events_dir(a))
 }
 
-// Test-only reader since the guard switched to live_heal_pids.
+// Test-only reader since the guard switched to live pids.
 #[cfg_attr(not(test), allow(dead_code))]
 fn read_pid_file(path: &std::path::Path) -> Option<u32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    crate::heal_pid::read_pid_file(path)
 }
 
 /// Spawn `argv` as the leader of a new session with stdio on /dev/null (the
@@ -1753,63 +1750,10 @@ fn age_phrase(ts: &str) -> String {
     }
 }
 
-/// True when the pid names a healer process. A stale pid file outlives its
-/// loop, and pid numbers are recycled: without an identity check a recycled
-/// pid holds the tick (every root) for as long as the unrelated owner lives.
-/// `ps -o command=` answers on macOS and Linux alike; an unreadable answer
-/// counts as NOT the healer (fail open to a spawn, never stuck in_flight).
-/// The current process is exempt: production never writes its own pid to a
-/// file, and the test harness does exactly that.
-fn pid_names_a_healer(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    let Ok((true, out, _)) = run(
-        "ps",
-        &["-p", &pid.to_string(), "-o", "command="],
-        &std::env::temp_dir(),
-        READ_TIMEOUT,
-    ) else {
-        return false;
-    };
-    out.contains("pr-heal") || out.contains("fno-agents")
-}
-
-/// Live pids across every `pr-heal.*.pid` file in `dir` and its `heal/`
-/// subfolder. The pid lives in the file CONTENT, read as an integer; EPERM
-/// counts alive. The glob also sweeps the old per-root `pr-heal.<tag>.pid`
-/// files; a file whose pid is dead is the family's own litter and is deleted
-/// here (the reader is the deleter: nothing else owns these files), and a
-/// recycled pid that belongs to an unrelated process skips without deleting.
+/// Live pids across the state root's `heal/` subfolder and the legacy
+/// top-level location; the family lives in `heal_pid`.
 fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
-    let mut out = Vec::new();
-    for scan_dir in [dir.join("heal"), dir.to_path_buf()] {
-        let Ok(entries) = std::fs::read_dir(&scan_dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let fname = e.file_name();
-            let Some(name) = fname.to_str() else {
-                continue;
-            };
-            if !name.starts_with("pr-heal.") || !name.ends_with(".pid") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(e.path()) else {
-                continue;
-            };
-            let Ok(pid) = text.trim().parse::<u32>() else {
-                continue;
-            };
-            if crate::evals_arm::pid_alive(pid) && pid_names_a_healer(pid) {
-                out.push(pid);
-            } else {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
-    out.sort_unstable();
-    out
+    crate::heal_pid::live_pids(dir)
 }
 
 /// The one `Heal:` readout line. `--status` prints it; `_install.py` shells
