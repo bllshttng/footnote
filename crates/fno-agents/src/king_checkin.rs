@@ -1123,8 +1123,8 @@ fn r_territory(ctx: &Ctx) -> Result<Value, String> {
 /// silent zero (the unmeasured-state rule).
 fn r_state_root_drift() -> Result<Value, String> {
     let home = crate::paths::AgentsHome::from_env();
-    let state_root = home.root().parent().unwrap_or_else(|| home.root());
-    let rep = crate::state_root_drift::drift_report(state_root)?;
+    let state_root = crate::reclaim::reclaim_state_root(&home);
+    let rep = crate::state_root_drift::drift_report(&state_root)?;
     Ok(json!({
         "undocumented": rep.count,
         "entries": rep.entries,

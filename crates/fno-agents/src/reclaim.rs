@@ -94,8 +94,8 @@ fn receipt_path(home: &AgentsHome) -> PathBuf {
 
 /// The state root the reclaim surfaces read: the agents home's parent in the
 /// default layout, overridable by env so tests and custom roots can point the
-/// gate, the receipt, and the drift lane at one place.
-fn reclaim_state_root(home: &AgentsHome) -> PathBuf {
+/// gate, the receipt, the drift lane, and the check-in reading at one place.
+pub(crate) fn reclaim_state_root(home: &AgentsHome) -> PathBuf {
     if let Some(root) = std::env::var_os("FNO_RECLAIM_STATE_ROOT") {
         return PathBuf::from(root);
     }

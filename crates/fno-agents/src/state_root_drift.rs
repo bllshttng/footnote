@@ -97,19 +97,27 @@ fn backtick_spans(cell: &str) -> Vec<String> {
 /// `<anything>` becomes `*` (the doc's placeholder convention).
 fn placeholder_star(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         if c == '<' {
-            if let Some(close) = s[i..].find('>') {
-                if close > 2 {
-                    out.push('*');
-                    // Skip past the '>'.
-                    for _ in 0..close + 1 {
-                        chars.next();
-                    }
-                    continue;
+            let mut inner = String::new();
+            let mut closed = false;
+            for next in chars.by_ref() {
+                if next == '>' {
+                    closed = true;
+                    break;
                 }
+                inner.push(next);
             }
+            if closed {
+                out.push('*');
+            } else {
+                // Unterminated '<': keep it literally, like the Python
+                // regex, which would never match here.
+                out.push('<');
+                out.push_str(&inner);
+            }
+            continue;
         }
         out.push(c);
     }
@@ -235,6 +243,18 @@ mod tests {
         names.retain(|n| !pats.iter().any(|p| glob_match(p, n)));
         names.sort();
         names
+    }
+
+    #[test]
+    fn placeholder_suffixes_survive_the_star() {
+        // Dialect parity with the Python gate: text after `<placeholder>`
+        // must survive, so the pattern still anchors the extension.
+        assert_eq!(
+            placeholder_star("opencode-install-<hash>.json"),
+            "opencode-install-*.json"
+        );
+        assert_eq!(placeholder_star("<ts>"), "*");
+        assert_eq!(placeholder_star("a<b.c"), "a<b.c");
     }
 
     #[test]
