@@ -199,14 +199,11 @@ cli/tests/unit/test_archive_sweep.py::<module>::mark.skipif  # on main before th
 cli/tests/unit/test_archive_sweep.py::<module>::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_backlog_api.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_backlog_api.py::<module>::marker.requires_rust  # on main before this ratchet
-cli/tests/unit/test_backlog_requeue.py::test_update_null_locked_by_clears_lock_alone::mark.skip  # on main before this ratchet
 cli/tests/unit/test_backlog_single_flight.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_backlog_single_flight.py::iso::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_backlog_single_flight.py::test_a_sigkilled_holder_is_reclaimed::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_backlog_single_flight.py::test_acquire_flight_takes_a_name_root_and_ttl::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_blueprint_batching_rule.py::test_behavioral_dispatch_plan_batches_the_shape_pair::mark.skipif  # on main before this ratchet
-cli/tests/unit/test_claim_reap.py::TestReapDeadClaims.test_AC3_HP_confirmed_node_release_clears_configured_graph_mirror::mark.skip  # on main before this ratchet
-cli/tests/unit/test_claim_reap.py::TestReapDeadClaims.test_mirror_clear_names_the_node_and_prior_owner::mark.skip  # on main before this ratchet
 cli/tests/unit/test_claim_rebind.py::test_rebind_live_different_pid_refuses_concurrent_writer::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_claims_core.py::TestSessionWitnessVerdicts.test_status_live_session_never_reads_stale::marker.requires_rust  # on main before this ratchet
@@ -243,7 +240,6 @@ cli/tests/unit/test_executor_parity_vs_bash.py::test_locked_parity_vs_bash::pyte
 cli/tests/unit/test_executor_parity_vs_bash.py::test_surface_parity_vs_bash::pytest.skip  # on main before this ratchet
 cli/tests/unit/test_graph_canonicalize.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_graph_canonicalize.py::<module>::marker.requires_rust  # on main before this ratchet
-cli/tests/unit/test_graph_provenance.py::test_us6_harness_stamp_written_and_cleared::mark.skip  # on main before this ratchet
 cli/tests/unit/test_graph_readiness.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/unit/test_graph_readiness.py::<module>::marker.requires_rust  # on main before this ratchet
 cli/tests/unit/test_graph_related.py::<module>::mark.skipif  # on main before this ratchet
