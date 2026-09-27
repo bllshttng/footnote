@@ -77,7 +77,7 @@ def test_emit_ledger_transition_uses_target_session_id():
 
     with tempfile.TemporaryDirectory() as td:
         tmp_path = Path(td)
-        state_dir = _setup_state(tmp_path, target_sid, nonce, transcript_uuid)
+        _setup_state(tmp_path, target_sid, nonce, transcript_uuid)
 
         entry = {
             "type": "execution",
