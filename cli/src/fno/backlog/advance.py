@@ -4142,28 +4142,24 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
 
 
 def _binding_provider() -> Optional[str]:
-    """The configured provider with the least lane headroom, or None.
-
- prices each child by its own lane, so this cap binds only an
-    unresolvable child (plus the scalar width and the explain's no-subject row).
-    """
+    """Pick the probe lane with least headroom for children whose lane is unknown."""
     from fno.agents import spawn_gate
-    from fno.config import load_settings
 
     probe_lanes = spawn_gate.probe_capacity(only=["lanes"]).get("lanes")
     if not isinstance(probe_lanes, dict):
         return None  # an unreadable probe names no binding lane
     binding: Optional[str] = None
     binding_remaining: Optional[int] = None
-    for name, budget in dict(load_settings().agents.provider_limits).items():
-        cap = spawn_gate.provider_lanes_cap(budget)
+    for name, lane_answer in probe_lanes.items():
+        if not isinstance(lane_answer, dict):
+            continue
+        cap = lane_answer.get("cap")
         if cap is None:
             continue  # an uncapped provider cannot bind anything
-        lane_answer = probe_lanes.get(name)
-        live = lane_answer.get("live") if isinstance(lane_answer, dict) else None
+        live = lane_answer.get("live")
         if live is None:
             continue  # an unreadable lane cannot bind the choice
-        remaining = cap - int(live)
+        remaining = int(cap) - int(live)
         if binding_remaining is None or remaining < binding_remaining:
             binding, binding_remaining = name, remaining
     return binding
@@ -4171,11 +4167,10 @@ def _binding_provider() -> Optional[str]:
 
 @dataclass
 class _LaneBudget:
-    """One pass's spawn-gate counters, shared by the drain and the explain preview.
+    """Probe-derived width and provider headroom shared by drain and explain.
 
-    : a child is bounded by the lane its own dispatch settles. Absent
-    from ``vendor_remaining`` = uncapped; ``binding`` keeps the old
-    most-constrained cap for a child whose lane cannot be resolved.
+    Uncapped lanes are absent from ``vendor_remaining``; ``binding`` keeps the
+    tightest cap for a child whose lane cannot be resolved.
     """
 
     fleet: int = 0
@@ -4202,7 +4197,12 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
         vendor = resolve_lane_vendor([], harness=provider)
         # Resolver silent: only a raw vendor pin scopes; else the configured caps bind.
         pin_vendor = vendor or (provider if provider in limits else None)
-        scoped: dict = {pin_vendor: limits.get(pin_vendor)} if pin_vendor else limits
+        if pin_vendor is None:
+            scoped: dict = limits
+        elif pin_vendor in limits:
+            scoped = {pin_vendor: limits[pin_vendor]}
+        else:
+            scoped = {}
     else:
         scoped = limits
     # One probe answer feeds the slot headroom, the per-vendor headroom and
@@ -4222,17 +4222,20 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
     slots = answer.get("slots")
     fleet = cap - int(slots) if isinstance(slots, int) else 0
     vendor_remaining: dict[str, int] = {}
-    for name, budget in scoped.items():
-        cap_v = spawn_gate.provider_lanes_cap(budget)
+    for name in scoped:
+        lane_answer = probe_lanes.get(name)
+        if not isinstance(lane_answer, dict):
+            _LOG.warning("gate probe could not read lane %s; dispatch width 0", name)
+            return _LaneBudget(fleet=0, vendor_remaining={}, binding=None, binding_remaining=None)
+        cap_v = lane_answer.get("cap")
         if cap_v is None:
             continue  # an uncapped provider cannot bound the width
-        lane_answer = probe_lanes.get(name)
-        live = lane_answer.get("live") if isinstance(lane_answer, dict) else None
+        live = lane_answer.get("live")
         if live is None:
             # An unreadable lane refuses in the gate; here it zeroes the width.
             _LOG.warning("gate probe could not read lane %s; dispatch width 0", name)
             return _LaneBudget(fleet=0, vendor_remaining={}, binding=None, binding_remaining=None)
-        vendor_remaining[name] = cap_v - int(live)
+        vendor_remaining[name] = int(cap_v) - int(live)
     # AC10: a hold or undecidable CPU verdict queues/refuses every spawn.
     cpu_refused = answer.get("verdict") == "refused"
     if not cpu_refused:

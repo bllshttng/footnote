@@ -35,9 +35,9 @@ def _wire(
     slots: int = 0,
     limits: dict | None = None,
     live: dict | None = None,
-    cap_fn=None,
     fail: bool = False,
     cpu_verdict: str = "admit",
+    unreadable_lanes: bool = False,
 ) -> None:
     limits = limits if limits is not None else {"zai": 7, "claude": None}
     live = live if live is not None else {}
@@ -50,17 +50,17 @@ def _wire(
     monkeypatch.setattr("fno.config.load_settings", fake_load_settings)
     from fno.agents import spawn_gate
 
-    monkeypatch.setattr(
-        spawn_gate,
-        "provider_lanes_cap",
-        cap_fn if cap_fn is not None else spawn_gate.provider_lanes_cap,
-    )
     # The width reads the ONE gate's probe answer (x-6089): slots, lanes and
     # the CPU verdict travel in one payload, stubbed here.
     rows: list[dict] = [
-        {"name": "cpu-share", "measured": "1.20/12.00 cores", "threshold": "50%",
-         "verdict": "pass" if cpu_verdict == "admit" else "refuse",
-         "key": "agents.max_fleet_cpu_share", "note": f"test {cpu_verdict}"}
+        {
+            "name": "cpu-share",
+            "measured": "1.20/12.00 cores",
+            "threshold": "50%",
+            "verdict": "pass" if cpu_verdict == "admit" else "refuse",
+            "key": "agents.max_fleet_cpu_share",
+            "note": f"test {cpu_verdict}",
+        }
     ]
     answer = {
         "verdict": "accepted" if cpu_verdict == "admit" else "refused",
@@ -68,9 +68,11 @@ def _wire(
         "message": None if cpu_verdict == "admit" else f"test {cpu_verdict}",
         "slots": slots,
         "max_live": max_live,
-        "lanes": {
-            name: {"cap": None, "live": count, "counted": []}
-            for name, count in live.items()
+        "lanes": None
+        if unreadable_lanes
+        else {
+            name: {"cap": limits.get(name), "live": live.get(name, 0), "counted": []}
+            for name in list(limits) + [name for name in live if name not in limits]
         },
         "rows": rows,
     }
@@ -128,6 +130,15 @@ def test_zero_headroom_means_full_not_error(monkeypatch):
 def test_an_unreadable_reading_degrades_to_one_lane_loudly(monkeypatch, caplog):
     _wire(monkeypatch, fail=True)
     assert _spawn_headroom() == 1
+
+
+def test_probe_without_lanes_fails_closed_for_binding_and_width(monkeypatch):
+    from fno.backlog.advance import _binding_provider, _spawn_budget
+
+    _wire(monkeypatch, limits={"zai": 7}, live={"zai": 3}, unreadable_lanes=True)
+    budget = _spawn_budget()
+    assert _binding_provider() is None
+    assert (budget.fleet, budget.vendor_remaining, budget.binding) == (0, {}, None)
 
 
 def test_parallel_max_lanes_warns_once_and_is_ignored(monkeypatch):
