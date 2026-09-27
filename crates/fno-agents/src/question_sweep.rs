@@ -355,6 +355,31 @@ mod tests {
     }
 
     #[test]
+    fn spares_a_user_only_question_and_still_closes_a_machine_one() {
+        // The sweep's node-closed close spares a user-only why_user; only an
+        // answer or a withdrawal closes such a question.
+        let home = tmp_home("user-only");
+        let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+        let user_row = format!(
+            r#"{{"ts":"2026-09-17T10:00:00Z","type":"operator_question","source":"target","data":{{"question_id":"q-user","question":"approve the rules?","node":"x-done","blocks":["x-done"],"why_user":"a product or taste call"}}}}"#
+        );
+        let read = fixture_read(
+            vec![("x-done".to_string(), "done".to_string())],
+            format!("{user_row}\n{}", open_row("q-mach", "x-done")),
+        );
+        assert_eq!(question_sweep_in(&home, &emitter, 1_000_000, &read), 1);
+        let questions = crate::event_store::journal_text(
+            &crate::provider_cap::questions_path(&home),
+            &["operator_question_closed"],
+        );
+        assert!(questions.contains("q-mach"), "{questions}");
+        assert!(
+            !questions.contains("q-user"),
+            "the user-only question survives: {questions}"
+        );
+    }
+
+    #[test]
     fn retires_legacy_machine_questions_and_leaves_agent_asks_open() {
         // AC12-HP + AC13-EDGE + AC14-EDGE: each legacy-marker row closes
         // with an empty answer, reason moved-to-fleet-task; an agent ask
