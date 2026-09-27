@@ -50,6 +50,7 @@ pub mod product_boundary;
 pub mod proto;
 pub mod proto_pane;
 pub mod proto_slot;
+pub mod provider_key;
 pub mod pty;
 pub mod ratatui_blit;
 pub mod registry_label;
