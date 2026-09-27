@@ -314,8 +314,11 @@ class WatermarkStore:
     def _persist(self) -> None:
         assert self._data is not None
         self._path.parent.mkdir(parents=True, exist_ok=True)
+
         tmp_path: Optional[Path] = None
-        try:
+
+        def _write_tmp() -> Path:
+            nonlocal tmp_path
             fd, tmp_str = tempfile.mkstemp(
                 dir=self._path.parent,
                 prefix=".pr-watcher-state.tmp.",
@@ -324,7 +327,18 @@ class WatermarkStore:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2)
                 fh.write("\n")
-            os.replace(tmp_path, self._path)
+            return tmp_path
+
+        try:
+            tmp_path = _write_tmp()
+            try:
+                os.replace(tmp_path, self._path)
+            except FileNotFoundError:
+                # A concurrent sweeper removed the tmp between write and
+                # replace (seen live mid-merge-queue). Rewrite once
+                # instead of aborting the caller's queue walk.
+                tmp_path = _write_tmp()
+                os.replace(tmp_path, self._path)
         except Exception:
             if tmp_path and tmp_path.exists():
                 try:
