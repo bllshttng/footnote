@@ -79,14 +79,13 @@ impl Proof {
     }
 }
 
-/// `fno-agents probe-run main-ci --workflow <name> --node <id> [--cwd <dir>]`.
+/// `fno-agents probe-run main-ci --workflow <name> --node <id>`.
 /// Exit 0 only on `green`; exit 1 on every other verdict; exit 2 on a usage
 /// error. stdout is exactly the word (with the run id when one exists), so a
 /// reconcile reason can quote it; the diagnostic detail goes to stderr.
 pub fn run(args: &[String]) -> i32 {
     let mut workflow: Option<String> = None;
     let mut node_id: Option<String> = None;
-    let mut cwd_arg = String::from(".");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -102,27 +101,18 @@ pub fn run(args: &[String]) -> i32 {
                     node_id = Some(args[i].clone());
                 }
             }
-            "--cwd" => {
-                i += 1;
-                if i < args.len() {
-                    cwd_arg = args[i].clone();
-                }
-            }
             _ => {}
         }
         i += 1;
     }
     let (Some(workflow), Some(node_id)) = (workflow, node_id) else {
-        eprintln!(
-            "usage: fno-agents probe-run main-ci --workflow <workflowName> --node <id> [--cwd <dir>]"
-        );
+        eprintln!("usage: fno-agents probe-run main-ci --workflow <workflowName> --node <id>");
         return 2;
     };
-    let cwd = PathBuf::from(&cwd_arg);
 
     // The node carries the PR number and its own cwd (the repo the PR lives
     // in), so a probe can run from any checkout.
-    let Some(node) = read_node(&node_id, &cwd) else {
+    let Some(node) = read_node(&node_id, Path::new(".")) else {
         return print_verdict(&Proof::Unreadable(format!("node {node_id} unreadable")));
     };
     let Some(pr) = node
@@ -135,11 +125,11 @@ pub fn run(args: &[String]) -> i32 {
         // weaker case of the same fact.
         return print_verdict(&Proof::Absent);
     };
-    let node_cwd = node
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or(cwd);
+    let Some(node_cwd) = node_repo_dir(&node) else {
+        // No cwd names no repo, and the caller's directory is evidence about
+        // the caller, never about this node. Answer unreadable, not absent.
+        return print_verdict(&Proof::Unreadable("node carries no cwd".to_string()));
+    };
 
     // The merge commit the workflow runs must contain.
     let gh = std::ffi::OsStr::new("gh");
@@ -346,6 +336,14 @@ fn read_node(node_id: &str, cwd: &Path) -> Option<Value> {
     crate::graph_get::find_entry(&rows, node_id).cloned()
 }
 
+/// The directory every gh read for this node runs in: the node's own cwd, the
+/// one repo the proof can stand on. A node without one names no repo, so the
+/// caller's directory is no substitute - it is evidence about the caller, and
+/// reading gh there would answer a different repo's question.
+fn node_repo_dir(node: &Value) -> Option<PathBuf> {
+    node.get("cwd").and_then(Value::as_str).map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +443,17 @@ mod tests {
     fn a_non_array_payload_is_unreadable() {
         let proof = classify(&json!({"error": "boom"}), "cli-ci", &oracle);
         assert!(matches!(proof, Proof::Unreadable(_)));
+    }
+
+    #[test]
+    fn a_node_without_a_cwd_names_no_repo_dir() {
+        // The caller's directory is evidence about the caller, never about
+        // the node: without a cwd the proof has no repo to read and answers
+        // unreadable rather than asking gh a wrong-repo question.
+        assert_eq!(node_repo_dir(&json!({"pr_number": 7})), None);
+        assert_eq!(
+            node_repo_dir(&json!({"cwd": "/repo/b"})),
+            Some(PathBuf::from("/repo/b"))
+        );
     }
 }
