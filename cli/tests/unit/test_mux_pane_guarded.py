@@ -219,6 +219,10 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
     """x-1904: bytes-written alone is not enough (Locked Decision 4). The
     unguarded mail-delivery paste only reports True once the recipient's OWN
     transcript carries the injected turn's content."""
+    # This file tests the PYTHON confirm contract; a machine with a deployed
+    # fno-agents on PATH would otherwise route the send into the Rust pane
+    # lane, whose subprocess answers these fakes never modeled.
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
@@ -263,6 +267,8 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     """The paste-then-CR burst can exit 0 (bytes written) while the paste sits
     unread in the recipient's input box -- exactly the Locked Decision 4 gap a
     bytes-only verdict would paper over."""
+    # Same lane pin as above: the Python contract, never an ambient binary.
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")  # never gets the marker
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
