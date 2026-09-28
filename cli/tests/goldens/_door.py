@@ -30,6 +30,9 @@ def seed_node(id: str, status: str = "in_progress", **kw) -> dict:
         "id": id,
         "title": kw.pop("title", f"node {id}"),
         "status": status,
+        # Every store mutator parses rows through the typed Node, which
+        # requires `type`; a seed without one refuses its own mutation.
+        "type": kw.pop("type", "feature"),
         "project": "fno",
         "slug": kw.pop("slug", f"slug-{id.split('-', 1)[1]}"),
         "priority": "p2",
