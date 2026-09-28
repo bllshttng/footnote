@@ -969,6 +969,9 @@ struct View {
     /// The questions command failed/timed out; same degrade contract as
     /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
+    /// Why the questions read failed, for the toggle toast; None when the
+    /// fold landed or never ran.
+    questions_degraded_reason: Option<String>,
     /// The questions detail overlay, `Some` while open. Keys divert to
     /// [`questions::detail_keys`], the draw chain arm renders it.
     question_detail: Option<questions::Detail>,
@@ -2127,6 +2130,7 @@ impl View {
             mine_acting: false,
             questions_fold: None,
             questions_degraded: false,
+            questions_degraded_reason: None,
             question_detail: None,
             question_esc: Vec::new(),
             questions_block: questions::BlockPrefs::load(),
@@ -8365,8 +8369,9 @@ async fn attach_and_run(
     // The questions block's fold channel: the 10s kick spawns the projection
     // read off the UI loop; the arm applies it under no gen guard (the block
     // always shows the latest fold).
-    let (questions_tx, mut questions_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Option<crate::needs_overlay::QuestionsFold>>();
+    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<crate::needs_overlay::QuestionsFold, String>,
+    >();
 
     // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -9102,16 +9107,7 @@ async fn attach_and_run(
                             view.mine_degraded = true;
                         }
                     }
-                    match outcome.questions {
-                        Some(fold) => {
-                            view.questions_fold = Some(fold);
-                            view.questions_degraded = false;
-                        }
-                        None => {
-                            view.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
-                            view.questions_degraded = true;
-                        }
-                    }
+                    view.apply_questions_fold(outcome.questions);
                     view.reanchor_answers(prev);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -10449,14 +10445,17 @@ async fn dispatch_event(
                 view.needs_degraded = false;
                 view.mine_degraded = false;
                 view.questions_degraded = false;
+                view.questions_degraded_reason = None;
             } else {
-                // Stale/first open: live-only until the refresh lands.
+                // Stale/reset: live-only until the refresh lands; the reason
+                // clears with the fold, never outlives its fold.
                 view.needs_fold = None;
                 view.needs_degraded = false;
                 view.mine_fold = None;
                 view.mine_degraded = false;
                 view.questions_fold = None;
                 view.questions_degraded = false;
+                view.questions_degraded_reason = None;
                 view.needs_want = true;
             }
         }
