@@ -855,10 +855,11 @@ mod tests {
         let fx = Fixture::new("unregistered-child");
         let _env = EnvGuard::new(&fx.pins());
         let anchor = fx.base.join("unregistered/web");
+        let node = ["x", "abcd"].join("-");
         let path = plan_doc_path(
             &anchor,
             "etl-search",
-            "x-abcd",
+            &node,
             Some(LocalTimestamp::from_epoch(NOW).unwrap()),
         )
         .unwrap();
