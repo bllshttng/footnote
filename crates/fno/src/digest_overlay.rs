@@ -163,25 +163,33 @@ fn parse_override_color(s: &str) -> Option<crate::proto::Color> {
     crate::sideline_color::parse_color(s)
 }
 
-/// Fold the `mux.theme.brand` / `mux.theme.needs_you` role overrides into
-/// `t`: the two roles are config's to pin under ANY theme -
-/// brand recolors selection, the active tab and the focused frame;
-/// needs_you recolors the waiting-on-you accent. The tab-bar mark's stamp
-/// takes NO override - the mark keeps its theme's own label. In TOML the
-/// keys are quoted dotted keys inside `[mux]` (`"theme.brand" =
-/// "#ff3434"`), which coexists with the scalar `theme` name. An unparseable
-/// value is reported, never silently ignored (the keymap-notice channel).
+/// Fold the `mux.theme.brand` / `mux.theme.needs_you` / `mux.theme.border`
+/// role overrides into `t`: the three roles are config's to pin under ANY
+/// theme - brand recolors selection, the active tab and the interaction
+/// accents; needs_you recolors the waiting-on-you accent; border recolors
+/// every border at once (the pane frame and the modal/popover borders,
+/// which default to the theme's brand). The tab-bar mark's stamp takes NO
+/// override - the mark keeps its theme's own label. In TOML the keys are
+/// quoted dotted keys inside `[mux]` (`"theme.border" = "#ff3434"`), which
+/// coexists with the scalar `theme` name. An unparseable value is reported,
+/// never silently ignored (the keymap-notice channel).
 /// Injectable so tests never touch process env.
 fn apply_overrides_to(
     t: &mut crate::theme::Theme,
     brand: Option<&str>,
     needs_you: Option<&str>,
+    border: Option<&str>,
 ) -> Option<crate::keys::KeymapWarning> {
     let mut bad: Vec<String> = Vec::new();
-    for (raw, role) in [(brand, "brand"), (needs_you, "needs_you")] {
+    for (raw, role) in [
+        (brand, "brand"),
+        (needs_you, "needs_you"),
+        (border, "border"),
+    ] {
         let Some(raw) = raw else { continue };
         match parse_override_color(raw) {
             Some(c) if role == "brand" => t.brand = c,
+            Some(c) if role == "border" => t.border = c,
             Some(c) => t.needs_you = c,
             None => bad.push(format!(
                 "mux.theme.{role} {raw:?} is not #rrggbb, indexed(<n>), or an ANSI-16 name; ignored"
@@ -200,7 +208,13 @@ pub fn theme_role_overrides(
 ) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
     let brand = mux_str(cwd, "theme.brand");
     let needs_you = mux_str(cwd, "theme.needs_you");
-    let override_warn = apply_overrides_to(&mut t, brand.as_deref(), needs_you.as_deref());
+    let border = mux_str(cwd, "theme.border");
+    let override_warn = apply_overrides_to(
+        &mut t,
+        brand.as_deref(),
+        needs_you.as_deref(),
+        border.as_deref(),
+    );
     let warn = match (warn, override_warn) {
         (Some(a), Some(b)) => Some(crate::keys::KeymapWarning(format!("{}; {}", a.0, b.0))),
         (Some(a), None) => Some(a),
@@ -229,7 +243,7 @@ mod colorfgbg_tests {
 mod theme_role_override_tests {
     use super::{apply_overrides_to, parse_override_color};
     use crate::proto::Color;
-    use crate::theme::Theme;
+    use crate::theme::{cell_style, Role, Theme};
 
     #[test]
     fn override_colors_take_the_sideline_palette_vocabulary() {
@@ -247,28 +261,42 @@ mod theme_role_override_tests {
     }
 
     #[test]
-    fn overrides_repin_the_two_roles_under_any_theme_and_the_stamp_is_untouched() {
+    fn overrides_repin_the_three_roles_under_any_theme_and_the_stamp_is_untouched() {
         for name in crate::theme::THEME_NAMES {
             let (mut t, _) = Theme::from_name(name);
             let (stamp, sel) = (t.stamp, t.sel);
-            let warn = apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"));
+            let warn =
+                apply_overrides_to(&mut t, Some("#123456"), Some("#abcdef"), Some("#654321"));
             assert!(warn.is_none(), "{name}");
             assert_eq!(t.brand, Color::Rgb(0x12, 0x34, 0x56), "{name}");
             assert_eq!(t.needs_you, Color::Rgb(0xab, 0xcd, 0xef), "{name}");
+            assert_eq!(t.border, Color::Rgb(0x65, 0x43, 0x21), "{name}");
             assert_eq!(t.stamp, stamp, "{name}: the mark takes no override");
-            assert_eq!(t.sel, sel, "{name}: only the two roles move");
+            assert_eq!(t.sel, sel, "{name}: only the overridden roles move");
         }
     }
 
     #[test]
     fn an_unparseable_override_is_reported_not_ignored() {
         let (mut t, _) = Theme::from_name("terminal");
-        let warn =
-            apply_overrides_to(&mut t, Some("notacolor"), None).expect("a bad value must warn");
+        let warn = apply_overrides_to(&mut t, Some("notacolor"), None, None)
+            .expect("a bad value must warn");
         assert!(warn.0.contains("mux.theme.brand"), "{warn:?}");
         assert!(warn.0.contains("notacolor"), "{warn:?}");
         // The untouched role keeps its theme value.
         assert_eq!(t.brand, Color::Indexed(3));
+    }
+
+    #[test]
+    fn border_override_recolors_every_border_under_any_theme() {
+        // AC4-OVERRIDE: the border key recolors modal borders AND the focused
+        // pane frame at once, because both read t.border.
+        for name in crate::theme::THEME_NAMES {
+            let (mut t, _) = Theme::from_name(name);
+            apply_overrides_to(&mut t, None, None, Some("#112233"));
+            assert_eq!(t.border, Color::Rgb(0x11, 0x22, 0x33), "{name}");
+            assert_eq!(cell_style(Role::Border, &t).0, t.border, "{name}");
+        }
     }
 }
 

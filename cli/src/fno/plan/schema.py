@@ -266,12 +266,17 @@ class ConsolidationEntry(BaseModel):
         # reader can check, which is the one thing this block exists to give.
         # Imported HERE, not at module scope: `fno.graph` costs 126ms of this
         # module's 219ms import, and every plan read would pay it for a key
-        # most plans carry once.
+        # most plans carry once. A legacy literal (a prefix with no separator
+        # once minted bare "<prefix><hex>" ids) also references: this is a
+        # binding check on a candidate the graph holds, not prose extraction,
+        # so the all-hex git-hash shape stays the one thing refused.
         from fno.graph._constants import is_wellformed_node_id
 
-        if not is_wellformed_node_id(v):
-            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-aaaa)")
-        return v
+        if is_wellformed_node_id(v):
+            return v
+        if re.fullmatch(r"(?i)(?![0-9a-f]+$)[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}", v):
+            return v
+        raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-aaaa)")
 
 
 class DecisionAcknowledgment(BaseModel):

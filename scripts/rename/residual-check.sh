@@ -18,6 +18,7 @@ cd "$ROOT"
 # The marker preserves historical data labels; it never exempts a runtime path.
 KEEP_FILES=(
   ':!scripts/rename/**'
+  ':!scripts/ci/state-root-rows.baseline'
   ':!*.lock'
   ':!**/*.lock'
 )

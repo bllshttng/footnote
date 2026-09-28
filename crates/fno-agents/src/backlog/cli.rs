@@ -181,6 +181,10 @@ pub fn run(args: &[String]) -> i32 {
         // not (the same split the `get` arm makes).
         "decide-retract" if carries(resolved.tail, &["--help", "-h"]) => forward_python(&resolved),
         "decide-retract" => crate::law_match::run_backlog_retract(resolved.tail),
+        // The decisions listing is native: the Python twin is deleted in the
+        // same change (d-e11b2b3e), so the door owns every shape, help
+        // included.
+        "decisions" => super::decisions_cli::run(resolved.tail),
         // The blueprint session lifecycle is native end to end: identity,
         // claims substrate, session rows, receipts. The Python twin is gone.
         "session" => super::session_cli::run(resolved.tail),

@@ -331,6 +331,8 @@ TOKEN_CASES = [
     ("feature/x-aaaa-x-bbbb", ["x-aaaa", "x-bbbb"]),
     # greedy hex takes the longest valid id
     ("repro/x-ab123-repro", ["x-ab123"]),
+    # compact legacy ids have no hyphen separator
+    ("feature/xd863", ["xd863"]),
 ]
 
 

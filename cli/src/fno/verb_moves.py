@@ -57,7 +57,7 @@ VERB_MOVES: dict[str, Move] = {
         kind="deprecated",
         to="inbox decide",
         leaf_destinations=(
-            ("list", "inbox decisions"),
+            ("list", "backlog decisions"),
             ("reindex", "backlog decide-reindex"),
             ("retract", "backlog decide-retract"),
         ),

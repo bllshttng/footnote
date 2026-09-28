@@ -65,6 +65,7 @@ def _gate(body: str, head_ref: str) -> int:
     [
         ("feature/x-76d1", ["x-76d1"]),                          # PR 971
         ("x-4271-x-5a83-pr-status-tally", ["x-4271", "x-5a83"]),  # PR 981
+        ("feature/xd863", ["xd863"]),
         ("feature/x-49ec", ["x-49ec"]),
         ("target/some-slug-ab-55ba9adb", ["ab-55ba9adb"]),
         ("chore/tidy-docs", []),
@@ -367,6 +368,7 @@ def test_batch_ship_claims_every_member(monkeypatch):
     "head_ref",
     [
         "feature/x-76d1", "x-4271-x-5a83-pr-status-tally", "feature/x-cdef-1234",
+        "feature/xd863",
         "target/some-slug-ab-55ba9adb", "chore/tidy-docs", "feature/x-5b667", "",
     ],
 )
@@ -422,6 +424,14 @@ def test_hook_allows_a_literal_trailer_in_the_command(monkeypatch):
     assert _hook_decision(
         'gh pr create --title t --body "s\n\nBacklog-Closure: x-49ec"',
         "feature/x-49ec",
+        monkeypatch=monkeypatch,
+    ) is None
+
+
+def test_hook_recognizes_a_compact_literal_trailer(monkeypatch):
+    assert _hook_decision(
+        'gh pr create --title t --body "Fixes xd863"',
+        "feature/xd863",
         monkeypatch=monkeypatch,
     ) is None
 

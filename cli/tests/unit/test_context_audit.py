@@ -12,15 +12,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-
-def _space_journal(tmp_path: Path) -> Path:
-    """The event journal the spawned child writes: the repo's space, pinned
-    by the conftest FNO_SPACES_DIR sandbox, keyed on the child's cwd."""
-    from fno.paths import space_dir
-
-    return space_dir(tmp_path) / "events.jsonl"
-
-
 from fno.cli import app
 from fno.context_audit import (
     ContextSource,
@@ -32,6 +23,14 @@ from fno.context_audit import (
     measure_file_source,
 )
 from fno.setup.managed_block import render_block
+
+
+def _space_journal(tmp_path: Path) -> Path:
+    """The event journal the spawned child writes: the repo's space, pinned
+    by the conftest FNO_SPACES_DIR sandbox, keyed on the child's cwd."""
+    from fno.paths import space_dir
+
+    return space_dir(tmp_path) / "events.jsonl"
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -666,3 +665,59 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         )
 
 
+def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "home"
+    state = tmp_path / "state"
+    bus = tmp_path / "bus"
+    for root in (home, state, bus):
+        root.mkdir()
+    manifest = tmp_path / "king.md"
+    manifest.write_text(
+        "shape: epic\nharness_session_id: king-session\n", encoding="utf-8"
+    )
+    transcript = tmp_path / "summary.jsonl"
+    transcript.write_text(
+        '{"isCompactSummary":true,"type":"user","summary":"Continue xd863"}\n',
+        encoding="utf-8",
+    )
+    fno = bin_dir / "fno"
+    fno.write_text(
+        "#!/bin/sh\n"
+        "case \"${1-}:${2-}:${3-}\" in\n"
+        "  agents:registry-json:*) printf '%s\\n' '{\"agents\":[{\"session_id\":\"king-session\",\"harness_session_id\":\"king-session\",\"crown_level\":\"epic\",\"crown_scope\":\"xd863\"}]}' ;;\n"
+        "  agents:king:faq) exit 0 ;;\n"
+        "  agents:king:manifest-path) printf '%s\\n' \"$KING_MANIFEST_PATH\" ;;\n"
+        "  backlog:get:xd863) printf '%s\\n' '[{\"id\":\"xd863\",\"status\":\"in_progress\"}]' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fno.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "FNO_HOME": str(home / ".fno"),
+        "FNO_AGENTS_HOME": str(state / "agents"),
+        "FNO_STATE_DIR": str(state),
+        "FNO_BUS_DIR": str(bus),
+        "FNO_PLATFORM": "codex",
+        "CODEX_PLUGIN_ROOT": str(ROOT),
+        "KING_MANIFEST_PATH": str(manifest),
+        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+    }
+
+    result = subprocess.run(
+        [str(ROOT / "hooks" / "king-postcompact-reinject.sh")],
+        cwd=tmp_path,
+        env=env,
+        input=json.dumps({"session_id": "king-session", "transcript_path": str(transcript)}),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "resolved: xd863 status=in_progress" in payload["systemMessage"]

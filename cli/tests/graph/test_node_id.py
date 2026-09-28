@@ -188,6 +188,18 @@ def test_mint_legacy_scheme_when_unconfigured(monkeypatch):
     assert len(c.node_id_suffix(mid)) == 8
 
 
+def test_mint_normalizes_prefix_without_trailing_dash(monkeypatch):
+    # A config prefix with no separator must not mint bare "<prefix><hex>"
+    # literals: they fail every canonical shape gate downstream (the target
+    # init guard, extract_node_ids, is_wellformed_node_id). The mint owns the
+    # separator so any configured prefix yields a wellformed id.
+    _patch_settings(monkeypatch, id_prefix="x", id_hex_width=4)
+    mid = c.mint_node_id(set())
+    assert c.is_wellformed_node_id(mid)
+    assert mid.startswith("x-")
+    assert len(c.node_id_suffix(mid)) == 4
+
+
 def test_mint_is_unique_against_existing(monkeypatch):
     _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4)
     existing = {c.mint_node_id(set()) for _ in range(50)}

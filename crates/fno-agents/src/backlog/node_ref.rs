@@ -347,7 +347,7 @@ pub fn resolve_asserted_id(
 
 /// The `(pr_number, pr_url)` refs one node carries: the primary pair first,
 /// then every `additional_prs` entry, deduplicated by number.
-fn node_pr_refs(node: &Value) -> Vec<(i64, Option<String>)> {
+pub(crate) fn node_pr_refs(node: &Value) -> Vec<(i64, Option<String>)> {
     let mut refs: Vec<(i64, Option<String>)> = Vec::new();
     let mut seen: std::collections::HashSet<i64> = Default::default();
     if let Some(n) = node.get("pr_number").and_then(Value::as_i64) {
@@ -464,12 +464,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn wellformed_gate_matches_the_python_grammar() {
+    fn wellformed_gate_matches_python_and_compact_legacy_grammar() {
         assert!(is_wellformed_node_id("x-aaaa1111"));
+        assert!(is_wellformed_node_id("xd863"));
         assert!(is_wellformed_node_id("ab-1234"));
         assert!(!is_wellformed_node_id("nope"));
         assert!(!is_wellformed_node_id("x-AAAA1111"));
         assert!(!is_wellformed_node_id("x-123"));
+        assert!(!is_wellformed_node_id("xg863"));
     }
 
     #[test]

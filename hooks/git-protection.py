@@ -1687,17 +1687,18 @@ def _find_pr_create_segments(segments):
     return out
 
 
-# Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
-# scripts/lib/node-id.sh. This hook is stdlib-only and runs under a bare
-# interpreter that may not import fno at all, so it cannot defer to either.
-# test_pr_closure_producer.py pins this copy against fno.pr.closure.
-# branch_node_ids so the three cannot drift apart in silence.
+# The general node-id grammar is used for closure markers. The branch guess is
+# narrower because this hook has no graph: compact prefixes other than the
+# historical x family are common ordinary words.
 _HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}"
-_HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+_HOOK_BRANCH_NODE_ID_BODY = r"(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})"
+_HOOK_BRANCH_NODE_ID_RE = re.compile(
+    rf"(?:^|[/-])({_HOOK_BRANCH_NODE_ID_BODY})(?=$|[/-])"
+)
 _CLOSURE_MARKER_RE = re.compile(
     # Composition evidence in the command itself: the generator variable, the
     # retired `Backlog-Closure:` spelling, or the new `Fixes <id>` line.
-    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}",
+    rf"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+{_HOOK_NODE_ID_BODY}",
     re.IGNORECASE,
 )
 _BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large

@@ -222,7 +222,7 @@ text = sys.stdin.buffer.read().decode('utf-8', errors='replace')
 # Whole uuids mask first: their inner hex groups straddle the id grammar at
 # word boundaries (...-abcd-1234-...) and are never node ids.
 text = re.sub(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', ' ', text)
-found = sorted(set(re.findall(r'\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b', text)))
+found = sorted(set(re.findall(r'\b(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})\b', text)))
 sys.stdout.write('\n'.join(found[:40]))
 " 2>/dev/null || true)"
     if [[ -n "$CANDIDATES" ]]; then
