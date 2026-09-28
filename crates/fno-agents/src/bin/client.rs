@@ -1451,12 +1451,24 @@ async fn run(args: Vec<String>) -> i32 {
             // canonical default nor the redirect note (a false diagnostic for a
             // non-consuming op -- review). spawn keeps the inverted default.
             let stamp = if !explicit_cwd && !here && method == "agent.spawn" {
-                match fno_agents::paths::canonical_repo_root(&caller) {
-                    Some(canon) => {
-                        note_fresh_redirect(&caller, &canon);
-                        canon
+                match fno_agents::node_seed::spawn_node_cwd(&params, &caller) {
+                    fno_agents::node_seed::SpawnNodeCwd::Foreign(msg) => {
+                        eprintln!("fno-agents: refusing to dispatch: {msg}");
+                        return 2;
                     }
-                    None => caller,
+                    fno_agents::node_seed::SpawnNodeCwd::Project(project) => {
+                        note_fresh_redirect(&caller, &project);
+                        project
+                    }
+                    fno_agents::node_seed::SpawnNodeCwd::Unnamed => {
+                        match fno_agents::paths::canonical_repo_root(&caller) {
+                            Some(canon) => {
+                                note_fresh_redirect(&caller, &canon);
+                                canon
+                            }
+                            None => caller,
+                        }
+                    }
                 }
             } else {
                 caller
@@ -2191,7 +2203,19 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let (cwd, surface_cwd) = if substrate == "pane" {
         (std::path::PathBuf::new(), false)
     } else {
-        resolve_dispatch_cwd(params)
+        let caller = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match fno_agents::node_seed::spawn_node_cwd(params, &caller) {
+            fno_agents::node_seed::SpawnNodeCwd::Foreign(msg) => {
+                eprintln!("fno-agents: refusing to dispatch: {msg}");
+                return Some(2);
+            }
+            fno_agents::node_seed::SpawnNodeCwd::Project(project) => {
+                let moved = project != caller;
+                note_fresh_redirect(&caller, &project);
+                (project, moved)
+            }
+            fno_agents::node_seed::SpawnNodeCwd::Unnamed => resolve_dispatch_cwd(params),
+        }
     };
     let timeout = params
         .get("timeout")

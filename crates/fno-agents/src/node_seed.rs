@@ -7,6 +7,7 @@
 //! filesystem or network reads.
 
 use serde_json::{json, Value};
+use std::path::Path;
 
 use crate::law_match::matches_node_id_shape;
 use crate::provider::parse_verb_token;
@@ -375,6 +376,78 @@ fn decide_in(payload: &Value, rows: &[Value]) -> Value {
     }
 }
 
+/// The spawn cwd guard's answer for a node-named spawn.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpawnNodeCwd {
+    /// No node named, or the id names no readable row with a cwd: the
+    /// pre-existing default (the caller repo's canonical) applies untouched.
+    Unnamed,
+    /// Dispatch from the node's project dir.
+    Project(std::path::PathBuf),
+    /// The caller cwd sits in a different git repo than the node's project;
+    /// the message names both. Printed and refused, never dispatched.
+    Foreign(String),
+}
+
+/// The launch dir for a spawn whose payload names a node, and whether the
+/// caller must be refused instead. The node comes from [`resolve_node`]
+/// (explicit flag, then the seed's first-line scan), the project cwd from the
+/// node's graph row, and refuse-vs-dispatch from the two repo roots: a caller
+/// inside ANOTHER git repo is refused naming both paths (the 2026-09-27
+/// incident dispatched a node's worker into the caller's private config repo,
+/// whose "canonical" is the caller-repo-relative default), while a caller in
+/// the node's own repo - any worktree - or outside git entirely dispatches
+/// from the node's project cwd. [`spawn_node_cwd`] is the production shape
+/// over the machine graph; this pure core is the testable one.
+fn spawn_node_cwd_in(
+    payload: &Value,
+    caller: &Path,
+    rows: &[Value],
+    repo_of: &dyn Fn(&Path) -> Option<std::path::PathBuf>,
+) -> SpawnNodeCwd {
+    let resolved = resolve_node(payload);
+    let node = resolved
+        .get("node")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty());
+    let Some(node) = node else {
+        return SpawnNodeCwd::Unnamed;
+    };
+    let Some(row) = rows
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_str) == Some(node))
+    else {
+        return SpawnNodeCwd::Unnamed;
+    };
+    let Some(cwd) = row
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|c| !c.trim().is_empty())
+    else {
+        return SpawnNodeCwd::Unnamed;
+    };
+    let project = std::path::PathBuf::from(cwd);
+    if let (Some(caller_repo), Some(node_repo)) = (repo_of(caller), repo_of(&project)) {
+        if caller_repo != node_repo {
+            return SpawnNodeCwd::Foreign(format!(
+                "the prompt names node {node} in project {}, but this shell \
+                 stands in another repo ({}); cd into the node's project, or \
+                 pass --cwd / --here to dispatch deliberately",
+                project.display(),
+                caller_repo.display(),
+            ));
+        }
+    }
+    SpawnNodeCwd::Project(project)
+}
+
+/// [`spawn_node_cwd_in`] over the machine graph and the real git resolution.
+pub fn spawn_node_cwd(payload: &Value, caller: &Path) -> SpawnNodeCwd {
+    let rows =
+        crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default();
+    spawn_node_cwd_in(payload, caller, &rows, &crate::paths::canonical_repo_root)
+}
+
 /// Which node does this spawn work, answered with the source that named it:
 /// a non-empty `flag_node` wins, then the first node-shaped token on the
 /// seed's first line (modifier tokens such as `L` never match the shape),
@@ -406,6 +479,7 @@ pub fn resolve_node(payload: &Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::{json, Map};
+    use std::path::PathBuf;
 
     fn decide_map(payload: Value) -> Map<String, Value> {
         decide_in(&payload, &[])
@@ -924,9 +998,91 @@ mod tests {
     #[test]
     fn a_flag_sourced_node_keeps_the_flag_wording() {
         let mut p = base();
+        p["flag_node"] = json!("x-1");
         p["node_source"] = json!("flag");
         p["row_found"] = json!(false);
         let msg = decide_map(p)["message"].as_str().unwrap().to_string();
-        assert!(msg.starts_with("--node x-1"), "{msg}");
+        assert!(msg.contains("--node x-1"), "{msg}");
+    }
+
+    // --- spawn_node_cwd: the node-named spawn's launch dir ---------------- //
+
+    /// The guard over pinned rows and a repo resolver modelling two canonical
+    /// repos: every path under `/repo` (any worktree) maps to `/repo`, every
+    /// path under `/other` to `/other`, anything else to None.
+    fn cwd_guard(payload: Value, caller: &str) -> SpawnNodeCwd {
+        let rows = vec![
+            json!({"id": "x-1111", "cwd": "/repo/footnote"}),
+            json!({"id": "x-2222", "cwd": ""}),
+            json!({"id": "x-3333", "cwd": "/other/project"}),
+        ];
+        spawn_node_cwd_in(&payload, Path::new(caller), &rows, &|p: &Path| {
+            if p.starts_with("/repo") {
+                Some(PathBuf::from("/repo"))
+            } else {
+                p.starts_with("/other").then(|| PathBuf::from("/other"))
+            }
+        })
+    }
+
+    fn seed_payload(seed: &str, flag_node: Value) -> Value {
+        json!({
+            "argv": ["spawn", seed],
+            "seed_index": 1,
+            "seed_form": "positional",
+            "flag_node": flag_node,
+            "env_node": Value::Null,
+        })
+    }
+
+    #[test]
+    fn node_named_in_seed_dispatches_from_the_row_cwd() {
+        let got = cwd_guard(seed_payload("/fno:target x-1111", Value::Null), "/repo/wt");
+        assert_eq!(got, SpawnNodeCwd::Project(PathBuf::from("/repo/footnote")));
+    }
+
+    #[test]
+    fn foreign_repo_caller_is_refused_naming_both() {
+        let got = cwd_guard(seed_payload("/fno:target x-3333", Value::Null), "/repo/wt");
+        match got {
+            SpawnNodeCwd::Foreign(msg) => {
+                assert!(msg.contains("/other/project"), "{msg}");
+                assert!(msg.contains("another repo (/repo)"), "{msg}");
+            }
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caller_outside_git_dispatches_from_the_node_project() {
+        // /nowhere maps to None (no repo): no repo of the caller's own to
+        // protect, so the dispatch proceeds from the node's project cwd.
+        let got = cwd_guard(
+            seed_payload("/fno:target x-3333", Value::Null),
+            "/nowhere/tmp",
+        );
+        assert_eq!(got, SpawnNodeCwd::Project(PathBuf::from("/other/project")));
+    }
+
+    #[test]
+    fn unnamed_node_falls_through_to_the_default() {
+        let got = cwd_guard(seed_payload("prose seed", Value::Null), "/repo/wt");
+        assert!(matches!(got, SpawnNodeCwd::Unnamed));
+        let got = cwd_guard(seed_payload("/fno:target x-9999", Value::Null), "/repo/wt");
+        assert!(matches!(got, SpawnNodeCwd::Unnamed));
+        // A row with an empty cwd is equally unanswerable.
+        let got = cwd_guard(seed_payload("/fno:target x-2222", Value::Null), "/repo/wt");
+        assert!(matches!(got, SpawnNodeCwd::Unnamed));
+    }
+
+    #[test]
+    fn explicit_flag_node_beats_the_seed_scan() {
+        // Flag names x-3333 (foreign); the seed names x-1111 (same repo). The
+        // flag is the caller's explicit answer and wins.
+        let got = cwd_guard(
+            seed_payload("/fno:target x-1111", json!("x-3333")),
+            "/repo/wt",
+        );
+        assert!(matches!(got, SpawnNodeCwd::Foreign(_)));
     }
 }
