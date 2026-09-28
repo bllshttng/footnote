@@ -205,6 +205,20 @@ def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
     assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ac"
 
 
+def test_machine_source_dispatch_carries_no_inherited_seed_block(monkeypatch):
+    """x-ea11: the wrapper env the dispatcher hands `fno agents spawn` never
+    carries the dispatcher's own seed provenance block - a worker that
+    inherits it attributes its first message to whoever seeded its parent."""
+    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
+
+    for key in SEED_PROVENANCE_KEYS:
+        monkeypatch.setenv(key, "stale-dispatcher-value")
+    args = _resolve(monkeypatch, source="ab")
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ab"
+    for key in SEED_PROVENANCE_KEYS:
+        assert key not in args.env, f"{key} rode the dispatch wrapper env"
+
+
 def test_reconcile_source_names_rd_in_the_trigger(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
     args = _resolve(monkeypatch, source="rd")
