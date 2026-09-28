@@ -1252,7 +1252,7 @@ pub(crate) fn resolve_entry_with_heal(
     token: &str,
     registry_path: &Path,
 ) -> Result<Value, ResolveError> {
-    resolve_entry_with_heal_scoped(rows, token, registry_path, false, None, false)
+    resolve_entry_with_heal_scoped(rows, token, registry_path, false, None)
 }
 
 pub(crate) fn resolve_entry_with_heal_scoped(
@@ -1261,14 +1261,13 @@ pub(crate) fn resolve_entry_with_heal_scoped(
     registry_path: &Path,
     cross_project: bool,
     scope_cwd: Option<&Path>,
-    for_stop: bool,
 ) -> Result<Value, ResolveError> {
     match find_agent_entry(rows, token) {
         Ok(e) => {
             if entry_session_tier(e, token) == Some(0) || !is_session_shaped(token) {
                 return Ok(e.clone());
             }
-            match heal_token(token, registry_path, cross_project, scope_cwd, for_stop) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(ResolveError::Ambiguous(format!(
                     "cannot safely resolve token {} because the harness stores could not be checked. Use the full session id.",
@@ -1284,7 +1283,7 @@ pub(crate) fn resolve_entry_with_heal_scoped(
             if !is_session_shaped(token) {
                 return Err(err);
             }
-            match heal_token(token, registry_path, cross_project, scope_cwd, for_stop) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(err),
                 Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
@@ -1531,7 +1530,7 @@ fn synthesize_and_adopt(
         return Ok((value, fno_id, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
-    match heal_token(session_id, &registry_path, cross_project, None, false) {
+    match heal_token(session_id, &registry_path, cross_project, None) {
         Ok(Some(row)) => Ok((row, None, AdoptSource::HarnessStore)),
         Ok(None) => Err(AdoptError::NoEvidence),
         Err(msg) => Err(AdoptError::Io(msg)),
@@ -1892,7 +1891,6 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         &home.registry_json(),
         cross_project,
         scope_cwd,
-        false,
     ) {
         Ok(e) => e,
         Err(err) => {

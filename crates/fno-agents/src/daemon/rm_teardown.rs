@@ -142,5 +142,23 @@ pub(crate) fn stamp_removed_session_tombstone(
         .as_deref()
         .map(str::trim)
         .filter(|session_id| !session_id.is_empty())?;
-    crate::rm_tombstone::record(home, entry.harness_name(), session_id).err()
+    crate::rm_tombstone::record(
+        home,
+        entry.harness_name(),
+        session_id,
+        entry.short_id.as_str(),
+        &entry.name,
+        &entry.cwd,
+    )
+    .err()
+}
+
+/// The for-stop HEALED row shape: a session `fno agents rm` just removed,
+/// re-resolved from the harness store or the rm tombstone. host_mode is
+/// unknown on such a row (neither store records it), so the strict
+/// `is_codex_thread_entry` gate would route the stop to the no-op arm and
+/// the thread would keep running. The re-attach validates the durable
+/// identity (full session id + existing cwd) for itself.
+pub(crate) fn is_codex_thread_heal(entry: &RegistryEntry) -> bool {
+    entry.harness_name() == "codex" && entry.short_id.is_empty() && entry.mux.is_none()
 }

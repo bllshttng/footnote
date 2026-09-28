@@ -528,6 +528,7 @@ def adopt_store_hit(
     """
     from fno.agents.registry import (
         AgentResolutionError,
+        mint_agent_entry,
         register_existing_session,
     )
 
@@ -575,36 +576,36 @@ def adopt_store_hit(
         )
         # The adopting session VOUCHED for this row (LD3); this
         # fallback copy skips register_session, stating the same split itself.
-        return _mint_unregistered(hit, short_id=short_id, log_path=log_path)
+        from fno.agents.dispatch import _capture_parent_edge
 
-
-def _mint_unregistered(hit: "StoreHit", *, short_id: str, log_path: str) -> "AgentEntry":
-    """The unregistered entry (registration-failure fallback + the for-stop heal)."""
-    from fno.agents.dispatch import _capture_parent_edge
-    from fno.agents.registry import mint_agent_entry
-
-    return mint_agent_entry(
-        harness_session_id=hit.session_id,
-        spawned_by_session=None,
-        spawned_by_harness=None,
-        spawned_by_cwd=None,
-        lineage_reason=None,
-        name=_fallback_name(hit.session_id),
-        cwd=hit.cwd,
-        log_path=log_path,
-        harness=hit.harness,
-        status="orphaned",
-        short_id=short_id,
-        adopted_by_session=_capture_parent_edge()[0],
-        origin="adopted",
-        substrate=None,
-    )
+        _sb_session = _capture_parent_edge()[0]
+        return mint_agent_entry(
+            harness_session_id=hit.session_id,
+            spawned_by_session=None,
+            spawned_by_harness=None,
+            spawned_by_cwd=None,
+            lineage_reason=None,
+            name=_fallback_name(hit.session_id),
+            cwd=hit.cwd,
+            log_path=log_path,
+            harness=hit.harness,
+            status="orphaned",
+            short_id=short_id,
+            adopted_by_session=_sb_session,
+            # Same fact as the registered row above, and it has to be stated
+            # here too: this one is handed straight back to the caller when
+            # registration fails, so it reaches a reader without ever passing
+            # the path that would have marked it.
+            origin="adopted",
+            # Adoption observed nothing about the lane; the substrate stays
+            # unknown (never "pane").
+            substrate=None,
+        )
 
 
 def heal_from_harness_store(
     token: str, *, registry_path: Optional[Path] = None,
     scope_cwd: Optional[str] = None, cross_project: bool = False,
-    for_stop: bool = False,
 ) -> Optional["AgentEntry"]:
     """Adopt the session ``token`` names into the registry and return its row.
 
@@ -618,9 +619,6 @@ def heal_from_harness_store(
     ``scope_cwd`` defaults to the process cwd; an out-of-project hit is refused
     with the candidate named, copying the ambiguity posture. See the module
     docstring's project-confinement rule.
-
-    ``for_stop`` resolves without adopting: the tombstone grace window does not
-    apply and nothing is registered (see :func:`adopt_store_hit`).
 
     Registration is best-effort. If the registry write fails, the synthesized row
     is still returned so the verb reaches the session anyway -- reaching it wins,
@@ -647,14 +645,6 @@ def heal_from_harness_store(
             f"{cands}. Disambiguate with the full session id.",
             ambiguous=True,
         )
-
-    if for_stop:
-        # Resolve without adopting: the rm tombstone gate and the registration
-        # both live in adopt_store_hit, so skipping it leaves no row behind and
-        # a stop can reach a session `fno agents rm` just removed.
-        hit = hits[0]
-        short_id = hit.short_id if hit.harness == "claude" else ""
-        return _mint_unregistered(hit, short_id=short_id, log_path="")
 
     return adopt_store_hit(hits[0], registry_path, token=token)
 

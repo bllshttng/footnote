@@ -3276,7 +3276,6 @@ def cmd_heal_token(
         hidden=True,
         help="Authorize machine-wide store selection after uniqueness checks.",
     ),
-    for_stop: bool = typer.Option(False, "--for-stop", hidden=True),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
@@ -3286,9 +3285,6 @@ def cmd_heal_token(
     the uniqueness decision. Exit 0 with the resolved row on stdout; 13 on a
     miss or a non-session-shaped token; 3 with the candidate list on stderr when
     the token is ambiguous; 12 when identity evidence is unavailable.
-
-    ``--for-stop`` (with ``--all-sources``) resolves without adopting: no rm
-    tombstone gate, no registration, so stop reaches a session rm just removed.
 
     ``--registry`` exists because the two runtimes resolve the registry
     differently -- Rust honors ``FNO_AGENTS_HOME``, this side does not -- so a
@@ -3313,7 +3309,6 @@ def cmd_heal_token(
                 path=Path(registry) if registry else None,
                 scope_cwd=os.getcwd(),
                 cross_project=cross_project,
-                for_stop=for_stop,
             )
             resolved_entry = resolved.entry
         except AgentResolutionError as exc:
