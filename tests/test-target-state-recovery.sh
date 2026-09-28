@@ -31,7 +31,7 @@ FAKE_BIN="$TMP_DIR/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/fno" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-} ${2:-}" == "target resolve-owned-identity" ]]; then
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
   printf 'HARNESS=%s\nSESSION_ID=fixture-session\nDISPOSITION=proven\nCOLLISION=\n' \
     "${FNO_TEST_HARNESS:-}"
   exit 0
@@ -42,6 +42,7 @@ fi
 if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
   case " $* " in
     *" --field _archived"*) printf 'null\n'; exit 0 ;;
+    *" --field id"*)       printf '%s\n' "${4:-unknown}"; exit 0 ;;
     *" --field status"*)    printf 'in_review\n'; exit 0 ;;
     *" --field pr_number"*) printf '4242\n'; exit 0 ;;
   esac
@@ -69,6 +70,8 @@ run_recovery_case() {
   local case_dir="$TMP_DIR/$case_name"
 
   mkdir -p "$case_dir/space"
+  git init -q "$case_dir"
+  git -C "$case_dir" checkout -q -b feature/recovery
   printf '%s\n' "$fixture_content" > "$case_dir/space/target-state.md"
 
   (
@@ -103,6 +106,8 @@ run_recovery_case "partial-frontmatter" $'---\nstatus: IN_PROGRESS\ncurrent_phas
 # still emitted, not that a mode was resolved.
 GEMINI_CASE_DIR="$TMP_DIR/gemini-detect"
 mkdir -p "$GEMINI_CASE_DIR/space"
+git init -q "$GEMINI_CASE_DIR"
+git -C "$GEMINI_CASE_DIR" checkout -q -b feature/gemini-recovery
 
 (
   cd "$GEMINI_CASE_DIR"
