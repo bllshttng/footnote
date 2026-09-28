@@ -172,11 +172,11 @@ _SERIAL_TEST_SUFFIXES = frozenset(
             "test_create_sigint_mid_stream_propagates_and_releases_child"
         ),
         (
-            "tests/agents/test_spawn_pane.py::"
+            "tests/agents/test_pane_journeys.py::"
             "test_late_codex_identity_composes_across_every_peer_surface"
         ),
         (
-            "tests/agents/test_spawn_pane.py::"
+            "tests/agents/test_pane_journeys.py::"
             "test_codex_autonomous_pane_journey_completes_without_operator_input"
         ),
         (

@@ -445,7 +445,7 @@ jobs:
       - name: Run the slow pane lane
         env:
           FNO_PYTEST_SHARD: "1/1"
-        run: uv run --project cli fno-py doctor test --stream cli/tests/agents/test_spawn_pane.py -m slow_e2e
+        run: uv run --project cli fno-py doctor test --stream cli/tests/agents/test_pane_journeys.py -- -m slow_e2e
 
   smoke-rest:
     needs: [pr-affected]

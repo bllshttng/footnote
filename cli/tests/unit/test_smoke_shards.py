@@ -203,7 +203,7 @@ def test_slow_e2e_lane_is_schedule_or_manual_only() -> None:
     )
     runs = "\n".join(step.get("run", "") for step in lane["steps"])
     assert "-m slow_e2e" in runs
-    assert "cli/tests/agents/test_spawn_pane.py" in runs
+    assert "cli/tests/agents/test_pane_journeys.py" in runs
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
