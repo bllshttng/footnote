@@ -154,7 +154,10 @@ mkdir -p "$ROOT_DIR/.fno/checkpoints"
 # provisions uv, then the published wheel with front door + agent binaries).
 if ! fno mux ls --json >/dev/null 2>&1; then
   echo "fno not found; installing via scripts/install/fno.sh..."
-  sh "$ROOT_DIR/scripts/install/fno.sh"
+  sh "$ROOT_DIR/scripts/install/fno.sh" || {
+    echo "fno install failed; run scripts/install/fno.sh manually to see why." >&2
+    exit 1
+  }
 fi
 
 # Scaffold settings.yaml with project vision placeholders if it doesn't exist
