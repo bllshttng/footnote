@@ -164,6 +164,31 @@ fn agents_history_route_tag_compares_normalized_model_but_resumes_exact_request(
 }
 
 #[test]
+fn agents_history_spawn_model_fallback_reports_first_turn_mismatch() {
+    let mut sources = specimen_sources(None, "");
+    sources.registry.as_mut().unwrap()[0]["model"] = json!("glm-5.3-flash");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    fs::write(
+        &path,
+        json!({
+            "type": "assistant",
+            "timestamp": "2026-09-23T14:01:16Z",
+            "message": {"model": "claude-opus-5-5"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let transcript = scan(&path).unwrap();
+
+    let lines = card(SID, &sources, Some(&transcript)).join("\n");
+    assert!(lines.contains("spawn glm-5.3-flash (registry model)"));
+    assert!(lines.contains(
+        "spawned asking for glm-5.3-flash, first turn answered as claude-opus-5-5 at 2026-09-23T14:01:16Z"
+    ));
+}
+
+#[test]
 fn agents_history_receipts_resolve_short_and_row_names_and_render_verbatim_resume() {
     let mut sources = empty_sources();
     sources.receipts = Ok(vec![receipt(

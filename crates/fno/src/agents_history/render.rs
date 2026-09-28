@@ -149,13 +149,10 @@ pub(super) fn card(
             ));
         }
     }
-    if let (Some(requested), Some(first)) = (
-        registry.and_then(|row| str_at(row, "requested_model")),
-        runs.first(),
-    ) {
-        if normalize_model(requested) != normalize_model(&first.model) {
+    if let Some(first) = runs.first() {
+        if model != "unknown" && normalize_model(model) != normalize_model(&first.model) {
             lines.push(format!(
-                "switch:     spawned asking for {requested}, first turn answered as {} at {}",
+                "switch:     spawned asking for {model}, first turn answered as {} at {}",
                 first.model,
                 first.first_ts.as_deref().unwrap_or("time unknown")
             ));
