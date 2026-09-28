@@ -142,7 +142,9 @@ Start the row's Action cell with one of three words:
 
 - `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
 - `Delete` - the row removes Python and adds none.
-- `Grant d-XXXXXXXX +N` - the superuser ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`, and the row declares the added lines it spends as `+N`. The rows are summed against `config.blueprint.python_repair_added_lines` (default 30). A Grant with no `+N` is a finding.
+- `Grant d-XXXXXXXX +N` - cite a live approval. Its subject must be the plan's node, or its decision text must name this row's path. General laws, including the Python repair law, do not approve a change by themselves. A row can cite a general law with its approval. The gate reads every cited id. Use `+N` for added lines. The gate sums Grant rows against `config.blueprint.python_repair_added_lines` (default 30). A Grant without `+N` is a finding.
+
+Before writing a Grant row, run `fno backlog decisions <node>` and find the approval. If none exists, ask the king with `fno inbox outstanding ask "<question>" --node <node>`. Stop before validation. The scope gate warns on plans created on or before its gate date.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
@@ -561,6 +563,17 @@ class.
 The same shape and fail-closed rules as `done_probes`: block form or
 single-line inline list, at most 3, a 60s native timeout, 127/non-zero/timeout
 all fail closed with the command and code named.
+
+### The main-ci repair proof
+
+A node that repairs a red main closes on its merge while main is still red unless its plan says otherwise. The built-in proof covers exactly that case. A repair plan declares it as one close_probes entry, and the node stays open until main's own verdict turns green on a commit containing the fix.
+
+```yaml
+close_probes:
+  - "fno-agents probe-run main-ci --workflow cli-ci --node <id>"
+```
+
+It resolves the node's merged PR and merge commit, then reads the newest completed verdict for that exact workflow on main. When that verdict is `success` on a head containing the merge commit, the proof exits 0. Any other answer exits nonzero with one named word: `red`, `pending`, `absent`, `stale`, `ambiguous`, or `unreadable`. The close verbs keep the node open, quoting that word in the refusal. A workflow renamed between the fix landing and the proof reads `absent`, which fails closed until the plan's probe is edited. Nothing is inferred from prose: a plan that declares no probe closes exactly as before.
 
 ## Join posture (step 3, every plan carrying an `## Execution Strategy`)
 

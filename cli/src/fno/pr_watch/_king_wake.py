@@ -526,12 +526,6 @@ def run_king_wake(
         from fno.agents.session_truth import resolve_session_truth
 
         truth_fn = resolve_session_truth
-    if unread_fn is None:
-        from fno.bus.cursor import scan_unread
-        from fno.bus.log import iter_messages
-
-        # One bus read per pass, not one per address: a crown has up to nine.
-        unread_fn = partial(scan_unread, messages=list(iter_messages()))
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
@@ -572,16 +566,35 @@ def run_king_wake(
         finally:
             pool.shutdown(wait=False)
 
+    def _setup_bounded(step, fn, *args):
+        left = seconds_left_fn() if seconds_left_fn is not None else None
+        if left is not None and left < _KING_STEP_FLOOR_S:
+            return None, True
+        if step:
+            _step(step)
+        return _bounded(fn, *args, wait_s=_wait_cap(left))
+
+    if unread_fn is None:
+        from fno.bus.cursor import scan_unread
+        from fno.bus.log import iter_messages
+
+        # One bus read per pass, not one per address: a crown has up to nine.
+        scanned, _bus_cut = _setup_bounded(None, lambda: list(iter_messages()))
+        unread_fn = partial(scan_unread, messages=scanned or [])
+
+    def _note(msg: str) -> None:
+        prior = str(summary.get("note") or "")
+        summary["note"] = f"{prior}; {msg}" if prior else msg
+
     def _budget_stop() -> dict[str, Any]:
-        budget_note = (
-            f"budget spent after {summary['evaluated']} of {len(targets)} crowns"
-        )
-        summary["note"] = f"{note}; {budget_note}" if note else budget_note
+        # Appends, never clobbers: a stop keeps the note naming why.
+        _note(f"budget spent after {summary['evaluated']} of {len(targets)} crowns")
         summary["budget_spent"] = True
         return summary
 
-    _step("court")
-    targets, note = _crowned(court_fn, rows_fn)
+
+    outcome, court_cut = _setup_bounded("court", _crowned, court_fn, rows_fn)
+    targets, note = outcome or ([], "court read did not complete in its slice bound")
     summary: dict[str, Any] = {
         "armed": True,
         "crowns": len(targets),
@@ -591,10 +604,10 @@ def run_king_wake(
         "evaluated": 0,
         "note": note,
     }
-    _step("answers")
     # One question-journal read per tick, shared by every scope like `entries`.
     try:
-        answered_records: list = answered_fn()
+        answered, _answers_cut = _setup_bounded("answers", answered_fn)
+        answered_records: list = answered or []
     except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
         answered_records = []
 
@@ -650,8 +663,8 @@ def run_king_wake(
                 _step("graph")
                 entries, cut = _bounded(entries_fn, wait_s=_wait_cap(left))
                 if cut:
-                    summary["note"] = "graph read timed out; crowns wait for the next tick"
-                    return _budget_stop()
+                    entries = []
+                    _note("graph read timed out; board triggers wait for the next tick")
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
             _step("board")

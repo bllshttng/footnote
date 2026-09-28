@@ -125,7 +125,7 @@ mod budget;
 mod ci_checks;
 mod coverage;
 mod coverage_classify;
-mod coverage_status;
+pub(crate) mod coverage_status;
 mod findings;
 mod fire_history;
 mod gh_read;
@@ -211,9 +211,7 @@ use local_attestation::{
     zero_evidence_attestation, LocalPass,
 };
 pub use local_attestation::{disposition_blockers, mark_owed_verdicts, rounds_since_last_pass};
-#[cfg(test)]
-use plan_fidelity::classify_plan_fidelity;
-use plan_fidelity::{evaluate_plan_fidelity, FidelityGate, FIDELITY_TIMEOUT};
+use plan_fidelity::FIDELITY_TIMEOUT;
 #[cfg(test)]
 use posture::resolved_required_bots;
 use posture::{
@@ -435,6 +433,14 @@ pub(crate) fn decide_with_payload(
             return (0, out);
         }
     };
+
+    // The merge posture of this run, read once with the same parser finalize
+    // uses to arm. `Some(false)` is a per-run no-merge: the merge belongs to
+    // whoever holds the merge slot at the end (usually the operator), so the
+    // stop-time fidelity gate below must not wedge the worker on a block the
+    // merge gate re-enforces at merge time anyway.
+    let manifest_fields = crate::finalize::parse_manifest_fields(&manifest_content);
+    let manifest_no_merge = manifest_fields.auto_merge_approved == Some(false);
 
     // Lease renewal: keep this session's node claim fresh on every
     // stop, so a worker whose supervisor pid died mid-run (and now runs under a
@@ -1369,38 +1375,39 @@ pub(crate) fn decide_with_payload(
 
                 // plan fidelity: the stop-gate half of AC5. A plan whose
                 // declared deliverables did not all ship blocks DonePRGreen until
-                // each shortfall carries a carveout - the agent files one and the
-                // next eval passes. Gated on the same conjuncts as done_probes and
-                // fail-open on a stale/missing fno (the merge gate is the backstop).
+                // each shortfall carries a carveout. plan_fidelity owns the read
+                // and the delegated-merge park that skips it for a run whose
+                // merge someone else lands.
                 let mut fidelity_block: Option<String> = None;
+                let mut merge_owner: Option<String> = None;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     let fno_bin = std::ffi::OsString::from(loopcheck_fno_bin());
-                    match evaluate_plan_fidelity(
+                    let read = plan_fidelity::green_conjunct_read(
+                        manifest_no_merge,
+                        manifest_fields.auto_merge_source.as_deref(),
+                        node_id.as_deref(),
                         manifest.plan_path.as_deref(),
-                        &fno_bin,
                         &cwd,
-                        // The 60s ceiling, clamped to the fire budget: a
-                        // fidelity probe is a stop-gate read like any other,
-                        // and one read must not spend more than the fire
+                        pr_info.number,
+                        &pr_info.head_oid,
+                        // The 60s ceiling, clamped to the fire budget: one
+                        // stop-gate read must not spend more than the fire
                         // still has before the harness kills the hook.
                         clamp_to_fire_deadline(FIDELITY_TIMEOUT),
-                    ) {
-                        FidelityGate::Refused { reason } => fidelity_block = Some(reason),
-                        // Degraded fails OPEN on the stop decision (same as Absent - a
-                        // hung probe must not wedge the gate that lets a finished
-                        // session stop), but is emitted here so it is never a SILENT
-                        // pass: a probe that keeps timing out stays visible in the
-                        // event log even though it never blocks.
-                        FidelityGate::Degraded { reason } => emit(
-                            "loop_check_fidelity_degraded",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "plan_path": manifest.plan_path,
-                                "reason": reason
-                            }),
-                        ),
-                        _ => {}
-                    }
+                        fno_bin.as_os_str(),
+                        |reason| {
+                            emit(
+                                "loop_check_fidelity_degraded",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "plan_path": manifest.plan_path,
+                                    "reason": reason
+                                }),
+                            );
+                        },
+                    );
+                    fidelity_block = read.block;
+                    merge_owner = read.merge_owner;
                 }
 
                 let (reviewed, probes_passed) = (
@@ -1543,6 +1550,10 @@ pub(crate) fn decide_with_payload(
                             pr_info.number
                         ),
                         None => format!("PR #{} is green and reviewed", pr_info.number),
+                    };
+                    let done_msg = match merge_owner {
+                        Some(owner) => format!("{done_msg}; merge owned by {owner}"),
+                        None => done_msg,
                     };
                     term_row("DonePRGreen", &done_msg);
                     fire_row(

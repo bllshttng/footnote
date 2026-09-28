@@ -66,6 +66,13 @@ fn open_composer(h: &mut ClientHarness) {
     type_and_settle(h, OPEN);
 }
 
+/// A harness picker row paints `✓ name` when it is the draft value, `• name`
+/// otherwise. The first-run preselect is claude, so either glyph is possible
+/// for any row; match rows under both.
+fn harness_row(s: &str, name: &str) -> bool {
+    s.contains(&format!("\u{2713} {name}")) || s.contains(&format!("\u{2022} {name}"))
+}
+
 /// Pick Claude through the harness chip's picker, then open the model
 /// picker. Chip-row grammar: Enter on a chip opens its picker, typing
 /// filters, Enter commits and closes.
@@ -76,17 +83,13 @@ fn pick_claude_and_open_model_picker(h: &mut ClientHarness) {
     type_and_settle(h, b"\r");
     // The picker lists the catalog's selectable (installed) harnesses once
     // the read lands. A clean CI home has only the fake bins, so the draft
-    // default (agy) may have no row at all: wait for installed rows, never
-    // for the check glyph.
-    h.wait_screen(35, |s| {
-        s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
-    });
+    // default may have no row at all: wait for installed rows, under either
+    // glyph.
+    h.wait_screen(35, |s| harness_row(s, "claude") && harness_row(s, "codex"));
     type_and_settle(h, b"claude");
     // codex vanishing proves the query narrowed the picker; claude alone
     // stays. Neither side of this test leans on the draft default.
-    h.wait_screen(35, |s| {
-        !s.contains("\u{2022} codex") && s.contains("\u{2022} claude")
-    });
+    h.wait_screen(35, |s| harness_row(s, "claude") && !harness_row(s, "codex"));
     type_and_settle(h, b"\r");
     // The committed chip reads `claude` with its caret padding; the filter
     // title never does.
@@ -130,11 +133,11 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
         screen.contains("+") && screen.contains("auto"),
         "the bottom row paints the plus and mode chips: {screen}"
     );
-    // The harness chip's value lands when the catalog read does (agy sorts
-    // first off the compile-time table).
-    let screen = h.wait_screen(35, |s| s.contains("agy"));
+    // The harness chip's value lands when the catalog read does; the
+    // first-run preselect is claude, per the harness-preselect ruling.
+    let screen = h.wait_screen(35, |s| s.contains("claude  \u{25be}"));
     assert!(
-        screen.contains("agy"),
+        screen.contains("claude  \u{25be}"),
         "the harness chip shows its value: {screen}"
     );
     // The tab strip is gone: no axis names paint.
@@ -151,6 +154,10 @@ fn project_picker_lists_projects_and_enter_never_launches() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
+    // Wait out the facts probe so the Branch/Worktree chips (painted while
+    // facts are unread) no longer sit between Project and the input; this
+    // scratch is not a git repo, so the pair hides once the probe lands.
+    h.wait_screen(15, |s| !s.contains("worktree"));
     // Shift-Tab from the input lands on the Project chip; Enter drops its
     // picker (title `project`).
     type_and_settle(&mut h, b"\x1b[Z");
@@ -277,7 +284,9 @@ fn narrow_terminal_wraps_the_right_chip_group() {
     wait_input(&mut h);
     open_composer(&mut h);
     h.wait_screen(10, |s| s.contains("new agent"));
-    let screen = h.wait_screen(35, |s| s.contains("agy"));
+    // The chip value is the first-run preselect claude, painted when the
+    // catalog read lands.
+    let screen = h.wait_screen(35, |s| s.contains("claude  \u{25be}"));
     // The left group's `+  auto` row and the right group's harness chip sit
     // on different screen rows. The two-space gap pins the match to the
     // sheet's chip row, never the sidebar's `+ new workspace`.
@@ -285,12 +294,12 @@ fn narrow_terminal_wraps_the_right_chip_group() {
         .lines()
         .position(|l| l.contains("+  auto"))
         .expect("the left chip group paints");
-    let harness_row = screen
+    let harness_line = screen
         .lines()
-        .position(|l| l.contains("agy"))
+        .position(|l| l.contains("claude  \u{25be}"))
         .expect("the harness chip paints");
     assert_ne!(
-        plus_row, harness_row,
+        plus_row, harness_line,
         "the right group wrapped to its own row:\n{screen}"
     );
 }
@@ -303,6 +312,10 @@ fn project_chip_focus_shows_the_working_directory_line() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
+    // While the facts probe is in flight the Branch/Worktree chips paint
+    // between Project and the input and would eat the BackTab; this scratch
+    // is not a git repo, so the pair hides once the probe lands.
+    h.wait_screen(15, |s| !s.contains("worktree"));
     type_and_settle(&mut h, b"\x1b[Z"); // Project chip
     let screen = h.wait_screen(10, |s| s.contains("Working directory"));
     assert!(
@@ -319,6 +332,10 @@ fn where_chip_opens_the_local_and_placement_picker() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     open_composer(&mut h);
+    // Wait out the facts probe so the Branch/Worktree chips (painted while
+    // facts are unread) no longer sit between Project and the input; this
+    // scratch is not a git repo, so the pair hides once the probe lands.
+    h.wait_screen(15, |s| !s.contains("worktree"));
     // BackTab BackTab walks Message -> Project -> Where.
     type_and_settle(&mut h, b"\x1b[Z\x1b[Z");
     type_and_settle(&mut h, b"\r");
@@ -398,12 +415,7 @@ fn prefix_hint_bar_shows_at_once() {
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     wait_input(&mut h);
     type_and_settle(&mut h, PREFIX);
-    std::thread::sleep(Duration::from_millis(120));
-    let screen = h.screen();
-    assert!(
-        screen.contains("esc cancel"),
-        "the bar names esc cancel: {screen}"
-    );
+    let screen = h.wait_screen(10, |s| s.contains("esc cancel"));
     assert!(
         screen.contains("all keys"),
         "the bar sends the reader to ?: {screen}"
@@ -528,13 +540,9 @@ fn codex_model_tab_lists_the_codex_slugs() {
     // chip and drop its picker. Same grammar the claude helper exercises.
     type_and_settle(&mut h, b"\t\t\t");
     type_and_settle(&mut h, b"\r");
-    h.wait_screen(35, |s| {
-        s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
-    });
+    h.wait_screen(35, |s| harness_row(s, "claude") && harness_row(s, "codex"));
     type_and_settle(&mut h, b"codex");
-    h.wait_screen(35, |s| {
-        !s.contains("\u{2022} claude") && s.contains("\u{2022} codex")
-    });
+    h.wait_screen(35, |s| harness_row(s, "codex") && !harness_row(s, "claude"));
     type_and_settle(&mut h, b"\r");
     h.wait_screen(35, |s| s.contains("codex  \u{25be}"));
     type_and_settle(&mut h, b"\t");
@@ -549,3 +557,51 @@ fn codex_model_tab_lists_the_codex_slugs() {
 
 #[allow(dead_code)]
 fn unused_path_helper(_: PathBuf) {}
+#[test]
+fn model_picker_shows_the_flagship_and_the_seeded_provider_group() {
+    // AC5-HP / AC7-HP preamble: a deepseek provider record and a fresh
+    // models.dev cache land in the scratch home, so the claude Model
+    // picker paints the flagship row under `harness default` and a
+    // deepseek group without a network fetch. The CI mux job ships no
+    // Python CLI, so the config reads may not land; the assertion accepts
+    // the named unavailable surface (the two-surface rule).
+    let scratch = Scratch::new("composer-model-picker-rows");
+    let dir = scratch.0.join("home").join(".fno");
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        "[model_routing.providers.deepseek]\n\
+         protocol = \"anthropic\"\n\
+         base_url = \"https://api.deepseek.com/anthropic\"\n\
+         api_key_env = \"FNO_TEST_DS_KEY\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("cache").join("models-dev.json"),
+        r#"{"deepseek":{"name":"DeepSeek","env":["DEEPSEEK_API_KEY"],"api":"https://api.deepseek.com","npm":"@ai-sdk/anthropic","models":{"deepseek-chat":{"id":"deepseek-chat","name":"DeepSeek V3"}}}}"#,
+    )
+    .unwrap();
+    let mut envs = with_fake_harnesses(&scratch);
+    envs.push(("FNO_TEST_DS_KEY", "x".to_string()));
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    pick_claude_and_open_model_picker(&mut h);
+    let screen = h.wait_screen(35, |s| s.contains("harness default"));
+    if screen.contains("model list unavailable") {
+        return; // the config reads never landed; the notice is the surface
+    }
+    assert!(
+        screen.contains("deepseek"),
+        "the seeded provider group renders: {screen}"
+    );
+    assert!(
+        screen.contains("flagship"),
+        "the flagship row paints under the default: {screen}"
+    );
+    assert!(
+        screen.contains("opus"),
+        "the flagship names the floor lead: {screen}"
+    );
+}

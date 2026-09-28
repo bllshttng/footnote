@@ -335,6 +335,16 @@ def remaining_label(handle) -> Optional[str]:
     return f"~{math.ceil(seconds / 60)}m"
 
 
+def gate_answer_in_process(token: str) -> Optional[str]:
+    """C15 own pass and lapsed-clock rule, for when no gate binary resolves."""
+    from fno.agents import dispatch
+    from fno.agents.self_stamp import resolve_self_session_id
+    own = resolve_self_session_id()
+    if (own and own.casefold() == token.casefold()) or lapsed(token):
+        return None
+    return dispatch.BUS_ONLY_POLICY
+
+
 def bounce_reason(recipient) -> Optional[str]:
     """The busy-mode receipt a sender reads, or None when no hold is running.
 
@@ -347,9 +357,14 @@ def bounce_reason(recipient) -> Optional[str]:
     """
     from fno import rust_binary
 
+    # A row cannot ride the token door (str(row) matches no gate key).
+    row_like = hasattr(recipient, "harness_session_id") or hasattr(recipient, "name")
     binary = rust_binary.resolve_installed_binary()
-    if binary is None:
-        return None
+    if row_like or binary is None:
+        hold = read_any(recipient)
+        if hold is None or hold.until is None or hold.until <= _now():
+            return None
+        return clock_description(hold)
     try:
         proc = subprocess.run(
             [str(binary), "mail-hold", "--gate", "--session", str(recipient)],

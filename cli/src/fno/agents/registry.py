@@ -39,6 +39,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -334,11 +335,9 @@ class AgentEntry:
     model: Optional[str] = None
     # The basis for `model`: "requested" (stamped at spawn from the
     # flag or route the caller named) or "verified" (read back from a verified
-    # pane status). A bare model is two facts in one field - the
-    # shape - so the pair travels together. None on rows that predate the
-    # field or carry no model. Additive-optional; stays OUT of the list-row
-    # projection (model is a projection omission by standing ruling: intended
-    # configuration must not surface as observed runtime truth).
+    # pane status). A bare model is two facts in one field, so the pair travels
+    # together, and the list row projects both. None on rows that predate the
+    # field or carry no model.
     model_basis: Optional[str] = None
     effort: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
@@ -1325,6 +1324,33 @@ def _validate_resolvable_handle(entry: AgentEntry) -> None:
     )
 
 
+class RegistryWriteRefused(RuntimeError):
+    """The shared-registry write guard, Python's mirror of ``registry_guard::check``."""
+
+
+def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:
+    sh = (Path.home() / ".fno" / "agents" / "registry.json").resolve()
+    if sh != target.resolve() or sh.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        return  # another target is the caller's own store; a sandboxed HOME has no real registry
+    if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":
+        raise RegistryWriteRefused(
+            f"refusing {target}: a test or probe process never writes the shared registry; "
+            "pin its state dir (config.paths.agents_registry_path) instead."
+        )
+    if os.environ.get("FNO_REGISTRY_ALLOW_ROW_LOSS") == "1":
+        return
+    live = _OWNERSHIP_LIVE_STATUSES
+    before = sum(
+        r.get("status") in live for r in (raw or {}).get("agents", []) if isinstance(r, dict)
+    )
+    after = sum(e.status in live for e in entries)
+    if before >= 2 and after * 2 < before:
+        raise RegistryWriteRefused(
+            f"refusing {target}: this write drops live registry rows from {before} to {after}; "
+            "set FNO_REGISTRY_ALLOW_ROW_LOSS=1 when the drop is deliberate."
+        )
+
+
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
     """Atomically write the registry to disk.
 
@@ -1338,6 +1364,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     raw = _read_raw_registry(target)
     _refuse_write_over_newer_schema(raw, target)
     _refuse_source_ahead_schema_bump(raw, target)
+    _refuse_probe_or_row_loss_write(target, raw, entries)
     existing = _existing_row_names(raw)
     for e in entries:
         _validate_single_live_ref(e)
@@ -1491,6 +1518,7 @@ def repair_registry_schema(
         raw, plan = _plan_registry_schema_repair(raw, target, to_version)
         if not apply:
             return plan
+        _refuse_probe_or_row_loss_write(target, raw, raw["agents"])
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup = target.with_name(f"{target.name}.bak.schema-repair-{stamp}")
         backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1990,6 +2018,18 @@ def register_existing_session(
     # anycast or a lane cap.
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
+    # A restore can strip a row's stamp; a manifest naming this session re-stamps it when bare.
+    from fno.king.state import manifest_crown_for_session
+
+    manifest_crown = manifest_crown_for_session(session_id, owner_cwd=cwd)
+
+    def _apply_manifest_crown(entry: AgentEntry) -> None:
+        if manifest_crown and not entry.crown_scope:
+            digits = manifest_crown.get("crown_level") or ""
+            entry.crown_level = int(digits) if digits.isdecimal() else None
+            entry.crown_scope = manifest_crown["crown_scope"]
+            entry.crown_grantor = manifest_crown.get("crown_grantor") or None
+
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         def _address_is_taken(
             token: str,
@@ -2119,6 +2159,7 @@ def register_existing_session(
                 # the current one is the wrong answer to keep.
                 if last_message_at is not None:
                     entry.last_message_at = last_message_at
+                _apply_manifest_crown(entry)
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated, same_session_only=True):
@@ -2211,6 +2252,7 @@ def register_existing_session(
             if _DERIVED_SHORT_RE.match(derived) and not _address_is_taken(derived):
                 fresh.short_id = derived
         entries.append(fresh)
+        _apply_manifest_crown(fresh)
         return entries
 
     persisted = update_registry(_updater, path=registry_path)

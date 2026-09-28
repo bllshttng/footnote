@@ -25,6 +25,7 @@ from fno.tracker import (
 from fno.tracker import sidecar as sidecar_mod
 from fno.tracker.sidecar import Sidecar, load, save
 from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 from tests.fixtures.graph_seed import seed_graph
 
 
@@ -309,9 +310,11 @@ def test_sidecar_external_mode_missing_file_is_empty(tmp_path, monkeypatch, exte
         ("intake", ["intake", "someplan.md"]),
     ],
 )
-def test_create_verbs_refuse_on_external_backend(verb, args, monkeypatch):
+def test_create_verbs_refuse_on_external_backend(
+    verb, args, monkeypatch, tmp_path
+):
     # Every creation entry point must refuse on an external backend. The guard
-    # lives in _create_node_impl (add/idea) AND at the top of cmd_new,
+    # lives at the top of the native create path AND of cmd_new,
     # cmd_decompose, cmd_intake, which write through their own mutators. A guard
     # on only some reachable paths is decorative, so this exercises each path:
     # if a future creation verb bypasses the helper, this fails loudly.
@@ -320,6 +323,21 @@ def test_create_verbs_refuse_on_external_backend(verb, args, monkeypatch):
     from fno.cli import app
 
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    if verb in {"add", "idea"}:
+        # add and idea answer natively now; their guard rides the binary
+        # under the same backend selection (the door pins graph, so the
+        # github selection merges over it).
+        result = run_native_create(
+            tmp_path / "graph.json",
+            verb,
+            "t",
+            auto_difficulty=False,
+            extra_env={"FNO_TRACKER_BACKEND": "github"},
+        )
+        assert result.exit_code == 1, f"{verb} did not refuse: {result.output + result.stderr}"
+        assert "github" in (result.output + result.stderr)
+        assert "tracker" in (result.output + result.stderr).lower()
+        return
     result = CliRunner().invoke(app, ["backlog", *args])
     assert result.exit_code == 1, f"{verb} did not refuse: {result.output}"
     assert "github" in result.output

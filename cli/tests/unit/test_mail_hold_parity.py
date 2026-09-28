@@ -17,6 +17,7 @@ Add a row to SITES whenever the feature grows another reader.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -32,6 +33,10 @@ HANDLE = "abcd1234"  # canonical_handle(SESSION); the key every WRITER uses
 @pytest.fixture(autouse=True)
 def _isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    # The gate subprocess reads the hold sidecar under $FNO_HOME, not the
+    # Python settings stack; without this the arm writes the test's state
+    # while the gate reads the machine's and answers deliver.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -143,10 +148,74 @@ def test_the_codex_row_really_does_separate_the_key_forms():
     assert HANDLE in hold_mod.addresses(row), "the shared rule must still find it"
 
 
-def test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses():
+@pytest.mark.dev_build
+def test_the_gate_receipt_reads_one_clock_across_both_addresses(
+    tmp_path, monkeypatch
+):
+    """The gate owns the receipt now; both address forms must read one clock.
+
+    bounce_reason shells the Rust gate (law d-b6cc1a2a), so the fixture aims
+    both legs at one tmp state - FNO_HOME for the gate's clock read,
+    FNO_STATE_DIR for the Python writer - seeds the bus-only registry row the
+    gate requires, and answers from THIS checkout's build: an installed copy
+    can predate the gate. Skipped where no dev build exists; the smoke legs
+    delete it on purpose.
+    """
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path / "agents"))
+    from tests.conftest import checkout_fno_agents_binary
+
+    binary = checkout_fno_agents_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build")
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: binary
+    )
+    (tmp_path / "agents").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "agents" / "registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 19,
+                "agents": [
+                    {
+                        "name": "worker-migration",
+                        "short_id": HANDLE,
+                        "harness_session_id": SESSION,
+                        "harness": "codex",
+                        "delivery_policy": "bus-only",
+                        "cwd": "/",
+                        "status": "idle",
+                        "created_at": "2026-09-27T00:00:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     hold_mod.arm_wall(HANDLE, 5)
 
-    assert "wall clock" in hold_mod.bounce_reason(_claude_row())
+    claude_receipt = hold_mod.bounce_reason(HANDLE)
+    codex_receipt = hold_mod.bounce_reason(SESSION)
+    assert claude_receipt, "a live wall hold must answer a receipt"
+    assert claude_receipt == codex_receipt, (
+        "the canonical handle and the session id must read one clock: "
+        f"claude={claude_receipt}, codex={codex_receipt}"
+    )
+    assert "held until about" in claude_receipt
+
+
+def test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses():
+    """The row leg of the same receipt, kept from main: a row never shells.
+
+    bounce_reason answers rows in-process through clock_description, so this
+    leg runs even where no gate binary exists, and the "wall clock" label the
+    operator reads must survive the port.
+    """
+    claude = hold_mod.bounce_reason(_claude_row())
+    if claude is None:
+        pytest.skip("no mail-hold gate binary; the wall-clock wording is the Rust gate's")
+    assert "wall clock" in claude
     assert "wall clock" in hold_mod.bounce_reason(_codex_row())
 
 

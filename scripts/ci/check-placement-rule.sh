@@ -145,6 +145,14 @@
 #      it matches (the ambient root, CLAUDE_CONFIG_DIR, the regex-quoted
 #      arms) names its subject on purpose. Comparison only; it writes
 #      nothing there.
+#      crates/fno-agents/src/backlog/birth.rs joins ~/.claude/projects to
+#      birth a session row from the harness's own transcript tree: read-only,
+#      the same category as transcript_tail.rs. Footnote stores nothing there.
+#      crates/fno-agents/src/plans_path.rs reads the project's
+#      .claude/settings.local.json / .claude/settings.json - the
+#      plansDirectory tier of the plans-dir chain, i.e. Claude Code's own
+#      config (not footnote state); its inline tests write fixture copies
+#      under a tempdir. Nothing accumulates in either.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -261,6 +269,7 @@ cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
+crates/fno-agents/src/backlog/birth.rs
 crates/fno-agents/src/claude_vault.rs
 crates/fno-agents/src/capability_leaves.rs
 crates/fno-agents/src/slot_cutover.rs
@@ -311,6 +320,7 @@ crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_config_tmp.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/law_match.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
