@@ -80,13 +80,20 @@ impl View {
                 actions.push(AuxAction::ToggleSidelineLayout);
             }
             SettingsTab::Theme => {
-                // The four shipped palettes; the active one is marked. Enter on a
-                // name applies it (an explicit action, not a cursor-move preview).
-                for name in crate::theme::THEME_NAMES {
-                    let active = self.theme.name == name;
+                // The shipped palettes first, then the user's own
+                // ([mux.themes], latched at startup); the active one is
+                // marked. Enter on a name applies it (an explicit action, not
+                // a cursor-move preview).
+                let mut names: Vec<String> = crate::theme::THEME_NAMES
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect();
+                names.extend(self.user_themes.iter().map(|(n, _)| n.clone()));
+                for name in &names {
+                    let active = self.theme.name == name.as_str();
                     rows.push(PopupRow::Entry {
                         glyph: if active { "●".into() } else { "○".into() },
-                        label: name.into(),
+                        label: name.clone(),
                         hint: if active {
                             "active".into()
                         } else {
@@ -94,7 +101,7 @@ impl View {
                         },
                         enabled: true,
                     });
-                    actions.push(AuxAction::ApplyTheme(name.into()));
+                    actions.push(AuxAction::ApplyTheme(name.clone()));
                 }
             }
             SettingsTab::Keys => {

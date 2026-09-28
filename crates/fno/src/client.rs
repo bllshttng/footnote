@@ -1052,6 +1052,16 @@ struct View {
     /// `footnote-paper`, and `terminal` stays available as the no-op that
     /// inherits the emulator's own colors.
     theme: Theme,
+    /// The user's own themes (`[mux.themes.<name>]`), latched once at
+    /// startup from the same config read the chrome theme resolves through.
+    /// The picker lists them and `ApplyTheme` resolves through them; a
+    /// config edit lands on the next attach.
+    user_themes: Vec<(String, Theme)>,
+    /// A theme switch's ground repaint, staged by `ApplyTheme` when
+    /// `paint_background` is on and drained by the run loop's stdin branch:
+    /// the loop owns the compositor and the exit guard, so the handler can
+    /// only stage the intent here.
+    pending_ground: Option<PendingGround>,
     /// The board's work-queue cards, verbatim off the wire Layout. The
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
@@ -1954,6 +1964,18 @@ pub(crate) enum AuxAction {
     LaneColorSet(String, String, String),
 }
 
+/// A theme switch's ground repaint, staged by `ApplyTheme` and drained by
+/// the run loop's stdin branch. The loop owns the compositor and the exit
+/// guard, so the handler can only stage the intent here.
+struct PendingGround {
+    /// The OSC bytes to write now: the theme's `ground_set`, or
+    /// `GROUND_RESTORE` when the theme paints none.
+    osc: Vec<u8>,
+    /// The new compositor ground (the theme base), `None` when it paints
+    /// none.
+    ground: Option<Color>,
+}
+
 mod backlog_board;
 mod backlog_style;
 mod config_set;
@@ -2155,6 +2177,8 @@ impl View {
             search_esc: Vec::new(),
             hover_focus: true,
             theme: Theme::default_theme(),
+            user_themes: Vec::new(),
+            pending_ground: None,
             backlog: Vec::new(),
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
@@ -8107,6 +8131,10 @@ async fn attach_and_run(
         None
     };
     view.theme = theme;
+    // The user's own themes latch with the chrome theme: the picker lists
+    // them and ApplyTheme resolves through this table, so a mid-session
+    // config edit lands on the next attach - same posture as hover_focus.
+    view.user_themes = crate::digest_overlay::user_themes(Path::new(&cwd)).0;
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
     // than silently running the shipped default: a keyboard that quietly ignores
@@ -8288,7 +8316,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(
+    let mut guard = launch::begin(
         &mut stdin_rx,
         &splash_tx,
         &theme,
@@ -8977,6 +9005,7 @@ async fn attach_and_run(
                             } else {
                                 None
                             };
+                            drain_pending_ground(&mut view, &mut compositor, &mut guard);
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -11594,6 +11623,41 @@ async fn row_menu_mouse(
     Ok(())
 }
 
+/// The repaint a theme switch stages: the theme's OSC ground set, or
+/// `GROUND_RESTORE` when it paints none, plus the new compositor ground.
+/// `None` when the paint_background kill switch is off - the takeover never
+/// started, so a switch must not start one. The flag is an argument so
+/// tests never read the live config ladder.
+fn ground_repaint(theme: &Theme, paint: bool) -> Option<PendingGround> {
+    if !paint {
+        return None;
+    }
+    Some(PendingGround {
+        osc: crate::theme::ground_set(theme)
+            .unwrap_or_else(|| crate::theme::GROUND_RESTORE.to_vec()),
+        ground: match theme.base {
+            Color::Default => None,
+            c => Some(c),
+        },
+    })
+}
+
+/// Apply a staged theme-switch ground repaint: write the OSC bytes,
+/// move the compositor ground, and latch the exit restore. The takeover
+/// gate (paint_background) was already checked at arm time.
+fn drain_pending_ground(
+    view: &mut View,
+    compositor: &mut compositor::Compositor,
+    guard: &mut launch::TerminalGuard,
+) {
+    let Some(p) = view.pending_ground.take() else {
+        return;
+    };
+    let _ = raw_out(&p.osc);
+    compositor.set_ground(p.ground);
+    guard.latch_ground();
+}
+
 /// Run one aux-popup action (US4/US5). Menu entries open a surface or
 /// detach; settings toggles flip a session-local view flag and rebuild the modal
 /// so its glyph reflects the new state (the popup stays open for another toggle).
@@ -11693,9 +11757,19 @@ async fn execute_aux_action(
                 .unwrap_or_default();
             let (theme, warn) = crate::digest_overlay::theme_role_overrides(
                 Path::new(&cwd),
-                Theme::from_name(&name),
+                Theme::from_name_in(&name, &view.user_themes),
             );
             view.theme = theme;
+            // The ground is a terminal property, not a view one: swapping the
+            // theme alone left the OLD theme's OSC ground painted (the bug: a
+            // fresh launch showed the new ground, a live switch kept the old
+            // one). Stage the repaint for the run loop, which owns the
+            // compositor and the exit guard - GROUND_RESTORE when the new
+            // theme paints none.
+            view.pending_ground = ground_repaint(
+                &theme,
+                crate::digest_overlay::paint_background_enabled(Path::new(&cwd)),
+            );
             let notice = match spawn_config_set("mux.theme", &name).await {
                 Ok(()) => match warn {
                     None => format!("theme: {name}"),
