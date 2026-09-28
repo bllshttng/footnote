@@ -224,6 +224,14 @@ pub struct HarnessCapabilities {
     /// time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// The composer's `--` flag picker: this harness's launch flags,
+    /// captured once off its own `--help` (chip- and door-owned flags left
+    /// out). Each entry is the flag spelling plus ` <value>` when the flag
+    /// takes one. Absent where no capture exists (the harness is not
+    /// installed on the capturing machine); a typed flag missing from the
+    /// list still works as a verbatim pill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_flags: Option<Vec<String>>,
     pub resume: String,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,

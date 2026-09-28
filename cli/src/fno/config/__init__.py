@@ -3723,6 +3723,8 @@ class MuxBlock(BaseModel):
     # `mux.theme.brand` / `mux.theme.needs_you` (#rrggbb quoted dotted keys
     # in [mux], read by the Rust client) pin those two roles under any theme.
     theme: Optional[str] = None
+    # While a theme is active, paint the terminal's own palette from it (OSC 11/10/4); restore on exit.
+    paint_background: bool = True
 
     @field_validator("shell_integration", mode="before")
     @classmethod
