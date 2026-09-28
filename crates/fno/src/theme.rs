@@ -250,7 +250,10 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
         Role::Subtitle => (t.dim, Color::Default, 0),
         Role::Tab(true) => (t.brand, Color::Default, cell_flags::BOLD),
-        Role::Tab(false) => (t.dim, Color::Default, 0),
+        // Inactive tabs read in the theme's full text color, not dim: a dim
+        // label on the theme ground blends into it (the user's screenshot),
+        // and an unpicked section is still a choice worth reading.
+        Role::Tab(false) => (t.title, Color::Default, 0),
         Role::Footer => (t.dim, Color::Default, 0),
         Role::ScrollTrack => (t.dim, Color::Default, cell_flags::DIM),
         Role::ScrollThumb => (t.border, Color::Default, cell_flags::BOLD),
