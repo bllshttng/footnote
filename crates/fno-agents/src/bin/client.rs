@@ -1448,19 +1448,26 @@ async fn run(args: Vec<String>) -> i32 {
             // performs -- review MEDIUM 4); --here keeps the caller cwd. --fresh
             // is an accepted no-op alias. ensure_request_cwd then leaves the
             // explicit --cwd intact.
-            let (_fresh, here) = fresh_here_flags(&params);
+            let (_fresh, here) = fno_agents::spawn_cwd::fresh_here_flags(&params);
             let explicit_cwd = params.get("cwd").is_some();
             // Only spawn consumes the launch dir: an `agent.ask` follows its
             // registered session and takes cwd as `_cwd`, so it never takes the
             // canonical default nor the redirect note (a false diagnostic for a
             // non-consuming op -- review). spawn keeps the inverted default.
             let stamp = if !explicit_cwd && !here && method == "agent.spawn" {
-                match fno_agents::paths::canonical_repo_root(&caller) {
-                    Some(canon) => {
-                        note_fresh_redirect(&caller, &canon);
-                        canon
+                match fno_agents::spawn_cwd::node_cwd_or_refuse(&params, &caller) {
+                    Err(msg) => {
+                        eprintln!("fno-agents: refusing to dispatch: {msg}");
+                        return 2;
                     }
-                    None => caller,
+                    Ok(Some(project)) => project,
+                    Ok(None) => match fno_agents::paths::canonical_repo_root(&caller) {
+                        Some(canon) => {
+                            fno_agents::spawn_cwd::note_fresh_redirect(&caller, &canon);
+                            canon
+                        }
+                        None => caller,
+                    },
                 }
             } else {
                 caller
@@ -1750,7 +1757,7 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
         .get("cwd")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(canonicalize_cwd)
+        .map(fno_agents::spawn_cwd::canonicalize_cwd)
         .unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
@@ -2195,7 +2202,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let (cwd, surface_cwd) = if substrate == "pane" {
         (std::path::PathBuf::new(), false)
     } else {
-        resolve_dispatch_cwd(params)
+        let caller = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match fno_agents::spawn_cwd::node_cwd_or_refuse(params, &caller) {
+            Err(msg) => {
+                eprintln!("fno-agents: refusing to dispatch: {msg}");
+                return Some(2);
+            }
+            Ok(Some(project)) => {
+                let moved = project != caller;
+                (project, moved)
+            }
+            Ok(None) => fno_agents::spawn_cwd::resolve_dispatch_cwd(params),
+        }
     };
     let timeout = params
         .get("timeout")
@@ -4191,37 +4209,6 @@ fn ensure_request_cwd(method: &str, params: &mut Value, cwd: &std::path::Path) {
     }
 }
 
-/// Canonicalize a `--cwd` string to an absolute path, matching Python's
-/// `Path(cwd).resolve()`: prefer `std::fs::canonicalize`, falling back to a
-/// join against the caller cwd for a relative path that does not exist yet.
-/// Extracted from the previously-duplicated claude-ask / spawn cwd blocks.
-fn canonicalize_cwd(c: &str) -> std::path::PathBuf {
-    std::fs::canonicalize(c).unwrap_or_else(|_| {
-        let p = std::path::PathBuf::from(c);
-        if p.is_absolute() {
-            p
-        } else {
-            std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p)
-        }
-    })
-}
-
-/// Read the `fresh` / `here` booleans a caller set via `--fresh` /
-/// `--here`(`--in-place`). Both default to false: `--fresh` is an opt-in
-/// mechanism, never on by default at the client layer (the policy layer decides
-/// when to pass it -- AC3 keeps non-target verbs on caller cwd unless asked).
-fn fresh_here_flags(params: &Value) -> (bool, bool) {
-    let fresh = params
-        .get("fresh")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let here = params
-        .get("here")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    (fresh, here)
-}
-
 /// The spawn-control flags one gate evaluation honors: the `--force` and
 /// `--no-wait` CLI flags land in the spawn params as booleans. Both gate
 /// constructions (the daemon-bound codex-thread gate and the shared one)
@@ -4237,78 +4224,6 @@ fn gate_flags_from_params(params: &Value) -> fno_agents::spawn_gate::GateFlags {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     }
-}
-
-/// Pure cwd precedence for a spawn/ask dispatch: explicit `--cwd` > `--here`
-/// (caller) > default canonical. inverted the default: with no explicit
-/// cwd source the worker lands on the canonical root, so the identical command
-/// behaves the same regardless of where the launcher stands; `--here` is the
-/// explicit opt-in to keep the caller's cwd. `--fresh` is an accepted no-op
-/// alias (the default already resolves canonical). An unresolved canonical
-/// (None) falls back to the caller cwd, the safe side. No git / env / IO, so the
-/// precedence is unit-testable (Failure Modes > Invariants: `--cwd` is the
-/// highest-priority cwd source and wins over everything).
-fn effective_worker_cwd(
-    explicit_cwd: Option<std::path::PathBuf>,
-    _fresh: bool,
-    here: bool,
-    canonical: Option<std::path::PathBuf>,
-    caller: std::path::PathBuf,
-) -> std::path::PathBuf {
-    if let Some(c) = explicit_cwd {
-        return c; // explicit --cwd always wins
-    }
-    if here {
-        return caller; // --here: explicit opt-in to the caller's cwd
-    }
-    canonical.unwrap_or(caller) // default: canonical; caller on resolution failure
-}
-
-/// One-line stderr note when the default (or `--fresh` alias) actually moves the
-/// worker cwd off the caller's dir, so the redirect is never silent on any path,
-/// default included (Locked Decision 5; Failure Modes > Errors).
-fn note_fresh_redirect(caller: &std::path::Path, chosen: &std::path::Path) {
-    if chosen != caller {
-        eprintln!(
-            "fno-agents: dispatching from canonical main (default) ({}); pass --here to stay in this worktree",
-            chosen.display()
-        );
-    }
-}
-
-/// Resolve the worker cwd for a client-side (claude/codex) spawn/ask dispatch,
-/// honoring `--cwd` > `--here` (caller) > default canonical. Shells to git only
-/// on the default path (no `--cwd`, no `--here`); emits the redirect note on an
-/// actual move. Returns `(cwd, moved)` where `moved` is exactly the note
-/// condition, so a caller surfacing `cwd` in a receipt couples to the note with
-/// no second, divergent comparison (; gemini review). Single source of cwd
-/// truth for the two client-side dispatch blocks (claude `ask`, claude `spawn`).
-fn resolve_dispatch_cwd(params: &Value) -> (std::path::PathBuf, bool) {
-    let caller = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let explicit = params
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        // An empty --cwd is absent, never the empty-string path (Failure Modes >
-        // Boundaries; Python's `if cwd:` twin). Without this, canonicalize_cwd("")
-        // resolves to the caller dir and suppresses the canonical default -- the
-        // exact worktree leak this change prevents (review).
-        .filter(|s| !s.is_empty())
-        .map(canonicalize_cwd);
-    let (fresh, here) = fresh_here_flags(params);
-    // Default path (no explicit --cwd, no --here) resolves canonical; --fresh is
-    // now a no-op alias since canonical IS the default.
-    let default_path = explicit.is_none() && !here;
-    let canonical = if default_path {
-        fno_agents::paths::canonical_repo_root(&caller)
-    } else {
-        None
-    };
-    let chosen = effective_worker_cwd(explicit.clone(), fresh, here, canonical, caller.clone());
-    let moved = default_path && chosen != caller;
-    if moved {
-        note_fresh_redirect(&caller, &chosen);
-    }
-    (chosen, moved)
 }
 
 fn str_arg(
