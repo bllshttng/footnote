@@ -1,8 +1,11 @@
-//! `fno-agents pr-push` -- the one guarded push: fetch, rebase onto
-//! origin/main (or merge it when the branch already holds merges), preflight, read the in-flight state, push exactly once,
-//! print one receipt. Every push site in `skills/pr` calls this through
-//! `fno do pr push`, so a branch integrates origin/main before it moves and a queued CI
-//! run is never cancelled by a second push.
+//! `fno-agents pr-push` -- the one guarded push: fetch, integrate origin/main
+//! only when GitHub reports a reason (the PR reads dirty, or its base
+//! requires an up-to-date branch), preflight, read the in-flight state, push
+//! exactly once, print one receipt. Every push site in `skills/pr` calls
+//! this through `fno do pr push`, so a queued CI run is never cancelled by a
+//! second push, and a green, mergeable PR is never moved by a routine
+//! refresh (ruling 2026-09-28: each merge-only commit restarts CI and voids
+//! a head-scoped merge grant).
 //!
 //! The in-flight guard is heal's, promoted. heal used to hold a private copy
 //! of the re-read-and-push decision; this module is now the shared push
@@ -784,6 +787,27 @@ fn behind(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+/// The open PR's `mergeable_state` for the head branch, `None` when the
+/// branch has no open PR or the read fails. Every unreadable answer
+/// integrates nothing: a push never needs integration to succeed, and the
+/// ruling forbids a routine refresh, so uncertainty lands on pushing the
+/// branch as it stands.
+fn pr_merge_state(gh_bin: &str, cwd: &Path, branch: &str) -> Option<String> {
+    let raw = gh_api(
+        gh_bin,
+        cwd,
+        &format!("repos/{{owner}}/{{repo}}/pulls?state=open&head={{owner}}:{branch}"),
+        &[],
+    )
+    .ok()?;
+    let prs: Value = serde_json::from_str(&raw).ok()?;
+    prs.as_array()?
+        .first()
+        .and_then(|pr| pr.get("mergeable_state"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// One refusal line per commit in a `git log --format=%h%x1f%B%x1e` capture
 /// whose message cites a decision id no ruling carries. Records split on
 /// \x1e, the short sha joins its message on \x1f.
@@ -825,9 +849,125 @@ fn commit_citation_failures(log: &str) -> Vec<String> {
     failures
 }
 
+/// The integrate leg: bring the fetched base into the branch. A plain rebase
+/// drops every merge commit, so a branch that already merges origin/main
+/// merges the fetched base instead. The door depends on the status:
+/// needs_resolver LEFT the rebase in-progress (plain `fno do pr rebase`
+/// would dead-end on the dirty guard or abort the caller's resolutions),
+/// refused/failed aborted it. `Err` carries the exit code; nothing moved.
+fn integrate_origin_main(git: &str, cwd: &Path) -> Result<&'static str, i32> {
+    let merge_count = match run_labeled(
+        "pr-push",
+        git,
+        &["rev-list", "--merges", "--count", "origin/main..HEAD"],
+        cwd,
+        READ_TIMEOUT,
+    ) {
+        Ok((true, out, _)) => match out.trim().parse::<u64>() {
+            Ok(count) => count,
+            Err(_) => {
+                eprintln!(
+                    "pr-push: could not count merge commits on the branch (non-numeric output: {}); nothing moved",
+                    out.trim()
+                );
+                return Err(4);
+            }
+        },
+        Ok((false, _, err)) => {
+            eprintln!(
+                "pr-push: could not count merge commits on the branch (git failed: {}); nothing moved",
+                err.trim()
+            );
+            return Err(4);
+        }
+        Err(err) => {
+            eprintln!(
+                "pr-push: could not count merge commits on the branch ({err}); nothing moved"
+            );
+            return Err(4);
+        }
+    };
+    if merge_count == 0 {
+        let (rc, v) = crate::pr_rebase::phase_a("origin/main", cwd, git);
+        if rc != 0 {
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+            let files = v
+                .get("files")
+                .and_then(|f| f.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let door = match status {
+                "needs_resolver" => {
+                    "Resolve the conflicts, then run `fno do pr rebase --continue`, \
+                     and re-run the push."
+                }
+                "refused" => {
+                    "The rebase was aborted (a guardrail refused auto-resolution); \
+                     resolve by hand, then re-run the push."
+                }
+                "dirty" => "Commit or stash the working-tree changes, then re-run the push.",
+                _ => "The rebase was aborted; rebase by hand, then re-run the push.",
+            };
+            eprintln!(
+                "pr-push: the branch is not safely rebasable onto origin/main \
+                 (status {status}{}). {door}",
+                if files.is_empty() {
+                    String::new()
+                } else {
+                    format!("; files: {files}")
+                }
+            );
+            return Err(3);
+        }
+        Ok("rebase")
+    } else {
+        let (ok, _, _err) = match run_labeled(
+            "pr-push",
+            git,
+            &["merge", "--no-edit", "origin/main"],
+            cwd,
+            READ_TIMEOUT,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!(
+                    "pr-push: the branch is not safely rebasable onto origin/main \
+                     (status merge_failed). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push. ({err})"
+                );
+                return Err(3);
+            }
+        };
+        if !ok {
+            let files = crate::pr_rebase::conflict_files(git, cwd);
+            let _ = run_labeled("pr-push", git, &["merge", "--abort"], cwd, READ_TIMEOUT);
+            if files.is_empty() {
+                eprintln!(
+                    "pr-push: the branch is not safely rebasable onto origin/main \
+                     (status merge_failed). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push."
+                );
+            } else {
+                eprintln!(
+                    "pr-push: the branch is not safely rebasable onto origin/main \
+                     (status merge_conflict; files: {}). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push.",
+                    files.join(", ")
+                );
+            }
+            return Err(3);
+        }
+        Ok("merge")
+    }
+}
+
 /// The guarded push, verb entry. Sequence: refuse protected/dirty, fetch,
-/// measure behind-before, rebase onto origin/main (or merge it when the branch
-/// already holds merges; refuse on conflict, naming the resolver door), measure behind-after,
+/// measure behind-before, integrate origin/main only when GitHub reads the
+/// PR dirty or behind (rebase, or merge when the branch already holds
+/// merges; refuse on conflict, naming the resolver door; otherwise none),
+/// measure behind-after,
 /// compare against the fetched remote branch (refuse remote-only commits),
 /// preflight, in-flight read on the remote head, push exactly once (leased
 /// when the branch was rebased), stamp, receipt. Exit codes: 0 pushed, 1
@@ -939,115 +1079,22 @@ pub fn run_push(argv: &[String]) -> i32 {
     // (3) behind-before.
     let before = behind(&git, &cwd);
 
-    // (4) A plain rebase drops every merge commit, so preserve a branch that
-    // already merges origin/main by merging the fetched base instead.
-    let merge_count = match run_labeled(
-        "pr-push",
-        &git,
-        &["rev-list", "--merges", "--count", "origin/main..HEAD"],
-        &cwd,
-        READ_TIMEOUT,
-    ) {
-        Ok((true, out, _)) => match out.trim().parse::<u64>() {
-            Ok(count) => count,
-            Err(_) => {
-                eprintln!(
-                    "pr-push: could not count merge commits on the branch (non-numeric output: {}); nothing moved",
-                    out.trim()
-                );
-                return 4;
-            }
-        },
-        Ok((false, _, err)) => {
-            eprintln!(
-                "pr-push: could not count merge commits on the branch (git failed: {}); nothing moved",
-                err.trim()
-            );
-            return 4;
-        }
-        Err(err) => {
-            eprintln!(
-                "pr-push: could not count merge commits on the branch ({err}); nothing moved"
-            );
-            return 4;
-        }
-    };
-    let integrate = if merge_count == 0 {
-        // The door depends on the status: needs_resolver LEFT the rebase
-        // in-progress (plain `fno do pr rebase` would dead-end on the dirty
-        // guard or abort the caller's resolutions), refused/failed aborted it.
-        let (rc, v) = crate::pr_rebase::phase_a("origin/main", &cwd, &git);
-        if rc != 0 {
-            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("?");
-            let files = v
-                .get("files")
-                .and_then(|f| f.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let door = match status {
-                "needs_resolver" => {
-                    "Resolve the conflicts, then run `fno do pr rebase --continue`, \
-                     and re-run the push."
-                }
-                "refused" => {
-                    "The rebase was aborted (a guardrail refused auto-resolution); \
-                     resolve by hand, then re-run the push."
-                }
-                "dirty" => "Commit or stash the working-tree changes, then re-run the push.",
-                _ => "The rebase was aborted; rebase by hand, then re-run the push.",
-            };
-            eprintln!(
-                "pr-push: the branch is not safely rebasable onto origin/main \
-                 (status {status}{}). {door}",
-                if files.is_empty() {
-                    String::new()
-                } else {
-                    format!("; files: {files}")
-                }
-            );
-            return 3;
-        }
-        "rebase"
+    // (4) Integrate the fetched base ONLY when GitHub reports a reason: the
+    // PR reads dirty (a merge conflict), or its base requires an up-to-date
+    // branch (mergeable_state behind). A green, mergeable PR that is merely
+    // behind pushes as is: four merge-only commits on the specimen PR each
+    // restarted about 40 minutes of CI and voided the head-scoped merge
+    // grant (ruling 2026-09-28). An unreadable PR read integrates nothing.
+    let integrate = if before == "0" {
+        "none"
     } else {
-        let (ok, _, _err) = match run_labeled(
-            "pr-push",
-            &git,
-            &["merge", "--no-edit", "origin/main"],
-            &cwd,
-            READ_TIMEOUT,
-        ) {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!(
-                    "pr-push: the branch is not safely rebasable onto origin/main \
-                     (status merge_failed). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push. ({err})"
-                );
-                return 3;
-            }
-        };
-        if !ok {
-            let files = crate::pr_rebase::conflict_files(&git, &cwd);
-            let _ = run_labeled("pr-push", &git, &["merge", "--abort"], &cwd, READ_TIMEOUT);
-            if files.is_empty() {
-                eprintln!(
-                    "pr-push: the branch is not safely rebasable onto origin/main \
-                     (status merge_failed). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push."
-                );
-            } else {
-                eprintln!(
-                    "pr-push: the branch is not safely rebasable onto origin/main \
-                     (status merge_conflict; files: {}). The branch already merges origin/main, so the verb merged instead of rebasing; the merge was aborted. Merge origin/main by hand, resolve, commit, then re-run the push.",
-                    files.join(", ")
-                );
-            }
-            return 3;
+        match pr_merge_state(&a.gh_bin, &cwd, &branch).as_deref() {
+            Some("dirty") | Some("behind") => match integrate_origin_main(&git, &cwd) {
+                Ok(which) => which,
+                Err(rc) => return rc,
+            },
+            _ => "none",
         }
-        "merge"
     };
 
     // (5) behind-after.
