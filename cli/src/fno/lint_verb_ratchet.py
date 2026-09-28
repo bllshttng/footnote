@@ -46,10 +46,9 @@ COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 
 # Collapse-kept leaves the fno-agents binary serves natively after their
 # Python click leg retired (`backlog rank`'s lane pin answers in the binary
-# now; the create door took `backlog add` and `backlog idea`). The map row
-# stays: the mux menu binds the leaf and the Rust verb-baseline ratchet
-# reads the same row.
-NATIVE_SERVED_LEAVES = {"backlog rank", "backlog add", "backlog idea"}
+# now). The map row stays: the mux menu binds the leaf and the Rust
+# verb-baseline ratchet reads the same row.
+NATIVE_SERVED_LEAVES = {"backlog rank"}
 
 # Two people hit these gates cold within an hour and both reverse-engineered the
 # row format by reading the file. The refusal said what to do and not how, so it

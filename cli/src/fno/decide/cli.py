@@ -417,8 +417,9 @@ def backlog_decide_retract(
     """Compatibility forward to the native retract door (fno-agents).
 
     The retraction logic is native; this leaf exists so the old spellings
-    keep resolving and the pinned surface sets do not shift. Retractions
-    are append-only and have no inverse.
+    keep resolving and the pinned surface sets do not shift.
+
+    Retractions are append-only and have no inverse.
     """
     import os
 

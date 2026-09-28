@@ -47,7 +47,6 @@ config unset
 config schema
 # Track B, the backlog (L10-L11)
 # L10 capture and shape work
-backlog idea
 backlog get
 backlog next
 backlog ready
