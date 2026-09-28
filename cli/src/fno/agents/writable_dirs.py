@@ -180,9 +180,20 @@ def _state_roots() -> list[Path]:
     """
     out: list[Path] = []
     try:
-        from fno.paths import state_dir
+        from fno.paths import agents_registry_path, state_dir
 
-        out.append(state_dir())
+        root = state_dir()
+        out.append(root)
+        # A declared FNO_AGENTS_HOME resolves the registry ahead of the state
+        # root (AgentsHome::from_env parity), so on such machines the registry
+        # directory sits outside the grant above. Cover it then: create the
+        # directory (the existing-only filter would drop a missing one) and
+        # grant it. Default machines keep the one-root grant - the registry
+        # lives under the state root and needs nothing extra.
+        reg_dir = agents_registry_path().parent
+        if not reg_dir.resolve().is_relative_to(root.resolve()):
+            reg_dir.mkdir(parents=True, exist_ok=True)
+            out.append(reg_dir)
     except Exception:
         pass
     try:

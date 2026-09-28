@@ -3723,6 +3723,11 @@ class MuxBlock(BaseModel):
     # `mux.theme.brand` / `mux.theme.needs_you` (#rrggbb quoted dotted keys
     # in [mux], read by the Rust client) pin those two roles under any theme.
     theme: Optional[str] = None
+    # While a footnote theme is active, paint the terminal's own background,
+    # foreground and 16-color palette from the theme (OSC 11/10/4) and restore
+    # them on exit. Read by the interactive Rust client via mux_bool (same
+    # config ladder as hover_focus); default on.
+    paint_background: bool = True
 
     @field_validator("shell_integration", mode="before")
     @classmethod

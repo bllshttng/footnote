@@ -35,8 +35,14 @@ def fake_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return state
 
 
+def _agents_home(tmp_path: Path) -> str:
+    """The conftest-pinned FNO_AGENTS_HOME root: a declared home resolves the
+    registry ahead of the state root, so its directory rides every grant."""
+    return str(tmp_path / ".fno" / "agents")
+
+
 def test_state_root_is_always_granted(fake_state: Path, tmp_path: Path) -> None:
-    assert worker_writable_dirs(tmp_path) == [str(fake_state)]
+    assert worker_writable_dirs(tmp_path) == [str(fake_state), _agents_home(tmp_path)]
 
 
 def test_state_root_and_divergent_claims_root_both_granted(
@@ -58,7 +64,11 @@ def test_state_root_and_divergent_claims_root_both_granted(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
 
-    assert worker_writable_dirs(tmp_path) == [str(configured), str(claims_home)]
+    assert worker_writable_dirs(tmp_path) == [
+        str(configured),
+        _agents_home(tmp_path),
+        str(claims_home),
+    ]
 
 
 def test_granted_root_is_an_ancestor_of_the_live_claim_store(tmp_path, monkeypatch):
@@ -101,7 +111,7 @@ def test_plan_dir_is_granted_but_never_the_vault_above_it(
     monkeypatch.setattr("fno.paths.vault_root", lambda **kw: vault)
 
     got = worker_writable_dirs(tmp_path, plan_path=plans / "p.md")
-    assert got == [str(fake_state), str(plans)]
+    assert got == [str(fake_state), _agents_home(tmp_path), str(plans)]
     assert str(vault) not in got
 
 
@@ -115,7 +125,11 @@ def test_plan_dir_falls_back_to_the_configured_plans_dir(
     monkeypatch.setattr(
         "fno.paths.plans_content_dir", lambda project_root=None: plans
     )
-    assert worker_writable_dirs(tmp_path) == [str(fake_state), str(plans)]
+    assert worker_writable_dirs(tmp_path) == [
+        str(fake_state),
+        _agents_home(tmp_path),
+        str(plans),
+    ]
 
 
 def test_foreign_roots_ride_last_and_only_when_passed(
@@ -125,9 +139,10 @@ def test_foreign_roots_ride_last_and_only_when_passed(
     sibling.mkdir()
     assert worker_writable_dirs(tmp_path, foreign_roots=[sibling]) == [
         str(fake_state),
+        _agents_home(tmp_path),
         str(sibling),
     ]
-    assert worker_writable_dirs(tmp_path) == [str(fake_state)]
+    assert worker_writable_dirs(tmp_path) == [str(fake_state), _agents_home(tmp_path)]
 
 
 def test_missing_directory_is_not_granted(
@@ -136,14 +151,15 @@ def test_missing_directory_is_not_granted(
     """A grant naming a directory that is not there is refused by some harnesses
     and buys nothing on any of them."""
     assert worker_writable_dirs(tmp_path, foreign_roots=[tmp_path / "nope"]) == [
-        str(fake_state)
+        str(fake_state),
+        _agents_home(tmp_path),
     ]
 
 
 def test_set_is_deduplicated(fake_state: Path, tmp_path: Path) -> None:
     assert worker_writable_dirs(
         tmp_path, foreign_roots=[fake_state, fake_state]
-    ) == [str(fake_state)]
+    ) == [str(fake_state), _agents_home(tmp_path)]
 
 
 # --------------------------------------------------------------------------
@@ -366,13 +382,13 @@ def test_seam_export_publishes_the_set_for_the_rust_route(
 
     env: dict[str, str] = {}
     published = export_worker_writable_dirs(tmp_path, env)
-    # The state root, then the mail bus the seam creates so its grant survives
-    # the existing-only filter. A worker with the claim store and no mail bus
-    # holds its node and reports nothing.
+    # The state root, the registry's declared home, then the mail bus the seam
+    # creates so its grant survives the existing-only filter. A worker with the
+    # claim store and no mail bus holds its node and reports nothing.
     mail_bus = fake_state / "inbox" / "agents"
-    assert published == [str(fake_state), str(mail_bus)]
+    assert published == [str(fake_state), _agents_home(tmp_path), str(mail_bus)]
     assert env[WORKER_ADD_DIRS_ENV] == os.pathsep.join(
-        [str(fake_state), str(mail_bus)]
+        [str(fake_state), _agents_home(tmp_path), str(mail_bus)]
     )
 
 
@@ -393,6 +409,9 @@ def test_seam_export_publishes_nothing_when_the_set_is_empty(
     monkeypatch.setattr(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
+    # The conftest pins FNO_AGENTS_HOME fleet-wide; without the declared home
+    # the registry rides the (missing) state root and the set stays empty.
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
     env: dict[str, str] = {}
     assert export_worker_writable_dirs(tmp_path, env) == []
     assert WORKER_ADD_DIRS_ENV not in env
@@ -454,6 +473,9 @@ def test_seam_export_clears_an_inherited_value(
     monkeypatch.setattr(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
+    # Same conftest pin as the empty-set test above: drop the declared home so
+    # the registry rides the missing state root and the set stays empty.
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
 
     env = {WORKER_ADD_DIRS_ENV: "/some/other/project"}
     assert export_worker_writable_dirs(tmp_path, env) == []
@@ -568,7 +590,11 @@ def test_mail_bus_is_granted_even_when_it_sits_outside_the_state_root(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
 
-    assert worker_writable_dirs(tmp_path) == [str(state), str(mail)]
+    assert worker_writable_dirs(tmp_path) == [
+        str(state),
+        _agents_home(tmp_path),
+        str(mail),
+    ]
 
 
 def test_mail_bus_under_the_state_root_is_listed_but_grants_nothing_new(
@@ -586,8 +612,8 @@ def test_mail_bus_under_the_state_root_is_listed_but_grants_nothing_new(
     monkeypatch.setattr("fno.paths.inbox_agents_root", lambda: bus)
 
     granted = worker_writable_dirs(tmp_path)
-    assert granted == [str(fake_state), str(bus)]
-    assert Path(granted[1]).is_relative_to(Path(granted[0]))
+    assert granted == [str(fake_state), _agents_home(tmp_path), str(bus)]
+    assert Path(granted[2]).is_relative_to(Path(granted[0]))
 
 
 def test_seam_creates_the_mail_bus_so_the_grant_is_not_dropped(
@@ -612,7 +638,7 @@ def test_seam_creates_the_mail_bus_so_the_grant_is_not_dropped(
     )
 
     # The resolver alone stays pure: it drops the absent directory.
-    assert worker_writable_dirs(tmp_path) == [str(state)]
+    assert worker_writable_dirs(tmp_path) == [str(state), _agents_home(tmp_path)]
 
     env: dict = {}
     published = export_worker_writable_dirs(tmp_path, env)
