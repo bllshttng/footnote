@@ -1,364 +1,92 @@
-"""`fno agents history` - one verb over live rows, reap receipts, ledger.
-
-Positive markers per the pitfalls corpus: assertions land on the printed
-field lines, never on "the command ran". The receipt's resume line is
-asserted byte-identical to a form the capability table does NOT declare, so
-a re-derivation fails the test instead of passing as a match.
-
-Fixtures mirror the real ReapReceipt shape written by
-crates/fno-agents/src/daemon.rs (row_name, short_id, harness,
-harness_session_id, cwd, log_path, created_at, reaped_at, resume, optional
-ledger enrichment) - a receipt the Rust writer would not produce is not a
-fixture this reader deserves.
-"""
+"""Owner-boundary tests for the native history forwarder."""
 
 from __future__ import annotations
 
-import json
-import re
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
-import pytest
 import typer
 from typer.testing import CliRunner
-from tests.fixtures.graph_seed import seed_graph
 
+import fno.agents.history as history_module
 from fno.agents.history import history_command
-from fno.agents.registry import AgentEntry
-
-_SID = "11111111-2222-3333-4444-555555555555"
-_REAPED_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-
-# Not any harness's declared interactive_resume form: if the verb re-derived
-# the command from the capability table, this byte-exact assert would fail.
-_REASUME_VERBATIM = "harness-quine --revive " + _REAPED_SID
 
 
-def _receipt(node: str | None = None, sid: str = _REAPED_SID) -> dict:
-    receipt = {
-        "row_name": "t-x6db9-worker",
-        "short_id": "tx6db9wor",
-        "harness": "claude",
-        "harness_session_id": sid,
-        "cwd": "/repo/wt",
-        "log_path": "/repo/wt/.fno/log",
-        "created_at": "2026-08-25T10:00:00Z",
-        "reaped_at": "2026-08-26T10:00:00Z",
-        "resume": _REASUME_VERBATIM,
+def _install_forwarder(monkeypatch, calls, slug):
+    configured = {
+        "graph_json": Path("/configured/graph.db"),
+        "ledger_json": Path("/configured/ledger.json"),
+        "global_events_json": Path("/configured/events.jsonl"),
+        "agents_home_dir": Path("/configured/agents"),
     }
-    if node is not None:
-        receipt["ledger"] = {"graph_node_id": node, "pr_number": 507}
-    return receipt
+    paths = SimpleNamespace(
+        **{name: (lambda path=path: path) for name, path in configured.items()}
+    )
+    monkeypatch.setattr(history_module, "_paths", paths)
+    monkeypatch.setattr(
+        history_module,
+        "resolve_current_repo_slug",
+        lambda cwd: slug,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_module,
+        "resolve_native_bin",
+        lambda: "/native/fno",
+        raising=False,
+    )
+    monkeypatch.setattr(os, "execv", lambda binary, argv: calls.append((binary, argv)))
+
+    return configured
 
 
-ROWS = [
-    {
-        "type": "execution",
-        "status": "done",
-        "graph_node_id": "x-3344",
-        "pr_number": 507,
-        "pr_url": "https://github.com/o/r/pull/507",
-        "plan_path": "/plans/x.md",
-        "root_path": "/wt/x",
-        "sessions": [_SID],
-        "provider": "zai",
-        "model": "glm-5.3[1m]",
-    },
-]
-
-GRAPH = {
-    "entries": [
-        {"id": "x-3344", "sessions": [{"session_id": _SID, "harness": "claude"}]},
+def _expected_argv(configured, slug):
+    argv = [
+        "fno",
+        "agents",
+        "history",
+        "x-3344",
+        "--graph",
+        str(configured["graph_json"]),
+        "--ledger",
+        str(configured["ledger_json"]),
+        "--events",
+        str(configured["global_events_json"]),
+        "--agents-home",
+        str(configured["agents_home_dir"]),
     ]
-}
+    if slug:
+        argv.extend(["--repo-slug", slug])
+    return argv
 
 
-def _paths(tmp_path, rows: list[dict], receipts: list[dict]):
-    ledger = tmp_path / "ledger.json"
-    graph = tmp_path / "graph.json"
-    ledger.write_text(json.dumps({"entries": rows}))
-    seed_graph(graph, GRAPH["entries"])
-    home = tmp_path / "agents-home"
-    if receipts:
-        (home / "reap-receipts").mkdir(parents=True)
-        for receipt in receipts:
-            name = f"{receipt['harness']}-{receipt['harness_session_id']}.json"
-            (home / "reap-receipts" / name).write_text(json.dumps(receipt))
-
-    class _P:
-        ledger_json = staticmethod(lambda: ledger)
-        graph_json = staticmethod(lambda: graph)
-        agents_home_dir = staticmethod(lambda: home)
-
-    return _P
+def test_forwarder_execs_resolved_paths_with_optional_repo_slug(monkeypatch):
+    calls = []
+    for slug in ("o/r", None):
+        configured = _install_forwarder(monkeypatch, calls, slug)
+        try:
+            history_command("x-3344")
+        except typer.Exit:
+            pass
+        assert calls and calls[-1] == ("/native/fno", _expected_argv(configured, slug))
 
 
-@pytest.fixture
-def history(tmp_path, monkeypatch, capsys):
-    def _install(rows=ROWS, receipts: list[dict] | None = None, entries=None, graph=None):
-        if graph is not None:
-            seed_graph(tmp_path / "graph.json", graph["entries"])
-        monkeypatch.setattr(
-            "fno.agents.history._paths", _paths(tmp_path, rows, receipts or [])
-        )
-        monkeypatch.setattr(
-            "fno.agents.registry.load_registry", lambda path=None: entries or []
-        )
-
-        def _run(arg: str) -> str:
-            code = 0
-            try:
-                history_command(arg)
-            except typer.Exit as exc:
-                code = exc.exit_code
-            out = capsys.readouterr().out
-            return out + f"\nEXIT={code}"
-
-        return _run
-
-    return _install
-
-
-def test_receipt_session_prints_resume_verbatim(history):
-    run = history(receipts=[_receipt()])
-    out = run(_REAPED_SID)
-    assert "resume:   " + _REASUME_VERBATIM in out
-    assert "harness:  claude" in out
-    assert "cwd:      /repo/wt" in out
-    assert "created_at:  2026-08-25T10:00:00Z" in out
-    assert "reaped_at:   2026-08-26T10:00:00Z" in out
-    assert "EXIT=0" in out
-
-
-def test_receipt_resolves_by_row_name_and_short_id(history):
-    # Nobody remembers a uuid, and the receipt filename is keyed on one, so
-    # the worker name is not in the path either. The same three keys
-    # `fno agents resume` matches.
-    run = history(receipts=[_receipt()])
-    by_name = run("t-x6db9-worker")
-    assert "name:     t-x6db9-worker" in by_name
-    assert "resume:   " + _REASUME_VERBATIM in by_name
-    assert "EXIT=0" in by_name
-
-    by_short = run("TX6DB9WOR")
-    assert "name:     t-x6db9-worker" in by_short
-    assert "EXIT=0" in by_short
-
-
-def test_a_reused_name_prints_every_receipt_newest_first(history):
-    older = _receipt(sid="00000000-1111-2222-3333-444444444444")
-    older["reaped_at"] = "2026-08-20T10:00:00Z"
-    run = history(receipts=[_receipt(), older])
-    out = run("t-x6db9-worker")
-    assert "2 receipts answer this handle, newest first" in out
-    assert out.index("2026-08-26T10:00:00Z") < out.index("2026-08-20T10:00:00Z")
-    assert "EXIT=0" in out
-
-
-def test_a_receipt_miss_names_the_keys_it_matched_against(history):
-    run = history(rows=[], receipts=[_receipt()])
-    out = run("t-nobody")
-    assert "harness_session_id, short_id, row_name" in out
-    assert "EXIT=1" in out
-
-
-def test_an_empty_receipt_field_never_matches_an_empty_handle(history):
-    blank = _receipt()
-    blank["row_name"] = ""
-    run = history(rows=[], receipts=[blank])
-    out = run("")
-    assert "receipt:  not recorded" in out
-
-
-def test_node_finds_receipt_through_ledger_enrichment(history):
-    # No ledger row for the node at all: the receipt's own enrichment is
-    # the join from work to session.
-    run = history(receipts=[_receipt(node="x-9f2e")])
-    out = run("x-9f2e")
-    assert _REAPED_SID in out
-    assert "resume:   " + _REASUME_VERBATIM in out
-    assert "EXIT=0" in out
-
-
-def test_node_finds_receipt_even_when_the_ledger_is_unreadable(history, tmp_path):
-    # A broken ledger must not downgrade a node arg to session kind: the
-    # receipt's own enrichment still answers, and the receipt section must
-    # never print a false absence for a file that is on disk.
-    (tmp_path / "ledger.json").write_text("{not json")
-    run = history(receipts=[_receipt(node="x-9f2e")])
-    out = run("x-9f2e")
-    assert "resume:   " + _REASUME_VERBATIM in out
-    assert "no reap receipt on disk" not in out
-
-
-def test_coverage_notes_survive_unhashable_session_elements(history, tmp_path):
-    # A corrupt row's sessions list can hold anything; the coverage notes
-    # degrade to 'not recorded' instead of crashing the whole verb.
-    corrupt = [dict(ROWS[0])]
-    corrupt[0] = {k: v for k, v in corrupt[0].items() if k != "sessions"}
-    corrupt[0]["sessions"] = [{"bad": 1}]
-    run = history(rows=corrupt)
-    out = run("x-3344")
-    assert "EXIT=0" in out
-
-
-def test_ledger_fields_match_whoami_ledger(history):
-    run = history()
-    out = run("x-3344")
-    assert "node:     x-3344" in out
-    assert "#507" in out
-    assert "/plans/x.md" in out
-    assert "/wt/x" in out
-    assert "status:   done" in out
-    assert "provider: zai" in out
-
-
-def test_live_row_reports_and_suppresses_its_receipt(history, tmp_path):
-    entry = AgentEntry(
-        name="t-live",
-        cwd="/repo/live",
-        log_path="/repo/live/.fno/log",
-        harness="claude",
-        harness_session_id=_SID,
-    )
-    run = history(
-        receipts=[_receipt(sid=_SID)],
-        entries=[entry],
-    )
-    out = run(_SID)
-    assert "live:" in out
-    assert "name:     t-live" in out
-    assert "no receipt is expected" in out
-    assert "row presence, not a liveness verdict" in out, out
-    assert "from:     " not in out  # the stale receipt is not reported
-
-
-def test_a_resumed_row_wins_its_own_name_over_a_stale_receipt(history):
-    """The receipt and the live row must answer the SAME handles.
-
-    A resumed session reappears under its old row name. Matching live rows on
-    the session id alone left the live set empty, so the suppression that
-    hides a stale receipt never fired and the retired paper was reported as
-    the present state of a running session.
-    """
-    entry = AgentEntry(
-        name="t-x6db9-worker",
-        cwd="/repo/live",
-        log_path="/repo/live/.fno/log",
-        harness="claude",
-        harness_session_id=_REAPED_SID,
-        short_id="tx6db9wor",
-    )
-    run = history(receipts=[_receipt()], entries=[entry])
-    for handle in ("t-x6db9-worker", "tx6db9wor", "T-X6DB9-WORKER"):
-        out = run(handle)
-        assert "name:     t-x6db9-worker" in out, out
-        assert _REASUME_VERBATIM not in out, out
-
-
-def test_total_miss_names_all_three_sources_and_exits_1(history):
-    run = history()
-    out = run("zz-not-a-thing")
-    assert "not recorded" in out
-    assert "no live row" in out
-    assert "no reap receipt on disk" in out
-    assert "no ledger row" in out
-    assert "EXIT=1" in out
-
-
-def test_legacy_row_session_says_not_recorded(history, tmp_path):
-    legacy = [dict(ROWS[0])]
-    legacy[0] = {k: v for k, v in legacy[0].items() if k != "sessions"}
-    run = history(rows=legacy)
-    out = run("x-3344")
-    assert "not recorded (ledger uuid coverage is write-path only; this row predates it)" in out
-    assert "node:     x-3344" in out
-    assert "#507" in out
-
-
-def test_legacy_node_key_resolves(history, tmp_path):
-    legacy = [dict(ROWS[0])]
-    legacy[0] = {k: v for k, v in legacy[0].items() if k != "graph_node_id"}
-    legacy[0]["node"] = "x-3344"
-    legacy[0]["node_id_unrecoverable"] = False
-    run = history(rows=legacy)
-    out = run("x-3344")
-    assert "node:     x-3344" in out
-
-
-def test_node_id_unrecoverable_named_not_dashed(history, tmp_path):
-    legacy = [dict(ROWS[0])]
-    legacy[0] = {k: v for k, v in legacy[0].items() if k != "graph_node_id"}
-    legacy[0]["node_id_unrecoverable"] = True
-    run = history(rows=legacy)
-    out = run(_SID)
-    assert "node:     not recorded (this row says node_id_unrecoverable)" in out
-
-
-def test_coverage_notes_name_missing_fields(history):
-    run = history()
-    out = run("x-3344")
-    assert "provider: zai" in out
-    assert "model:    glm-5.3[1m]" in out
-    bare = [dict(ROWS[0])]
-    bare[0] = {k: v for k, v in bare[0].items() if k not in ("provider", "model")}
-    run2 = history(rows=bare)
-    out2 = run2("x-3344")
-    assert "provider: not recorded" in out2
-    assert "model:    not recorded" in out2
-
-
-# --- AC7: the alias is hidden from help and still resolves -----------------
-
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def test_whoami_ledger_hidden_but_working(tmp_path, monkeypatch):
-    ledger = tmp_path / "ledger.json"
-    graph = tmp_path / "graph.json"
-    ledger.write_text(json.dumps({"entries": ROWS}))
-    seed_graph(graph, GRAPH["entries"])
-
-    class _P:
-        ledger_json = staticmethod(lambda: ledger)
-        graph_json = staticmethod(lambda: graph)
-
-    monkeypatch.setattr("fno.ledger_show._paths", _P)
+def test_whoami_ledger_alias_is_hidden_and_forwards_to_history(monkeypatch):
     from fno.agent.cli import whoami_app
 
+    calls = []
+    configured = _install_forwarder(monkeypatch, calls, "o/r")
     runner = CliRunner()
-    help_text = _ANSI_RE.sub("", runner.invoke(whoami_app, ["--help"]).output)
-    assert "ledger" not in help_text
+    assert "ledger" not in runner.invoke(whoami_app, ["--help"]).output
+
     result = runner.invoke(whoami_app, ["ledger", "x-3344"])
+    assert calls == [("/native/fno", _expected_argv(configured, "o/r"))]
     assert result.exit_code == 0
-    assert "#507" in result.output
-
-
-def test_a_revived_row_joins_live_through_the_receipt(history):
-    # The receipt answers the argument, and the session came back under a
-    # registry row re-created under its uuid-shaped name (the SessionStart
-    # register path). The live row joins through the receipt's session id,
-    # so history reports the session LIVE and suppresses its stale receipt:
-    # a live row and its receipt never both describe the present.
-    entry = AgentEntry(
-        name="footnote-" + _REAPED_SID,
-        cwd="/repo/wt",
-        log_path="",
-        harness="claude",
-        harness_session_id=_REAPED_SID,
-        status="idle",
-    )
-    run = history(receipts=[_receipt()], entries=[entry])
-    out = run("t-x6db9-worker")
-    assert "live:" in out
-    assert _REAPED_SID in out
-    assert "resume:   " + _REASUME_VERBATIM not in out
-    assert "EXIT=0" in out
 
 
 def test_agents_help_advertises_history():
     from fno.agents.cli import agents_app
 
-    runner = CliRunner()
-    help_text = _ANSI_RE.sub("", runner.invoke(agents_app, ["--help"]).output)
-    assert "history" in help_text
+    result = CliRunner().invoke(agents_app, ["--help"])
+    assert "history" in result.output

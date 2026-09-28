@@ -317,6 +317,26 @@ pub enum SandboxUnavailablePolicy {
     Warn,
 }
 
+/// How far the done-node arm may go on a done tree's uncommitted tracked
+/// work. `balanced` (the default) keeps the tree; `aggressive` lets the
+/// caller salvage the tracked diff to a salvage ref, then prune.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreePruneDone {
+    Balanced,
+    Aggressive,
+}
+
+/// Resolve `worktree.prune_done`. A missing or malformed value degrades to
+/// `balanced`: today's keep contract is the safe side of every typo.
+pub fn worktree_prune_done(cwd: &Path) -> WorktreePruneDone {
+    match config_lookup(cwd, &["worktree", "prune_done"]) {
+        Some(v) if scalar_to_string(&v).as_deref() == Some("aggressive") => {
+            WorktreePruneDone::Aggressive
+        }
+        _ => WorktreePruneDone::Balanced,
+    }
+}
+
 impl SandboxUnavailablePolicy {
     pub fn is_warn(self) -> bool {
         matches!(self, Self::Warn)
@@ -753,9 +773,12 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default freshness window for a single-flight answer. Matches the Pydantic
-/// default.
-pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
+/// Default freshness window for a single-flight answer. Raised from 10 s to
+/// one liveness cadence after the 1800 s reader-cost window measured the
+/// truth class at 7 concurrent children with 502 births: callers inside one
+/// cadence join the answering child instead of spawning their own. Matches
+/// the Pydantic default.
+pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 60;
 /// Default join budget. Over the 23.2 s worst-measured roster read, so a loaded
 /// box joins instead of timing out. Matches the Pydantic default.
 pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;

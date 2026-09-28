@@ -524,6 +524,7 @@ fn run_sync_with_shell(deps: &Deps, cwd: &Path, pr: u64, shell: &ShellRun) -> Sy
         reason: Some("single-flight: post-merge canonical sync".into()),
         metadata: None,
         pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
+        identity: None,
         root: Some(canonical.clone()),
         events_dir: None,
     };
@@ -1249,6 +1250,7 @@ mod tests {
             reason: Some("test".into()),
             metadata: None,
             pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
+            identity: None,
             root: Some(tmp.path().to_path_buf()),
             events_dir: None,
         };
@@ -1660,6 +1662,7 @@ mod tests {
             reason: Some("test".into()),
             metadata: None,
             pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
+            identity: None,
             root: Some(tmp.path().to_path_buf()),
             events_dir: None,
         };
