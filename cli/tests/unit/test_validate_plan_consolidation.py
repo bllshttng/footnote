@@ -392,13 +392,16 @@ def test_consolidation_entry_accepts_legacy_dashless_literal():
 
     A config prefix with no separator once minted such literals; a candidate
     the graph holds must be recordable here, or the gate cannot say what it
-    considered. The all-hex git-hash shape stays refused (extraction safety).
+    considered. The binding check is the graph's own predicate, so any shape
+    the graph mints (dashed or legacy bare) passes; only a non-id shape is
+    refused. Prose extraction keeps its own stricter grammar.
     """
     from fno.plan.schema import ConsolidationEntry
 
     assert ConsolidationEntry(id="x4d12", reason="parent epic, not a fold")
+    assert ConsolidationEntry(id="a3f9c1d2", reason="legacy bare id references too")
     with pytest.raises(Exception):
-        ConsolidationEntry(id="a3f9c1d2", reason="bare hash is not an id")
+        ConsolidationEntry(id="9abc", reason="not an id shape at all")
 
 
 def test_blueprint_owns_the_consolidation_frontmatter_key():

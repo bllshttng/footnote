@@ -1365,9 +1365,16 @@ mod tests {
         draw(&mut cells, 24, 80, &r, &theme);
         // Positive control: the popup drew its top-left border corner.
         assert!(cells.iter().any(|c| c.c == '╭'), "drew the border");
-        // Byte-identity: every cell is Default-colored.
+        // Byte-identity except the two named slots the terminal theme still
+        // colors: the border role (its own amber field, and any
+        // mux.theme.border override) and the brand accent on the key column.
+        let border = theme.border;
         for c in cells.iter() {
-            assert_eq!(c.fg, crate::proto::Color::Default);
+            assert!(
+                c.fg == crate::proto::Color::Default || c.fg == border || c.fg == theme.brand,
+                "unexpected fg {:?}",
+                c.fg
+            );
             assert_eq!(c.bg, crate::proto::Color::Default);
         }
     }
