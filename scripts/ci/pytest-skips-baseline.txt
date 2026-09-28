@@ -72,7 +72,7 @@ cli/tests/conftest.py::native_backlog_door::pytest.skip  # on main before this r
 cli/tests/conftest.py::pytest_collection_modifyitems::mark.skip  # on main before this ratchet
 cli/tests/conftest.py::pytest_collection_modifyitems::mark.skip  # the dev_build marker's hook-applied skip: the smoke pytest legs delete the dev build on purpose, so a marked test skips there (tests/test-dev-build-suites.sh runs it with the build present)
 cli/tests/events/test_producer_equivalence.py::test_resolver_reads_the_code_review_attestation_at_head::mark.skipif  # on main before this ratchet
-cli/tests/graph/test_backlog_search_fts.py::test_find_fts_flag_degrades_to_substring_with_a_warning::pytest.skip  # on main before this ratchet
+cli/tests/graph/test_backlog_search_fts.py::test_find_fts_uses_native_index_when_available::pytest.skip  # the Rust FTS index is unavailable when this Python-only test lane runs
 cli/tests/integration/test_backlog_alias.py::_native_backlog::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_backlog_reconcile.py::test_reconcile_reclaims_status_drift_from_container_rollup::mark.skip  # on main before this ratchet
 cli/tests/integration/test_claims_cross_impl.py::<module>::mark.skip  # on main before this ratchet
@@ -92,6 +92,9 @@ cli/tests/integration/test_graph_status.py::test_dash_a_is_shorthand_for_all_in_
 cli/tests/integration/test_graph_status.py::test_linked_idea_stub_excluded_from_next_by_default::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_node_with_plan_path_derives_to_ready::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_update_on_archived_node_names_the_remedy::mark.skip  # on main before this ratchet
+cli/tests/integration/test_install_frontdoor_journey.py::_run_fno::pytest.skip  # the journey requires the Rust front door to route backlog commands
+cli/tests/integration/test_install_frontdoor_journey.py::_run_native_backlog::pytest.skip  # the journey requires the compiled Rust backlog door
+cli/tests/integration/test_install_frontdoor_journey.py::clean_machine::pytest.skip  # the isolated native journey requires a development build
 cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/integration/test_native_update_repaint.py::_update::pytest.skip  # CI pytest env builds no dev fno-agents binary

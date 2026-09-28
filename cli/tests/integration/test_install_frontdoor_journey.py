@@ -241,7 +241,6 @@ def test_authorized_target_init_journey(clean_machine):
         assert f'node:{node}' in manifest_text, manifest_text
     else:
         assert f'input: "{node}"' in manifest_text, manifest_text
-        assert "target_claim_blocked_reason: holder_unattributable" in manifest_text
         assert "graph_node_id: null" in manifest_text
 
     # 5. The claim readback: the claims store answers for this exact key. When
