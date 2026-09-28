@@ -286,6 +286,11 @@ RUST_CLIENT_VERBS = frozenset(
         # queue arm all ask it, so no two merge paths can answer "may this head
         # merge?" differently. Python calls it via fno.rust_binary.verb_call.
         "authorized-merge",
+        # The control lane's recipient-side drain: the PreToolUse hook calls
+        # it DIRECTLY (no daemon RPC, no Python impl) so a frozen worker's
+        # freeze mail lands even when the daemon is the thing wedged. This
+        # entry keeps the client.rs<->router parity test in sync.
+        "mail-control-drain",
         # Running-process census; the walker lives in census.rs.
         "census",
         # Durable fleet incident breaker: direct dispatch in client.rs

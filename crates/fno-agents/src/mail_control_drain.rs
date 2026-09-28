@@ -385,7 +385,11 @@ mod tests {
             "ts": "2026-09-28T12:00:00Z",
         });
         use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(bus.join("messages.jsonl")).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(bus.join("messages.jsonl"))
+            .unwrap();
         writeln!(f, "{line}").unwrap();
     }
     fn flag(bus: &Path, form: &str) {

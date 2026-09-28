@@ -22,7 +22,11 @@ pub const STATE_VERSION: u32 = 1;
 
 /// The record's home, beside `fleet-stop.json`.
 pub fn merge_freeze_json() -> PathBuf {
-    AgentsHome::from_env().root().join("merge-freeze.json")
+    record_path(&AgentsHome::from_env().root())
+}
+
+fn record_path(home: &std::path::Path) -> PathBuf {
+    home.join("merge-freeze.json")
 }
 
 /// One freeze verdict for a PR: `Clear` admits; `Frozen` names the freeze;
@@ -35,7 +39,13 @@ pub enum Verdict {
 }
 
 pub(crate) fn verdict_for(pr: Option<u64>) -> Verdict {
-    let path = merge_freeze_json();
+    verdict_for_in(&AgentsHome::from_env().root(), pr)
+}
+
+/// The same read against an explicit home; the seam the tests use so they
+/// never race the process env.
+pub(crate) fn verdict_for_in(home: &std::path::Path, pr: Option<u64>) -> Verdict {
+    let path = record_path(home);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Verdict::Clear,
@@ -94,7 +104,11 @@ pub(crate) fn verdict_for(pr: Option<u64>) -> Verdict {
 /// naming the freeze; an unreadable record refuses fail closed. `None`
 /// admits.
 pub(crate) fn refusal(pr: Option<u64>) -> Option<(i32, String)> {
-    match verdict_for(pr) {
+    refusal_in(&AgentsHome::from_env().root(), pr)
+}
+
+fn refusal_in(home: &std::path::Path, pr: Option<u64>) -> Option<(i32, String)> {
+    match verdict_for_in(home, pr) {
         Verdict::Clear => None,
         Verdict::Frozen { subject, set_by } => {
             let who = if set_by.is_empty() {
@@ -127,10 +141,14 @@ pub(crate) fn refusal(pr: Option<u64>) -> Option<(i32, String)> {
 /// Run one freeze op from an `authorized-merge` payload. Same receipt
 /// contract as the hold ops.
 pub fn run(op: &str, payload: &Value) -> String {
+    run_in(&AgentsHome::from_env().root(), op, payload)
+}
+
+fn run_in(home: &std::path::Path, op: &str, payload: &Value) -> String {
     match op.strip_prefix("freeze-").unwrap_or(op) {
-        "set" => set(payload),
-        "clear" => clear(payload),
-        "check" => check(payload),
+        "set" => set_in(home, payload),
+        "clear" => clear_in(home, payload),
+        "check" => check_in(home, payload),
         other => receipt("refused", 2, format!("unknown freeze op: {other}")).to_string(),
     }
 }
@@ -143,7 +161,7 @@ fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
 }
 
-fn set(payload: &Value) -> String {
+fn set_in(home: &std::path::Path, payload: &Value) -> String {
     let subject = payload_str(payload, "subject").unwrap_or("");
     let set_by = payload_str(payload, "set_by").unwrap_or("");
     for (name, value) in [("subject", subject), ("set-by", set_by)] {
@@ -165,12 +183,12 @@ fn set(payload: &Value) -> String {
         )
         .to_string();
     }
-    if verdict_for(None) != Verdict::Clear {
-        let (home, _) = read_subject();
+    if verdict_for_in(home, None) != Verdict::Clear {
+        let (subject, _) = read_subject_in(home);
         return receipt(
             "refused",
             3,
-            format!("a merge freeze is already active ({home}); lift it with a freeze-clear op"),
+            format!("a merge freeze is already active ({subject}); lift it with a freeze-clear op"),
         )
         .to_string();
     }
@@ -181,7 +199,7 @@ fn set(payload: &Value) -> String {
         "reason": payload_str(payload, "reason").unwrap_or(""),
         "allow": allow,
     });
-    let path = merge_freeze_json();
+    let path = record_path(home);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -193,7 +211,7 @@ fn set(payload: &Value) -> String {
         return receipt("error", 2, format!("freeze rename failed: {e}")).to_string();
     }
     // Readback: the writer proves the record says what it wrote.
-    if verdict_for(allow.first().copied().map(|n| n as u64)) != Verdict::Clear {
+    if verdict_for_in(home, allow.first().copied().map(|n| n as u64)) != Verdict::Clear {
         let _ = std::fs::remove_file(&path);
         return receipt(
             "error",
@@ -210,8 +228,8 @@ fn set(payload: &Value) -> String {
     out.to_string()
 }
 
-fn read_subject() -> (String, String) {
-    match std::fs::read_to_string(merge_freeze_json()) {
+fn read_subject_in(home: &std::path::Path) -> (String, String) {
+    match std::fs::read_to_string(record_path(home)) {
         Ok(text) => {
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             (
@@ -229,12 +247,12 @@ fn read_subject() -> (String, String) {
     }
 }
 
-fn clear(payload: &Value) -> String {
+fn clear_in(home: &std::path::Path, payload: &Value) -> String {
     let evidence = payload_str(payload, "evidence").unwrap_or("");
     if evidence.trim().is_empty() {
         return receipt("refused", 2, "clear needs a non-blank --evidence").to_string();
     }
-    let path = merge_freeze_json();
+    let path = record_path(home);
     if !path.exists() {
         return receipt("refused", 3, "no merge freeze is active; nothing to lift").to_string();
     }
@@ -248,9 +266,9 @@ fn clear(payload: &Value) -> String {
     out.to_string()
 }
 
-fn check(payload: &Value) -> String {
+fn check_in(home: &std::path::Path, payload: &Value) -> String {
     let pr = payload.get("pr").and_then(Value::as_u64);
-    match verdict_for(pr) {
+    match verdict_for_in(home, pr) {
         Verdict::Clear => receipt("clear", 0, "").to_string(),
         Verdict::Frozen { subject, set_by } => {
             receipt("frozen", 0, format!("{subject} {set_by}")).to_string()
@@ -264,38 +282,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn with_home(test: &str) -> (tempfile::TempDir, ()) {
+    fn home(test: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::TempDir::new_in(std::env::temp_dir()).unwrap();
         let root = dir.path().join(test);
         std::fs::create_dir_all(&root).unwrap();
-        // SAFETY: tests run single-threaded per process here; AgentsHome is
-        // env-pinned like every other state-root fixture in this crate.
-        std::env::set_var("FNO_AGENTS_HOME", &root);
-        (dir, ())
+        let clone = root.clone();
+        (dir, clone)
     }
 
     #[test]
     fn absence_reads_clear() {
-        let (_dir, ()) = with_home("freeze-absent");
-        assert_eq!(verdict_for(Some(42)), Verdict::Clear);
-        assert!(refusal(Some(42)).is_none());
+        let (_dir, home) = home("freeze-absent");
+        assert_eq!(verdict_for_in(&home, Some(42)), Verdict::Clear);
+        assert!(refusal_in(&home, Some(42)).is_none());
     }
 
     #[test]
     fn a_set_freeze_refuses_an_off_list_pr_and_admits_a_listed_one() {
-        let (_dir, ()) = with_home("freeze-scoped");
-        let out = run(
+        let (_dir, home) = home("freeze-scoped");
+        let out = run_in(
+            &home,
             "freeze-set",
             &json!({"subject": "rc freeze", "set_by": "crown", "allow": [2739, 2740]}),
         );
         let r: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(r["outcome"], "frozen", "{out}");
-        assert!(matches!(verdict_for(Some(2739)), Verdict::Clear));
+        assert!(matches!(verdict_for_in(&home, Some(2739)), Verdict::Clear));
         assert!(matches!(
-            verdict_for(Some(2500)),
+            verdict_for_in(&home, Some(2500)),
             Verdict::Frozen { ref subject, .. } if subject == "rc freeze"
         ));
-        let (code, message) = refusal(Some(2500)).unwrap();
+        let (code, message) = refusal_in(&home, Some(2500)).unwrap();
         assert!(message.contains("rc freeze"), "{message}");
         assert!(message.contains("not on its allow-list"), "{message}");
         assert!(code != 0);
@@ -303,15 +320,18 @@ mod tests {
 
     #[test]
     fn an_unreadable_record_refuses_fail_closed() {
-        let (_dir, ()) = with_home("freeze-unreadable");
-        std::fs::write(merge_freeze_json(), "{").unwrap();
-        assert!(matches!(verdict_for(Some(42)), Verdict::Unavailable { .. }));
-        assert!(refusal(Some(42)).is_some());
+        let (_dir, home) = home("freeze-unreadable");
+        std::fs::write(record_path(&home), "{").unwrap();
+        assert!(matches!(
+            verdict_for_in(&home, Some(42)),
+            Verdict::Unavailable { .. }
+        ));
+        assert!(refusal_in(&home, Some(42)).is_some());
     }
 
     #[test]
     fn set_refuses_when_a_freeze_is_already_active_and_clear_needs_evidence() {
-        let (_dir, ()) = with_home("freeze-lift");
+        let (_dir, home) = home("freeze-lift");
         let g = |extra: Value| {
             let mut base = json!({"subject": "s", "set_by": "crown", "allow": [1]});
             for (k, v) in extra.as_object().unwrap() {
@@ -319,16 +339,16 @@ mod tests {
             }
             base
         };
-        run("freeze-set", &g(json!({})));
-        let second = run("freeze-set", &g(json!({"subject": "again"})));
+        run_in(&home, "freeze-set", &g(json!({})));
+        let second = run_in(&home, "freeze-set", &g(json!({"subject": "again"})));
         assert!(second.contains("already active"), "{second}");
-        let no_evidence = run("freeze-clear", &json!({}));
+        let no_evidence = run_in(&home, "freeze-clear", &json!({}));
         assert!(no_evidence.contains("--evidence"), "{no_evidence}");
-        let lifted = run("freeze-clear", &json!({"evidence": "freeze lifted"}));
+        let lifted = run_in(&home, "freeze-clear", &json!({"evidence": "freeze lifted"}));
         let r: Value = serde_json::from_str(&lifted).unwrap();
         assert_eq!(r["outcome"], "lifted", "{lifted}");
-        assert_eq!(verdict_for(Some(1)), Verdict::Clear);
-        let nothing = run("freeze-clear", &json!({"evidence": "again"}));
+        assert_eq!(verdict_for_in(&home, Some(1)), Verdict::Clear);
+        let nothing = run_in(&home, "freeze-clear", &json!({"evidence": "again"}));
         assert!(nothing.contains("no merge freeze is active"), "{nothing}");
     }
 }
