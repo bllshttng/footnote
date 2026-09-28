@@ -1179,6 +1179,35 @@ fn slot_cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+fn vendor_maps(
+    payload: &Value,
+) -> (
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+) {
+    let explicit = ["vendor_caps", "vendor_counts", "vendor_count_errors"]
+        .iter()
+        .any(|key| payload.get(*key).is_some());
+    let gathered = (!explicit).then(|| {
+        let registry = crate::paths::AgentsHome::from_env_opt().map(|home| home.registry_json());
+        crate::spawn_gate_lanes::vendor_lane_readings(&slot_cwd(), registry.as_deref())
+    });
+    let source = gathered.as_ref().unwrap_or(payload);
+    let read = |key| {
+        source
+            .get(key)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    (
+        read("vendor_counts"),
+        read("vendor_count_errors"),
+        read("vendor_caps"),
+    )
+}
+
 /// The epoch seconds the capacity read judges evidence freshness by.
 fn slot_now() -> f64 {
     std::time::SystemTime::now()
@@ -1637,21 +1666,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         names
     };
 
-    let vendor_counts = payload
-        .get("vendor_counts")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let vendor_count_errors = payload
-        .get("vendor_count_errors")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let vendor_caps = payload
-        .get("vendor_caps")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let (vendor_counts, vendor_count_errors, vendor_caps) = vendor_maps(payload);
 
     let mut demoted: Vec<(usize, String, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
