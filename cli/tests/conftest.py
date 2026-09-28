@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 import warnings
@@ -799,7 +800,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             basetemp = Path(session.config._tmp_path_factory.getbasetemp())
             markers |= {str(basetemp), os.path.realpath(basetemp)}
         except Exception:
-            pass
+            print(
+                "prod tripwire: could not read the session basetemp; watching sandbox markers only",
+                file=sys.stderr,
+            )
         leaks = find_leaks(before, roots, markers)
         for leak in leaks:
             print(f"prod tripwire: {leak} was created by this test session", file=sys.stderr)
