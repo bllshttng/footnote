@@ -12,6 +12,7 @@ from fno.graph.fuzzy import (
     IdMatch,
     _branch_tokens,
     resolve_id,
+    resolve_node,
     suggest_domain,
 )
 
@@ -41,8 +42,6 @@ def test_resolve_id_refuses_flag_shaped_query_before_the_graph():
 
 
 def test_resolve_node_refuses_flag_shaped_query():
-    from fno.graph.fuzzy import resolve_node
-
     entries = [_entry("ab-00000001", "X", status="ready")]
     entries[0]["slug"] = "strict"
     result = resolve_node("--strict", entries)
