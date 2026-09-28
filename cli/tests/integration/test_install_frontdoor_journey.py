@@ -133,6 +133,7 @@ def _run_front_door(
     """Run a verb owned by this checkout's compiled Rust front."""
     env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
     env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
+    env["FNO_STATE_DIR"] = str(repo / ".fno")
     env["FNO_TRACKER_BACKEND"] = "graph"
     return subprocess.run(
         [str(front), *args],

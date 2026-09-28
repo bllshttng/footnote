@@ -39,6 +39,20 @@ fn attr<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+fn shortened_uuid_handle(value: &str) -> Option<String> {
+    let segments: Vec<_> = value.split('-').collect();
+    let widths = [8, 4, 4, 4, 12];
+    if segments.len() == widths.len()
+        && segments.iter().zip(widths).all(|(part, width)| {
+            part.len() == width && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        Some(value[..8].to_string())
+    } else {
+        None
+    }
+}
+
 fn validate_attr(name: &str, value: &str) -> Result<(), String> {
     if value.chars().any(|ch| matches!(ch, '"' | '<' | '>')) {
         return Err(format!(
@@ -90,7 +104,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     // ids whose 8-hex clock bucket repeats within a minute, so codex keeps the
     // full id on the wire.
     let from_shortened = match harness {
-        Some("claude") | Some("opencode") => from_full.get(..8).map(str::to_string),
+        Some("claude") | Some("opencode") => shortened_uuid_handle(from_full),
         _ => None,
     };
     let from: &str = from_shortened.as_deref().unwrap_or(from_full);
