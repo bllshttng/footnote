@@ -450,8 +450,7 @@ def default_real_state_paths(repo_root: Path) -> dict[str, Path]:
         "repo_events_jsonl": repo_root / ".fno" / "events.jsonl",
         "global_events_jsonl": fno_home / "events.jsonl",
         "memory_dir": fno_home / "memory",
-        # corrections.log moved again into the logs/ subfolder (the state-root
-        # tidiness wave); scan it there, not the legacy root location.
+        # corrections.log moved under logs/ in the state-root wave; scan it there.
         "corrections_log": fno_home / "logs" / "corrections.log",
     }
 
