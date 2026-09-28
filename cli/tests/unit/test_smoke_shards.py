@@ -186,6 +186,26 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
     assert carriers == [("smoke-pytest", shard) for shard in range(1, 14)]
 
 
+def test_per_pr_pytest_lane_excludes_slow_e2e() -> None:
+    pytest_step = next(
+        command
+        for name, _cwd, command in smoke_steps(_REPO_ROOT)
+        if name == "Pytest (unit + integration)"
+    )
+    assert "-m 'not slow_e2e'" in pytest_step
+
+
+def test_slow_e2e_lane_is_schedule_or_manual_only() -> None:
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    lane = workflow["jobs"]["slow-e2e"]
+    assert lane["if"] == (
+        "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
+    )
+    runs = "\n".join(step.get("run", "") for step in lane["steps"])
+    assert "-m slow_e2e" in runs
+    assert "cli/tests/agents/test_spawn_pane.py" in runs
+
+
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
     """The seam is the faithful-ordering guard, so the guard must stay true.
 

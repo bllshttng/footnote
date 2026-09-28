@@ -429,6 +429,24 @@ jobs:
           : "$start"
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/13
 
+  slow-e2e:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    # The real-pane test rebuilds both native binaries; its separate 144s cap
+    # names the slow step while this bounds setup and the Cargo work around it.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision the slow-test runner
+        uses: ./.github/actions/smoke-setup
+
+      - name: Run the slow pane lane
+        env:
+          FNO_PYTEST_SHARD: "1/1"
+        run: uv run --project cli fno-py doctor test --stream cli/tests/agents/test_spawn_pane.py -m slow_e2e
+
   smoke-rest:
     needs: [pr-affected]
     if: ${{ !cancelled() && needs.pr-affected.outputs.python_full == 'true' }}
