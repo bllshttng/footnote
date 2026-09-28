@@ -200,8 +200,7 @@ def _state_roots() -> list[Path]:
     try:
         from fno.paths import agents_registry_path
 
-        # The registry module's real write directory; FNO_AGENTS_HOME
-        # relocates it independently of state_dir.
+        # The registry write directory; FNO_AGENTS_HOME relocates it independently of state_dir.
         registry_dir = agents_registry_path().parent
         if not any(registry_dir.is_relative_to(root) for root in out):
             out.append(registry_dir)
