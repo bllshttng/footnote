@@ -255,14 +255,13 @@ pub struct Scroll {
     pub visible: usize,
 }
 
-/// One body line handed to [`frame`]. Family A fills `header` / `sel_span` /
+/// One body line handed to [`frame`]. Family A fills `sel_span` /
 /// `hits` (the last is the mouse hit-test spans, which `frame` shifts past the
 /// left border so a click in the framed block still resolves); family B leaves
 /// them default.
 #[derive(Debug, Clone, Default)]
 pub struct BodyLine {
     pub text: String,
-    pub header: bool,
     /// A greyed, inert row (a disabled `PopupRow::Entry`): every cell takes
     /// [`Role::BodyDim`] regardless of selection, so it reads as inert.
     pub disabled: bool,
@@ -463,7 +462,7 @@ pub(crate) fn paint_line(
         if sc >= cols {
             break;
         }
-        let role = roles.get(j).copied().unwrap_or(Role::Body);
+        let role = roles.get(j).copied().unwrap_or(Role::PanelBody);
         let (fg, bg, flags) = cell_style(role, theme);
         cells[sr * cols + sc] = Cell {
             c: ch,
@@ -641,9 +640,9 @@ fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize)
 
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
-        // Rounded corners, the same vocabulary the pane frames wear
-        // (the 2026-09-25 wave note, 2026-09-25): modals and panes read as one product.
-        Level::Bare => edge_row('╭', '╮', '─', Vec::new(), inner_w),
+        // Bare: `╭─ esc ─╮` - the chip rides the TOP border at every level,
+        // so the affordance lives in one corner of every modal.
+        Level::Bare => chip_border_row('╭', '╮', vec![('─', Role::Border)], inner_w),
         // `╭─ Title ──── esc ─╮`: title left (after `─`), esc chip right. A
         // Left click on the chip closes the modal, identical to pressing esc
         // - the title bar's chip was decorative chrome; only the footer's
@@ -666,9 +665,7 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
 fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
         Level::Full => edge_row('╰', '╯', '─', Vec::new(), inner_w),
-        // Bare: `╰─ esc ─╯` - the esc hint rides the bottom border at zero
-        // row, the same clickable chip as the Full title bar.
-        Level::Bare => chip_border_row('╰', '╯', vec![('─', Role::Border)], inner_w),
+        Level::Bare => edge_row('╰', '╯', '─', Vec::new(), inner_w),
     }
 }
 
@@ -690,16 +687,19 @@ fn body_row(
     text.push('│');
     roles.push(Role::Border);
 
-    // One cell of side padding between the border and the body text (the
-    // wave-note inset that matches the pane frames' inner inset). The pad
-    // joins the row's own treatment, so a whole-row selection highlight
-    // reads edge to edge, pad included (highlight-span fix).
-    let pad = usize::from(body_w > 1);
+    // Side padding between the border and the body text: two cells when the
+    // row has room (degrading 2 -> 1 -> 0 as the width shrinks), matching the
+    // popup's own right-edge gap. The pad joins the row's own treatment, so a
+    // whole-row selection highlight reads edge to edge, pad included
+    // (highlight-span fix).
+    let pad = if body_w >= 4 {
+        2
+    } else {
+        usize::from(body_w > 1)
+    };
     let sel_from_start = line.sel_span.is_some_and(|(off, _)| off == 0);
     let pad_role = if line.disabled {
         Role::BodyDim
-    } else if line.header {
-        Role::BodyHead
     } else if sel_from_start {
         Role::BodySel
     } else {
@@ -730,8 +730,6 @@ fn body_row(
         }
         let role = if line.disabled {
             Role::BodyDim
-        } else if line.header {
-            Role::BodyHead
         } else if in_sel(char_idx) {
             Role::BodySel
         } else {
@@ -749,8 +747,6 @@ fn body_row(
         text.push(' ');
         roles.push(if line.disabled {
             Role::BodyDim
-        } else if line.header {
-            Role::BodyHead
         } else if sel_from_start {
             Role::BodySel
         } else {
@@ -770,8 +766,9 @@ fn body_row(
     let hits = line
         .hits
         .iter()
-        // +1 the left border, +1 the body's side padding.
-        .map(|(t, off, len)| (*t, off + 2, *len))
+        // +1 the left border, + the body's side padding (2 when the row has
+        // room, 1 when it barely fits, 0 at a 1-col body).
+        .map(|(t, off, len)| (*t, off + 1 + pad, *len))
         .collect();
 
     FramedLine { text, roles, hits }
@@ -1032,18 +1029,23 @@ mod tests {
     }
 
     #[test]
-    fn bare_bottom_border_carries_inline_esc() {
+    fn bare_top_border_carries_inline_esc() {
         let c = Chrome::new("", Anchor::At { row: 0, col: 0 });
         let framed = frame(&[bl("body")], &c, 6, None);
-        let bottom = framed.lines.last().unwrap();
-        assert!(bottom.text.contains("esc"));
-        assert!(bottom.roles.contains(&Role::Chip));
-        // Same clickable chip as the Full title bar.
-        assert_eq!(bottom.hits.len(), 1);
-        let (t, off, len) = bottom.hits[0];
+        // The chip rides the TOP border at every level, so the affordance
+        // lives in one corner of every modal.
+        let top = &framed.lines[0];
+        assert!(top.text.contains("esc"));
+        assert!(top.roles.contains(&Role::Chip));
+        assert_eq!(top.hits.len(), 1);
+        let (t, off, len) = top.hits[0];
         assert_eq!(t, ESC_CLOSE_HIT);
-        let word: String = bottom.text.chars().skip(off).take(len).collect();
+        let word: String = top.text.chars().skip(off).take(len).collect();
         assert_eq!(word, "esc");
+        // The bottom border is plain now.
+        let bottom = framed.lines.last().unwrap();
+        assert!(!bottom.text.contains("esc"));
+        assert!(bottom.hits.is_empty());
     }
 
     #[test]
@@ -1060,9 +1062,9 @@ mod tests {
             .iter()
             .find(|l| l.hits.iter().any(|(t, _, _)| *t == 0))
             .unwrap();
-        // The body's side pad sits between the border and the text, so the
-        // span starts one column deeper than border+1.
-        assert_eq!(body.hits[0], (0, 2, 5));
+        // The body's two-cell side pad sits between the border and the text,
+        // so the span starts two columns deeper than border+1.
+        assert_eq!(body.hits[0], (0, 3, 5));
     }
 
     #[test]
@@ -1244,9 +1246,9 @@ mod tests {
         // terminal writer skips, and the char after the glyph lands two
         // columns on - the alignment that was off by one before.
         // Geometry for body "a＋b" in a 6-column body (empty title: the ESC
-        // chip's minimum is 6, so body_w stays 6): col0 border, col1 side
-        // pad, col2 'a', col3 lead, col4 spacer, col5 'b', col6 padding,
-        // col7 border.
+        // chip's minimum is 6, so body_w stays 6): col0 border, col1-col2 the
+        // two pad cells, col3 'a', col4 lead, col5 spacer, col6 'b', col7
+        // border.
         let c = Chrome::new("", Anchor::Center);
         let framed = frame(&[bl("a＋b")], &c, 6, None);
         let theme = Theme::default_theme();
@@ -1256,16 +1258,17 @@ mod tests {
         let row = &cells[framed.width..2 * framed.width];
         assert_eq!(row[0].c, '│');
         assert_eq!(row[1].c, ' ', "the body's side padding");
-        assert_eq!(row[2].c, 'a');
-        assert_eq!(row[3].c, '＋', "the lead cell carries the glyph");
-        assert_eq!(row[4].c, ' ', "the continuation cell renders nothing");
+        assert_eq!(row[2].c, ' ', "the second pad cell");
+        assert_eq!(row[3].c, 'a');
+        assert_eq!(row[4].c, '＋', "the lead cell carries the glyph");
+        assert_eq!(row[5].c, ' ', "the continuation cell renders nothing");
         assert!(
-            row[4].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
+            row[5].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
             "and it is flagged WIDE_SPACER"
         );
-        assert_eq!(row[5].c, 'b', "the next char lands at column+2");
+        assert_eq!(row[6].c, 'b', "the next char lands at column+2");
         assert!(
-            row[5].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
+            row[6].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
             "no spacer on a narrow char"
         );
         assert_eq!(row[7].c, '│', "the right border stays inside the frame");

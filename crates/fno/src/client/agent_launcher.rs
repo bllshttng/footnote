@@ -3308,6 +3308,9 @@ pub(crate) struct SheetLayout {
     pub keybar_y: u16,
     /// The [cancel] footer rect while an attempt is pending.
     pub cancel: Option<RtRect>,
+    /// The keybar's trailing `esc close` / `esc cancel` word: a clickable
+    /// close affordance, the same gesture as the Esc key.
+    pub esc_rect: Option<RtRect>,
 }
 
 impl Launcher {
@@ -3417,6 +3420,16 @@ impl Launcher {
         let pending = matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. });
         let keybar_y = bottom_y + bottom_rows;
         let cancel = pending.then(|| RtRect::new(0, keybar_y as u16, 8, 1));
+        // The keybar's trailing esc word is the chip: "esc close" at rest,
+        // "esc cancel" while an attempt is pending. Either way the click is
+        // the Esc key's gesture.
+        let kb = compact_chip_value(&self.keybar(), inner_w);
+        let esc_rect = if kb.ends_with("esc close") || kb.ends_with("esc cancel") {
+            let off = (kb.chars().count() - 9) as u16;
+            Some(RtRect::new(off, keybar_y as u16, 9, 1))
+        } else {
+            None
+        };
         Some(SheetLayout {
             origin,
             framed_w,
@@ -3428,6 +3441,7 @@ impl Launcher {
             editor_rows,
             keybar_y: keybar_y as u16,
             cancel,
+            esc_rect,
         })
     }
 
@@ -3631,16 +3645,39 @@ impl Launcher {
                 &mut buf,
                 cr,
                 "[cancel]",
-                role_style(Role::Body, &view.theme),
+                role_style(Role::Chip, &view.theme),
                 false,
             );
         }
-        buf.set_string(
-            0,
-            keybar_y.min((body_h as u16).saturating_sub(1)),
-            compact_chip_value(&self.keybar(), inner_w),
-            RtStyle::new(),
-        );
+        // The esc word paints with the chip style so it reads as the same
+        // affordance the modal borders carry; the click target sits under it.
+        let kb = compact_chip_value(&self.keybar(), inner_w);
+        if let Some(r) = sl.esc_rect {
+            let byte_off = kb
+                .char_indices()
+                .nth(r.x as usize)
+                .map(|(b, _)| b)
+                .unwrap_or(kb.len());
+            buf.set_string(
+                0,
+                keybar_y.min((body_h as u16).saturating_sub(1)),
+                &kb[..byte_off],
+                RtStyle::new(),
+            );
+            buf.set_string(
+                r.x,
+                keybar_y.min((body_h as u16).saturating_sub(1)),
+                &kb[byte_off..],
+                role_style(Role::Chip, &view.theme),
+            );
+        } else {
+            buf.set_string(
+                0,
+                keybar_y.min((body_h as u16).saturating_sub(1)),
+                &kb,
+                RtStyle::new(),
+            );
+        }
         buf.set_string(
             0,
             (keybar_y + 1).min((body_h as u16).saturating_sub(1)),
@@ -3840,8 +3877,9 @@ pub(crate) async fn launcher_mouse(
             return Ok(over);
         }
         let portal = next_free_portal(view);
-        // Field-disjoint snapshot for the commit path.
+        // Field-disjoint snapshots for the commit and step-down paths.
         let catalog = view.launcher_catalog.clone();
+        let backlog = view.backlog.clone();
         if let Some(l) = view.launcher.as_mut() {
             let Some(mut picker) = l.picker.take() else {
                 unreachable!("checked Some above");
@@ -3851,6 +3889,14 @@ pub(crate) async fn launcher_mouse(
                 return Ok(true);
             }
             match hit {
+                Some(crate::chrome::ESC_CLOSE_HIT) => {
+                    // The esc chip click reads exactly as pressing Esc: a
+                    // drilled picker steps down its ladder, the main list
+                    // closes (the taken picker is never restored).
+                    if picker.mode != PickerMode::Main {
+                        picker_step_down(l, &catalog, &backlog, picker);
+                    }
+                }
                 Some(target) => {
                     let field = picker.field;
                     picker.popup.select(target);
@@ -3899,6 +3945,7 @@ pub(crate) async fn launcher_mouse(
     let hit_chip = sl.chips.iter().find(|(_, r)| hit(*r)).map(|(f, _)| *f);
     let hit_message = hit(sl.message);
     let hit_cancel = sl.cancel.is_some_and(|r| hit(r));
+    let hit_esc = sl.esc_rect.is_some_and(|r| hit(r));
     if let MouseKind::Move = rep.kind {
         // Motion over the Project chip shows the cwd facts line; motion
         // anywhere else over the sheet is consumed silently.
@@ -3908,6 +3955,23 @@ pub(crate) async fn launcher_mouse(
         return Ok(true);
     }
     if !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
+        return Ok(true);
+    }
+    if hit_esc {
+        // The esc word is the key, by mouse: cancel a pending attempt, else
+        // close (hide + retain) - the same gesture as the Esc key.
+        let pending = view
+            .launcher
+            .as_ref()
+            .is_some_and(|l| matches!(l.phase, Phase::Unknown { .. } | Phase::Submitting { .. }));
+        if pending {
+            if let Some(l) = view.launcher.as_mut() {
+                l.phase = Phase::Editing;
+                l.armed = None;
+            }
+        } else {
+            close(view);
+        }
         return Ok(true);
     }
     if hit_cancel {

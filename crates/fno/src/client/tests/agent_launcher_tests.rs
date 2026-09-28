@@ -671,6 +671,99 @@ fn motion_over_the_project_chip_shows_the_cwd_line_and_a_press_outside_closes_th
 }
 
 #[test]
+fn a_click_on_the_picker_esc_chip_closes_the_picker() {
+    // AC3-CLICK: the chip is a real target in the picker's mouse path - the
+    // click reads exactly as pressing Esc (Main list closes the picker).
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    type_message(&mut v, "keep me");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Shift-Tab walks back to the Project chip; Enter drops its picker.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[Z", &mut sock).await;
+    });
+    rt.block_on(async {
+        super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock)
+            .await
+            .unwrap();
+    });
+    let l = v.launcher.as_ref().unwrap();
+    let picker = l.picker.as_ref().expect("Enter opened the picker");
+    let r = picker.popup.render((v.term.0, v.term.1));
+    // The chip's click span on the framed title border.
+    let (hit_row, hit_col) = r
+        .lines
+        .iter()
+        .enumerate()
+        .find_map(|(i, line)| {
+            line.hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, off, len)| {
+                    (
+                        r.origin.0 as u16 + i as u16,
+                        r.origin.1 as u16 + (off + len / 2) as u16,
+                    )
+                })
+        })
+        .expect("the picker's esc chip carries a hit span");
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: hit_row,
+        col: hit_col,
+        shift: false,
+    };
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click on the picker's esc chip is consumed");
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "the chip click closed the picker");
+    assert_eq!(l.draft.message, "keep me", "the draft keeps its value");
+}
+
+#[test]
+fn a_click_on_the_sheet_esc_word_closes_the_sheet() {
+    // AC3-CLICK: the composer's keybar esc word is the chip; the click is
+    // the Esc key's gesture (hide + retain at rest).
+    let mut v = view_with_launcher();
+    type_message(&mut v, "keep me");
+    let l = v.launcher.as_ref().unwrap();
+    let sl = l.sheet_layout(&v).unwrap();
+    let r = sl.esc_rect.expect("the keybar names an esc word");
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: sl.origin.0 + 1 + r.y,
+        col: sl.origin.1 + 1 + r.x + 2,
+        shift: false,
+    };
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click on the sheet's esc word is consumed");
+    });
+    assert!(v.launcher.is_none(), "the esc word closed the sheet");
+    assert_eq!(
+        v.launcher_closed
+            .as_ref()
+            .expect("hidden with retain")
+            .draft
+            .message,
+        "keep me",
+        "the draft is retained"
+    );
+}
+
+#[test]
 fn esc_leaves_full_screen_and_retains_the_draft() {
     let mut v = view_with_launcher();
     v.sideline_full = true;
