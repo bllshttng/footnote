@@ -509,7 +509,7 @@ fn append_refuses_newline_and_bad_scope_and_bad_ts() {
 }
 
 #[test]
-fn unowned_visitor_stop_accepts_empty_scope_only_without_a_manifest() {
+fn a_stop_decision_without_scope_is_auditable_for_every_session() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");
     let visitor = json!({
@@ -539,7 +539,10 @@ fn unowned_visitor_stop_accepts_empty_scope_only_without_a_manifest() {
     append_envelope(&live, &visitor, None).unwrap();
     assert_eq!(count_type(&store_path(&live), "stop_decision"), 1);
 
-    let owned = json!({
+    // A session a manifest does not yet name - a fresh heir
+    // whose only manifest is its predecessor's - journals the same way. The
+    // correlated row is what king admission reads; no manifest needed.
+    let heir = json!({
         "ts": "2026-09-17T12:00:00Z",
         "type": "stop_decision",
         "source": "hook",
@@ -551,15 +554,39 @@ fn unowned_visitor_stop_accepts_empty_scope_only_without_a_manifest() {
             "scope": "",
             "node_id": "",
             "driver": "king",
-            "continuation_owner": "goal",
+            "continuation_owner": "visitor",
             "decision": "allow",
-            "class": "delegated-to-goal",
+            "class": "foreign-manifest",
             "correlation_id": "stop:thread-1:turn-2",
             "harness_output_contract": "empty"
         }
     })
     .to_string();
-    let error = append_envelope(&live, &owned, None).unwrap_err();
+    append_envelope(&live, &heir, None).unwrap();
+    assert_eq!(count_type(&store_path(&live), "stop_decision"), 2);
+
+    // A NON-empty scope still validates against the canonical form.
+    let bad_scope = json!({
+        "ts": "2026-09-17T12:00:00Z",
+        "type": "stop_decision",
+        "source": "hook",
+        "data": {
+            "session_id": "thread-1",
+            "raw_identity_candidates": [],
+            "turn_id": "turn-3",
+            "manifest": "",
+            "scope": "ready no build, idea",
+            "node_id": "",
+            "driver": "king",
+            "continuation_owner": "none",
+            "decision": "allow",
+            "class": "visitor",
+            "correlation_id": "stop:thread-1:turn-3",
+            "harness_output_contract": "empty"
+        }
+    })
+    .to_string();
+    let error = append_envelope(&live, &bad_scope, None).unwrap_err();
     assert!(error.contains("canonical crown scope"), "error: {error}");
 }
 

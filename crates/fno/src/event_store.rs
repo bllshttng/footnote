@@ -773,20 +773,15 @@ fn is_canonical_crown_scope(s: &str) -> bool {
             .all(|m| !m.is_empty() && !m.chars().any(char::is_whitespace))
 }
 
-fn is_valid_event_scope(event_type: &str, data: &serde_json::Value, scope: &str) -> bool {
+fn is_valid_event_scope(event_type: &str, _data: &serde_json::Value, scope: &str) -> bool {
     if !scope.is_empty() {
         return is_canonical_crown_scope(scope);
     }
-    // An unowned visitor Stop has no crown scope but remains an auditable event.
+    // A stop_decision with no crown scope remains an auditable event: the
+    // correlated session row is what king admission reads, and a fresh heir
+    // journals exactly there - before init writes the manifest that would
+    // carry its scope.
     event_type == "stop_decision"
-        && data.get("class").and_then(serde_json::Value::as_str) == Some("visitor")
-        && data.get("decision").and_then(serde_json::Value::as_str) == Some("allow")
-        && data
-            .get("continuation_owner")
-            .and_then(serde_json::Value::as_str)
-            == Some("none")
-        && data.get("manifest").and_then(serde_json::Value::as_str) == Some("")
-        && data.get("node_id").and_then(serde_json::Value::as_str) == Some("")
 }
 
 /// The canonical comma-joined form of a raw scope spelling: members split on

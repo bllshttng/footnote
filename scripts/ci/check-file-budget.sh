@@ -24,11 +24,12 @@
 # shrinks the production files. An EXISTING over-budget test file is under the
 # same rule as production code - it may not grow either.
 #
-# The Python tree under cli/src/fno is shrink-only as a TREE, net: Python is
-# the compatibility shell, Rust is the product. New code lands in crates/, and
-# a Python edit is a port or a deletion; plans meet that rule at blueprint time
-# in validate-plan.sh. This tally is the push-time backstop: net growth above
-# the allowance is refused. The remedy is to port the verb to crates/,
+# The Python tree under cli/src/fno is shrink-only as a TREE: Python is the
+# compatibility shell, Rust is the product. New code lands in crates/, and a
+# Python edit is a port or a deletion; plans meet that rule at blueprint time
+# in validate-plan.sh. This tally counts added lines per change against
+# blueprint.python_repair_added_lines; deletions do not offset new lines. The
+# remedy is to port the verb to crates/,
 # land the feature in Rust, or refactor the growth away: per-harness DATA
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR

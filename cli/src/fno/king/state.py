@@ -315,6 +315,22 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return out
 
 
+def manifest_crown_for_session(
+    session_id: str, *, owner_cwd: Optional[str] = None
+) -> Optional[dict[str, str]]:
+    """The king manifest naming ``session_id`` as holder, else ``None``: the
+    durable record a register re-stamps from when a restore stripped the row."""
+    try:
+        files = sorted((_owner_state_root(owner_cwd) / "kings").glob("*.md"))
+    except OSError:
+        return None
+    for path in files:
+        manifest = parse_manifest(path)
+        if manifest.get("harness_session_id", "").strip() == session_id:
+            return manifest | {"crown_scope": path.stem}
+    return None
+
+
 def _manifest_int(manifest: dict[str, str], key: str, default: int) -> int:
     raw = manifest.get(key)
     if not raw:

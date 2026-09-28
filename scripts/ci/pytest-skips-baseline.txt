@@ -231,4 +231,7 @@ cli/tests/conftest.py::run_native_create::pytest.skip  # native create door: the
 cli/tests/integration/test_graph_concurrency.py::_run_backlog::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
 cli/tests/integration/test_graph_status.py::test_backlog_idea_listed_in_help::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
 cli/tests/integration/test_parent_filter.py::_add::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
+cli/tests/test_mail_send_check.py::test_a_held_peer_lane_restores_after_the_wall_hold_expires::pytest.skip  # native hold gate: without the fno-agents build the bus-only check fails closed to DND, which inverts both legs
+cli/tests/test_mail_send_check.py::test_a_live_self_hold_does_not_block_the_own_raw_lane::pytest.skip  # native hold gate: without the fno-agents build the bus-only check fails closed to DND and the C15 own-send pass cannot be asserted
+cli/tests/unit/test_mail_hold_parity.py::test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses::pytest.skip  # native hold gate: the wall-clock wording is the Rust gate receipt; no binary means no receipt to assert
 cli/tests/unit/test_strand.py::_seed_idea::pytest.skip  # native create door: the smoke shard deletes crates/fno-agents/target, and the subject of these assertions is that binary
