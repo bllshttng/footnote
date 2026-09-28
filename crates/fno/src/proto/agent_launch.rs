@@ -67,6 +67,17 @@ pub struct AgentLaunchRequest {
     /// Additional argv tokens for `fno agents spawn`; never shell text.
     #[serde(default)]
     pub extra_flags: Vec<String>,
+    /// Launch in a worktree resolved server-side through `fno-agents
+    /// launch-workdir`: a `workdir` answer replaces `cwd` before the spawn
+    /// argv is built, a `hold` settles `Refused`. False runs in `cwd`
+    /// verbatim and the argv stays byte-identical to the pre-94 shape.
+    #[serde(default)]
+    pub worktree: bool,
+    /// The branch a worktree launch checks out; `None` = ensure's default
+    /// (a fresh branch off origin/main). Validated like the node id: never
+    /// an argv element the branch string could corrupt.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// One progress update for a launch attempt, correlated by `request_id`.
