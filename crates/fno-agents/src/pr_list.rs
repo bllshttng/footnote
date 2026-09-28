@@ -203,7 +203,7 @@ fn summary(item: &Value) -> Option<Value> {
 
 fn bind(rows: &mut [Value], graph: GraphRead) {
     let is_open = |r: &Value| r.get("state").and_then(Value::as_str) == Some("OPEN");
-    let open: Vec<Value> = rows.iter().filter(|r| is_open(r)).cloned().collect();
+    let open: Vec<&Value> = rows.iter().filter(|row| is_open(row)).collect();
     if open.is_empty() {
         return;
     }
@@ -216,7 +216,7 @@ fn bind(rows: &mut [Value], graph: GraphRead) {
             return;
         }
     };
-    for v in pr_binding_verdicts(&open, &entries) {
+    for v in pr_binding_verdicts(open, &entries) {
         let Some(row) = rows
             .iter_mut()
             .find(|r| is_open(r) && r.get("number").and_then(Value::as_i64) == Some(v.number))
@@ -342,26 +342,50 @@ mod tests {
     }
 
     #[test]
-    fn an_open_row_carries_its_binding_in_key_order_and_no_body() {
+    fn open_rows_surface_binding_verdicts_and_never_emit_body() {
         let gh = |_: &[String], _: &Path| {
-            Ok(json!([{
-                "number": 7, "state": "open", "merged_at": null, "title": "t",
-                "head": {"ref": "feature/x-aaaa"}, "html_url": "https://github.com/o/r/pull/7",
-                "body": "text",
-            }])
+            Ok(json!([
+                {
+                    "number": 7, "state": "open", "merged_at": null, "title": "bound",
+                    "head": {"ref": "feature/x-aaaa"}, "html_url": "https://github.com/o/r/pull/7",
+                    "body": "text",
+                },
+                {
+                    "number": 8, "state": "open", "merged_at": null, "title": "missing",
+                    "head": {"ref": "feature/x-bbbb"}, "html_url": "https://github.com/o/r/pull/8",
+                    "body": "text",
+                },
+                {
+                    "number": 9, "state": "open", "merged_at": null, "title": "untracked",
+                    "head": {"ref": "chore/tidy-docs"}, "html_url": "https://github.com/o/r/pull/9",
+                    "body": "Just a fix.",
+                },
+                {
+                    "number": 10, "state": "open", "merged_at": null, "title": "ambiguous",
+                    "head": {"ref": "feature/x-aaaa-x-bbbb"}, "html_url": "https://github.com/o/r/pull/10",
+                    "body": "text",
+                },
+            ])
             .to_string()
             .into_bytes())
         };
         let graph = || {
             Ok(vec![
                 json!({"id": "x-aaaa", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}),
+                json!({"id": "x-bbbb", "status": "ready"}),
             ])
         };
         let out = list(&args(&["--repo", "o/r"]), Path::new("/"), None, &gh, &graph);
         assert_eq!(out.code, 0);
         let rows: Value = serde_json::from_str(&out.stdout).unwrap();
-        let row = rows.as_array().unwrap()[0].as_object().unwrap();
-        let keys: Vec<&str> = row.keys().map(String::as_str).collect();
+        let rows = rows.as_array().unwrap();
+        let row = |number: i64| {
+            rows.iter()
+                .find(|row| row["number"].as_i64() == Some(number))
+                .expect("listed row")
+        };
+        let bound = row(7).as_object().unwrap();
+        let keys: Vec<&str> = bound.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
             vec![
@@ -374,10 +398,20 @@ mod tests {
                 "node_binding"
             ]
         );
-        assert_eq!(row["node_binding"], "bound");
+        assert_eq!(bound["node_id"], "x-aaaa");
+        assert_eq!(bound["node_binding"], "bound");
+        assert_eq!(row(8)["node_binding"], "missing");
+        assert_eq!(row(8)["node_id"], "x-bbbb");
+        assert_eq!(row(9)["node_binding"], "untracked");
+        assert!(row(9)["node_binding_detail"]
+            .as_str()
+            .unwrap()
+            .contains("chore/tidy-docs"));
+        assert_eq!(row(10)["node_binding"], "ambiguous");
+        assert!(rows.iter().all(|row| row.get("body").is_none()));
         assert_eq!(
             out.stderr,
-            vec!["pr list: o/r (--repo), 1 rows".to_string()]
+            vec!["pr list: o/r (--repo), 4 rows".to_string()]
         );
     }
 

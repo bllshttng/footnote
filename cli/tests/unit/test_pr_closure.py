@@ -7,8 +7,6 @@ and the consumers. Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR,
 AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
-from tests.fixtures.graph_seed import seed_graph
-
 import json
 import os
 import subprocess

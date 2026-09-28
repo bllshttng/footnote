@@ -506,6 +506,7 @@ pub(crate) struct PrVerdict {
     pub verdict: &'static str,
     pub node_id: Option<String>,
     pub detail: Option<String>,
+    board_unbound_detail: Option<String>,
     url: Option<String>,
     head: String,
     /// The key that decided an `ambiguous` verdict: `branch`, `backref`,
@@ -521,7 +522,10 @@ pub(crate) struct PrVerdict {
 /// within one repository; then the body's exact `Backlog-Closure:` trailer.
 /// The keys come from [`pr_binding_keys`], the same predicate the merge owner
 /// reads.
-pub(crate) fn pr_binding_verdicts(rows: &[Value], entries: &[Value]) -> Vec<PrVerdict> {
+pub(crate) fn pr_binding_verdicts<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    entries: &[Value],
+) -> Vec<PrVerdict> {
     let node_by_id: HashMap<&str, &Value> = entries
         .iter()
         .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
@@ -530,7 +534,7 @@ pub(crate) fn pr_binding_verdicts(rows: &[Value], entries: &[Value]) -> Vec<PrVe
     // row competes for its node like a branch-resolved one, so one node named
     // by a branch PR and a trailer PR reads ambiguous on both.
     let mut open_prs_by_node: HashMap<String, Vec<i64>> = HashMap::new();
-    let mut parsed: Vec<(i64, Option<String>, String, PrBinding)> = Vec::new();
+    let mut parsed: Vec<(i64, Option<String>, String, PrBinding, bool)> = Vec::new();
     for row in rows {
         let Some(number) = s_i64(row, "number") else {
             continue;
@@ -565,15 +569,17 @@ pub(crate) fn pr_binding_verdicts(rows: &[Value], entries: &[Value]) -> Vec<PrVe
             row.get("url").and_then(Value::as_str).map(str::to_string),
             head.to_string(),
             keys,
+            row.get("body").is_some(),
         ));
     }
     let mut out: Vec<PrVerdict> = Vec::new();
-    for (number, url, head, keys) in parsed {
+    for (number, url, head, keys, body_supplied) in parsed {
         let verdict = |verdict, node_id, detail, via, candidates| PrVerdict {
             number,
             verdict,
             node_id,
             detail,
+            board_unbound_detail: None,
             url: url.clone(),
             head: head.clone(),
             via,
@@ -586,7 +592,21 @@ pub(crate) fn pr_binding_verdicts(rows: &[Value], entries: &[Value]) -> Vec<PrVe
             match keys.backrefs.as_slice() {
                 [] => {
                     if keys.trailer.is_empty() {
-                        out.push(verdict("untracked", None, unbound, "", Vec::new()));
+                        let detail = format!(
+                            "branch '{head}' names no real node; {}; {}",
+                            url.as_deref()
+                                .filter(|url| !url.is_empty())
+                                .map(|url| format!("no node carries #{number} at {url}"))
+                                .unwrap_or_else(|| "no url, back-pointer not read".to_string()),
+                            if body_supplied {
+                                "body carries no closure line"
+                            } else {
+                                "body not supplied, trailer not read"
+                            }
+                        );
+                        let mut row = verdict("untracked", None, Some(detail), "", Vec::new());
+                        row.board_unbound_detail = unbound;
+                        out.push(row);
                         continue;
                     }
                     if keys.trailer.len() > 1 {
@@ -678,13 +698,13 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
         .collect();
     let mut bound: Vec<Value> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    for v in pr_binding_verdicts(rows, entries) {
+    for v in pr_binding_verdicts(rows.iter(), entries) {
         let number = v.number;
         match v.verdict {
             "untracked" => warnings.push(format!(
                 "pr_node_binding_untracked: #{number} {} ({})",
                 v.head,
-                v.detail.unwrap_or_default()
+                v.board_unbound_detail.unwrap_or_default()
             )),
             "ambiguous" if matches!(v.via, "backref" | "trailer") => warnings.push(format!(
                 "pr_node_binding_ambiguous: #{number} -> {}",
@@ -1145,7 +1165,7 @@ mod tests {
             .detail
             .as_deref()
             .unwrap()
-            .contains("branch names no node"));
+            .contains("branch 'docs/faq' names no real node"));
         let (_, warnings) = classify_pr_bindings(&rows, &entries);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("pr_node_binding_untracked: #2 docs/faq"));
