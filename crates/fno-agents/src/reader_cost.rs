@@ -195,7 +195,11 @@ struct PidTrack {
 /// sighting, so bucket totals always sum to the window totals.
 struct BucketAccumulator {
     t0: u64,
-    first_push_done: bool,
+    /// Set by the first push that carried rows: that sample is the
+    /// pre-window baseline. An empty earlier push (a transient table-read
+    /// failure) must not eat the baseline, or every resident pid later
+    /// counts its whole pre-window CPU as in-window spend.
+    baseline_seen: bool,
     prev_ns: std::collections::HashMap<u32, u64>,
     partials: Vec<Partial>,
 }
@@ -216,7 +220,7 @@ impl BucketAccumulator {
     fn new(t0: u64) -> Self {
         BucketAccumulator {
             t0,
-            first_push_done: false,
+            baseline_seen: false,
             prev_ns: std::collections::HashMap::new(),
             partials: Vec::new(),
         }
@@ -252,7 +256,7 @@ impl BucketAccumulator {
             let delta_ns = match prev {
                 Some(p) => row.cpu_ns.saturating_sub(p),
                 None => {
-                    if !self.first_push_done {
+                    if !self.baseline_seen {
                         0
                     } else {
                         row.cpu_ns
@@ -267,7 +271,9 @@ impl BucketAccumulator {
                 partial.build += delta_s;
             }
         }
-        self.first_push_done = true;
+        if !sample.rows.is_empty() {
+            self.baseline_seen = true;
+        }
     }
 
     fn finish(&self) -> Vec<BucketStat> {
@@ -354,6 +360,13 @@ pub fn fold(
         std::collections::BTreeMap<u32, PidTrack>,
     > = Default::default();
     let mut max_conc: std::collections::BTreeMap<String, u64> = Default::default();
+    // The baseline is the first sample that carried rows: an empty earlier
+    // sample (transient table-read failure) must not turn every resident pid
+    // into a whole-reading "birth".
+    let baseline_idx = samples
+        .iter()
+        .position(|s| !s.rows.is_empty())
+        .unwrap_or(usize::MAX);
     for (idx, s) in samples.iter().enumerate() {
         let mut per_class_here: std::collections::BTreeMap<&str, u64> = Default::default();
         for row in &s.rows {
@@ -387,13 +400,13 @@ pub fn fold(
         let mut births = 0u64;
         let mut life_sum = 0.0;
         for t in pids.values() {
-            let ns = if t.first_idx == 0 {
+            let ns = if t.first_idx <= baseline_idx {
                 t.last_ns.saturating_sub(t.first_ns)
             } else {
                 t.last_ns
             };
             cpu_ticks += ns;
-            if t.first_idx > 0 {
+            if t.first_idx > baseline_idx {
                 births += 1;
             }
             life_sum += (t.last_t_ms.saturating_sub(t.first_t_ms)) as f64 / 1000.0;
@@ -553,15 +566,11 @@ fn capacity_cores() -> f64 {
     }
 }
 
-fn load_1m() -> f64 {
+fn load_1m() -> Option<f64> {
     let mut avg = 0.0f64;
     // SAFETY: a one-element array owned by this frame.
     let n = unsafe { libc::getloadavg(&mut avg, 1) };
-    if n < 1 {
-        0.0
-    } else {
-        avg
-    }
+    (n >= 1).then_some(avg)
 }
 
 fn system_ms() -> u64 {
@@ -672,19 +681,28 @@ fn run_config(config: &Config) -> i32 {
     let t0 = system_ms();
     let mut acc = BucketAccumulator::new(t0);
     let mut printed = 0usize;
+    let mut last_load = 0.0f64;
+    let mut printed_partials = 0usize;
     loop {
         let (rows, unr) = sample_rows();
         unreadable += unr;
         let sample = Sample {
             t_ms: system_ms(),
-            load_1m: load_1m(),
+            load_1m: load_1m().unwrap_or(last_load),
             rows,
         };
+        last_load = sample.load_1m;
         acc.push(&sample);
         samples.push(sample);
-        while printed + 1 < acc.partials.len() {
-            print_bucket(&acc.finish()[printed]);
-            printed += 1;
+        // A bucket's numbers never change once a later sample lands elsewhere,
+        // so finish() only pays when a new bucket opened.
+        if acc.partials.len() > printed_partials {
+            printed_partials = acc.partials.len();
+            let closed = acc.finish();
+            while printed + 1 < closed.len() {
+                print_bucket(&closed[printed]);
+                printed += 1;
+            }
         }
         if started.elapsed().as_secs() >= config.window_s {
             break;
@@ -923,6 +941,23 @@ mod tests {
         let c = s.classes.first().unwrap();
         assert!((c.cpu_s - 7.0).abs() < 1e-9, "5.0 resident + 2.0 born");
         assert!((s.machine_cpu_s - c.cpu_s).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_empty_baseline_sample_makes_no_whole_reading_births() {
+        // Sample 0 failed to read the table (transient). Resident pids first
+        // seen at sample 1 must delta against that sighting, not count their
+        // whole pre-window life as in-window spend.
+        let samples = vec![
+            sample(0, 5.0, vec![]),
+            sample(1000, 5.0, vec![row(7, "fno-py agents truth", 30.0)]),
+            sample(2000, 5.0, vec![row(7, "fno-py agents truth", 32.0)]),
+        ];
+        let s = fold(&samples, 12.0, 2, 1000, 0.0, 0);
+        let c = s.classes.first().unwrap();
+        assert!((c.cpu_s - 2.0).abs() < 1e-9, "delta, not 62.0: {}", c.cpu_s);
+        assert_eq!(c.births, 0, "a baseline resident is not a birth");
+        assert_eq!(s.sampled_births, 0);
     }
 
     #[test]
