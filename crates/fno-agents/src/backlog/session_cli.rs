@@ -1271,10 +1271,10 @@ mod tests {
     fn plan_claims_reads_node_key_as_a_single_claim() {
         let dir = tempfile::tempdir().unwrap();
         let plan = dir.path().join("plan-node.md");
-        std::fs::write(&plan, "---\nstatus: ready\nnode: x-abcd\n---\n\n# plan\n").unwrap();
+        std::fs::write(&plan, "---\nstatus: ready\nnode: x-aaaa\n---\n\n# plan\n").unwrap();
         assert_eq!(
             super::plan_claims(plan.to_str().unwrap()),
-            Some(vec!["x-abcd".to_string()])
+            Some(vec!["x-aaaa".to_string()])
         );
     }
 
