@@ -8974,7 +8974,7 @@ async fn attach_and_run(
                             } else {
                                 None
                             };
-                            drain_pending_ground(&mut view, &mut compositor, &mut guard);
+                            theme_ground::drain_pending_ground(&mut view, &mut compositor, &mut guard);
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -13712,6 +13712,7 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+#[cfg(test)]
 #[path = "client_tests/theme_ground_tests.rs"]
 mod theme_ground_tests;
 

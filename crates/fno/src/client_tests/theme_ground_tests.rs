@@ -1,8 +1,8 @@
 //! The theme-switch ground repaint and user-theme tests, moved out of
 //! client_tests.rs for the shrink-only budget.
 
+use super::tests::two_pane_view;
 use super::*;
-use super::client_tests::two_pane_view;
 
 #[test]
 fn apply_theme_stages_the_ground_repaint_and_the_drain_applies_it() {
