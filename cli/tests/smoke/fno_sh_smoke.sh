@@ -190,5 +190,13 @@ else
 fi
 
 echo "---"
-if [ "$fail" -ne 0 ]; then echo "fno.sh smoke: FAILED"; exit 1; fi
+if [ "$fail" -ne 0 ]; then
+  # A failed check prints only its own line. Dump the installer's full
+  # captured output so the next diagnosis reads the real error instead of
+  # guessing from check names.
+  echo "--- installer output (provision run):"
+  printf '%s\n' "$PROVISION_OUT"
+  echo "fno.sh smoke: FAILED"
+  exit 1
+fi
 echo "fno.sh smoke: all checks passed"
