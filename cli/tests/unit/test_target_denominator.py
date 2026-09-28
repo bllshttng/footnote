@@ -57,9 +57,15 @@ esac
 
 
 def _run_init_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+    subprocess.run(
+        ["git", "init", "-q", "-b", "feature/denominator-test", str(tmp_path)],
+        check=True,
+    )
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Test plan\n")
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     fno = bin_dir / "fno"
@@ -67,7 +73,7 @@ def _run_init_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.Co
     fno.chmod(0o755)
     stub_env = install_state_path_stub(bin_dir, tmp_path / "space")
     env = {
-        "HOME": str(tmp_path),
+        "HOME": str(home_dir),
         "PATH": f"{bin_dir}{os.pathsep}" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "TARGET_START": "1",
         "TARGET_INPUT": str(plan_file),
