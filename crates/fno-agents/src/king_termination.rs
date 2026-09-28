@@ -138,6 +138,18 @@ pub(crate) struct KingBoard {
     pub(crate) operator_questions_unreadable: bool,
 }
 
+impl KingBoard {
+    /// The not-read receipt every quiet exit carries: the board names what
+    /// it did not see instead of exiting on an unseen board, and the next
+    /// wake re-reads the named sources. Empty on a fully readable board.
+    pub(crate) fn not_read_receipt(&self) -> String {
+        if self.blind_queues.is_empty() {
+            return String::new();
+        }
+        format!("; not read: {}", self.blind_queues.join(", "))
+    }
+}
+
 fn row_identity(queue: &str, row: &Value) -> String {
     let id = row
         .get("id")
@@ -725,6 +737,38 @@ mod tests {
         ]));
         let parsed = parse_king_board_value(&board).unwrap();
         assert!(!parsed.unreadable_sources);
+    }
+
+    #[test]
+    fn a_quiet_board_of_timeouts_stays_certifiable_and_names_the_reads() {
+        // A quiet board whose only failures are timeouts must allow
+        // the stop. The flag stays off, and the receipt names each timed-out
+        // source so the allow is a named wait, never a silent clean.
+        let board = board_with_queues(json!([
+            {"name": "stale_claim", "status": "over_budget",
+             "error": "truth probe: batch of 34 handles timed out",
+             "actionable": true, "rows": []},
+            {"name": "unheld_progress", "status": "over_budget",
+             "error": "truth probe: batch of 34 handles timed out",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.unreadable_sources);
+        assert_eq!(
+            parsed.not_read_receipt(),
+            "; not read: stale_claim not read: truth probe: batch of 34 handles timed out, \
+             unheld_progress not read: truth probe: batch of 34 handles timed out"
+        );
+    }
+
+    #[test]
+    fn a_fully_readable_board_carries_an_empty_receipt() {
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "ok", "actionable": true,
+             "count": 2, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(parsed.not_read_receipt().is_empty());
     }
 
     #[test]
