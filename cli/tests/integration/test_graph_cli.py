@@ -412,9 +412,9 @@ def test_queue_accepts_multiple_ids_space_and_comma_separated(tmp_graph):
         # filing-time dedup receipt mixes into r.output via CliRunner).
         ids.append(json.JSONDecoder().raw_decode(r.output)[0]["id"])
     # Mix comma and space separators.
-    r = _invoke("backlog", "queue", f"{ids[0]},{ids[1]}", ids[2], "--reason", "batch")
-    assert r.exit_code == 0, r.output
-    queued_ids = {x["id"] for x in json.loads(_invoke("backlog", "queued").output)}
+    r = _native_verb("queue", f"{ids[0]},{ids[1]}", ids[2], "--reason", "batch")
+    assert r.exit_code == 0, r.output + r.stderr
+    queued_ids = {x["id"] for x in json.loads(_native_verb("queued").output)}
     assert queued_ids == set(ids)
     # Same reason on all three.
     for tid in ids:
@@ -426,7 +426,7 @@ def test_queue_batch_is_atomic_on_unknown_id(tmp_graph):
     """If any ID is unknown, no nodes are queued."""
     r = _native_verb("add", "Real")
     real_id = json.loads(r.output)["id"]
-    r = _invoke("backlog", "queue", f"{real_id},ab-deadbeef")
+    r = _native_verb("queue", f"{real_id},ab-deadbeef")
     assert r.exit_code != 0
     # Real node was NOT queued because the batch aborted.
     data = json.loads(_native_get(real_id))
@@ -438,18 +438,18 @@ def test_unqueue_accepts_multiple_ids(tmp_graph):
     for title in ("UnqA", "UnqB"):
         r = _native_verb("add", title)
         ids.append(json.loads(r.output)["id"])
-    _invoke("backlog", "queue", ids[0])
-    _invoke("backlog", "queue", ids[1])
-    r = _invoke("backlog", "unqueue", f"{ids[0]},{ids[1]}")
-    assert r.exit_code == 0
-    queued_listing = json.loads(_invoke("backlog", "queued").output)
+    _native_verb("queue", ids[0])
+    _native_verb("queue", ids[1])
+    r = _native_verb("unqueue", f"{ids[0]},{ids[1]}")
+    assert r.exit_code == 0, r.stderr
+    queued_listing = json.loads(_native_verb("queued").output)
     assert queued_listing == []
 
 
 def test_done_clears_queued_state(tmp_graph):
     r = _native_verb("add", "QueuedThenDone")
     nid = json.loads(r.output)["id"]
-    _invoke("backlog", "queue", nid)
+    _native_verb("queue", nid)
     # Evidence lands on the row first; the canonical bare close's mutation is
     # what clears the queued ghost fields, and the subject of this test is
     # that clear, not the note path.
