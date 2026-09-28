@@ -449,13 +449,15 @@ report_success() {
 	fi
 	# Degrade to the manual hint if this uv predates `tool update-shell` or the
 	# profile edit fails for any reason - never leave the user with no PATH fix.
-	if "$FNO_UV" tool update-shell >/dev/null 2>&1; then
+	# The failure is named, not swallowed: uv exits 2 both with SHELL unset and
+	# on an already-edited profile, and an unnamed rc explains neither.
+	if _us_out=$("$FNO_UV" tool update-shell 2>&1); then
 		_shell_name=$(basename "${SHELL:-sh}")
 		say "added $FNO_TOOL_BIN to your $_shell_name profile (via 'uv tool update-shell')."
 		say "restart your shell, or run this to use fno now:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
 	else
-		say "installed, but $FNO_TOOL_BIN is not on your PATH yet."
+		say "installed, but $FNO_TOOL_BIN is not on your PATH yet (uv tool update-shell failed: $(printf '%s' "${_us_out:-}" | head -n 1))."
 		say "add it for this and future shells, e.g.:"
 		say "    export PATH=\"$FNO_TOOL_BIN:\$PATH\""
 	fi

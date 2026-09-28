@@ -115,7 +115,10 @@ fi
 # on a uv too old for `tool update-shell`, so on such a uv the assertion would
 # false-fail though the installer behaved correctly (the fallback is exercised).
 if uv tool update-shell --help >/dev/null 2>&1; then
-  if printf '%s' "$OUT" | grep -qi 'update-shell'; then
+  # Assert the SUCCESS marker, not the tool name: the installer's fallback
+  # line names the failed command too, and a name-only grep would pass the
+  # check on the very failure it exists to catch.
+  if printf '%s' "$OUT" | grep -qi "added .*profile.*via 'uv tool update-shell'"; then
     pass "path-update-shell" "default path ran 'uv tool update-shell' to fix PATH"
   else
     miss "path-update-shell" "default path did not report a 'uv tool update-shell' profile edit"
