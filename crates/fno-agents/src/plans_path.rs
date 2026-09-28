@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone, Utc};
 
-use crate::agents_config::config_lookup;
-use crate::paths::{canonical_repo_root, space_slug, worktree_repo_root};
+use crate::agents_config::{config_lookup, within_search_ceiling};
+use crate::paths::{canonical_repo_root, resolve_loose, space_slug, worktree_repo_root};
 
 const DEFAULT_PLANS_DIR: &str = ".fno/plans/";
 const DEFAULT_PLANS_FILENAME: &str = "%Y%m%d-{slug}-{node}.md";
@@ -31,6 +31,11 @@ const DEFAULT_PLANS_FILENAME: &str = "%Y%m%d-{slug}-{node}.md";
 pub(crate) fn plans_content_dir(anchor: &Path) -> Option<PathBuf> {
     for name in ["settings.local.json", "settings.json"] {
         let path = anchor.join(".claude").join(name);
+        // A discovered settings file outside the test config ceiling is not
+        // read, matching the config tier (agents_config::within_search_ceiling).
+        if !within_search_ceiling(&path) {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -450,34 +455,6 @@ fn expanduser(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// `Path.resolve()` for a path that may not exist: canonicalize the deepest
-/// existing ancestor, re-append the missing tail.
-fn resolve_loose(path: &Path) -> PathBuf {
-    if let Ok(c) = std::fs::canonicalize(path) {
-        return c;
-    }
-    let mut missing: Vec<std::ffi::OsString> = Vec::new();
-    let mut cur = path.to_path_buf();
-    loop {
-        match std::fs::canonicalize(&cur) {
-            Ok(existing) => {
-                let mut out = existing;
-                for comp in missing.iter().rev() {
-                    out.push(comp);
-                }
-                return out;
-            }
-            Err(_) => match (cur.file_name().map(|f| f.to_os_string()), cur.parent()) {
-                (Some(name), Some(parent)) => {
-                    missing.push(name);
-                    cur = parent.to_path_buf();
-                }
-                _ => return path.to_path_buf(),
-            },
-        }
-    }
-}
-
 /// The spaces root, Python `paths.spaces_root`'s full chain:
 /// `$FNO_SPACES_DIR` (skipped when `durable`, whose destination must survive
 /// the pin) > `paths.spaces_dir` in config > `<state_dir>/spaces`, where
@@ -824,6 +801,34 @@ mod tests {
         let _env = EnvGuard::new(&fx.pins());
         let dir = plans_content_dir(&fx.root()).unwrap();
         assert_eq!(dir, resolve_loose(&fx.root().join("docs/plans")));
+    }
+
+    #[test]
+    fn settings_plans_directory_outside_the_ceiling_is_skipped() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fx = Fixture::new("ceiling");
+        fs::write(
+            fx.root().join(".claude/settings.local.json"),
+            r#"{"plansDirectory": "docs/plans"}"#,
+        )
+        .unwrap();
+        fs::write(fx.config(), "plans_dir = \"cfg/plans\"\n").unwrap();
+        let ceiling = fx.base.join("ceiling-root");
+        fs::create_dir_all(&ceiling).unwrap();
+        let _env = EnvGuard::new(&fx.pins());
+        let _capped = EnvGuard::new(&[("FNO_CONFIG_SEARCH_ROOT", ceiling.display().to_string())]);
+
+        let dir = plans_content_dir(&fx.root()).unwrap();
+        assert_ne!(
+            dir,
+            resolve_loose(&fx.root().join("docs/plans")),
+            "a settings file outside the ceiling is not read"
+        );
+        assert_eq!(
+            dir,
+            resolve_loose(&fx.root().join("cfg/plans")),
+            "the explicit FNO_CONFIG tier still answers under the ceiling"
+        );
     }
 
     #[test]
