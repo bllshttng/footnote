@@ -1274,37 +1274,30 @@ _MERGE_FLOOR_S = 150.0
 def merge_freeze_refusal(pr: int) -> Optional[str]:
     """The scoped merge freeze's answer for one PR, or None when it may merge.
 
-    The record lives in the agents home, written by the crown through the
-    authorized-merge verb's freeze ops; the merge owner's own Rust gate is
-    the authoritative reader and refuses off-list PRs on every merge path.
-    This pre-check only spares the arm's queue a round of doomed merges and
-    names the freeze in the arm's own receipt. Fail posture mirrors the
-    fleet breaker: an unreadable record refuses, absence is a real answer.
+    The Rust gate owns the record; one authorized-merge freeze-check receipt
+    answers here, keeping this a thin call site that spares the arm's queue a
+    round of doomed merges and names the freeze in the arm's own receipt.
+    Fail posture mirrors the fleet breaker: an unreadable answer refuses,
+    absence is a real answer.
     """
-    import json as _json
+    from fno.rust_binary import call_binary_json
 
-    from fno.paths import agents_home_dir
-
-    path = Path(agents_home_dir()) / "merge-freeze.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    error, receipt = call_binary_json(
+        "authorized-merge", [json.dumps({"op": "freeze-check", "pr": pr})], timeout=15
+    )
+    if error is not None:
+        return f"merge-freeze check unavailable ({error}); the arm fails closed"
+    if not isinstance(receipt, dict):
+        return f"merge-freeze check answered unreadable JSON ({receipt!r}); the arm fails closed"
+    outcome = receipt.get("outcome")
+    if outcome == "clear":
         return None
-    except OSError as exc:
-        return f"merge-freeze record unreadable ({exc}); the arm fails closed"
-    try:
-        record = _json.loads(raw)
-    except ValueError as exc:
-        return f"merge-freeze record unreadable ({exc}); the arm fails closed"
-    if not isinstance(record, dict) or record.get("version") != 1:
-        return f"merge-freeze record at {path} is not a version-1 freeze; the arm fails closed"
-    subject = record.get("subject")
-    allow = record.get("allow")
-    if not isinstance(subject, str) or not isinstance(allow, list):
-        return f"merge-freeze record at {path} is not a version-1 freeze; the arm fails closed"
-    if pr in allow:
-        return None
-    return f"a merge freeze holds ({subject}); PR {pr} is not on its allow-list"
+    if outcome == "frozen":
+        return (
+            f"a merge freeze holds ({receipt.get('detail') or 'unnamed'}); "
+            f"PR {pr} is not on its allow-list"
+        )
+    return f"merge-freeze record unreadable ({receipt.get('detail') or outcome}); the arm fails closed"
 
 
 def run_execute_queue(

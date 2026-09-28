@@ -1,60 +1,56 @@
 """The pr-watch merge arm refuses an off-list PR under the scoped merge freeze.
 
 The crown writes one record (subject + allow-list) through the
-authorized-merge verb's freeze ops; the arm's executor reads it for the
-per-PR early skip, and the merge owner's Rust gate is the authoritative
-reader on every merge path.
+authorized-merge verb's freeze ops; the Rust gate is the authoritative
+reader, and the arm's executor asks it through one thin receipt call. The
+verdict mapping lives here; the record read is the Rust tests'.
 """
 from __future__ import annotations
-
-import json
 
 from fno.pr_watch._dispatch import merge_freeze_refusal, run_execute_queue
 
 
-def _record(tmp_path, record):
-    home = tmp_path / "agents"
-    home.mkdir(exist_ok=True)
-    if record is not None:
-        (home / "merge-freeze.json").write_text(json.dumps(record))
-    return home
+def _door(monkeypatch, receipt=None, error=None):
+    import fno.rust_binary as rb
+
+    seen = {}
+
+    def _call(verb, args, *, timeout=None):
+        seen["verb"] = verb
+        seen["args"] = args
+        return (error, receipt)
+
+    monkeypatch.setattr(rb, "call_binary_json", _call, raising=True)
+    return seen
 
 
-def _patch_home(monkeypatch, home):
-    import fno.paths as paths_mod
-
-    monkeypatch.setattr(paths_mod, "agents_home_dir", lambda: home)
+CLEAR = {"outcome": "clear", "exit_code": 0, "detail": ""}
+FROZEN = {"outcome": "frozen", "exit_code": 0, "detail": "rc freeze crown"}
 
 
 class TestMergeFreezeVerdict:
-    def test_no_record_reads_clear(self, tmp_path, monkeypatch):
-        _patch_home(monkeypatch, _record(tmp_path, None))
+    def test_a_clear_receipt_reads_none(self, monkeypatch):
+        seen = _door(monkeypatch, receipt=CLEAR)
         assert merge_freeze_refusal(42) is None
+        assert seen["verb"] == "authorized-merge"
+        assert '{"op": "freeze-check", "pr": 42}' in seen["args"][0]
 
-    def test_an_off_list_pr_refuses_naming_the_freeze(self, tmp_path, monkeypatch):
-        _patch_home(
-            monkeypatch,
-            _record(
-                tmp_path,
-                {"version": 1, "subject": "rc freeze", "set_by": "crown", "allow": [2739]},
-            ),
-        )
+    def test_an_off_list_pr_refuses_naming_the_freeze(self, monkeypatch):
+        _door(monkeypatch, receipt=FROZEN)
         why = merge_freeze_refusal(2500)
         assert why is not None
         assert "rc freeze" in why
         assert "2500" in why
-        assert merge_freeze_refusal(2739) is None
 
-    def test_an_unreadable_record_refuses_fail_closed(self, tmp_path, monkeypatch):
-        home = _record(tmp_path, None)
-        _patch_home(monkeypatch, home)
-        (home / "merge-freeze.json").write_text("{")
+    def test_a_failed_check_refuses_fail_closed(self, monkeypatch):
+        _door(monkeypatch, error="fno-agents binary not found")
+        why = merge_freeze_refusal(42)
+        assert why is not None and "unavailable" in why
+
+    def test_an_unreadable_receipt_refuses_fail_closed(self, monkeypatch):
+        _door(monkeypatch, receipt=[1, 2])
         why = merge_freeze_refusal(42)
         assert why is not None and "unreadable" in why
-
-    def test_a_wrong_version_refuses_fail_closed(self, tmp_path, monkeypatch):
-        _patch_home(monkeypatch, _record(tmp_path, {"version": 99, "subject": "s", "allow": []}))
-        assert merge_freeze_refusal(42) is not None
 
 
 # --- the arm's queue ----------------------------------------------------------
@@ -68,12 +64,7 @@ class _Cand:
         self.repo_dir = "/tmp"
 
 
-class _Store:
-    def __init__(self, path=None):
-        self._entries = {}
-
-
-def _run_queue(monkeypatch, entries, pr):
+def _run_queue(monkeypatch, entries, pr, receipt=None):
     """Run one queue row through the executor with the merge stubbed."""
     receipts = []
 
@@ -107,6 +98,7 @@ def _run_queue(monkeypatch, entries, pr):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch._gh_budget_backoff_left", lambda: 0.0, raising=True
     )
+    _door(monkeypatch, receipt=receipt if receipt is not None else CLEAR)
 
     def _fake_merge(argv, cwd=None, *, authority="", timeout_s=0.0):
         from fno.pr import _merge as m
@@ -128,17 +120,13 @@ def _run_queue(monkeypatch, entries, pr):
 
 class TestQueueSkipsUnderFreeze:
     def test_an_off_list_pr_skips_with_a_receipt_naming_the_freeze(
-        self, tmp_path, monkeypatch
+        self, monkeypatch
     ):
-        _patch_home(
-            monkeypatch,
-            _record(
-                tmp_path,
-                {"version": 1, "subject": "rc freeze", "set_by": "crown", "allow": [2739]},
-            ),
-        )
         counts, receipts = _run_queue(
-            monkeypatch, {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}}, 2500
+            monkeypatch,
+            {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}},
+            2500,
+            receipt=FROZEN,
         )
         assert counts["held"] == 1
         assert counts["executed"] == 0
@@ -147,8 +135,7 @@ class TestQueueSkipsUnderFreeze:
         skipped = [d for k, d in receipts if k == "pr_watch_skipped"]
         assert skipped and skipped[-1].get("reason") == "merge-freeze"
 
-    def test_no_freeze_runs_the_merge(self, tmp_path, monkeypatch):
-        _patch_home(monkeypatch, _record(tmp_path, None))
+    def test_no_freeze_runs_the_merge(self, monkeypatch):
         counts, receipts = _run_queue(
             monkeypatch, {"o/r#2500": {"last_seen_state": "OPEN", "retries": 0}}, 2500
         )
