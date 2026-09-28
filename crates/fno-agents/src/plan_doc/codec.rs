@@ -202,7 +202,7 @@ fn parse_scalar(raw: &str) -> String {
         return resolve_dq_escapes(&raw[1..raw.len() - 1]);
     }
     if bytes.len() >= 2 && bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'' {
-        return raw[1..raw.len() - 1].to_string();
+        return raw[1..raw.len() - 1].replace("''", "'");
     }
     raw.to_string()
 }
@@ -473,7 +473,7 @@ pub fn serialize_frontmatter(fields: &Fields) -> String {
 /// Epic-decomposition group nodes carry plan_path of the form
 /// `<doc>#group-<slug>`; when the literal path is absent and dropping the
 /// trailing `#group-` fragment yields a real file, use that.
-pub fn read_plan_file(plan_path: &Path) -> Result<(PathBuf, Fields, String), ReadError> {
+pub(super) fn resolve_plan_path(plan_path: &Path) -> PathBuf {
     let mut plan_path = plan_path.to_path_buf();
     if !plan_path.exists() {
         if let Some(name) = plan_path.file_name().and_then(|n| n.to_str()) {
@@ -488,7 +488,11 @@ pub fn read_plan_file(plan_path: &Path) -> Result<(PathBuf, Fields, String), Rea
             }
         }
     }
+    plan_path
+}
 
+pub fn read_plan_file(plan_path: &Path) -> Result<(PathBuf, Fields, String), ReadError> {
+    let plan_path = resolve_plan_path(plan_path);
     if !plan_path.is_file() {
         return Err(ReadError::NotFound(format!(
             "Plan path does not exist: {}",
