@@ -42,7 +42,7 @@ HOME="$TEST_HOME" python3 scripts/roadmap-tasks.py intake "$TEST_HOME/plans/dash
     || fail "intake dashboard"
 
 # Step 2: graph.md renders with all three cards in the Next column.
-GRAPH_MD="$TEST_HOME/.fno/graph.md"
+GRAPH_MD="$TEST_HOME/.fno/pages/graph.md"
 [[ -f "$GRAPH_MD" ]] || fail "graph.md missing after intake"
 grep -q "^kanban-plugin: board" "$GRAPH_MD" || fail "kanban-plugin frontmatter missing"
 grep -q "^## Now" "$GRAPH_MD" || fail "Now column missing"

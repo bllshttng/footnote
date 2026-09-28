@@ -103,10 +103,18 @@ async function resolveManifestPath(bin: string, dir: string): Promise<string | n
 // shows no Footnote verbs", never to an error.
 function skillsRoot(): string | null {
   const base = process.env.FNO_HOME || join(homedir(), ".fno")
-  let root: string
-  try {
-    root = readFileSync(join(base, "plugin-root"), "utf8").trim()
-  } catch {
+  // The pointer moved under install/ (the state-root tidiness wave); an
+  // unmigrated install keeps the legacy root name until the daemon migrates.
+  let root: string | null = null
+  for (const name of ["install/plugin-root", "plugin-root"]) {
+    try {
+      root = readFileSync(join(base, name), "utf8").trim()
+      if (root) break
+    } catch {
+      // try the next spelling
+    }
+  }
+  if (!root) {
     console.error("[footnote] no plugin-root pointer; skills not offered")
     return null
   }

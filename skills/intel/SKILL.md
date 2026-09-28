@@ -68,7 +68,7 @@ The fold names its populations, and the report keeps them apart. Every number sa
 
 6. Corrections section: quote user corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
 
-7. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
+7. Feed the S2 writer so the rows land in `~/.fno/logs/corrections.log`:
 
    ```bash
    bash scripts/corrections-insights-tag.sh --insights-file <report>
