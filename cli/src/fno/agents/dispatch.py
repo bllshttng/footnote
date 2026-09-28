@@ -1014,6 +1014,7 @@ def _lane_b_thread_spawn(
     """
     from fno.agents.harness_map import render_session_argv, thread_lane
     from fno.harness_identity import scrub_ambient_identity
+    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
 
     if thread_lane(harness) != "keeper":
         raise DispatchAskError(
@@ -1107,6 +1108,10 @@ def _lane_b_thread_spawn(
         # IDENTITY; the keeper passes its own env through to the harness
         # child unchanged, so the scrub has to happen here.
         scrub_ambient_identity(env)
+        # The same for the seed block: a child that inherits it attributes
+        # its own first message to whoever seeded its parent.
+        for _seed_key in SEED_PROVENANCE_KEYS:
+            env.pop(_seed_key, None)
         # The loop extension's spawn binding: the presence of this variable
         # marks THIS process as one fno spawned into the loop lane, so the
         # global footnote extension gates only here and never hijacks a
