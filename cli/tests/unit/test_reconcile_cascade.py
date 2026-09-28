@@ -904,7 +904,7 @@ def test_release_parented_children_clears_non_done_revivable():
     must not refuse the supersede over it, and a deferred/superseded child is
     not currently dispatchable so it must not block the supersede either.
     """
-    from fno.graph.cli import _live_child_ids, _release_parented_children
+    from fno.graph.strand import _live_child_ids, _release_parented_children
 
     def _kid(
         id_,
