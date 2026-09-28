@@ -1792,6 +1792,10 @@ pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
     };
     let mut rows: Vec<HarnessChoice> = table
         .iter()
+        // The user retired gemini (upstream CLI deprecated): the composer
+        // picker never lists it again. The capability table keeps the row
+        // for its other consumers (resume argv, state grants).
+        .filter(|(name, _)| *name != "gemini")
         .map(|(name, caps)| {
             let efforts = caps.get("efforts").and_then(|v| v.as_array()).map(|a| {
                 a.iter()
@@ -2185,7 +2189,7 @@ fn title_for(field: Focus) -> String {
     match field {
         Focus::Harness => "harness".to_string(),
         Focus::Model => "model".to_string(),
-        Focus::Project => "project".to_string(),
+        Focus::Project => "directory".to_string(),
         Focus::Permission => "mode".to_string(),
         Focus::Where => "where".to_string(),
         Focus::Effort => "effort".to_string(),
@@ -3179,7 +3183,7 @@ impl Launcher {
                 .cwd()
                 .rsplit('/')
                 .find(|s| !s.is_empty())
-                .unwrap_or("project")
+                .unwrap_or("directory")
                 .to_string(),
             Focus::Branch => match d.worktree_state(catalog) {
                 Some(true) => d.branch.clone().unwrap_or_else(|| "main".to_string()),
