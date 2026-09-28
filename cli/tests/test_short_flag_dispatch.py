@@ -35,8 +35,8 @@ runner = CliRunner()
 # --------------------------------------------------------------------------- #
 
 PHASE2_HELP_SURFACES: dict[str, list[str]] = {
-    "backlog-add": ["backlog", "add", "--help"],
-    "backlog-idea": ["backlog", "idea", "--help"],
+    # backlog-add / backlog-idea moved with the create port: the native
+    # binary answers --help now (pinned below, next to native-find).
     "backlog-intake": ["backlog", "intake", "--help"],
     # backlog-update moved with the update port: the native binary answers
     # --help now (pinned below, next to native-find).
@@ -67,6 +67,17 @@ def test_phase2_surface_registers(argv: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 # Parity: backlog find (read-only graph path).
 # --------------------------------------------------------------------------- #
+
+def test_backlog_create_native_help_registers() -> None:
+    """`backlog add|idea --help` moved with the create port: the binary's
+    flag decls still parse and the surface answers."""
+    from tests._native_door import run_native
+
+    for verb in ("add", "idea"):
+        code, out, err = run_native("backlog", verb, "--help")
+        assert code == 0, err
+        assert "Usage" in out + err
+
 
 def test_backlog_find_native_help_registers() -> None:
     """`backlog find --help` is the native binary's now; the flag decl still

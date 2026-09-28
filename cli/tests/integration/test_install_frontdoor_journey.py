@@ -68,8 +68,8 @@ def _front_door() -> Path | None:
     return None
 
 
-def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """One fresh CLI process: the journey must exercise the real verb surface."""
+def _journey_env(home: Path) -> dict[str, str]:
+    """The scrubbed environment every journey subprocess runs under."""
     env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
     # The journey rides an attributable identity: init stamps the node lock and
     # acquires the claim against a harness session, and the shared conftest
@@ -78,10 +78,15 @@ def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[
     # documented carve-out), so this journey carries one - the real session id
     # when pytest itself runs inside a harness, a synthetic one otherwise.
     env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
+    return env
+
+
+def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """One fresh CLI process: the journey must exercise the real verb surface."""
     return subprocess.run(
         [sys.executable, "-c", "from fno.cli import app; app()", *args],
         cwd=repo,
-        env=env,
+        env=_journey_env(home),
         capture_output=True,
         text=True,
         timeout=120,
@@ -149,14 +154,29 @@ def test_authorized_target_init_journey(clean_machine):
     """
     home, repo = clean_machine
 
-    # 1. The node: minted by us, in the state root we own.
-    proc = _run_fno(
-        repo, home, "backlog", "idea",
-        f"journey fixture {uuid.uuid4().hex[:8]}",
-        "--difficulty", "low", "--separate",
+    # 1. The node: seeded by us into the state root this journey's CLI
+    #    resolves (the create verbs are the native binary's since the create
+    #    port, so the fixture mints the row through the store directly - the
+    #    behavior under test is the authorized init, not the mint vehicle).
+    proc = subprocess.run(
+        [sys.executable, "-c", "from fno import paths; print(paths.graph_json())"],
+        cwd=repo, env=_journey_env(home), capture_output=True, text=True, timeout=120, check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    node = json.loads(proc.stdout)["id"]
+    graph_json = Path(proc.stdout.strip().splitlines()[-1])
+    node = f"x-{uuid.uuid4().hex[:8]}"
+    from tests.fixtures.graph_seed import seed_graph
+
+    seed_graph(graph_json, json.dumps({"entries": [{
+        "id": node,
+        "title": f"journey fixture {node}",
+        "project": "fno",
+        "type": "feature",
+        "priority": "p2",
+        "status": "ready",
+        "blocked_by": [],
+        "children": [],
+    }]}) + "\n")
 
     # 2. Setup ran through the same CLI before init (the wizard's plan, above,
     #    proves the surface; this journey re-runs it so the receipt is one run).

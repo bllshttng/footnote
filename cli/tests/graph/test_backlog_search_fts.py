@@ -76,9 +76,11 @@ def test_query_syntax_is_neutralized_end_to_end(tmp_graph):
     assert fts.search('"unbalanced quote AND (', tmp_graph) == []
 
 
-def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path, monkeypatch):
-    """`find --fts` is the native binary's now: it has no FTS cache, so the
-    flag rides the documented substring degrade, warning on stderr."""
+def test_find_fts_answers_through_the_native_index(tmp_graph, tmp_path, monkeypatch):
+    """`find --fts` is the native binary's now, and it rides the store's own
+    FTS5 index (search.rs): the seeded row comes back best-first with no
+    warning. The substring-degrade warning fires only when the index errors,
+    which a seeded store no longer produces."""
     import os as _os
     import subprocess as _sp
 
@@ -97,5 +99,4 @@ def test_find_fts_flag_degrades_to_substring_with_a_warning(tmp_graph, tmp_path,
         env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
     )
     assert proc.returncode == 0, proc.stderr
-    assert "warning: fts unavailable" in proc.stderr
     assert [e["id"] for e in json.loads(proc.stdout)] == ["x-aaaa"]

@@ -75,10 +75,14 @@ def test_idea_details_file_roundtrip(tmp_graph):
     details = 'guidance with "quotes" and\nnewlines\n'
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text(details, encoding="utf-8")
-    r = runner.invoke(
-        cli,
-        ["idea", "file-fed idea", "--details-file", str(details_file),
-         "--difficulty", "low", "-J"],
+    # The idea verb is the native create door's since the create port; the
+    # binary is exec'd with the state dir pinned to the graph's parent.
+    from tests.conftest import run_native_create
+
+    r = run_native_create(
+        tmp_graph, "idea", "file-fed idea",
+        "--details-file", str(details_file),
+        "--difficulty", "low", "-J",
     )
     assert r.exit_code == 0, r.output
     receipt = json.loads(r.stdout)
@@ -91,9 +95,11 @@ def test_idea_details_file_roundtrip(tmp_graph):
 def test_idea_details_file_and_details_refused(tmp_graph):
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text("d", encoding="utf-8")
-    r = runner.invoke(
-        cli,
-        ["idea", "t", "--details-file", str(details_file), "--details", "inline"],
+    from tests.conftest import run_native_create
+
+    r = run_native_create(
+        tmp_graph, "idea", "t",
+        "--details-file", str(details_file), "--details", "inline",
     )
     assert r.exit_code == 1
     assert "not both" in r.stderr
