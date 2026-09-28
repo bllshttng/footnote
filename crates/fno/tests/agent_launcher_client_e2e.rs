@@ -77,9 +77,9 @@ fn harness_row(s: &str, name: &str) -> bool {
 /// picker. Chip-row grammar: Enter on a chip opens its picker, typing
 /// filters, Enter commits and closes.
 fn pick_claude_and_open_model_picker(h: &mut ClientHarness) {
-    // A fresh open focuses the input; three Tabs walk Message -> Plus ->
+    // A fresh open focuses the input; two Tabs walk Message ->
     // Permission -> Harness.
-    type_and_settle(h, b"\t\t\t");
+    type_and_settle(h, b"\t\t");
     type_and_settle(h, b"\r");
     // The picker lists the catalog's selectable (installed) harnesses once
     // the read lands. A clean CI home has only the fake bins, so the draft
@@ -130,8 +130,8 @@ fn composer_from_sidebar_opens_the_centered_sheet_with_full_values() {
         "the Where chip and the placeholder paint: {screen}"
     );
     assert!(
-        screen.contains("+") && screen.contains("auto"),
-        "the bottom row paints the plus and mode chips: {screen}"
+        screen.contains("auto"),
+        "the bottom row paints the mode chip: {screen}"
     );
     // The harness chip's value lands when the catalog read does; the
     // first-run preselect is claude, per the harness-preselect ruling.
@@ -287,12 +287,13 @@ fn narrow_terminal_wraps_the_right_chip_group() {
     // The chip value is the first-run preselect claude, painted when the
     // catalog read lands.
     let screen = h.wait_screen(35, |s| s.contains("claude  \u{25be}"));
-    // The left group's `+  auto` row and the right group's harness chip sit
+    // The left group's `auto  \u{25be}` chip and the right group's harness
+    // chip sit
     // on different screen rows. The two-space gap pins the match to the
     // sheet's chip row, never the sidebar's `+ new workspace`.
     let plus_row = screen
         .lines()
-        .position(|l| l.contains("+  auto"))
+        .position(|l| l.contains("auto  \u{25be}"))
         .expect("the left chip group paints");
     let harness_line = screen
         .lines()
@@ -478,8 +479,8 @@ fn arrows_in_the_model_body_move_and_up_never_launches() {
     let mut h = ClientHarness::spawn_sized_with(&scratch, 24, 120, &env_refs);
     wait_input(&mut h);
     open_composer(&mut h);
-    // Four tabs land on the Model chip; Enter drops its picker.
-    type_and_settle(&mut h, b"\t\t\t\t");
+    // Three tabs land on the Model chip; Enter drops its picker.
+    type_and_settle(&mut h, b"\t\t\t");
     type_and_settle(&mut h, b"\r");
     std::thread::sleep(Duration::from_millis(400));
     type_and_settle(&mut h, UP);
@@ -538,7 +539,7 @@ fn codex_model_tab_lists_the_codex_slugs() {
     open_composer(&mut h);
     // Narrow the harness picker to codex, commit it, then Tab to the Model
     // chip and drop its picker. Same grammar the claude helper exercises.
-    type_and_settle(&mut h, b"\t\t\t");
+    type_and_settle(&mut h, b"\t\t");
     type_and_settle(&mut h, b"\r");
     h.wait_screen(35, |s| harness_row(s, "claude") && harness_row(s, "codex"));
     type_and_settle(&mut h, b"codex");
@@ -603,5 +604,30 @@ fn model_picker_shows_the_flagship_and_the_seeded_provider_group() {
     assert!(
         screen.contains("opus"),
         "the flagship names the floor lead: {screen}"
+    );
+}
+
+#[test]
+fn typed_dash_dash_opens_the_flag_picker_and_a_pick_becomes_a_pill() {
+    // AC10-HP: `--` at a word start opens the harness's flag picker (the
+    // compiled capability table carries claude's captured flags); a pick
+    // becomes a pill on the pills row and leaves the message clean.
+    let scratch = Scratch::new("composer-flag-pills");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    wait_input(&mut h);
+    open_composer(&mut h);
+    type_and_settle(&mut h, b"--");
+    let screen = h.wait_screen(35, |s| s.contains("--agent"));
+    assert!(
+        screen.contains("--agent"),
+        "the flags picker lists the captured flags: {screen}"
+    );
+    // Narrow to --agent and pick it; the pill paints with its value slot.
+    type_and_settle(&mut h, b"agent");
+    type_and_settle(&mut h, b"\r");
+    let screen = h.wait_screen(10, |s| s.contains("--agent <value>"));
+    assert!(
+        screen.contains("--agent <value>"),
+        "the pill paints with its value slot: {screen}"
     );
 }
