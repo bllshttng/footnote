@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -79,7 +80,7 @@ def test_ac1_hp_backlog_help_lists_verbs():
     """
     r = _invoke("backlog", "--help")
     assert r.exit_code == 0, r.output
-    for verb in ("add", "next", "get", "done"):
+    for verb in ("next", "get", "done"):
         assert verb in r.output, f"verb {verb!r} missing from backlog help"
 
 
@@ -99,7 +100,7 @@ def test_ac1_hp_top_level_help_hides_graph_shows_backlog():
 
 def test_ac2_hp_backlog_add_round_trips(tmp_graph):
     """`fno backlog add X` round-trips: returns the node JSON with the title set."""
-    r = _invoke("--json", "backlog", "add", "FeatureB")
+    r = run_native_create(tmp_graph, "add", "FeatureB", "--difficulty", "medium")
     assert r.exit_code == 0, r.output
     node = json.loads(r.stdout)
     assert node["title"] == "FeatureB"
@@ -174,7 +175,7 @@ def test_adopt_alias_is_gone(tmp_graph, tmp_path):
 
 def test_ac1_hp_done_marks_node_completed(tmp_graph):
     """`fno backlog done <id>` sets completed_at and status derives to done."""
-    add = _invoke("--json", "backlog", "add", "DoneTest")
+    add = run_native_create(tmp_graph, "add", "DoneTest", "--difficulty", "medium")
     assert add.exit_code == 0
     node_id = json.loads(add.stdout)["id"]
 
@@ -192,7 +193,7 @@ def test_ac1_hp_done_marks_node_completed(tmp_graph):
 
 def test_ac3_edge_done_is_idempotent(tmp_graph):
     """Running `done` on an already-done node is a safe no-op (exit 0)."""
-    add = _invoke("--json", "backlog", "add", "IdemTest")
+    add = run_native_create(tmp_graph, "add", "IdemTest", "--difficulty", "medium")
     node_id = json.loads(add.stdout)["id"]
     _invoke("backlog", "done", node_id, "--note", "idempotency fixture")
     r2 = _invoke("backlog", "done", node_id)
@@ -253,9 +254,9 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
 # ---------------------------------------------------------------------------
 
 _ADVERTISED_BACKLOG_VERBS = {
-    # `update` moved with the update port: the native binary advertises it,
-    # the python menu no longer lists it.
-    "add", "idea", "get", "view", "next", "done", "defer",
+    # `update` moved with the update port, and `add`/`idea` with the create
+    # port: the native binary advertises them, the python menu does not.
+    "get", "view", "next", "done", "defer",
     "triage", "note",
 }
 

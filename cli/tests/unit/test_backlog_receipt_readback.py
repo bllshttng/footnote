@@ -27,17 +27,7 @@ def _graph(tmp_path: Path, monkeypatch, entries: list[dict]) -> Path:
     return graph
 
 
-def test_idea_refuses_when_the_new_row_does_not_read_back(tmp_path, monkeypatch):
-    _graph(tmp_path, monkeypatch, [])
-    monkeypatch.setattr("fno.graph.store._readback_row", lambda path, node_id: (None, True))
 
-    result = runner.invoke(
-        app,
-        ["backlog", "idea", "lost filing", "--difficulty", "low", "--separate"],
-    )
-
-    assert result.exit_code == 1, result.output
-    assert "write did not land" in result.output
 
 
 def test_update_receipt_names_the_resolved_id(tmp_path, monkeypatch):
