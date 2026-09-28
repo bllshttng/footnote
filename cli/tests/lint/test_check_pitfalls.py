@@ -15,6 +15,8 @@ from tests.fixtures.graph_seed import seed_graph
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -30,23 +32,29 @@ def _run(
     target: Path, *, lint: Path = LINT, env_extra: dict | None = None
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
-    # operator's live graph: pin an empty state root with an absent store.
-    state = target.parent / "state"
-    config = target.parent / "config.toml"
-    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
-    env = {
-        **os.environ,
-        "FNO_CONFIG": str(config),
-        "FNO_GRAPH_JSON": str(state / "graph.json"),
-    }
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        ["bash", str(lint), str(target)],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    # operator's live graph: pin an empty state root with an absent store. The
+    # config lives outside target.parent because a symlinked target may point
+    # that directory back into the checkout.
+    with tempfile.TemporaryDirectory(prefix="fno-pitfalls-state-") as directory:
+        state = Path(directory) / "state"
+        config = Path(directory) / "config.toml"
+        config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
+        env = {
+            **os.environ,
+            "FNO_CONFIG": str(config),
+            "FNO_GRAPH_JSON": str(state / "graph.json"),
+            "PATH": os.pathsep.join(
+                (str(Path(sys.executable).parent), os.environ.get("PATH", ""))
+            ),
+        }
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", str(lint), str(target)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def _fixture(tmp_path: Path, entries):
@@ -386,7 +394,7 @@ def test_an_unreadable_graph_fails_loud(tmp_path: Path) -> None:
     graph_db.parent.mkdir(parents=True)
     graph_db.write_bytes(b"not sqlite")
     path = _fixture(tmp_path, [GOOD])
-    r = _run(path)
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph_db.with_suffix(".json"))})
     assert r.returncode == 1
     assert "cannot be read" in r.stderr
 
