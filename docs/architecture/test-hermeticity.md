@@ -45,7 +45,7 @@ On its first run it caught `$CLI` in `loop_dispatch.rs`, which nothing had scrub
 Isolation must not quietly change which code path runs.
 Three pins were tried and removed because they did:
 
-- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`, and `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain: the Python loader (`config_io._apply_search_ceiling`) and the Rust readers (`within_search_ceiling`, applied at `config_candidates`, the backlog settings walk, and the plans chain's `.claude/settings*.json` tier) both honor it.
+- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`. `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain. Both legs honor it: the Python loader (`config_io._apply_search_ceiling`) and the Rust readers (`within_search_ceiling`). The Rust sites: `config_candidates`, the backlog settings walk, and the plans chain's `.claude/settings*.json` tier.
 - **`FNO_GLOBAL_SETTINGS_PATH`** - the global candidate is `Path.home()/.fno/settings.yaml`, so the sandboxed `HOME` covers it. Re-pinning additionally overrode the candidate for tests that monkeypatch `HOME` precisely to exercise the global-fallback path.
 - **`FNO_REPO_ROOT`** - pinning it points repo-root resolution at an empty sandbox, and a large part of the suite legitimately resolves the real checkout to find a lint script or the installed package. Unset is also exactly what CI has.
 
