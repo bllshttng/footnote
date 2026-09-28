@@ -15,7 +15,7 @@ use resolve::resolve;
 use sources::{load_sources, Paths, Receipt, Sources};
 #[cfg(test)]
 use transcript::scan;
-use transcript::{find_transcript, TranscriptFacts};
+use transcript::{find_many, TranscriptFacts};
 
 pub fn classify(args: &[OsString]) -> Option<Vec<OsString>> {
     if args.len() < 3
@@ -45,6 +45,7 @@ fn run_to(args: &[OsString], stdout: &mut impl Write, stderr: &mut impl Write) -
     };
     let sources = load_sources(&paths);
     let resolved = resolve(&paths.arg, &sources);
+    let transcripts = find_many(&resolved.sessions);
     let mut output = Vec::new();
 
     if resolved.repo_slug_unresolved {
@@ -54,8 +55,7 @@ fn run_to(args: &[OsString], stdout: &mut impl Write, stderr: &mut impl Write) -
         );
     }
     for sid in &resolved.sessions {
-        let transcript = find_transcript(sid);
-        for line in card(sid, &sources, transcript.as_ref()) {
+        for line in card(sid, &sources, transcripts.get(sid)) {
             let _ = writeln!(output, "{line}");
         }
         if sid != resolved.sessions.last().unwrap_or(sid) || !resolved.ledger_only.is_empty() {

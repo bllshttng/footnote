@@ -497,7 +497,10 @@ fn resume_line(
     if let Some(provider) = provider.filter(|provider| !provider.eq_ignore_ascii_case("anthropic"))
     {
         if spawn_model != "unknown" {
-            return format!("fno agents spawn --resume {sid} -P {provider} -m '{spawn_model}'");
+            return format!(
+                "fno agents spawn --resume {sid} -P {provider} -m {}",
+                shell_single_quote(spawn_model)
+            );
         }
         return "unknown (the registry records a provider but no spawn model)".into();
     }
@@ -519,6 +522,10 @@ fn resume_line(
         }
     }
     "unknown (the harness has no declared resume form)".into()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn normalize_model(model: &str) -> &str {

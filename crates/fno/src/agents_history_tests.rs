@@ -168,6 +168,16 @@ fn agents_history_route_tag_compares_normalized_model_but_resumes_exact_request(
 }
 
 #[test]
+fn agents_history_routed_resume_quotes_apostrophes_in_model_ids() {
+    let sources = specimen_sources(Some("zai"), "model'variant");
+    let lines = card(SID, &sources, None).join("\n");
+
+    assert!(lines.contains(&format!(
+        "resume:     fno agents spawn --resume {SID} -P zai -m 'model'\"'\"'variant'"
+    )));
+}
+
+#[test]
 fn agents_history_spawn_model_fallback_reports_first_turn_mismatch() {
     let mut sources = specimen_sources(None, "");
     sources.registry.as_mut().unwrap()[0]["model"] = json!("glm-5.3-flash");
@@ -491,4 +501,57 @@ fn agents_history_pr_resolution_filters_repo_slug_and_keeps_both_when_unresolved
     let resolved = resolve("#44", &sources);
     assert_eq!(resolved.sessions.len(), 2);
     assert!(resolved.repo_slug_unresolved);
+}
+
+#[test]
+fn agents_history_pr_lookup_prints_warning_when_repo_slug_is_missing() {
+    let dir = tempdir().unwrap();
+    let agents_home = dir.path().join("agents");
+    fs::create_dir_all(&agents_home).unwrap();
+    let ledger = dir.path().join("ledger.json");
+    fs::write(
+        &ledger,
+        json!({
+            "entries": [
+                {
+                    "graph_node_id": "x-3344",
+                    "pr_number": 44,
+                    "pr_url": "https://github.com/acme/one/pull/44",
+                    "status": "done"
+                },
+                {
+                    "graph_node_id": "x-9f2e",
+                    "pr_number": 44,
+                    "pr_url": "https://github.com/acme/two/pull/44",
+                    "status": "done"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let args = vec![
+        OsString::from("44"),
+        OsString::from("--graph"),
+        dir.path().join("graph.db").into_os_string(),
+        OsString::from("--ledger"),
+        ledger.into_os_string(),
+        OsString::from("--events"),
+        dir.path().join("events.jsonl").into_os_string(),
+        OsString::from("--agents-home"),
+        agents_home.into_os_string(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    assert_eq!(run_to(&args, &mut stdout, &mut stderr), 0);
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert_eq!(
+        stdout
+            .matches("repo slug unresolved; PR numbers collide across repos")
+            .count(),
+        1
+    );
+    assert!(stdout.contains("ledger:     x-3344 #44 done"));
+    assert!(stdout.contains("ledger:     x-9f2e #44 done"));
 }

@@ -1,6 +1,7 @@
 use super::string_at;
 use crate::transcript_tail;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -19,10 +20,12 @@ pub(super) struct ModelRun {
     pub(super) last_ts: Option<String>,
     pub(super) turns: usize,
 }
-pub(super) fn find_transcript(sid: &str) -> Option<TranscriptFacts> {
-    let found = transcript_tail::find_transcripts(&[sid]);
-    let path = found.get(sid)?;
-    scan(path).ok()
+pub(super) fn find_many(sids: &[String]) -> HashMap<String, TranscriptFacts> {
+    let wanted = sids.iter().map(String::as_str).collect::<Vec<_>>();
+    transcript_tail::find_transcripts(&wanted)
+        .into_iter()
+        .filter_map(|(sid, path)| scan(&path).ok().map(|facts| (sid, facts)))
+        .collect()
 }
 
 pub(super) fn scan(path: &Path) -> Result<TranscriptFacts, String> {
