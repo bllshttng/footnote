@@ -25,7 +25,7 @@ set -uo pipefail
 
 CANDIDATE_JSON=""
 SESSION_ID=""
-FILE="${LESSON_CANDIDATES_FILE:-${HOME:-}/.fno/lesson-candidates.jsonl}"
+FILE="${LESSON_CANDIDATES_FILE:-${HOME:-}/.fno/history/lesson-candidates.jsonl}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

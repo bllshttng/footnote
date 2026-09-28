@@ -358,6 +358,7 @@ def test_evals_history_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert isinstance(result, Path)
     assert result.is_absolute()
     assert result.name == "evals-history.jsonl"
+    assert result.parent.name == "history"
 
 
 def test_evals_history_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

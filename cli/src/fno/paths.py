@@ -1074,8 +1074,8 @@ def evals_history() -> Path:
         return _guard_state_path(_resolve(override))
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return state_dir() / "evals-history.jsonl"
-    return _guard_state_path(_resolve("~/.fno/") / "evals-history.jsonl")
+        return state_dir() / "history" / "evals-history.jsonl"
+    return _guard_state_path(_resolve("~/.fno/") / "history" / "evals-history.jsonl")
 
 
 def benchmarks_json() -> Path:

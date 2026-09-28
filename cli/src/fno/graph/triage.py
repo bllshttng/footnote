@@ -1830,7 +1830,7 @@ def cmd_health(
             # never raises TypeError. Same shape for retain_days.
             history_path_str = (
                 history_cfg.get("path")
-                or str(_paths.state_dir() / "health-history.jsonl")
+                or str(_paths.state_dir() / "history" / "health-history.jsonl")
             )
             try:
                 retain_days = int(history_cfg.get("retain_days", 90))
