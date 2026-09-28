@@ -190,31 +190,10 @@ impl PrReadError {
     }
 }
 
-/// `owner/repo` parsed from a GitHub PR URL, or None (the repo_slug_from_url
-/// twin): the URL scopes gh to the node's actual repository so a same-number
-/// PR in a different repo is never mistaken for the node's PR.
-pub(crate) fn repo_slug_from_url(url: Option<&str>) -> Option<String> {
-    let url = url?;
-    let s = url.trim();
-    // Strip an optional scheme and credentials, then anchor on github.com.
-    let after_scheme = s.split("://").nth(1).unwrap_or(s);
-    let after_creds = after_scheme.split('@').next_back().unwrap_or(after_scheme);
-    let lower = after_creds.to_lowercase();
-    let idx = lower.find("github.com")?;
-    let rest = &after_creds[idx + "github.com".len()..];
-    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit() || c == '/');
-    let rest = rest.trim_start_matches('/');
-    // A PR URL carries /pull/<n>; a repo URL stops at owner/repo.
-    let segs: Vec<&str> = rest
-        .split(['/', '?', '#'])
-        .filter(|s| !s.is_empty())
-        .collect();
-    if segs.len() < 2 {
-        return None;
-    }
-    let repo = segs[1].strip_suffix(".git").unwrap_or(segs[1]);
-    Some(format!("{}/{}", segs[0], repo))
-}
+/// `owner/repo` parsed from a GitHub PR URL, or None. pr_link's parser IS the
+/// port of the python twin's `_PR_URL_RE`, so the parity pair reuses it
+/// instead of carrying a second, wider parser.
+pub(crate) use super::pr_link::repo_slug_from_url;
 
 /// The `(pr_number, pr_url)` pairs for a node, primary first, de-duplicated
 /// by number (primary wins). The node_pr_refs twin.
@@ -457,14 +436,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn slug_parses_from_pr_and_repo_urls() {
+    fn slug_parses_from_pr_urls_only() {
         assert_eq!(
             repo_slug_from_url(Some("https://github.com/acme/widget/pull/7")),
             Some("acme/widget".into())
         );
         assert_eq!(
-            repo_slug_from_url(Some("https://github.com/acme/widget.git")),
+            repo_slug_from_url(Some("https://github.com/acme/widget/issues/9")),
             Some("acme/widget".into())
+        );
+        // A bare repo url is not a PR ref: the twin answers None and the
+        // caller falls back to the cwd's git remote.
+        assert_eq!(
+            repo_slug_from_url(Some("https://github.com/acme/widget")),
+            None
         );
         assert_eq!(repo_slug_from_url(Some("https://gitlab.com/a/b")), None);
         assert_eq!(repo_slug_from_url(None), None);
