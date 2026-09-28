@@ -564,6 +564,17 @@ The same shape and fail-closed rules as `done_probes`: block form or
 single-line inline list, at most 3, a 60s native timeout, 127/non-zero/timeout
 all fail closed with the command and code named.
 
+### The main-ci repair proof
+
+A node that repairs a red main closes on its merge while main is still red unless its plan says otherwise. The built-in proof covers exactly that case. A repair plan declares it as one close_probes entry, and the node stays open until main's own verdict turns green on a commit containing the fix.
+
+```yaml
+close_probes:
+  - "fno-agents probe-run main-ci --workflow cli-ci --node <id>"
+```
+
+It resolves the node's merged PR and merge commit, then reads the newest completed verdict for that exact workflow on main. When that verdict is `success` on a head containing the merge commit, the proof exits 0. Any other answer exits nonzero with one named word: `red`, `pending`, `absent`, `stale`, `ambiguous`, or `unreadable`. The close verbs keep the node open, quoting that word in the refusal. A workflow renamed between the fix landing and the proof reads `absent`, which fails closed until the plan's probe is edited. Nothing is inferred from prose: a plan that declares no probe closes exactly as before.
+
 ## Join posture (step 3, every plan carrying an `## Execution Strategy`)
 
 Ask the author who hands out the plan's remaining waves. Record the answer as one frontmatter key:
