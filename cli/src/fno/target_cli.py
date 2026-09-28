@@ -376,7 +376,7 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
         return None
 
 
-_TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$", re.IGNORECASE)
+_TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}$", re.IGNORECASE)
 _SOURCE_PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[#?\s)]|$)",
     re.IGNORECASE,
@@ -408,10 +408,9 @@ def _graph_entries_or_none() -> Optional[list]:
 
 
 def _input_may_name_a_node(text: Optional[str]) -> bool:
-    """True when an input's SHAPE can name a backlog node: a canonical
-    ``<prefix>-<hex>`` token, a bare hex id, or a kebab slug - the shapes
-    ``fuzzy.resolve_node`` accepts. Spaced free text and single words cannot
-    name one, so an unreadable graph stays proceed-able for them."""
+    """True when input shape can name a backlog node: canonical or compact
+    prefix/hex, bare hex, or kebab slug. Spaced free text and single words
+    cannot name one, so an unreadable graph stays proceed-able for them."""
     if not text:
         return False
     for tok in text.split():

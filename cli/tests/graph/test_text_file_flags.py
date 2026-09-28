@@ -1,4 +1,4 @@
-"""Rank 3 flags on the graph verbs: `note --body-file`, `idea --details-file`.
+"""Rank 3 file flags: Python `note --body-file`, native `backlog idea --details-file`.
 
 The acceptance is a round-trip: a body with quotes and newlines - the shape
 that a worktree session's Bash cannot carry positionally - arrives byte-exact
@@ -27,6 +27,9 @@ BODY = 'note with "quotes" and\na newline\n'
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
     seed_graph(g, json.dumps({"entries": []}))
+    config = tmp_path / "config.toml"
+    config.write_text(f'state_dir = "{tmp_path}"\n', encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(config))
     monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     return g
 
@@ -72,16 +75,17 @@ def test_note_body_file_and_positional_refused(tmp_graph):
 
 
 def test_idea_details_file_roundtrip(tmp_graph):
+    from tests._native_door import run_native
+
     details = 'guidance with "quotes" and\nnewlines\n'
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text(details, encoding="utf-8")
-    r = runner.invoke(
-        cli,
-        ["idea", "file-fed idea", "--details-file", str(details_file),
-         "--difficulty", "low", "-J"],
+    code, out, err = run_native(
+        "backlog", "idea", "file-fed idea", "--details-file", str(details_file),
+        "--difficulty", "low", "-J",
     )
-    assert r.exit_code == 0, r.output
-    receipt = json.loads(r.stdout)
+    assert code == 0, f"{out}\n{err}"
+    receipt = json.loads(out)
     minted = receipt["id"]
     assert minted, "expected a minted node"
     node = next(e for e in read_graph_strict(tmp_graph) if e.get("id") == minted)
@@ -89,11 +93,12 @@ def test_idea_details_file_roundtrip(tmp_graph):
 
 
 def test_idea_details_file_and_details_refused(tmp_graph):
+    from tests._native_door import run_native
+
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text("d", encoding="utf-8")
-    r = runner.invoke(
-        cli,
-        ["idea", "t", "--details-file", str(details_file), "--details", "inline"],
+    code, out, err = run_native(
+        "backlog", "idea", "t", "--details-file", str(details_file), "--details", "inline",
     )
-    assert r.exit_code == 1
-    assert "not both" in r.stderr
+    assert code != 0
+    assert "not both" in f"{out}\n{err}"
