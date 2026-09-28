@@ -1085,6 +1085,27 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     codex_yolo = build_pane_argv("codex", "", tmp_path, True, None)
     assert "--dangerously-bypass-approvals-and-sandbox" in codex_yolo
 
+
+def test_codex_pane_bounded_default_rides_the_rust_owner(
+    no_state_grant: None, tmp_path: Path
+) -> None:
+    """AC3-HP: the bounded default IS the thread lane's workspace-write:never
+    pair, tokens straight from permission_pane_tokens - pane and thread start
+    from one posture, and the network override rides with it."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    argv = build_pane_argv("codex", "task", tmp_path, False, None)
+    assert argv[:5] == ["codex", "--remote", "unix://", "-C", str(tmp_path)]
+    i = argv.index("--sandbox")
+    assert argv[i : i + 6] == [
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+    ]
+
     gemini = build_pane_argv("gemini", "task", tmp_path, False, None)
     assert gemini[:2] == ["gemini", "--skip-trust"]
     assert "-i" in gemini

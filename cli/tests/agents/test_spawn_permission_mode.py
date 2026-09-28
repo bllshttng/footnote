@@ -38,13 +38,32 @@ CWD = Path("/tmp")
         (
             "codex",
             "workspace-write:on-request",
-            ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+            [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "on-request",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ],
+        ),
+        (
+            "codex",
+            "workspace-write:never",
+            [
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ],
         ),
         ("opencode", "auto", ["--auto"]),
         ("agy", "skip", ["--dangerously-skip-permissions"]),
     ],
 )
-def test_mapping_accepts_provider_native_values(provider, mode, expected):
+def test_mapping_accepts_provider_native_values(rust_door, provider, mode, expected):
     assert permission_pane_tokens(provider, mode) == expected
 
 
@@ -58,7 +77,7 @@ def test_mapping_accepts_provider_native_values(provider, mode, expected):
         ("claude", ""),  # empty value required
     ],
 )
-def test_mapping_fail_closed_on_unmappable(provider, mode):
+def test_mapping_fail_closed_on_unmappable(rust_door, provider, mode):
     with pytest.raises(DispatchAskError) as exc:
         permission_pane_tokens(provider, mode)
     assert exc.value.exit_code == 2

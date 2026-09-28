@@ -395,12 +395,20 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
             "yolo" => Ok(vec!["--dangerously-bypass-approvals-and-sandbox".into()]),
             _ => match mode.split_once(':') {
                 Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
-                    Ok(vec![
+                    let mut tokens = vec![
                         "--sandbox".into(),
                         sandbox.to_string(),
                         "--ask-for-approval".into(),
                         approval.to_string(),
-                    ])
+                    ];
+                    // The exec lanes' bounded arm forces network on; the pane
+                    // pair must not be the one bounded posture that leaves a
+                    // worker unable to reach gh or the graph keeper socket.
+                    if sandbox == "workspace-write" {
+                        tokens.push("-c".into());
+                        tokens.push(BOUNDED_NETWORK_OVERRIDE.into());
+                    }
+                    Ok(tokens)
                 }
                 _ => Err(format!(
                     "codex --permission-mode {mode:?} unmappable; use a shortcut \
@@ -529,7 +537,9 @@ mod mappable_tests {
                 "--sandbox",
                 "workspace-write",
                 "--ask-for-approval",
-                "on-request"
+                "on-request",
+                "-c",
+                BOUNDED_NETWORK_OVERRIDE
             ]
         );
         assert_eq!(
