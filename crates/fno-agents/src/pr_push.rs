@@ -796,7 +796,10 @@ fn pr_merge_state(gh_bin: &str, cwd: &Path, branch: &str) -> Option<String> {
     let raw = gh_api(
         gh_bin,
         cwd,
-        &format!("repos/{{owner}}/{{repo}}/pulls?state=open&head={{owner}}:{branch}"),
+        &format!(
+            "repos/{{owner}}/{{repo}}/pulls?state=open&head={{owner}}:{}&base=main",
+            crate::claims::encode_key(branch)
+        ),
         &[],
     )
     .ok()?;
