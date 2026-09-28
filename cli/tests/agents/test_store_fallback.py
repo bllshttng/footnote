@@ -1180,3 +1180,44 @@ def test_tombstoned_short_token_still_refuses_ambiguity(tmp_path):
     with pytest.raises(AgentResolutionError):
         store_fallback.heal_from_harness_store(CLAUDE_UUID[:8])
     assert load_registry() == []
+
+
+# --- for-stop heal: a just-removed session stays stoppable -------------------
+
+
+def test_for_stop_heal_reaches_a_recently_removed_session(tmp_path):
+    """Stop resolves a session `fno agents rm` just removed: the tombstone
+    grace window does not apply and nothing is registered, so the stop can
+    reach the live thread without resurrecting the removed row."""
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(tmp_path, "codex", CODEX_UUID, age_s=60)
+
+    entry = store_fallback.heal_from_harness_store(CODEX_UUID, for_stop=True)
+
+    assert entry is not None
+    assert entry.harness_session_id == CODEX_UUID
+    assert load_registry() == []
+
+
+def test_resolve_agent_for_stop_rides_the_heal(tmp_path):
+    """The resolver-level for_stop lane behaves identically: the hit resolves,
+    the tombstone never fires, the registry stays empty."""
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(tmp_path, "codex", CODEX_UUID, age_s=60)
+
+    resolved = resolve_agent(CODEX_UUID, for_stop=True)
+
+    assert resolved.matched_by == "harness_store"
+    assert resolved.entry.harness_session_id == CODEX_UUID
+    assert load_registry() == []
+
+
+def test_for_stop_still_refuses_an_ambiguous_token(tmp_path):
+    """for_stop lifts the tombstone, never the ambiguity refusal."""
+    _write_claude_session(tmp_path, CLAUDE_UUID)
+    _write_codex_session(tmp_path, CODEX_UUID)
+    _write_tombstone(tmp_path, "codex", CODEX_UUID)
+
+    with pytest.raises(AgentResolutionError):
+        store_fallback.heal_from_harness_store(CLAUDE_UUID[:8], for_stop=True)
+    assert load_registry() == []

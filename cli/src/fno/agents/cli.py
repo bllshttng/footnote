@@ -755,82 +755,19 @@ def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -
         pass
 
 
-def _node_named_workdir(message: str | None, node: str | None, caller: Path) -> Path | None:
-    """The launch dir a node-named spawn must use, or None when none resolves.
+def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:
+    """Worker launch dir honoring --cwd > --here (caller) > default canonical.
 
-    The node id is the explicit ``--node``, else the seed's first-line scan
-    (verb head, node-shaped argument) mirroring the Rust ``resolve_node``. A
-    readable graph row with a cwd answers the node's project dir. A caller
-    inside a DIFFERENT git repo is refused naming both paths (the
-    caller-repo-relative canonical default dispatched a node's worker into
-    the caller's own repo), by raising :class:`typer.Exit`.
-    """
-    candidate = (node or "").strip()
-    if not candidate and message:
-        from fno.config._dispatch_verbs import parse_verb_token
-        from fno.graph._constants import is_wellformed_node_id
-
-        lines = message.splitlines()
-        toks = lines[0].split() if lines else []
-        if toks and parse_verb_token(toks[0]):
-            for tok in toks[1:3]:
-                if tok.startswith(('"', "'")):
-                    break
-                word = tok.strip(".,;:!?\"'()[]{}<>").lower()
-                if is_wellformed_node_id(word):
-                    candidate = word
-                    break
-    if not candidate:
-        return None
-    from fno.agents.node_dispatch import find_node_row
-
-    row = find_node_row(candidate)
-    if not isinstance(row, dict) or not str(row.get("cwd") or "").strip():
-        return None
-    project = Path(str(row["cwd"]))
-    from fno.paths import resolve_canonical_worktree
-
-    # A caller outside any git repo has no repo of its own to protect, so it
-    # dispatches from the node's project like the default always meant to.
-    caller_repo = resolve_canonical_worktree(caller)
-    project_repo = resolve_canonical_worktree(project)
-    if (
-        caller_repo is not None
-        and project_repo is not None
-        and caller_repo.resolve() != project_repo.resolve()
-    ):
-        print(
-            f"fno agents: refusing to dispatch: the prompt names node "
-            f"{row.get('id') or candidate} in project {project}, but this shell "
-            f"stands in another repo ({caller_repo}); cd into the node's "
-            "project, or pass --cwd / --here to dispatch deliberately",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    return project
-
-
-def _resolve_dispatch_workdir(
-    cwd: str | None,
-    fresh: bool,
-    here: bool,
-    *,
-    message: str | None = None,
-    node: str | None = None,
-) -> Path:
-    """Worker launch dir honoring --cwd > --here (caller) > node project > default canonical.
-
-    Mirrors the Rust client's ``effective_worker_cwd`` precedence plus its
-    spawn-node-cwd guard. The default (was the caller cwd) resolves to the
-    canonical (main) checkout, so the identical command behaves the same
-    regardless of where the launcher happens to stand - EXCEPT when the spawn
-    names a node: a prompt-named or ``--node`` spawn then launches from that
-    node's project cwd, and a caller standing in another git repo is refused
-    naming both paths. ``--here``/``--in-place`` is the explicit
-    opt-in to keep the caller's cwd and bypasses the guard; ``--fresh``
-    survives as an accepted no-op alias. Only the Python fallback runtime
-    reaches this -- when an installed binary auto-routes the verb, the Rust
-    client owns the identical precedence.
+    Mirrors the Rust client's ``effective_worker_cwd`` precedence.
+    inverted the default (was 's caller-cwd): a spawn with NO explicit
+    cwd source now resolves to the canonical (main) checkout, so the identical
+    command behaves the same regardless of where the launcher happens to stand.
+    ``--here``/``--in-place`` is the explicit opt-in to keep the caller's cwd.
+    ``--fresh`` survives as an accepted no-op alias (the default already resolves
+    canonical). A canonical that lands on the caller's own dir is a no-op (no
+    redirect note). Only the Python fallback runtime reaches this -- when an
+    installed binary auto-routes the verb, the Rust client owns the identical
+    precedence.
     """
     del fresh  # accepted no-op alias: the default already resolves canonical.
     if cwd:
@@ -838,15 +775,6 @@ def _resolve_dispatch_workdir(
     caller = Path(os.getcwd()).resolve()
     if here:
         return caller
-    guard = _node_named_workdir(message, node, caller)
-    if guard is not None:
-        if guard != caller:
-            print(
-                f"fno agents: dispatching from node project ({guard}); "
-                "pass --here to stay in this worktree",
-                file=sys.stderr,
-            )
-        return guard
     from fno.paths import resolve_canonical_repo_root
 
     # Best-effort: any resolution error (missing git, odd environment) falls
@@ -1475,10 +1403,7 @@ def cmd_spawn(
         resolve_dispatch_harness,
     )
 
-    # An explicit --node with no typed message resolves its own launch workdir
-    # (worktree ensure) further down; the cwd guard must not pre-empt it.
-    guard_node = None if (node is not None and not (message or "").strip()) else node
-    workdir = _resolve_dispatch_workdir(cwd, fresh, here, message=message, node=guard_node)
+    workdir = _resolve_dispatch_workdir(cwd, fresh, here)
     # `-c` is `--cwd` on spawn: codex's own `-c key=value` config spelling
     # silently becomes a working directory. Stop before launch, name the fence.
     if cwd and not Path(cwd).exists():
@@ -3351,12 +3276,7 @@ def cmd_heal_token(
         hidden=True,
         help="Authorize machine-wide store selection after uniqueness checks.",
     ),
-    for_stop: bool = typer.Option(
-        False,
-        "--for-stop",
-        hidden=True,
-        help="Resolve without adopting: no tombstone gate, no registration.",
-    ),
+    for_stop: bool = typer.Option(False, "--for-stop", hidden=True),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
@@ -3367,10 +3287,8 @@ def cmd_heal_token(
     miss or a non-session-shaped token; 3 with the candidate list on stderr when
     the token is ambiguous; 12 when identity evidence is unavailable.
 
-    ``--for-stop`` resolves the hit without adopting it: the rm tombstone grace
-    window does not apply and nothing is registered, so a stop can reach a
-    session `fno agents rm` just removed. The consuming verb is stop; an adopt
-    caller must not pass it.
+    ``--for-stop`` (with ``--all-sources``) resolves without adopting: no rm
+    tombstone gate, no registration, so stop reaches a session rm just removed.
 
     ``--registry`` exists because the two runtimes resolve the registry
     differently -- Rust honors ``FNO_AGENTS_HOME``, this side does not -- so a
@@ -3418,7 +3336,6 @@ def cmd_heal_token(
             registry_path=Path(registry) if registry else None,
             scope_cwd=os.getcwd(),
             cross_project=cross_project,
-            for_stop=for_stop,
         )
     except AgentResolutionError as exc:
         sys.stderr.write(f"{exc}\n")

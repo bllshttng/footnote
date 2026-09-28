@@ -513,7 +513,6 @@ def adopt_store_hit(
     *,
     token: Optional[str] = None,
     log_path: str = "",
-    for_stop: bool = False,
 ) -> "AgentEntry":
     """Register one verified and project-confined hit as an adopted orphan.
 
@@ -521,11 +520,6 @@ def adopt_store_hit(
     caller that adopts for a lane which will resume the thread by full
     session id passes it HERE so the row is complete at the moment it
     lands, not patched in a second write the caller must survive.
-
-    ``for_stop`` resolves WITHOUT adopting: the rm tombstone is not consulted
-    and nothing is registered. A stop needs the session identity, never a
-    roster row, so a session the operator just removed stays stoppable inside
-    the grace window, and stopping it does not resurrect the removed row.
 
     This function does not scan harness stores or establish project membership.
     Batch callers must first pass their hits through :func:`confine_store_hits`.
@@ -537,7 +531,7 @@ def adopt_store_hit(
         register_existing_session,
     )
 
-    if not for_stop and _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
+    if _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
         raise AgentResolutionError(
             f"session {hit.session_id} ({hit.harness}) was removed by `fno agents rm` "
             f"inside the grace window ({RM_TOMBSTONE_GRACE_SECS // 3600}h); it is not "
@@ -548,8 +542,6 @@ def adopt_store_hit(
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
-    if for_stop:
-        return _mint_unregistered(hit, short_id=short_id, log_path=log_path)
     last_message_at = _transcript_last_write(hit)
     try:
         return register_existing_session(
@@ -586,19 +578,11 @@ def adopt_store_hit(
         return _mint_unregistered(hit, short_id=short_id, log_path=log_path)
 
 
-def _mint_unregistered(
-    hit: "StoreHit", *, short_id: str, log_path: str
-) -> "AgentEntry":
-    """The unregistered entry shape: reaching the session beats the roster row.
-
-    Serves both the registration-failure fallback and the for-stop heal, which
-    returns it WITHOUT any registry write, so a stop can reach a session the
-    operator just removed without resurrecting the removed row.
-    """
+def _mint_unregistered(hit: "StoreHit", *, short_id: str, log_path: str) -> "AgentEntry":
+    """The unregistered entry (registration-failure fallback + the for-stop heal)."""
     from fno.agents.dispatch import _capture_parent_edge
     from fno.agents.registry import mint_agent_entry
 
-    _sb_session = _capture_parent_edge()[0]
     return mint_agent_entry(
         harness_session_id=hit.session_id,
         spawned_by_session=None,
@@ -611,14 +595,8 @@ def _mint_unregistered(
         harness=hit.harness,
         status="orphaned",
         short_id=short_id,
-        adopted_by_session=_sb_session,
-        # Same fact as the registered row above, and it has to be stated
-        # here too: this one is handed straight back to the caller when
-        # registration fails, so it reaches a reader without ever passing
-        # the path that would have marked it.
+        adopted_by_session=_capture_parent_edge()[0],
         origin="adopted",
-        # Adoption observed nothing about the lane; the substrate stays
-        # unknown (never "pane").
         substrate=None,
     )
 
@@ -670,7 +648,15 @@ def heal_from_harness_store(
             ambiguous=True,
         )
 
-    return adopt_store_hit(hits[0], registry_path, token=token, for_stop=for_stop)
+    if for_stop:
+        # Resolve without adopting: the rm tombstone gate and the registration
+        # both live in adopt_store_hit, so skipping it leaves no row behind and
+        # a stop can reach a session `fno agents rm` just removed.
+        hit = hits[0]
+        short_id = hit.short_id if hit.harness == "claude" else ""
+        return _mint_unregistered(hit, short_id=short_id, log_path="")
+
+    return adopt_store_hit(hits[0], registry_path, token=token)
 
 
 def _fallback_name(session_id: str) -> str:

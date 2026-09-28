@@ -920,8 +920,7 @@ def resolve_agent(
     Every session-shaped short token is checked against the harness stores too:
     the registry is a cache of reality, so a store-only session must participate
     in the same ambiguity decision. A registry miss may then adopt one unique
-    store hit. ``for_stop`` rides through to that heal: it resolves without
-    adopting (no tombstone gate, no registration).
+    store hit.
     """
     try:
         entries = load_registry(path=path)
@@ -1079,8 +1078,7 @@ def resolve_from_harness_store(
     ``scope_cwd``/``cross_project`` carry the project-confinement contract
     through to :func:`heal_from_harness_store`; the default (process cwd, no
     override) confines adoption to the caller's project. ``resume`` bypasses this
-    healer entirely, so it is uncovered by design. ``for_stop`` resolves without
-    adopting (no tombstone gate, no registration)."""
+    healer entirely, so it is uncovered by design."""
     from fno.agents.store_fallback import heal_from_harness_store
 
     return heal_from_harness_store(
