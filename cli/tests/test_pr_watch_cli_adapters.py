@@ -770,10 +770,18 @@ def test_phase_caps_fit_ceiling():
         f"_EVERY_TICK_CAP_S/_FLEET_CAP_S or re-measure"
     )
     assert set(_PHASE_CAP_S) == set(_EVERY_TICK_CAP_S) | set(_FLEET_CAP_S)
-    merge_room = ceiling - (every_tick + fleet_max)
-    assert "merge" not in _PHASE_CAP_S and merge_room >= _MERGE_FLOOR_S, (
-        f"merge floor does not fit: {ceiling}s - ({every_tick}s + {fleet_max}s) "
-        f"= {merge_room}s, floor {_MERGE_FLOOR_S}s"
+    # Merge runs before the sweep (x-e69d), so its guaranteed room is the
+    # fresh wall minus the caps of the two phases ahead of it. The room must
+    # cover the read bound plus one attempt at the drain's floor.
+    from fno.pr_watch.cli import _GRANT_QUEUE_READ_TIMEOUT_S
+
+    merge_room = ceiling - sum(
+        _EVERY_TICK_CAP_S[k] for k in ("settings", "king_wake"))
+    assert "merge" not in _PHASE_CAP_S and merge_room >= (
+        _MERGE_FLOOR_S + _GRANT_QUEUE_READ_TIMEOUT_S), (
+        f"merge room does not fit: {ceiling}s - settings and king_wake caps "
+        f"= {merge_room}s, needs read {_GRANT_QUEUE_READ_TIMEOUT_S}s + floor "
+        f"{_MERGE_FLOOR_S}s"
     )
 
 
@@ -830,26 +838,33 @@ def _run_merge_tick_with_counts(monkeypatch, counts):
     return rows, observed_left, drained
 
 
-def test_merge_phase_runs_last_on_the_rest_of_the_ceiling(monkeypatch):
+def test_merge_phase_runs_before_the_sweep_on_the_fresh_wall(monkeypatch):
+    """x-e69d: the drain sees the fresh wall, not the sweep's leftovers."""
     counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 0}
     rows, left, drained = _run_merge_tick_with_counts(monkeypatch, counts)
     assert len(drained) == 1 and left[0] > 400
-    assert rows[-1][0] == "pr_watch_merge"
+    merge_at = rows.index(next(r for r in rows if r[0] == "pr_watch_merge"))
+    sweep_at = rows.index(next(r for r in rows if r[0] == "pr_watch_sweep"))
+    assert merge_at < sweep_at
+
+
+def _merge_row(rows):
+    return next(data for arm, data in rows if arm == "pr_watch_merge")
 
 
 def test_a_drain_that_decided_nothing_reads_budget_spent(monkeypatch):
     counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 1, "budget": 2}
     rows, _, _ = _run_merge_tick_with_counts(monkeypatch, counts)
-    arm, data = rows[-1]
-    assert arm == "pr_watch_merge" and data["skip_reason"] == "budget_spent"
+    data = _merge_row(rows)
+    assert data["skip_reason"] == "budget_spent"
     assert data["acted"] == 0 and "skipped=1 budget=2" in data["detail"]
 
 
 def test_a_hold_is_a_verdict_so_the_merge_row_stays_ok(monkeypatch):
     counts = {"executed": 0, "held": 1, "failed": 0, "skipped": 0, "budget": 2}
     rows, _, _ = _run_merge_tick_with_counts(monkeypatch, counts)
-    arm, data = rows[-1]
-    assert arm == "pr_watch_merge" and data.get("skip_reason") is None
+    data = _merge_row(rows)
+    assert data.get("skip_reason") is None
 
 
 def test_fleet_tail_phases_stagger_across_three_ticks(monkeypatch, _no_global_tick_events):

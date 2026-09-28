@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PostToolUse - renew claim heartbeat
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
 PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH

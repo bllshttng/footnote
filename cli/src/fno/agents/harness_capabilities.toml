@@ -522,7 +522,7 @@ launch_flags = [
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
-# agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
+# agy, measured 2026-08-28: hooks/footnote-agy-target-stop-hook.sh is a real adapter that
 # shells the same loop-check, and `fno config setup` registers it in agy's
 # ~/.gemini/config/hooks.json under the `footnote` namespace key as a `Stop`
 # handler (crates/fno-agents/src/agy_hooks.rs is the writer; the Python setup

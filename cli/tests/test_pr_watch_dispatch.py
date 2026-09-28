@@ -2252,26 +2252,29 @@ class TestTickRecordsAndDeadline:
         Only a wall abort between phases reads timeout."""
         import time as _time
 
-        def _stall(**_kw):
+        def _stall(*_a, **_kw):
             _time.sleep(1.5)
-            raise AssertionError("deadline did not interrupt the stalled tick")
 
+        # king_wake runs first now, so it is the phase that can spend the
+        # wall before any other body starts.
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake", _stall, raising=True)
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
-        res, events = self._invoke_tick(monkeypatch, _stall)
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
 
         assert res.exit_code == 0, f"expected exit 0, got {res.exit_code}: {res.output!r}"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert len(ends) == 1
         assert ends[0]["outcome"] == "error"
         assert "why" not in ends[0]
-        assert "sweep" in ends[0]["cut"]
+        assert "king_wake" in ends[0]["cut"]
         assert ends[0]["duration_s"] >= 1.0
         rows = [d for t, d in events if t == "control_plane_tick"
-                and d.get("arm") == "pr_watch_sweep"]
+                and d.get("arm") == "king_wake"]
         assert rows
         # The wall wording, not the slice wording: the env ceiling (1s) is
-        # below the sweep cap (150s), so the alarm budget was the wall.
-        assert "deadline exceeded in phase sweep" in rows[-1]["detail"]
+        # below the king_wake cap (75s), so the alarm budget was the wall.
+        assert "deadline exceeded in phase king_wake" in rows[-1]["detail"]
 
     def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
         """A bootout's SIGTERM cannot unwind the tick, so the handler writes
@@ -2362,27 +2365,23 @@ class TestTickRecordsAndDeadline:
         assert prcli._bounce_sender() == "unrecorded"
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
-        """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
-        behind it down. king_wake and notify_watch still write their rows in
-        the same tick, the merge row reads timeout, and the end record names
-        the cut."""
+        """AC3-HP (x-c79d): a phase burning its slice cannot take the arms
+        behind it down. king_wake runs first now, so its cut must leave the
+        merge, sweep and notify rows intact in the same tick, and the end
+        record names the cut."""
         import time as _time
 
         from fno.pr_watch import cli as prcli
 
-        def _stall(**_kw):
+        def _stall(*_a, **_kw):
             _time.sleep(2)
-            raise AssertionError("deadline did not interrupt the stalled sweep")
 
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
-        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake", _stall, raising=True)
         # Determinism, not contract: the arms behind the cut must be cheap, or
         # a loaded runner cuts them too and this reads as a different failure.
-        monkeypatch.setattr(
-            "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
-            raising=True,
-        )
         def _notify_row(_roots=None, timeout_s=None, **_kw) -> None:
             prcli._emit_tick_row("notify_watch", interval_s=300,
                                  skip_reason="notify_off")
@@ -2393,30 +2392,31 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
         monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
 
-        res, events = self._invoke_tick(monkeypatch, _stall)
+        from fno.pr_watch._dispatch import TickResult
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: TickResult(open_prs=0, acted=0))
 
         assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
-        assert king_rows, "king_wake wrote no row after the sweep was cut"
-        assert notify_rows, "notify_watch wrote no row after the sweep was cut"
+        assert king_rows, "king_wake wrote no row for its own cut"
+        assert notify_rows, "notify_watch wrote no row after king_wake was cut"
+        sweep_rows = [d for d in rows if d.get("arm") == "pr_watch_sweep"]
+        assert sweep_rows, "the sweep wrote no row after king_wake was cut"
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") is None
-        assert merge_rows[-1]["detail"].startswith("merge sweep=cut candidates=0")
+        assert merge_rows[-1]["detail"].startswith("merge kw=cut candidates=0")
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
-        assert ends and ends[-1].get("cut") == ["sweep"]
+        assert ends and ends[-1].get("cut") == ["king_wake"]
         # The 1s cap is below the 30s wall, so this cut is slice starvation -
         # one arm lost its turn and the tick carried on to its end record.
-        # The cut sweep left no TickResult, so the honest outcome is error
-        # without a watermark, never timeout.
-        assert ends[-1].get("outcome") == "error"
-        assert "why" not in ends[-1]
-        assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
-        # Saturated = the phase spent its whole slice: the cut sweep did,
-        # king_wake finished early and reads as quiet, not saturated.
-        assert ends[-1].get("saturated") == ["sweep"]
+        assert "sweep" in ends[-1].get("phase_s", {})
+        # Saturated = the phase spent its whole slice: the cut king_wake did,
+        # the sweep finished early and reads as quiet, not saturated.
+        assert ends[-1].get("saturated") == ["king_wake"]
 
     def test_a_notify_slice_below_its_real_cost_mints_the_starved_row(
         self, monkeypatch, tmp_path
@@ -2483,11 +2483,12 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
         monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
 
-    def test_merge_phase_runs_its_own_queue_after_a_cut_sweep(
+    def test_merge_phase_drains_its_queue_without_waiting_for_the_sweep(
         self, monkeypatch, tmp_path
     ):
-        """AC6-HP: the sweep cut leaves no TickResult, and the merge phase
-        still drains the Rust grant queue and names its own outcome."""
+        """AC6-HP (x-e69d): merge runs before the sweep, so the Rust grant
+        queue drains on the fresh wall whatever the sweep does after; a cut
+        sweep still leaves the queue intact and named."""
         import time as _time
 
         def _stall(**_kw):
@@ -2530,7 +2531,7 @@ class TestTickRecordsAndDeadline:
         assert merge_rows and merge_rows[-1].get("acted") == 1
         assert merge_rows[-1].get("skip_reason") is None
         assert merge_rows[-1]["detail"] == (
-            "merge sweep=cut candidates=2 granted=1 executed=1 held=0 failed=0 skipped=0 budget=0 read_ms=812"
+            "merge kw=ok candidates=2 granted=1 executed=1 held=0 failed=0 skipped=0 budget=0 read_ms=812"
         )
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
@@ -2555,7 +2556,7 @@ class TestTickRecordsAndDeadline:
         rows = [d for t, d in events if t == "control_plane_tick"]
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") == "error"
-        assert merge_rows[-1]["detail"].startswith("merge sweep=")
+        assert merge_rows[-1]["detail"].startswith("merge kw=")
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         assert king_rows, "king_wake still wrote its row"
 
@@ -2577,7 +2578,7 @@ class TestTickRecordsAndDeadline:
         rows = [d for t, d in events if t == "control_plane_tick"]
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") == "disabled"
-        assert merge_rows[-1]["detail"].startswith("merge sweep=")
+        assert merge_rows[-1]["detail"].startswith("merge kw=")
 
     def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
         """AC2-ERR: the alarm catching the pass mid-truth-read names

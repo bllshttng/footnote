@@ -135,7 +135,7 @@ fn transcript_uuid_shaped(uuid: &str) -> bool {
 /// wanted uuid, or whose stem ENDS in one, matches. The uuid's fixed 36-char
 /// width makes the suffix window exact, so a longer hex tail cannot read as a
 /// uuid match.
-fn find_transcripts(uuids: &[&str]) -> HashMap<String, PathBuf> {
+pub(crate) fn find_transcripts(uuids: &[&str]) -> HashMap<String, PathBuf> {
     let wanted: HashSet<&str> = uuids
         .iter()
         .filter(|u| transcript_uuid_shaped(u))

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - test run guard
 # PreToolUse: refuse a raw pytest or `cargo test` run in a footnote checkout
 # (policy: crates/fno-agents/src/hook/test_run_guard.rs). Never exec a
 # candidate: an old build answers "unknown entry" and a nonzero PreToolUse

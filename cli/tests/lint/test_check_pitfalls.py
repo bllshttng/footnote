@@ -15,6 +15,7 @@ from tests.fixtures.graph_seed import seed_graph
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -31,22 +32,24 @@ def _run(
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
     # operator's live graph: pin an empty state root with an absent store.
-    state = target.parent / "state"
-    config = target.parent / "config.toml"
-    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
-    env = {
-        **os.environ,
-        "FNO_CONFIG": str(config),
-        "FNO_GRAPH_JSON": str(state / "graph.json"),
-    }
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        ["bash", str(lint), str(target)],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="fno-pitfalls-test-") as temp_dir:
+        config_dir = Path(temp_dir) if target.resolve() == AGENTS.resolve() else target.parent
+        state = config_dir / "state"
+        config = config_dir / "config.toml"
+        config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
+        env = {
+            **os.environ,
+            "FNO_CONFIG": str(config),
+            "FNO_GRAPH_JSON": str(state / "graph.json"),
+        }
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", str(lint), str(target)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def _fixture(tmp_path: Path, entries):

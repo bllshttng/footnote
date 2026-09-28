@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - worktree write protect
 
 set -uo pipefail
 

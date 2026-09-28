@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - join partition write guard
 
 set -uo pipefail
 

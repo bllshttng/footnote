@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PostToolUse - capture plan mode
 # capture-plan-mode.sh - PostToolUse(ExitPlanMode) hook. Claude-Code-only.
 #
 # When a plan is approved in Claude Code's native Plan Mode, this hook captures
