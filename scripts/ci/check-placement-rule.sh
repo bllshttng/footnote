@@ -54,6 +54,8 @@
 #      guard-corpus-sweep.py joins ~/.claude/projects for the same reason: it
 #      READS Claude Code's own transcripts to replay every real Bash command
 #      hooks/target-stop-hook.sh compares the transcript path Claude Code
+#      backlog/birth.rs searches the same read-only transcript store by
+#      session id across project slugs when recreating a plan stub.
 #      hands it against the ~/.claude/projects prefix to prove the session's
 #      harness (an env marker alone is inheritable and can mislabel a claude
 #      session as codex). A string prefix match on the harness's own file;
@@ -312,6 +314,7 @@ cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_config_tmp.rs
+crates/fno-agents/src/backlog/birth.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/law_match.rs
