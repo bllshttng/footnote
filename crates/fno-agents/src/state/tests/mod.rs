@@ -2876,3 +2876,187 @@ fn heal_rewrites_only_a_full_uuid_copy_and_keeps_the_row_identity() {
     assert_eq!(heal_full_uuid_short_ids(&path).unwrap(), 0);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Rolling registry snapshots (task 1.2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_due_cases() {
+    use std::time::Duration;
+    let ten_min = Duration::from_secs(600);
+    // No snapshot at all: due.
+    assert!(snapshot_due(None, 100));
+    // Fresh snapshot, similar size: not due.
+    assert!(!snapshot_due(
+        Some((ten_min - Duration::from_secs(1), 100)),
+        100
+    ));
+    // Older than the interval: due.
+    assert!(snapshot_due(Some((ten_min, 100)), 100));
+    // Collapsed to a tenth: due even on a fresh snapshot.
+    assert!(snapshot_due(Some((Duration::from_secs(1), 100)), 10));
+    // An empty newest snapshot never divides, so it is not a collapse.
+    assert!(!snapshot_due(Some((Duration::from_secs(1), 0)), 100));
+}
+
+#[test]
+fn registry_update_snapshots_once_per_interval() {
+    let dir = tmpdir("snapshot-once");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        registry.entries.push(sample_entry("seed"));
+    })
+    .unwrap();
+    let before_second_write = std::fs::read(&path).unwrap();
+
+    update_registry(&path, |_| {}).unwrap();
+    update_registry(&path, |registry| {
+        let mut second = sample_entry("second");
+        second.session_id = Some("uuid-2".into());
+        second.codex_session_id = Some("uuid-2".into());
+        registry.entries.push(second);
+    })
+    .unwrap();
+
+    let snapshots = dir.join("registry-snapshots");
+    let snaps: Vec<PathBuf> = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("registry.json."))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        snaps.len(),
+        1,
+        "two writes within the interval: one snapshot"
+    );
+    assert_eq!(
+        std::fs::read(&snaps[0]).unwrap(),
+        before_second_write,
+        "the snapshot holds the pre-write bytes"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn registry_snapshot_pins_last_good_copy_on_collapse() {
+    let dir = tmpdir("snapshot-collapse");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        for i in 0..20 {
+            let mut e = sample_entry(&format!("w{i}"));
+            e.harness_session_id = Some(format!("aaaaaaaa-0000-0000-0000-{i:012}"));
+            registry.entries.push(e);
+        }
+    })
+    .unwrap();
+    // Materialize the first snapshot of the 20-row file.
+    update_registry(&path, |_| {}).unwrap();
+    // Another writer cuts the file to 1 row, bypassing update_registry.
+    update_registry(&path, |registry| {
+        registry.entries.retain(|e| e.name == "w0");
+    })
+    .unwrap();
+    // The next write reads a collapsed file: snapshot at once, and the
+    // 20-row copy leaves rotation as a pre-shrink pin.
+    update_registry(&path, |_| {}).unwrap();
+
+    let snapshots = dir.join("registry-snapshots");
+    let pins: Vec<PathBuf> = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("pre-shrink.registry.json."))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(pins.len(), 1, "the collapsed predecessor is pinned");
+    let pinned = std::fs::read_to_string(&pins[0]).unwrap();
+    assert!(pinned.contains("\"w19\""), "the pin holds 20 rows");
+    // Rotation still keeps a live newest copy.
+    let has_newest = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("registry.json.")
+        });
+    assert!(
+        has_newest,
+        "the newest snapshot dir entry stays in rotation"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rename_agent_emits_agent_renamed() {
+    let dir = tmpdir("rename-journal");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        let mut e = sample_entry("worker-a");
+        e.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+        registry.entries.push(e);
+    })
+    .unwrap();
+
+    rename_agent(&path, "worker-a", "vellum", None).unwrap();
+
+    let events = crate::events::committed_journal_text(&dir.join("events.jsonl"));
+    let renamed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["type"] == "agent_renamed")
+        .collect();
+    assert_eq!(renamed.len(), 1, "exactly one journal row: {events}");
+    let event = &renamed[0];
+    assert_eq!(event["source"], "daemon");
+    assert_eq!(event["data"]["name"], "vellum");
+    assert_eq!(event["data"]["from"], "worker-a");
+    assert_eq!(event["data"]["to"], "vellum");
+    assert_eq!(
+        event["data"]["harness_session_id"],
+        "aaaaaaaa-0000-0000-0000-111111111111"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rename_displacement_journals_the_displaced_row() {
+    let dir = tmpdir("rename-displace");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        let mut mover = sample_entry("mover");
+        mover.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+        registry.entries.push(mover);
+        let mut holder = sample_entry("b");
+        holder.harness_session_id = Some("aaaaaaaa-0000-0000-0000-222222222222".into());
+        holder.aliases = vec!["keeper".into()];
+        registry.entries.push(holder);
+    })
+    .unwrap();
+
+    rename_agent_displacing(&path, "mover", "b", None, |_, _| true).unwrap();
+
+    let events = crate::events::committed_journal_text(&dir.join("events.jsonl"));
+    let renamed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["type"] == "agent_renamed")
+        .collect();
+    assert_eq!(renamed.len(), 2, "both label moves journal: {events}");
+    assert_eq!(renamed[0]["data"]["from"], "mover");
+    assert_eq!(renamed[0]["data"]["to"], "b");
+    assert_eq!(renamed[1]["data"]["from"], "b");
+    assert_eq!(renamed[1]["data"]["to"], "keeper");
+    assert_eq!(
+        renamed[1]["data"]["harness_session_id"],
+        "aaaaaaaa-0000-0000-0000-222222222222"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
