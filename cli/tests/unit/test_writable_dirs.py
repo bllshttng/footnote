@@ -24,6 +24,9 @@ def fake_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point every state resolver at one existing tmp root."""
     state = tmp_path / "state"
     (state / "claims").mkdir(parents=True)
+    agents_home = state / "agents"
+    agents_home.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setattr("fno.paths.state_dir", lambda: state)
     monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: state)
     monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: state / "claims")
@@ -49,6 +52,9 @@ def test_state_root_and_divergent_claims_root_both_granted(
     configured.mkdir()
     claims_home = tmp_path / "home" / ".fno"
     (claims_home / "claims").mkdir(parents=True)
+    agents_home = tmp_path / "agents-home"
+    agents_home.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setattr("fno.paths.state_dir", lambda: configured)
     monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "home")
     monkeypatch.setattr(
@@ -58,7 +64,11 @@ def test_state_root_and_divergent_claims_root_both_granted(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
 
-    assert worker_writable_dirs(tmp_path) == [str(configured), str(claims_home)]
+    assert worker_writable_dirs(tmp_path) == [
+        str(configured),
+        str(agents_home),
+        str(claims_home),
+    ]
 
 
 def test_granted_root_is_an_ancestor_of_the_live_claim_store(tmp_path, monkeypatch):
@@ -84,6 +94,7 @@ def test_granted_root_is_an_ancestor_of_the_live_registry_path(tmp_path, monkeyp
     from fno import paths
 
     target = paths.agents_registry_path().parent.resolve()
+    target.mkdir(parents=True, exist_ok=True)
     granted = [Path(d).resolve() for d in worker_writable_dirs(tmp_path)]
 
     assert any(target == root or target.is_relative_to(root) for root in granted)

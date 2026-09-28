@@ -172,17 +172,26 @@ def add_dir_tokens(
 def _state_roots() -> list[Path]:
     """The fno do state directories a worker cannot function without.
 
-    Normally one path (``~/.fno``). Two when they diverge: ``locks_dir`` and the
-    global claims root are deliberately config-free ($HOME / ``$FNO_CLAIMS_ROOT``)
-    while ``state_dir`` honors ``config.paths.state_dir``, so an override moves one
-    and not the other. Granting the root rather than three subdirectories keeps
-    this from drifting the moment ``config.paths.*`` moves again.
+    Normally one path (``~/.fno``). Divergent claims and registry roots are
+    added when their config-free homes differ from ``state_dir``. Granting
+    roots rather than individual files keeps this from drifting as paths move.
     """
     out: list[Path] = []
     try:
         from fno.paths import state_dir
 
         out.append(state_dir())
+    except Exception:
+        pass
+    try:
+        from fno.paths import agents_registry_path
+
+        registry_root = Path(agents_registry_path()).parent
+        if not any(
+            registry_root == root or registry_root.is_relative_to(root)
+            for root in out
+        ):
+            out.append(registry_root)
     except Exception:
         pass
     try:
