@@ -252,7 +252,7 @@ def test_authorized_target_init_journey(clean_machine):
         assert '"state": "live"' in claim.stdout, claim.stdout
 
     # 6. The node readback: the graph agrees the work is in progress.
-    got = _run_native_backlog(repo, home, "get", node, "-J")
+    got = _run_native_backlog(repo, home, "get", node)
     assert got.returncode == 0, got.stderr
     assert "in_progress" in got.stdout, got.stdout
 
