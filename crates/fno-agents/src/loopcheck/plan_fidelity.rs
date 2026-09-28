@@ -91,3 +91,66 @@ pub(super) fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
         _ => FidelityGate::Pass,
     }
 }
+
+/// The green-conjunct stop read for one fire: the plan-fidelity gate, or the
+/// delegated-merge park that skips it.
+///
+/// A delegated merge (a per-run no-merge manifest, or a valid crown ruling
+/// hold on this node) skips the stop-time read: someone else merges, the
+/// merge gate re-runs the same fidelity join at merge time, and DonePRGreen
+/// is a shipped terminal, so the later join sees a delivered row rather than
+/// stranding a row on a non-shipped terminal no later merge ever restamps.
+/// The park names who merges so a human (or the merge queue) owns the next
+/// act.
+pub(super) struct GreenRead {
+    /// The fidelity refusal that blocks DonePRGreen, if any.
+    pub block: Option<String>,
+    /// Set only when the merge is delegated: who lands this PR now.
+    pub merge_owner: Option<String>,
+}
+
+pub(super) fn green_conjunct_read(
+    manifest_no_merge: bool,
+    manifest_source: Option<&str>,
+    node_id: Option<&str>,
+    plan_path: Option<&str>,
+    cwd: &Path,
+    pr_number: i64,
+    head_oid: &str,
+    timeout: std::time::Duration,
+    fno_bin: &std::ffi::OsStr,
+    mut on_degraded: impl FnMut(String),
+) -> GreenRead {
+    let ruling = node_id.and_then(super::awaiting_merge::ruling_hold);
+    if manifest_no_merge || ruling.is_some() {
+        let owner = if manifest_no_merge {
+            let source = manifest_source.unwrap_or("unknown");
+            let repo_slug = crate::finalize::slug_from_git_remote(cwd).unwrap_or_default();
+            format!(
+                "the operator (per-run no-merge, source {source}); attended grant: {}",
+                crate::merge_grant::attended_grant_command(&repo_slug, pr_number, head_oid)
+            )
+        } else {
+            format!("the ruling {}", ruling.unwrap_or_default())
+        };
+        return GreenRead {
+            block: None,
+            merge_owner: Some(owner),
+        };
+    }
+    let mut block = None;
+    match evaluate_plan_fidelity(plan_path, fno_bin, cwd, timeout) {
+        FidelityGate::Refused { reason } => block = Some(reason),
+        // Degraded fails OPEN on the stop decision (same as Absent - a hung
+        // probe must not wedge the gate that lets a finished session stop),
+        // but is emitted so it is never a SILENT pass: a probe that keeps
+        // timing out stays visible in the event log even though it never
+        // blocks.
+        FidelityGate::Degraded { reason } => on_degraded(reason),
+        _ => {}
+    }
+    GreenRead {
+        block,
+        merge_owner: None,
+    }
+}
