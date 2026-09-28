@@ -16,7 +16,7 @@ use std::path::Path;
 /// Per-project rows rendered for the capture stream; the count stays whole.
 pub(crate) const CAPTURE_PROJECT_CAP: usize = 8;
 
-pub(crate) const NODE_ID_BODY: &str = "[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}";
+pub(crate) const NODE_ID_BODY: &str = "[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}";
 
 // ---------------------------------------------------------------------------
 // Lane: the operator's own ranked file (king/lane.py)
@@ -37,7 +37,7 @@ pub(crate) fn parse_lane(path: &Path) -> Result<Vec<LaneItem>, String> {
         Err(e) => return Err(format!("cannot read operator lane {}: {e}", path.display())),
     };
     let item_re = regex::Regex::new(r"^- \[( |x|X)\] (.*)$").expect("static regex");
-    let body = "[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}";
+    let body = "[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}";
     let suffix_re = regex::Regex::new(&format!(
         r"->\s*(?:(?P<node>{body})|parked:\s*(?P<reason>\S.*?))\s*$"
     ))
