@@ -3,8 +3,6 @@ rename, carrying the ProviderBudget record, with the legacy spelling parsing
 forever and ONE deprecation line."""
 from __future__ import annotations
 
-import pytest
-
 
 def test_legacy_spelling_parses_with_deprecation_line(capsys):
     from fno.config import AgentsBlock
@@ -104,4 +102,4 @@ def test_no_second_agents_leaf_named_max_lanes():
     assert agents_fields == set(), f"agents.* grew a second max_lanes leaf: {agents_fields}"
 
 # The gate's own provider_limits read moved into the ONE Rust gate
-# (spawn_gate_lanes::provider_lanes_cap); its cases live there.
+# (spawn_gate_lanes::provider_lane_caps); its cases live there.

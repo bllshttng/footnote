@@ -221,6 +221,17 @@ fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
             return Err(format!("invalid node id {id:?}"));
         }
     }
+    // A worktree launch's branch feeds `worktree ensure --branch`, so the
+    // same charset the node id answers: empty, flag-shaped, whitespace or
+    // control characters never reach the ensure argv.
+    if let Some(branch) = &req.branch {
+        if branch.is_empty()
+            || branch.starts_with('-')
+            || branch.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(format!("invalid branch {branch:?}"));
+        }
+    }
     if req.message.chars().count() > crate::proto::MAX_MAIL_TEXT {
         return Err(format!(
             "message too long (max {} chars)",
@@ -234,6 +245,67 @@ fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
 /// seconds, never minutes.
 fn launch_timeout() -> Duration {
     crate::dispatch_launch::dispatch_timeout()
+}
+
+/// The worktree launch's directory resolve: one bounded
+/// `fno-agents launch-workdir` shell-out carrying the project cwd, the
+/// minted worker name, the harness and the picked branch. Its one JSON
+/// answer settles the launch: a `workdir` replaces the request's cwd, a
+/// `hold` names why nothing may launch, and a transport failure refuses the
+/// same way - never a silent fall-back to the cwd the box promised to leave.
+/// The bound is its own 150s (the ensure leg inside the verb may itself
+/// spend 120s), not the spawn's 75s deadline.
+async fn resolve_launch_workdir(req: &mut AgentLaunchRequest) -> Result<(), String> {
+    const WORKDIR_TIMEOUT: Duration = Duration::from_secs(150);
+    let name = req.node.clone().unwrap_or_else(|| {
+        format!(
+            "composer-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        )
+    });
+    let payload = serde_json::json!({
+        "recorded_cwd": req.cwd,
+        "node": name,
+        "harness": req.harness,
+        "branch": req.branch,
+    });
+    let bin = crate::digest_overlay::fno_agents_bin()
+        .to_string_lossy()
+        .into_owned();
+    let argv = [bin.as_str(), "launch-workdir"];
+    match crate::dispatch_launch::run_fno_captured_with_stdin(
+        &argv,
+        payload.to_string().as_bytes(),
+        WORKDIR_TIMEOUT,
+        tokio::time::Instant::now() + WORKDIR_TIMEOUT,
+    )
+    .await
+    {
+        None => Err("launch-workdir timed out".to_string()),
+        Some((false, _, stderr)) => Err(stderr
+            .lines()
+            .next()
+            .unwrap_or("launch-workdir failed")
+            .trim()
+            .to_string()),
+        Some((true, stdout, _)) => {
+            let answer: serde_json::Value = serde_json::from_str(stdout.trim())
+                .map_err(|e| format!("launch-workdir answered unparseable json: {e}"))?;
+            if let Some(hold) = answer.get("hold").and_then(|v| v.as_str()) {
+                return Err(hold.to_string());
+            }
+            match answer.get("workdir").and_then(|v| v.as_str()) {
+                Some(dir) if !dir.is_empty() => {
+                    req.cwd = dir.to_string();
+                    Ok(())
+                }
+                _ => Err("launch-workdir answered neither workdir nor hold".to_string()),
+            }
+        }
+    }
 }
 
 impl super::Core {
@@ -325,7 +397,7 @@ impl super::Core {
     /// client never cancels a running attempt - the desk owns the truth, so
     /// a lost reply reads `Unknown` client-side instead of becoming a
     /// second process.
-    pub(super) fn agent_launch(&mut self, id: u64, req: AgentLaunchRequest) {
+    pub(super) fn agent_launch(&mut self, id: u64, mut req: AgentLaunchRequest) {
         if let Some(update) = self.launch_desk.in_flight_or_done(id, req.request_id) {
             self.send_launch_update(id, update);
             return;
@@ -363,6 +435,28 @@ impl super::Core {
         tokio::spawn(async move {
             let timeout = launch_timeout();
             let deadline = tokio::time::Instant::now() + timeout;
+            // A worktree launch resolves its directory FIRST: a `workdir`
+            // answer replaces req.cwd before the argv is built, a `hold` is
+            // a definitive no-birth refusal, and a transport failure refuses
+            // the same way - never a silent fall-back to the project cwd the
+            // box promised to leave.
+            if req.worktree {
+                if let Err(reason) = resolve_launch_workdir(&mut req).await {
+                    let _ = core_tx
+                        .send(super::CoreMsg::AgentLaunchUpdate {
+                            id,
+                            update: AgentLaunchUpdate {
+                                request_id,
+                                state: LaunchState::Refused {
+                                    reason: format!("worktree: {reason}"),
+                                },
+                            },
+                            retry: 0,
+                        })
+                        .await;
+                    return;
+                }
+            }
             let fno = super::fno_bin().display().to_string();
             let argv = launch_spawn_argv(&fno, &req, &session);
             let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -532,6 +626,8 @@ mod tests {
             node: None,
             message: String::new(),
             extra_flags: Vec::new(),
+            worktree: false,
+            branch: None,
         }
     }
 

@@ -263,6 +263,14 @@ pub enum StateError {
         current: u32,
         source_root: String,
     },
+    /// The shared-registry write guard refused at the choke point
+    /// (`registry_guard`): a test/probe process aimed at the real shared
+    /// registry, or a closure about to drop most live rows without the
+    /// override. Its own variant rather than `InvariantViolation` so the
+    /// remedy-bearing message stays grep-able as the guard, not as a
+    /// row-shape bug.
+    #[error("registry write guard: {0}")]
+    WriteGuard(String),
     /// The blocking-pool task reading the registry was cancelled by daemon
     /// shutdown before it ran, not by a failure in the read itself.
     #[error("cancelled during shutdown: {0}")]
@@ -2440,6 +2448,18 @@ where
             entry.exited_at = None;
         }
     }
+    // The shared-registry write guard. Fires only on the real shared
+    // root - a pinned FNO_AGENTS_HOME or a tempdir-sandboxed home stands down -
+    // so the refusal names exactly the two shapes that cost the fleet its
+    // rows on 2026-09-27: a test or probe process writing fleet state, and a
+    // closure about to drop most live rows. Python's `write_registry` mirrors
+    // both arms.
+    crate::registry_guard::check_env(
+        path,
+        crate::registry_guard::count_live(&before_entries),
+        crate::registry_guard::count_live(&registry.entries),
+    )
+    .map_err(StateError::WriteGuard)?;
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde

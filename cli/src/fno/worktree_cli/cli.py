@@ -446,6 +446,29 @@ def _worktree_ensure(
             and wt_top.returncode == 0
             and Path(wt_top.stdout.strip()).resolve() == wt.resolve()
         ):
+            # A demanded branch the reused tree does not carry is honored:
+            # the caller picked it, so the launch runs it (a branch has one
+            # checkout, so a branch already checked out elsewhere refuses
+            # here - fail closed, never launching the wrong branch). A dirty
+            # tree that blocks the checkout refuses the same way.
+            if branch is not None:
+                cur = _git(wt, "branch", "--show-current")
+                if cur.returncode == 0 and cur.stdout.strip() != branch:
+                    co = _git(wt, "checkout", branch)
+                    if co.returncode != 0:
+                        typer.echo(
+                            f"worktree ensure: checkout {branch} in {wt} failed: "
+                            f"{co.stderr.strip() or co.stdout.strip()}",
+                            err=True,
+                        )
+                        return 1
+                    typer.echo(
+                        f"worktree ensure: {policy_receipt}; "
+                        f"switched worktree at {wt} to {branch} created=false",
+                        err=True,
+                    )
+                    typer.echo(str(wt))
+                    return 0
             typer.echo(
                 f"worktree ensure: {policy_receipt}; "
                 f"reusing worktree at {wt} created=false",

@@ -9,6 +9,95 @@ use super::tests::{
 };
 use super::*;
 use serde_json::json;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+struct LaneStatePins {
+    prior: Vec<(&'static str, Option<OsString>)>,
+    agents_home: PathBuf,
+}
+
+impl LaneStatePins {
+    fn at(root: &Path) -> Self {
+        let fno_home = root.join("fno-home");
+        let agents_home = root.join("agents");
+        let claims_root = root.join("claims");
+        for dir in [&fno_home, &agents_home, &claims_root] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let vars = [
+            ("FNO_HOME", fno_home),
+            ("FNO_AGENTS_HOME", agents_home.clone()),
+            ("FNO_CLAIMS_ROOT", claims_root),
+            ("FNO_EVENTS_PATH", root.join("events.jsonl")),
+        ];
+        let prior = vars
+            .iter()
+            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .collect();
+        for (name, value) in &vars {
+            std::env::set_var(name, value);
+        }
+        Self { prior, agents_home }
+    }
+
+    fn registry_path(&self) -> PathBuf {
+        self.agents_home.join("registry.json")
+    }
+}
+
+impl Drop for LaneStatePins {
+    fn drop(&mut self) {
+        for (name, value) in &self.prior {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+fn pin_vendor_state(env: &CapacityEnv, registry: &str) -> LaneStatePins {
+    let pins = LaneStatePins::at(env.dir.path());
+    std::fs::write(
+        env.dir.path().join("config.toml"),
+        "[agents.provider_limits.zai]\nlanes = 2\n",
+    )
+    .unwrap();
+    std::fs::write(pins.registry_path(), registry).unwrap();
+    pins
+}
+
+fn without_vendor_maps(mut payload: serde_json::Value) -> serde_json::Value {
+    let object = payload.as_object_mut().unwrap();
+    for key in ["vendor_caps", "vendor_counts", "vendor_count_errors"] {
+        object.remove(key);
+    }
+    payload
+}
+
+fn two_live_zai_rows() -> String {
+    let pid = std::process::id();
+    let pid_start_time = crate::daemon::process_start_time(pid).expect("current process start");
+    let entries = (0..2)
+        .map(|index| {
+            json!({
+                "name": format!("zai-{index}"),
+                "provider": "zai",
+                "cwd": "/tmp",
+                "status": "live",
+                "created_at": "2026-09-27T00:00:00Z",
+                "pid": pid,
+                "pid_start_time": pid_start_time,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+        "entries": entries,
+    })
+    .to_string()
+}
 
 /// AC1-HP: the readout's walk refreshes a stale lane itself, and both the
 /// lane row and `would_take` read the map the walk judged: `codex-luna` ok,
@@ -161,4 +250,113 @@ fn a_mixed_exhausted_and_unknown_walkout_keeps_the_exhausted_terminal() {
     );
     assert_eq!(out["reason_kind"], "capacity-exhausted");
     assert_eq!(out["refusal_terminal"]["class"], "exhausted-refuse");
+}
+
+/// AC5-HP: an omitted vendor map is gathered from the configured cap and the
+/// same registry count the gate reads.
+#[test]
+fn omitted_vendor_maps_gather_caps_and_counts_for_the_walk() {
+    let env = CapacityEnv::new(&state_json(None), None);
+    let pins = pin_vendor_state(
+        &env,
+        &json!({
+            "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+            "entries": [],
+        })
+        .to_string(),
+    );
+    let input = without_vendor_maps(payload(json!({"lanes_raw": ["flash-x"]})));
+
+    let out = resolve_slot_payload(&input);
+    assert_eq!(out["status"], "pick");
+    assert_eq!(out["candidate"]["lane"], "flash-x");
+    assert!(
+        !chain_of(&out)
+            .iter()
+            .any(|line| line.contains("flash-x uncapped")),
+        "chain: {:?}",
+        chain_of(&out)
+    );
+    drop(pins);
+}
+
+#[test]
+fn gathered_full_vendor_lane_is_skipped_using_its_count() {
+    let env = CapacityEnv::new(&state_json(None), None);
+    let pins = pin_vendor_state(&env, &two_live_zai_rows());
+    let input = without_vendor_maps(payload(json!({"lanes_raw": ["flash-x", "sonnet-x"]})));
+
+    let out = resolve_slot_payload(&input);
+    assert_eq!(out["status"], "pick");
+    assert_eq!(out["candidate"]["lane"], "sonnet-x");
+    assert!(
+        chain_of(&out)
+            .iter()
+            .any(|line| line.contains("provider zai at 2 of 2")),
+        "chain: {:?}",
+        chain_of(&out)
+    );
+    drop(pins);
+}
+
+/// AC6-ERR: an unreadable registry is a lane-count error and fails closed.
+#[test]
+fn unreadable_registry_refuses_a_gathered_capped_lane() {
+    let env = CapacityEnv::new(&state_json(None), None);
+    let pins = pin_vendor_state(&env, "not json");
+    let input = without_vendor_maps(payload(json!({"lanes_raw": ["flash-x"]})));
+
+    let out = resolve_slot_payload(&input);
+    assert!(out["candidate"].is_null());
+    assert!(chain_of(&out).iter().any(|line| {
+        line.starts_with(
+            "slot=provider-count-unavailable agents.profiles.target.lanes[0] zai: fno registry unreadable:"
+        )
+    }), "chain: {:?}", chain_of(&out));
+    drop(pins);
+}
+
+#[test]
+fn gate_bypass_keeps_lane_when_gathered_count_is_unavailable() {
+    let env = CapacityEnv::new(&state_json(None), None);
+    let pins = pin_vendor_state(&env, "not json");
+    let input = without_vendor_maps(payload(json!({
+        "lanes_raw": ["flash-x"],
+        "gate_bypassed": true,
+    })));
+
+    let out = resolve_slot_payload(&input);
+    assert_eq!(out["candidate"]["lane"], "flash-x");
+    assert!(
+        chain_of(&out).iter().any(|line| {
+            line.contains("flash-x zai count unavailable (fno registry unreadable:")
+        }),
+        "chain: {:?}",
+        chain_of(&out)
+    );
+    drop(pins);
+}
+
+/// AC7-EDGE: any explicit vendor key keeps the caller's map authoritative.
+#[test]
+fn explicit_empty_vendor_caps_do_not_read_config_or_registry() {
+    let env = CapacityEnv::new(&state_json(None), None);
+    let pins = pin_vendor_state(&env, "not json");
+    let mut input = payload(json!({
+        "lanes_raw": ["flash-x"],
+        "vendor_caps": {},
+    }));
+    input.as_object_mut().unwrap().remove("vendor_counts");
+    input.as_object_mut().unwrap().remove("vendor_count_errors");
+
+    let out = resolve_slot_payload(&input);
+    assert_eq!(out["candidate"]["lane"], "flash-x");
+    assert!(
+        chain_of(&out)
+            .iter()
+            .any(|line| { line.contains("flash-x uncapped (zai)") }),
+        "chain: {:?}",
+        chain_of(&out)
+    );
+    drop(pins);
 }

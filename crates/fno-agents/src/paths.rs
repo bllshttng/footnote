@@ -210,6 +210,16 @@ impl AgentsHome {
         AgentsHome { root: root.into() }
     }
 
+    /// The ambient shared root built from an explicit `$HOME` value: the pure
+    /// form of [`Self::ambient_shared_root`], for a caller that already holds
+    /// the home and must not re-read the env (the registry write guard takes
+    /// the home as an argument so its decision stays testable).
+    pub(crate) fn ambient_from(home: &std::ffi::OsStr) -> Self {
+        AgentsHome {
+            root: Path::new(home).join(".fno").join("agents"),
+        }
+    }
+
     /// The shared `registry.json` path, resolved for COMPARISON only.
     ///
     /// [`AgentsHome::from_env_opt`] answers `None` when a test declared no
