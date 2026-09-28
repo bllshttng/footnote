@@ -837,7 +837,8 @@ fn close_node(tail: &[String], args: &DoneArgs, task_id: &str) -> i32 {
         Ok(true)
     });
     if applied.is_err() {
-        eprintln!("done: the graph write was refused; nothing changed.");
+        let err = applied.unwrap_err();
+        eprintln!("Error: {err}");
         return 1;
     }
     if not_found.into_inner() {
@@ -1047,7 +1048,8 @@ pub fn run_reopen(tail: &[String]) -> i32 {
         Ok(true)
     });
     if applied.is_err() {
-        eprintln!("reopen: the graph write was refused; nothing changed.");
+        let err = applied.unwrap_err();
+        eprintln!("Error: {err}");
         return 1;
     }
     if not_found.into_inner() {
@@ -1255,12 +1257,27 @@ fn plan_rung_status(plan_path: &str, cwd: Option<&str>) -> String {
 fn archived_entry(node_id: &str) -> Option<Value> {
     let archive = settings::graph_path().parent()?.join("graph-archive.json");
     let read = graph_store::read_archive_raw(&archive).ok()?;
-    match read {
-        graph_store::RawRead::Entries(rows) => {
-            rows.into_iter().find(|e| text_at(e, "id") == Some(node_id))
-        }
-        _ => None,
+    let rows = match read {
+        graph_store::RawRead::Entries(rows) => rows,
+        _ => return None,
+    };
+    // The archive probe resolves a partial legacy id the way the working
+    // graph does, or `reopen ab-2222` reports "not found" for a node sitting
+    // readable in the archive.
+    let exact = rows.iter().find(|e| text_at(e, "id") == Some(node_id));
+    if exact.is_some() {
+        return exact.cloned();
     }
+    if node_id.starts_with("ab-") && node_id.len() < 11 {
+        let matches: Vec<&Value> = rows
+            .iter()
+            .filter(|e| text_at(e, "id").is_some_and(|id| id.starts_with(node_id)))
+            .collect();
+        if matches.len() == 1 {
+            return Some(matches[0].clone());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1463,50 +1480,50 @@ mod tests {
             "x-aaaa".into(),
             "--force".into(),
             "--reason".into(),
-            "why".into(),
+            "why".to_string(),
         ]);
         assert!(a.close_flags() && !a.rich_flags());
-        let a = parse_done_args(&["x-aaaa".into(), "--note".into(), "done"]);
+        let a = parse_done_args(&["x-aaaa".into(), "--note".into(), "done".to_string()]);
         assert!(!a.close_flags() && a.rich_flags());
-        let a = parse_done_args(&["--force".into(), "--note".into(), "n"]);
+        let a = parse_done_args(&["--force".into(), "--note".into(), "n".to_string()]);
         assert!(a.close_flags() && a.rich_flags());
     }
 
     #[test]
     fn live_children_exclude_contained_and_terminal() {
         let rows = vec![
-            json!({"id": "ab-10000001", "parent": "ab-30000003"}),
-            json!({"id": "ab-20000002", "parent": "ab-30000003", "contained_in": "ab-30000003"}),
-            json!({"id": "ab-40000004", "parent": "ab-30000003", "completed_at": "2026-09-01T00:00:00+00:00"}),
+            json!({"id": "ab-aaaaaaaa", "parent": "ab-cccccccc"}),
+            json!({"id": "ab-bbbbbbbb", "parent": "ab-cccccccc", "contained_in": "ab-cccccccc"}),
+            json!({"id": "ab-dddddddd", "parent": "ab-cccccccc", "completed_at": "2026-09-01T00:00:00+00:00"}),
         ];
         assert_eq!(
-            live_child_ids(&rows, "ab-30000003"),
-            vec!["ab-10000001".to_string()]
+            live_child_ids(&rows, "ab-cccccccc"),
+            vec!["ab-aaaaaaaa".to_string()]
         );
     }
 
     #[test]
     fn cascade_closes_an_ancestor_whose_children_all_closed() {
         let mut rows = vec![
-            seed("ab-e0000001", None),
-            seed("ab-10000001", Some("ab-e0000001")),
-            seed("ab-20000002", Some("ab-e0000001")),
+            seed("ab-ffffffff", None),
+            seed("ab-aaaaaaaa", Some("ab-ffffffff")),
+            seed("ab-bbbbbbbb", Some("ab-ffffffff")),
         ];
         let idx = rows
             .iter()
-            .position(|e| text_at(e, "id") == Some("ab-10000001"))
+            .position(|e| text_at(e, "id") == Some("ab-aaaaaaaa"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
         let idx = rows
             .iter()
-            .position(|e| text_at(e, "id") == Some("ab-20000002"))
+            .position(|e| text_at(e, "id") == Some("ab-bbbbbbbb"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
-        let closed = cascade_close_parents(&mut rows, "ab-20000002");
-        assert!(closed.contains(&"ab-e0000001".to_string()), "{closed:?}");
+        let closed = cascade_close_parents(&mut rows, "ab-bbbbbbbb");
+        assert!(closed.contains(&"ab-ffffffff".to_string()), "{closed:?}");
         let epic = rows
             .iter()
-            .find(|e| text_at(e, "id") == Some("ab-e0000001"))
+            .find(|e| text_at(e, "id") == Some("ab-ffffffff"))
             .unwrap();
         assert_eq!(
             text_at(epic, "completion_note"),
@@ -1517,32 +1534,32 @@ mod tests {
     #[test]
     fn cascade_stops_on_a_live_sibling() {
         let mut rows = vec![
-            seed("ab-e0000001", None),
-            seed("ab-10000001", Some("ab-e0000001")),
-            seed("ab-20000002", Some("ab-e0000001")),
+            seed("ab-ffffffff", None),
+            seed("ab-aaaaaaaa", Some("ab-ffffffff")),
+            seed("ab-bbbbbbbb", Some("ab-ffffffff")),
         ];
         let idx = rows
             .iter()
-            .position(|e| text_at(e, "id") == Some("ab-10000001"))
+            .position(|e| text_at(e, "id") == Some("ab-aaaaaaaa"))
             .unwrap();
         apply_completion_fields(&mut rows[idx], false);
-        let closed = cascade_close_parents(&mut rows, "ab-10000001");
+        let closed = cascade_close_parents(&mut rows, "ab-aaaaaaaa");
         assert!(closed.is_empty(), "{closed:?}");
     }
 
     #[test]
     fn a_reopen_postdating_child_closes_outranks_the_sweep() {
         let parent = json!({
-            "id": "ab-e0000001",
+            "id": "ab-ffffffff",
             "reopened_at": "2026-09-02T00:00:00+00:00",
         });
         let kids = vec![
-            json!({"id": "ab-10000001", "completed_at": "2026-09-01T00:00:00+00:00"}),
-            json!({"id": "ab-20000002", "completed_at": "2026-09-03T00:00:00+00:00"}),
+            json!({"id": "ab-aaaaaaaa", "completed_at": "2026-09-01T00:00:00+00:00"}),
+            json!({"id": "ab-bbbbbbbb", "completed_at": "2026-09-03T00:00:00+00:00"}),
         ];
         let refs: Vec<&Value> = kids.iter().collect();
         assert!(!reopen_outranks_child_closes(&parent, &refs));
-        let older_kid = json!({"id": "ab-10000001", "completed_at": "2026-08-01T00:00:00+00:00"});
+        let older_kid = json!({"id": "ab-aaaaaaaa", "completed_at": "2026-08-01T00:00:00+00:00"});
         let refs: Vec<&Value> = vec![&older_kid];
         assert!(reopen_outranks_child_closes(&parent, &refs));
     }
@@ -1550,20 +1567,20 @@ mod tests {
     #[test]
     fn reparent_walks_to_the_nearest_live_ancestor() {
         let mut rows = vec![
-            seed("ab-50000005", None),
-            seed("ab-e0000001", Some("ab-50000005")),
-            seed("ab-10000001", Some("ab-e0000001")),
+            seed("ab-eeeeeeee", None),
+            seed("ab-ffffffff", Some("ab-eeeeeeee")),
+            seed("ab-aaaaaaaa", Some("ab-ffffffff")),
         ];
-        let moved = reparent_live_children(&mut rows, "ab-e0000001");
+        let moved = reparent_live_children(&mut rows, "ab-ffffffff");
         assert_eq!(
             moved,
-            vec![("ab-10000001".to_string(), Some("ab-50000005".to_string()))]
+            vec![("ab-aaaaaaaa".to_string(), Some("ab-eeeeeeee".to_string()))]
         );
         let kid = rows
             .iter()
-            .find(|e| text_at(e, "id") == Some("ab-10000001"))
+            .find(|e| text_at(e, "id") == Some("ab-aaaaaaaa"))
             .unwrap();
-        assert_eq!(text_at(kid, "parent"), Some("ab-50000005"));
+        assert_eq!(text_at(kid, "parent"), Some("ab-eeeeeeee"));
     }
 
     #[test]
@@ -1588,5 +1605,20 @@ mod tests {
     fn normalize_strips_fragments_and_slashes() {
         assert_eq!(normalize_plan_path(" plans/p.md#wave-1 "), "plans/p.md");
         assert_eq!(normalize_plan_path("plans/p.md/"), "plans/p.md");
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn partial_prefix_finds_unique_row() {
+        let rows = vec![
+            json!({"id": "ab-e0000000", "title": "e"}),
+            json!({"id": "ab-c0000000", "title": "c", "parent": "ab-e0000000"}),
+        ];
+        let found = find_node(&rows, "ab-c000");
+        assert!(found.is_some(), "partial must resolve");
     }
 }

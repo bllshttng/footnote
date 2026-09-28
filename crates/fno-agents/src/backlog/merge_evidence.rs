@@ -533,9 +533,9 @@ mod tests {
             failure_kind: None,
             remedy: Some("retry later".into()),
         };
-        let text = render_merge_evidence_failure("ab-00000001", &ev, "open");
+        let text = render_merge_evidence_failure("ab-1234abcd", &ev, "open");
         assert!(
-            text.starts_with("Error: gh cross-check failed for ab-00000001: gh down"),
+            text.starts_with("Error: gh cross-check failed for ab-1234abcd: gh down"),
             "{text}"
         );
         assert!(text.ends_with("Node stays open."), "{text}");
@@ -548,10 +548,10 @@ mod tests {
             failure_kind: Some("not_found".into()),
             remedy: None,
         };
-        let text = render_merge_evidence_failure("ab-00000001", &ev, "open");
+        let text = render_merge_evidence_failure("ab-1234abcd", &ev, "open");
         assert_eq!(
             text,
-            "Refused: ab-00000001 cross-check failed: PR #7 state=CLOSED (not merged)"
+            "Refused: ab-1234abcd cross-check failed: PR #7 state=CLOSED (not merged)"
         );
     }
 

@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn a_plan_less_node_passes_without_gh_io() {
-        let node = serde_json::json!({"id": "ab-00000001", "status": "in_progress"});
+        let node = serde_json::json!({"id": "ab-1234abcd", "status": "in_progress"});
         let v = resolve_promise_evidence(&node, None, &[]);
         assert!(v.satisfied());
         assert!(v.warning.is_none());
@@ -436,14 +436,14 @@ mod tests {
 
     #[test]
     fn refusal_c_names_the_ship_gap() {
-        let text = promise_refusal_c("ab-00000001", "plans/p.md", 3, 1);
+        let text = promise_refusal_c("ab-1234abcd", "plans/p.md", 3, 1);
         assert!(text.contains("promised 3 ships; only 1 merged"), "{text}");
         assert!(text.contains("expected_url_count: 3"), "{text}");
     }
 
     #[test]
     fn refusal_b_names_the_probes() {
-        let text = promise_refusal_b("ab-00000001", "plans/p.md", "probe x failed");
+        let text = promise_refusal_b("ab-1234abcd", "plans/p.md", "probe x failed");
         assert!(
             text.contains("declared close_probes and at least one failed"),
             "{text}"
@@ -456,7 +456,7 @@ mod tests {
         let deferred: Vec<Value> = (0..7)
             .map(|i| serde_json::json!({"id": format!("c{i}"), "need": format!("n{i}")}))
             .collect();
-        let text = promise_refusal_d("ab-00000001", &deferred);
+        let text = promise_refusal_d("ab-1234abcd", &deferred);
         assert!(text.contains("would close with 7 unharvested"), "{text}");
         assert!(text.contains("...and 2 more"), "{text}");
         assert!(!text.contains("c5:"), "{text}");
