@@ -147,6 +147,9 @@ enum Role {
     /// lexically the way `fno doctor event` is, because the Python CLI owns
     /// the rest of the `inbox` tree.
     InboxLaw(Vec<OsString>),
+    /// `fno inbox decisions ...`: the native listing read, classified beside
+    /// the law verbs; the Python `inbox` tree keeps every other name.
+    InboxDecisions(Vec<OsString>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -209,6 +212,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     }
     if let Some(rest) = fno::law_cli::classify_inbox_law(args) {
         return Role::InboxLaw(rest);
+    }
+    if let Some(rest) = fno::law_cli::classify_inbox_decisions(args) {
+        return Role::InboxDecisions(rest);
     }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
@@ -369,6 +375,7 @@ fn main() {
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
         Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
+        Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup

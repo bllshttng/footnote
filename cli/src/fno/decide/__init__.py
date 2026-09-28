@@ -1115,49 +1115,6 @@ def looks_like_decision_id(token: str) -> bool:
     return bool(_DECISION_ID_RE.match(token.strip()))
 
 
-def near_miss_subjects(
-    subject: str, entries: "list[dict] | None" = None
-) -> "list[tuple[str, int]]":
-    """Recorded subjects that nearly match, newest-heaviest first.
-
-    A near miss is indistinguishable from a real absence today: four rulings
-    filed under the free-text subject `` scope`` are invisible to
-    ``--subject ``, and recovering them needed a raw grep of the index.
-    Containment in EITHER direction counts, because the writer is as likely to
-    have recorded the longer spelling as the shorter one.
-
-    One function, read by both the human block and ``--json``, so the two
-    surfaces cannot drift into disagreeing about what nearly matched.
-
-    A subject the exact matcher already answered is NOT a near miss. The same
-    predicate decides both, so the two cannot disagree: `--subject f7b9`
-    resolves through the node tier to ``, prints that row, and must not
-    then report it as something it failed to reach.
-
-    Counted by distinct ``decision_id``, matching how ``list_decisions``
-    reports. The index is append-only and a reindex landing mid-write appends
-    one ruling twice, so a raw row count inflates the very number this message
-    exists to convey.
-    """
-    want = subject.strip().casefold()
-    if not want:
-        return []
-    matches = _subject_matcher(subject, entries=entries)
-    rows, _ = _read_index(warn=False)
-    seen: "dict[str, set[str]]" = {}
-    for row in rows:
-        recorded = str(row.get("subject") or "")
-        folded = recorded.strip().casefold()
-        if not folded or folded == want or matches(recorded):
-            continue
-        if want in folded or folded in want:
-            seen.setdefault(recorded, set()).add(str(row.get("decision_id") or ""))
-    ranked = sorted(
-        ((s, len(ids)) for s, ids in seen.items()), key=lambda kv: (-kv[1], kv[0])
-    )
-    return ranked[:10]
-
-
 def list_decisions(
     subject: str | None = None,
     limit: int | None = None,
@@ -1354,83 +1311,6 @@ def current_law(subject: str) -> dict[str, Any]:
     return {
         "canonical_subject": canonical_subject,
         "current_law": verdict,
-    }
-
-
-def review_list() -> dict[str, Any]:
-    """Report unresolved multi-ruling subjects without mutating the index."""
-    _, rows, damaged = list_decisions(limit=None, state="all", scope="all")
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    display_subjects: dict[str, str] = {}
-    graph_entries = _graph_entries()
-    subjectless = 0
-    subjectless_rows: list[dict[str, Any]] = []
-    invalid_authority = 0
-    # A bare count cannot surface a SPELLING. `crown-l1` and two
-    # `crown-l2-<node>` values were minted by kings with no correct value to
-    # pass, and the tally that would have caught them only ever said how many.
-    invalid_authority_values: dict[str, int] = {}
-
-    def review_row(row: dict) -> dict[str, Any]:
-        return {
-            key: row.get(key)
-            for key in (
-                "decision_id",
-                "lane",
-                "ts",
-                "decision",
-                "rationale",
-                "authority_source",
-                "lifecycle",
-            )
-            if row.get(key) is not None
-        }
-
-    for row in rows:
-        subject = str(row.get("subject") or "").strip()
-        if not subject:
-            subjectless += 1
-            subjectless_rows.append(review_row(row))
-        authority = row.get("authority_source")
-        if authority and authority not in READ_AUTHORITY_SOURCES:
-            invalid_authority += 1
-            key = str(authority)
-            invalid_authority_values[key] = invalid_authority_values.get(key, 0) + 1
-        if row.get("lifecycle") != "live" or not subject:
-            continue
-        node_id = _resolved_node(subject, graph_entries)
-        group_key = f"node:{node_id}" if node_id else f"text:{subject.casefold()}"
-        display_subjects.setdefault(group_key, subject)
-        grouped.setdefault(group_key, []).append(review_row(row))
-
-    groups = [
-        {"subject": display_subjects[group_key], "decisions": decisions}
-        for group_key, decisions in sorted(grouped.items())
-        if len(decisions) > 1
-    ]
-    if subjectless_rows:
-        groups.append({"subject": "(unscoped)", "decisions": subjectless_rows})
-    return {
-        "groups": groups,
-        "data_quality": {
-            "subjectless": subjectless,
-            # Kept as an integer beside the breakdown: --review-list --json is
-            # a read surface, so removing this key would break its readers.
-            "invalid_authority": invalid_authority,
-            # A LIST, not a dict, because the order is the ranking. A dict
-            # carries rank only in its insertion order, and every serializer is
-            # free to drop that: `--output report.json` writes through
-            # `json.dumps(sort_keys=True)`, which would file `banana` above a
-            # 40-row `crown-l1`. A list survives any of them.
-            "invalid_authority_values": [
-                {"value": value, "count": count}
-                for value, count in sorted(
-                    invalid_authority_values.items(),
-                    key=lambda item: (-item[1], item[0]),
-                )
-            ],
-        },
-        "damaged": damaged,
     }
 
 

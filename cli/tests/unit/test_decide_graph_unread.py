@@ -77,23 +77,3 @@ def test_unknown_survives_live_filter_and_subjectless_coord_stays_unscoped(monke
     )
     assert subjectless is not None
     assert subjectless["lifecycle"] == "unscoped"
-
-
-def test_review_list_uses_soft_graph_read_that_reports_failure(monkeypatch, capsys):
-    import sys
-
-    import fno.decide as decide
-
-    monkeypatch.setattr(decide, "_read_index", lambda: ([], 0))
-
-    def graph_entries(*, required=False):
-        if required:
-            raise OSError("database is locked")
-        print("decide: the graph could not be read (database is locked)", file=sys.stderr)
-        return []
-
-    monkeypatch.setattr(decide, "_graph_entries", graph_entries)
-
-    decide.review_list()
-
-    assert "decide: the graph could not be read" in capsys.readouterr().err
