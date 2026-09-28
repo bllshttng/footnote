@@ -44,6 +44,9 @@
 #      agent session and so never loads plugin hooks, which leaves the
 #      settings file the only place a WorktreeRemove hook can reach it. That
 #      is Claude Code config, not footnote state - nothing accumulates there.
+#      plans_path.rs reads Claude's own plansDirectory setting to place plan
+#      docs in the project-selected directory; it does not write footnote state
+#      under .claude.
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
 #      context_audit.py reads project-owned .claude/rules/*.md to census the
@@ -321,6 +324,7 @@ crates/fno-agents/src/hook/stop.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/plans_dirs.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs

@@ -687,7 +687,7 @@ pub fn run_plan_path(args: &[String]) -> i32 {
 
 fn anchor_of(args: &[String]) -> PathBuf {
     match args.first() {
-        Some(p) if Path::new(p).is_dir() => PathBuf::from(p),
+        Some(p) if Path::new(p).is_dir() || Path::new(p).is_absolute() => PathBuf::from(p),
         _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     }
 }
@@ -697,6 +697,15 @@ mod tests {
     use super::*;
     use crate::claims::test_env_lock;
     use std::fs;
+
+    #[test]
+    fn anchor_of_keeps_an_absolute_project_root_that_is_not_checked_out() {
+        let root =
+            std::env::temp_dir().join(format!("fno-plans-path-absent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(!root.exists());
+        assert_eq!(anchor_of(&[root.display().to_string()]), root);
+    }
 
     struct Fixture {
         base: PathBuf,

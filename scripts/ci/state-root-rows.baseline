@@ -1,7 +1,7 @@
 .1
 .DS_Store
 .a2a-confirmed
-.abilities
+.abilities # fno-rename-keep: retained forensic state-root row
 .active-backlog-nudge
 .canary
 .claude
