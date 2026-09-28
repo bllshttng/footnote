@@ -170,12 +170,7 @@ def add_dir_tokens(
 
 
 def _state_roots() -> list[Path]:
-    """The fno do state directories a worker cannot function without.
-
-    Normally one path (``~/.fno``). Divergent claims and registry roots are
-    added when their config-free homes differ from ``state_dir``. Granting
-    roots rather than individual files keeps this from drifting as paths move.
-    """
+    """State roots a worker needs, including divergent claims or registry roots."""
     out: list[Path] = []
     try:
         from fno.paths import state_dir
