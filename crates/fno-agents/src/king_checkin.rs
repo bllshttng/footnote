@@ -390,37 +390,6 @@ fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     }))
 }
 
-/// The unplanned rows this crown must not dispatch: node id -> the canonical
-/// scope of the live crown that owns it, other than this crown's own. The
-/// fold's owner read is the one instrument; an unread read is the caller's
-/// error, never an empty map that would let another king's node print.
-fn other_owned_scopes(
-    folded: &Result<Value, String>,
-    scope: &str,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let folded = folded.as_ref().map_err(Clone::clone)?;
-    let mine = crate::territory::canonical_scope(scope);
-    let scopes = folded
-        .get("owned_scopes")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            folded
-                .get("fold")
-                .and_then(|f| f.get("owned_reason"))
-                .and_then(Value::as_str)
-                .unwrap_or("the fold names no owner map")
-                .to_string()
-        })?;
-    Ok(scopes
-        .iter()
-        .filter_map(|(id, sc)| {
-            sc.as_str()
-                .filter(|s| *s != mine)
-                .map(|s| (id.clone(), s.to_string()))
-        })
-        .collect())
-}
-
 fn r_board(
     board: &Result<Value, String>,
     court: &Result<Value, String>,
@@ -1250,7 +1219,8 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         let floor = crate::agents_config::config_lookup(&ctx.cwd, &["dispatch", "blueprint_floor"])
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| crate::backlog_ready::DEFAULT_BLUEPRINT_FLOOR.to_string());
-        let other_owned = other_owned_scopes(&beat.folded, &ctx.scope);
+        let other_owned =
+            crate::king_checkin_blueprint::other_owned_scopes(&beat.folded, &ctx.scope);
         crate::king_checkin_blueprint::r_blueprint(
             &beat.board,
             &ctx.cwd,
@@ -3417,34 +3387,6 @@ mod tests {
         let data = Map::new();
         let change = derive_change(Some(prev.get("data").unwrap()), &data, "");
         assert_eq!(change, "unmeasured: previous row lacks owned_active");
-    }
-
-    /// The dispatch filter keeps only the rows another live crown owns: the
-    /// map values are canonical scopes, so the caller's own scope never
-    /// leaks through, and the fold's owner-read failure names the reason
-    /// instead of reading as empty.
-    #[test]
-    fn other_owned_scopes_keep_only_foreign_crown_rows() {
-        let folded = Ok(json!({
-            "owned_scopes": {"x-1": "x-8b8d", "x-2": "x-9", "x-3": "x-bbbb"},
-            "fold": {"owned_reason": Value::Null}
-        }));
-        let owned = other_owned_scopes(&folded, "x-bbbb").unwrap();
-        assert_eq!(
-            owned,
-            std::collections::HashMap::from([
-                ("x-1".to_string(), "x-8b8d".to_string()),
-                ("x-2".to_string(), "x-9".to_string()),
-            ])
-        );
-        let failed = Ok(json!({
-            "owned_scopes": Value::Null,
-            "fold": {"owned_reason": "territory: registry unreadable (x)"}
-        }));
-        let err = other_owned_scopes(&failed, "x-bbbb").unwrap_err();
-        assert!(err.contains("registry unreadable"), "{err}");
-        let no_map = Ok(json!({"fold": {}}));
-        assert!(other_owned_scopes(&no_map, "x-bbbb").is_err());
     }
 
     #[test]
