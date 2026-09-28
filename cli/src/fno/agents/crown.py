@@ -436,6 +436,22 @@ def grant_error(
     if caller_row is None:
         return None
     if caller_row is REGISTRY_UNREADABLE:
+        # A shell that once hosted a worker keeps its FNO_AGENT_SELF. The
+        # registry is not the problem (2026-09-27: crown refusals blamed a
+        # healthy registry), so name the stray variable and its heal instead.
+        stray = (os.environ.get("FNO_AGENT_SELF") or "").strip()
+        if stray:
+            from fno.agents.self_stamp import resolve_self_identity
+
+            if not resolve_self_identity().session_id:
+                return (
+                    f"cannot verify the grantor's authority: this shell carries "
+                    f"FNO_AGENT_SELF={stray} with no harness session, so it reads "
+                    "as an agent fno cannot resolve, not an attended human. A "
+                    "shell that once hosted a worker keeps that variable. If you "
+                    "are the human at this shell, rerun as: "
+                    "env -u FNO_AGENT_SELF fno agents crown <args>."
+                )
         return (
             "cannot verify the grantor's authority: the agent registry could not "
             "be read, so this session is treated as an agent whose authority is "
