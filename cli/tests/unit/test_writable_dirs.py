@@ -90,6 +90,9 @@ def test_granted_root_is_an_ancestor_of_the_live_registry_path(tmp_path, monkeyp
     claims_root = tmp_path / "elsewhere"
     (claims_root / ".fno" / "claims").mkdir(parents=True)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    # Same shape as the claims sibling: the store exists, and the grant has to
+    # reach it. The autouse fixture points FNO_AGENTS_HOME here.
+    (tmp_path / ".fno" / "agents").mkdir(parents=True, exist_ok=True)
 
     from fno import paths
 

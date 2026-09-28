@@ -1329,6 +1329,9 @@ class RegistryWriteRefused(RuntimeError):
 
 
 def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:
+    # The ambient home, never the config chain and never FNO_AGENTS_HOME: the
+    # Rust interop runs plain python3 (no pydantic), and a declared home
+    # relocates sandboxes, not the operator root this guard protects.
     sh = paths.ambient_registry_path()
     if sh != target.resolve() or sh.is_relative_to(Path(tempfile.gettempdir()).resolve()):
         return  # another target is the caller's own store; a sandboxed HOME has no real registry

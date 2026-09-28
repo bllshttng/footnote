@@ -208,6 +208,15 @@ def _state_roots() -> list[Path]:
         out.append(_mail_bus_root())
     except Exception:
         pass
+    try:
+        from fno.paths import agents_registry_path
+
+        # The registry write directory; FNO_AGENTS_HOME relocates it independently of state_dir.
+        registry_dir = agents_registry_path().parent
+        if not any(registry_dir.is_relative_to(root) for root in out):
+            out.append(registry_dir)
+    except Exception:
+        pass
     return out
 
 
