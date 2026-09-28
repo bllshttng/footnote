@@ -89,8 +89,6 @@ expect "AC7: cat is a read" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat ~/.claude/settings.json\"},\"session_id\":\"$SID\"}"
 expect "AC7: a quoted mention with a redirect elsewhere" approve \
   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo 'see ~/.claude/x.out' > /tmp/elsewhere.out\"},\"session_id\":\"$SID\"}"
-expect "AC7: repo .fno paths are out of scope" approve \
-  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ~/.fno/graph.json\"},\"session_id\":\"$SID\"}"
 
 # ── AC8: the other write-operator families ────────────────────────────────────
 expect "AC8: tee into the config dir" block \
@@ -157,6 +155,60 @@ else
   fail "AC12: refusal lacks the isolated job dir: $out"
 fi
 rm -rf "$CFGDIR"
+
+# ── AC13: the state root — a NEW top-level entry is refused, an existing one
+#    stays writable, subfolders stay allowed. Hermetic via FNO_STATE_DIR. ─────
+STATEDIR="$(mktemp -d)"
+touch "$STATEDIR/ledger.json"
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > $STATEDIR/foo.out\"},\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"block"'; then
+  pass "AC13: new top-level entry in the state root is refused"
+else
+  fail "AC13: new state-root entry approved: $out"
+fi
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > $STATEDIR/ledger.json\"},\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if [[ "$out" == "{}" ]]; then
+  pass "AC13: existing top-level entry stays writable"
+else
+  fail "AC13: existing entry blocked: $out"
+fi
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > $STATEDIR/spaces/x/out.out\"},\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if [[ "$out" == "{}" ]]; then
+  pass "AC13: state-root subfolder stays allowed"
+else
+  fail "AC13: subfolder write blocked: $out"
+fi
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cp staged $STATEDIR/\"},\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"block"'; then
+  pass "AC13: cp into the state root itself is refused"
+else
+  fail "AC13: cp into the state root approved: $out"
+fi
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > $STATEDIR/foo.out\"},\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q "jobs/${SID:0:8}/tmp" && printf '%s' "$out" | grep -q "top-level entry"; then
+  pass "AC13: state-root refusal names the job tmp dir"
+else
+  fail "AC13: state-root refusal lacks the job dir: $out"
+fi
+rm -rf "$STATEDIR"
+
+# ── AC14: a RELATIVE write target resolves against the payload cwd ───────────
+expect "AC14: relative redirect with cwd inside the config dir" block \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > chk1.out\"},\"cwd\":\"$HOME/.claude\",\"session_id\":\"$SID\"}"
+STATEDIR="$(mktemp -d)"
+out=$(printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > chk2.out\"},\"cwd\":\"$STATEDIR\",\"session_id\":\"$SID\"}" | FNO_STATE_DIR="$STATEDIR" bash "$GUARD" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"block"'; then
+  pass "AC14: relative redirect with cwd inside the state root"
+else
+  fail "AC14: relative state-root redirect approved: $out"
+fi
+expect "AC14: relative redirect with cwd in a repo stays allowed" approve \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > chk3.out\"},\"cwd\":\"/tmp\",\"session_id\":\"$SID\"}"
+expect "AC14: relative tee with cwd inside the config dir" block \
+  "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"run | tee agents-ci.log\"},\"cwd\":\"$HOME/.claude\",\"session_id\":\"$SID\"}"
+expect "AC14: relative Write file_path with config-dir cwd" block \
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"notes.md\",\"content\":\"x\"},\"cwd\":\"$HOME/.claude\",\"session_id\":\"$SID\"}"
+rm -rf "$STATEDIR"
 
 printf '[ccw] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

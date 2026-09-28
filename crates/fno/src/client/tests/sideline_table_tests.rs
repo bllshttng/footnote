@@ -342,9 +342,13 @@ fn list_hover_band_is_one_color_across_every_column_gap() {
     let row = agent_i - view.sideline_offset();
     let cells = &frame.cells[row * cols..row * cols + text_w];
     assert!(cells.iter().any(|c| c.c != ' '), "the row has text");
-    for cell in cells {
+    for (j, cell) in cells.iter().enumerate() {
         assert_eq!(cell.bg, Color::Indexed(0), "one band bg, gaps included");
-        assert_eq!(cell.fg, Color::Indexed(3), "one band accent text");
+        // The status column keeps the row's lane accent on the band (the
+        // operator's color ruling); every other cell carries the band text.
+        if j >= 5 {
+            assert_eq!(cell.fg, Color::Indexed(3), "one band accent text");
+        }
         assert_eq!(cell.flags, 0, "no INVERSE inside the band");
     }
 }
@@ -382,4 +386,115 @@ fn composed_list_bands_hold_contrast_on_dark_and_light_frames() {
             );
         }
     }
+}
+
+#[test]
+fn sticky_footer_and_the_in_list_new_squad_row_never_paint_twice() {
+    // x-b5b8: once the list overflows, the pinned footer AND the in-list
+    // NewSquad row both painted `+ new workspace` in one frame. Exactly one
+    // instance may show at any scroll offset.
+    let mut view = two_pane_view();
+    view.term = (10, 72);
+    let panes = view.layout.panes.clone();
+    let agents: Vec<AgentRow> = (0..12)
+        .map(|i| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
+            name: format!("a{i}"),
+            pane_id: Some(100 + i),
+            portal: None,
+            ..focus_agent(0)
+        })
+        .collect();
+    view.set_layout(LayoutView {
+        squads: vec![meta(1, "footnote", 1, 0)],
+        active_squad: 1,
+        panes,
+        focus: 100,
+        area: (10, 72),
+        agents,
+        focus_node: None,
+    });
+    let label = "+ new workspace";
+    let count = |view: &View| {
+        let (rows, cols, panel_w) = (10usize, 72usize, 28usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        view.draw_sideline(&mut cells, rows, cols, panel_w);
+        cells
+            .iter()
+            .map(|c| c.c)
+            .collect::<String>()
+            .matches(label)
+            .count()
+    };
+    // Park the selector on the NewSquad row and clamp: the window scrolls so
+    // the in-list row is visible - the state where the pinned footer painted
+    // beside it and the label showed twice.
+    let ns = view
+        .display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::NewSquad))
+        .expect("the row list carries a new-workspace row");
+    view.selector = Some(ns);
+    view.clamp_sideline_scroll();
+    assert_eq!(count(&view), 1, "scrolled so the in-list row is visible");
+    // Scrolled back to the top: the in-list row is off-screen, so the pinned
+    // footer is the one instance.
+    view.selector = Some(0);
+    view.clamp_sideline_scroll();
+    assert_eq!(count(&view), 1, "scrolled to the top");
+}
+
+#[test]
+fn chosen_band_wins_when_the_selector_lands_on_the_focused_row() {
+    // x-4374 / AC3-UI, restated: when the selector sits on the focused row,
+    // the standing band still paints - the cursor never masks the "you are
+    // here" signal (the card contract, list mode too). Since x-b5b8 the one
+    // band is the surface pair; the accent rides the glyph and state word.
+    let mut view = two_pane_view();
+    view.layout.agents.push(focus_agent(11));
+    view.selector = Some(1); // the focused agent row
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let lead = frame.cells[cols]; // outer row 1, col 0
+    assert_eq!(
+        lead.bg,
+        Color::Indexed(0),
+        "the chosen row keeps its standing surface band"
+    );
+}
+
+#[test]
+fn xf331_focus_band_and_selector_are_distinct_treatments() {
+    // x-f331 US2/AC1-UI, restated: focus and selector are distinct
+    // treatments. The operator's color ruling (x-b5b8) retired the accent
+    // FILL for both - selection, hover, and focus now share the ONE surface
+    // band, and the focus row's distinction rides its glyph marks and state
+    // word, never a louder fill. This pin holds the unification: neither row
+    // regresses to an accent fill.
+    let mut view = two_pane_view();
+    view.layout.agents.push(focus_agent(11)); // owns focused pane 11 -> row 1
+    view.selector = Some(3); // notes squad header, a different actionable row
+    view.hover_row = None;
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+
+    let focus_cell = frame.cells[cols]; // display row 1: the focus band
+    assert_eq!(
+        focus_cell.bg,
+        Color::Indexed(0),
+        "the focus row wears the surface band, never an accent fill"
+    );
+
+    let sel_cell = frame.cells[3 * cols]; // display row 3: the selector bar
+    assert_eq!(
+        sel_cell.bg,
+        Color::Indexed(0),
+        "the selector row wears the same surface band"
+    );
+    assert_eq!(
+        focus_cell.bg, sel_cell.bg,
+        "focus and selector share the one surface band"
+    );
 }

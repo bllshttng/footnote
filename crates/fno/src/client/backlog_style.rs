@@ -250,7 +250,7 @@ pub(crate) fn paint_panel(
             theme,
         );
         if band && r < rows {
-            let (fg, bg, flags) = band_style(false, theme);
+            let (fg, bg, flags) = band_style(theme);
             let row_base = r * cols;
             for c in 0..text_w.min(cols) {
                 let cell = &mut cells[row_base + c];
@@ -334,7 +334,7 @@ pub(crate) fn paint_framed_band(
     if r >= rows {
         return;
     }
-    let (fg, bg, flags) = band_style(false, theme);
+    let (fg, bg, flags) = band_style(theme);
     let c0 = (origin.1 + 1).min(cols);
     let c1 = (origin.1 + frame_w.saturating_sub(1)).min(cols);
     for c in c0..c1 {
