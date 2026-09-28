@@ -7,9 +7,12 @@ the measurement behind each row: docs/architecture/thread-lanes.md.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from fno import paths
 
 #: Every launch axis a spawn can carry, as (flag an operator types, the row's
 #: ``carries`` name). A row that omits the name refuses the flag; a row that
@@ -298,3 +301,25 @@ def keeper_thread_spawn(
         short_id=session_id,
         effective_message=effective_message,
     )
+
+
+def _lane_b_keeper_socket(name: str) -> Path:
+    """``<state-root>/mux/threads/<name>.sock``: the pane-less keeper's
+    socket, session-keyed beside the pane keepers' ``mux/panes/`` (see
+    docs/state-root-inventory.md for the owner + lifetime row).
+
+    The state root follows the daemon's derivation, not just ``state_dir()``:
+    the Rust registry-side keeper sweep derives the threads dir from the
+    agents root's parent (``FNO_AGENTS_HOME``'s parent when set, else
+    ``state_dir()``), and the spawn must write the socket where that sweep
+    reads it or a restart rebind silently finds nothing.
+
+    The override arm keeps ``FNO_AGENTS_HOME``'s literal spelling - no
+    ``resolve()``: the sweep matches the row's socket path byte-for-byte
+    against a dir built from the raw ``--home`` string, and resolving
+    repoints it through symlinked components (macOS ``/var`` ->
+    ``/private/var``), leaving the socket orphaned at every restart."""
+    override = os.environ.get("FNO_AGENTS_HOME")
+    if override:
+        return Path(override).expanduser().parent / "mux" / "threads" / f"{name}.sock"
+    return paths.state_dir() / "mux" / "threads" / f"{name}.sock"

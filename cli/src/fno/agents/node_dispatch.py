@@ -286,13 +286,10 @@ def resolve_node_spawn(
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
     if source in ("ac", "rd", "ab"):
         from fno.harness_identity import scrub_ambient_identity
-        from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
+        from fno.mail.seed_provenance import scrub_seed_provenance
         run_env = {**(run_env or {}), "FNO_SPAWN_TRIGGER": f"dispatch:{source}"}
         scrub_ambient_identity(run_env)
-        # The seed block rides the same way: a wrapper or harness lane that
-        # never crosses the github_cli floor would inherit the dispatcher's.
-        for _seed_key in SEED_PROVENANCE_KEYS:
-            run_env.pop(_seed_key, None)
+        scrub_seed_provenance(run_env)
 
     return NodeSpawnArgs(
         node_id=node_id,
