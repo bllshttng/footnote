@@ -231,29 +231,25 @@ fn run_owned(
     // ── The foreign-session guard (PR #388 fix class) ─────────────────────────
     // The manifest's stamped harness id (claude_session_id, then
     // claude_transcript_id, then harness_session_id) must name THIS
-    // transcript. Codex rollout suffixes count.
-    if !state_is_pending {
-        let manifest_ctid =
-            first_raw_field(&manifest, &["claude_session_id", "claude_transcript_id"])
-                .filter(|v| v != "null" && !v.is_empty())
-                .or_else(|| {
-                    first_raw_field(&manifest, &["harness_session_id"])
-                        .filter(|v| v != "null" && !v.is_empty())
-                })
-                .unwrap_or_default();
-        if !manifest_ctid.is_empty() {
-            let basename = transcript_basename(&fire.transcript_path.display().to_string())
-                .unwrap_or_default();
-            // An empty basename (grok with an unreadable store) is not
-            // foreign: the transcript_ok unavailable block owns that answer.
-            if !basename.is_empty()
-                && basename != manifest_ctid
-                && !basename.ends_with(&format!("-{manifest_ctid}"))
-            {
-                // Another session's manifest; genuinely not ours to judge.
-                return 0;
-            }
-        }
+    // transcript. Codex rollout suffixes count. The guard's allow now
+    // journals a correlated stop_decision first: king admission reads one
+    // after the newest snapshot for EVERY session, and a fresh heir resolves
+    // HERE - to its predecessor's manifest - until init, the very thing the
+    // silent allow starved, writes its own.
+    if !state_is_pending
+        && manifest_names_foreign_session(&manifest, &fire.transcript_path.display().to_string())
+    {
+        emit_stop_decision(
+            hook_cwd,
+            fire,
+            Some(&state),
+            driver,
+            "none",
+            "allow",
+            "foreign-manifest",
+            &manifest,
+        );
+        return 0;
     }
 
     // ── An active owner with no transcript file: unavailable bounded block ────
@@ -772,6 +768,28 @@ fn collect_fire(
         turn_id,
         goal_payload,
     }
+}
+
+/// The foreign-session guard predicate: the manifest's stamped harness id
+/// (claude_session_id, then claude_transcript_id, then harness_session_id)
+/// must name THIS transcript. Codex rollout suffixes count. An empty basename
+/// (grok with an unreadable store) is not foreign: the transcript_ok
+/// unavailable block owns that answer.
+fn manifest_names_foreign_session(manifest: &str, transcript_display: &str) -> bool {
+    let manifest_ctid = first_raw_field(manifest, &["claude_session_id", "claude_transcript_id"])
+        .filter(|v| v != "null" && !v.is_empty())
+        .or_else(|| {
+            first_raw_field(manifest, &["harness_session_id"])
+                .filter(|v| v != "null" && !v.is_empty())
+        })
+        .unwrap_or_default();
+    if manifest_ctid.is_empty() {
+        return false;
+    }
+    let basename = transcript_basename(transcript_display).unwrap_or_default();
+    !basename.is_empty()
+        && basename != manifest_ctid
+        && !basename.ends_with(&format!("-{manifest_ctid}"))
 }
 
 fn transcript_basename(path: &str) -> Option<String> {
@@ -1310,6 +1328,66 @@ mod tests {
         assert!(resident_matches(&state, "h-uuid-9"));
         assert!(!resident_matches(&state, "h-uuid-9-extra"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The foreign-session guard's allow journals a correlated
+    /// stop_decision, so a fresh heir's stops stay observable before init
+    /// writes the heir's own manifest.
+    #[test]
+    fn a_foreign_manifest_stop_still_journals_a_correlated_stop_decision() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("GLOBAL_EVENTS_PATH", dir.path().join("global-events.jsonl"));
+        let state = dir.path().join("target-state.md");
+        std::fs::write(&state, "---\nharness_session_id: sess-old\n").unwrap();
+        let fire = collect_fire(
+            "sess-new",
+            "/tmp/fno-x4847/sess-new.jsonl",
+            None,
+            "turn-9".to_string(),
+            None,
+        );
+        let rc = run_owned(
+            &dir.path(),
+            &fire,
+            "{}",
+            state,
+            "king",
+            dir.path().to_path_buf(),
+        );
+        assert_eq!(rc, 0, "the foreign manifest allows the stop unjudged");
+
+        // Read the journal the way king admission reads it: live text plus
+        // the store, one query for the stop_decision type.
+        let project = crate::paths::events_path(dir.path());
+        let query = crate::event_store::EventQuery::of_types(&["stop_decision"]);
+        let journal =
+            crate::event_store::journal_text_checked(&project, &query).expect("journal readable");
+        let row = journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| {
+                event.get("type").and_then(Value::as_str) == Some("stop_decision")
+                    && event.pointer("/data/session_id").and_then(Value::as_str) == Some("sess-new")
+            })
+            .unwrap_or_else(|| panic!("no stop_decision for sess-new in {}", project.display()));
+        assert_eq!(
+            row.pointer("/data/correlation_id").and_then(Value::as_str),
+            Some("stop:sess-new:turn-9")
+        );
+        assert_eq!(
+            row.pointer("/data/class").and_then(Value::as_str),
+            Some("foreign-manifest")
+        );
+        assert_eq!(
+            row.pointer("/data/decision").and_then(Value::as_str),
+            Some("allow")
+        );
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::env::remove_var("GLOBAL_EVENTS_PATH");
     }
 
     #[test]

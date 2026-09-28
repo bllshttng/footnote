@@ -11,9 +11,7 @@
 # the dangerous direction, so unsure verbs sit tracker-owned.
 
 [tracker]
-# node lifecycle + creation
-add
-idea
+# node lifecycle + creation (add and idea answer natively)
 new
 intake
 decompose

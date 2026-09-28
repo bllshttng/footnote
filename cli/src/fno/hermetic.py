@@ -112,6 +112,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # a developer's terminal reports its own palette, and a suite must not
     # resolve the theme from the machine it happens to run on.
     "COLORFGBG",
+    # The splash's motion-suppression probe (splash.rs): a developer's OS
+    # accessibility setting is not a test input, and its mere presence
+    # changes whether the launch animation runs.
+    "REDUCED_MOTION",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
     "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
@@ -186,6 +190,7 @@ _ENVIRONMENT: tuple[str, ...] = (
     "USERNAME",
     "TERM",
     "COLORTERM",
+    "REDUCED_MOTION",  # splash honors a motion preference, like TERM above
     "PYTHONPATH",
     "PYTEST_CURRENT_TEST",
     "CI",  # CI-gated behaviour is deliberate; the graph tripwire keys on it
