@@ -27,6 +27,10 @@ refresh = ["codegraph", "sync"]     # documented for users; fno never runs it
 
 A provider that errors, times out or is missing never blocks a plan. The plan records `status: unavailable` or `status: error` and continues. Detection itself never runs `ask`, `fresh` or `refresh`.
 
+## What an index covers
+
+An index answers only for the files it indexed. For codegraph, `codegraph status` lists them under Files by Language. On the footnote repo that list holds python, rust, yaml, javascript, typescript and ruby, and no shell or markdown. Asked for the shell function `link_dir`, codegraph answers with a python `bin_dir` from a test file. So a planner opens every hit, and a hit on another surface is not an answer. A claim that the index does not cover takes its verdict from a plain search.
+
 ## Where the files live
 
 Detection reads three directories in order, and a later file with the same `name` replaces an earlier one:
