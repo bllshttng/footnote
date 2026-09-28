@@ -265,8 +265,12 @@ pub async fn questions_now() -> Result<QuestionsFold, String> {
         }
     };
     if !output.status.success() {
-        return Err(questions_reason(&output.stdout)
-            .unwrap_or_else(|| format!("needs --items exited {}", output.status)));
+        return Err(questions_reason(&output.stdout).unwrap_or_else(|| {
+            match output.status.code() {
+                Some(code) => format!("needs --items exited {code}"),
+                None => "needs --items was killed by a signal".to_string(),
+            }
+        }));
     }
     parse_questions(&output.stdout).ok_or_else(|| "unreadable output".to_string())
 }
