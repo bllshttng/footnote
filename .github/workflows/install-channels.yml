@@ -131,8 +131,8 @@ jobs:
           rc=$?
           set -e
           expect='${{ matrix.row.expect }}'
-          if [ "$rc" -eq 42 ] || [ "$rc" -eq 3 ]; then
-            echo "row ${{ matrix.row.id }}: driver refused the run (rc=$rc); the job fails regardless of the row's expectation"
+          if [ "$rc" -eq 42 ] || [ "$rc" -eq 3 ] || [ "$rc" -eq 43 ]; then
+            echo "row ${{ matrix.row.id }}: driver refused the run (rc=$rc: dirty machine, unknown row, or a hang); the job fails regardless of the row's expectation"
             exit 1
           fi
           if [ "$expect" = pass ]; then

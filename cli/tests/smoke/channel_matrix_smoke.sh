@@ -452,30 +452,51 @@ row_readme_commands() {
   fi
 }
 
-case "$ROW_KEY" in
-  claude-marketplace)    row_claude_marketplace ;;
-  claude-plugin-session) row_claude_plugin_session ;;
-  codex-plugin-session)  row_codex_plugin_session ;;
-  fno-sh-served)         row_fno_sh_served ;;
-  fno-sh-head)           row_fno_sh_head ;;
-  install-sh-alias)      row_install_sh_alias ;;
-  pypi-uv)               row_pypi_uv ;;
-  pypi-uv-pinned)        row_pypi_uv_pinned ;;
-  brew)                  row_brew ;;
-  cargo)                 row_cargo ;;
-  skills-sh)             row_skills_sh ;;
-  clone-setup)           row_clone_setup ;;
-  readme-commands)       row_readme_commands ;;
-  *)
-    printf 'FAIL[row] unknown row id: %s\n' "$ROW"
-    exit 3
-    ;;
-esac
-unset ROW_KEY
+run_row() {
+  case "$ROW_KEY" in
+    claude-marketplace)    row_claude_marketplace ;;
+    claude-plugin-session) row_claude_plugin_session ;;
+    codex-plugin-session)  row_codex_plugin_session ;;
+    fno-sh-served)         row_fno_sh_served ;;
+    fno-sh-head)           row_fno_sh_head ;;
+    install-sh-alias)      row_install_sh_alias ;;
+    pypi-uv)               row_pypi_uv ;;
+    pypi-uv-pinned)        row_pypi_uv_pinned ;;
+    brew)                  row_brew ;;
+    cargo)                 row_cargo ;;
+    skills-sh)             row_skills_sh ;;
+    clone-setup)           row_clone_setup ;;
+    readme-commands)       row_readme_commands ;;
+    *)
+      printf 'FAIL[row] unknown row id: %s\n' "$ROW"
+      exit 3
+      ;;
+  esac
+  [ "$fail" -ne 0 ] && return 1
+  return 0
+}
+
+# The row runs under a watchdog: an install that blocks forever must score as
+# a hang (exit 43, which the workflow refuses to read as an expected fail),
+# never as an honest channel failure.
+run_row &
+row_pid=$!
+watched=0
+while kill -0 "$row_pid" 2>/dev/null; do
+  if [ "$watched" -ge 1500 ]; then
+    kill "$row_pid" 2>/dev/null
+    printf 'FAIL[row] row exceeded the 1500s bound; scoring as a hang, not an honest fail\n'
+    exit 43
+  fi
+  sleep 5
+  watched=$((watched + 5))
+done
+wait "$row_pid"; rc=$?
 
 echo "---"
-if [ "$fail" -ne 0 ]; then
+if [ "$rc" -ne 0 ]; then
   echo "channel matrix row $ROW: FAILED"
-  exit 1
+  exit "$rc"
 fi
 echo "channel matrix row $ROW: passed"
+exit 0
