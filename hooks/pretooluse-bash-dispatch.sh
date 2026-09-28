@@ -7,7 +7,8 @@ errfile=$(mktemp -t pbd-stderr.XXXXXX) || errfile=/dev/null
 if [[ "$errfile" != /dev/null ]]; then
     trap 'rm -f "$errfile"' EXIT
 fi
-for bin in "$(command -v fno-agents 2>/dev/null)" "${FNO_AGENTS_BIN:-}" \
+for bin in "${FNO_AGENTS_BIN:-}" "${FNO_AGENTS_FRONT:-}" \
+    "$(command -v fno-agents 2>/dev/null)" \
     "$PWD"/crates/fno-agents/target/{release,debug}/fno-agents; do
     [[ -n "$bin" && -x "$bin" ]] || continue
     if out="$(printf '%s' "$stdin" | FNO_REPO_ROOT="$root" "$bin" hook pretooluse-bash 2>"$errfile")"; then
