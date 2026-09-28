@@ -50,7 +50,7 @@ class TestMergeFreezeVerdict:
     def test_an_unreadable_receipt_refuses_fail_closed(self, monkeypatch):
         _door(monkeypatch, receipt=[1, 2])
         why = merge_freeze_refusal(42)
-        assert why is not None and "unreadable" in why
+        assert why is not None and "unavailable" in why
 
 
 # --- the arm's queue ----------------------------------------------------------

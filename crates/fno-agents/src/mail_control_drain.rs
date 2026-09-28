@@ -1,5 +1,5 @@
-//! Control-mail landing at the tool boundary: the `mail-control-drain`
-//! client verb.
+//! Control-mail landing at the tool boundary: the `mail-inject
+//! --control-drain` mode.
 //!
 //! The recipient-side half of the control lane. A control body that demoted
 //! durable waits on `notify-self`, which fires only at a prompt boundary; a
@@ -238,7 +238,7 @@ pub fn run(args: &[String]) -> i32 {
     let parsed = match parse_args(args) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("mail-control-drain: {e}");
+            eprintln!("mail-inject --control-drain: {e}");
             return 2;
         }
     };

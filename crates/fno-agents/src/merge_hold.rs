@@ -53,6 +53,29 @@ pub fn run(op: &str, payload: &Value) -> String {
     match op.strip_prefix("hold-").unwrap_or(op) {
         "set" => set_hold(&entry, &node_id, payload, &graph),
         "release" => release_hold(&entry, &node_id, payload, &entries, &graph),
+        // The one hold verdict the merge and dispatch gates ask for: the
+        // reader walks the bounded ancestry and answers with the first
+        // hold, fields flattened for the receipt.
+        "verdict" => {
+            let by_id: BTreeMap<String, Value> = entries
+                .iter()
+                .filter_map(|e| graph_store::entry_id(e).map(|id| (id.to_string(), e.clone())))
+                .collect();
+            let Some(v) = crate::backlog_ready::hold_verdict_receipt(&entry, &by_id) else {
+                return receipt("absent", 0, "").to_string();
+            };
+            let mut out = receipt(if v.held { "held" } else { "invalid" }, 0, "");
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("owner".into(), Value::String(v.owner));
+                obj.insert("guard_reason".into(), Value::String(v.guard_reason));
+                obj.insert("reason".into(), Value::String(v.reason));
+                obj.insert("release_when".into(), Value::String(v.release_when));
+                obj.insert("review_on".into(), Value::String(v.review_on));
+                obj.insert("set_by".into(), Value::String(v.set_by));
+                obj.insert("detail".into(), Value::String(v.detail));
+            }
+            out.to_string()
+        }
         other => receipt("refused", 2, format!("unknown hold op: {other}")).to_string(),
     }
 }

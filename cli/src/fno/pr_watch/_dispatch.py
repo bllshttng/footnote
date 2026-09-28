@@ -1274,30 +1274,22 @@ _MERGE_FLOOR_S = 150.0
 def merge_freeze_refusal(pr: int) -> Optional[str]:
     """The scoped merge freeze's answer for one PR, or None when it may merge.
 
-    The Rust gate owns the record; one authorized-merge freeze-check receipt
-    answers here, keeping this a thin call site that spares the arm's queue a
-    round of doomed merges and names the freeze in the arm's own receipt.
-    Fail posture mirrors the fleet breaker: an unreadable answer refuses,
-    absence is a real answer.
+    One freeze-check receipt answers; the Rust gate owns the record. An
+    unreadable answer refuses fail closed; a missing record is a real
+    answer.
     """
     from fno.rust_binary import call_binary_json
 
     error, receipt = call_binary_json(
         "authorized-merge", [json.dumps({"op": "freeze-check", "pr": pr})], timeout=15
     )
-    if error is not None:
-        return f"merge-freeze check unavailable ({error}); the arm fails closed"
-    if not isinstance(receipt, dict):
-        return f"merge-freeze check answered unreadable JSON ({receipt!r}); the arm fails closed"
-    outcome = receipt.get("outcome")
-    if outcome == "clear":
+    if error is not None or not isinstance(receipt, dict):
+        return f"merge-freeze check unavailable ({error or receipt!r}); the arm fails closed"
+    if receipt.get("outcome") == "clear":
         return None
-    if outcome == "frozen":
-        return (
-            f"a merge freeze holds ({receipt.get('detail') or 'unnamed'}); "
-            f"PR {pr} is not on its allow-list"
-        )
-    return f"merge-freeze record unreadable ({receipt.get('detail') or outcome}); the arm fails closed"
+    if receipt.get("outcome") == "frozen":
+        return f"a merge freeze holds ({receipt.get('detail') or 'unnamed'}); PR {pr} is not on its allow-list"
+    return f"merge-freeze record unreadable ({receipt.get('detail')}); the arm fails closed"
 
 
 def run_execute_queue(

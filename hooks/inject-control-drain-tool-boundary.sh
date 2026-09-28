@@ -18,7 +18,7 @@ export PATH
 command -v jq >/dev/null 2>&1 || exit 0
 
 SID="$(jq -r '.session_id // empty' 2>/dev/null)"
-[[ "$SID" =~ /^[0-9a-f-]{16,}$/ ]] || exit 0
+[[ "$SID" =~ ^[0-9a-f-]{16,}$ ]] || exit 0
 
 BUS="${FNO_STATE_DIR:-$HOME/.fno}/bus"
 FIRST8="${SID:0:8}"
@@ -33,6 +33,6 @@ command -v fno-agents >/dev/null 2>&1 || exit 0
 # byte-for-byte (same discipline as inject-mail-notify.sh). A miss never
 # blocks the tool call it rode in on.
 exec 3>&1
-drain_err="$(fno-agents mail-control-drain --bus-dir "$BUS" --session "$SID" 2>&1 1>&3 3>&-)"
+drain_err="$(fno-agents mail-inject --control-drain --bus-dir "$BUS" --session "$SID" 2>&1 1>&3 3>&-)"
 exec 3>&-
 exit 0
