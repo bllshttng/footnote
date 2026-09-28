@@ -8597,9 +8597,9 @@ async fn attach_and_run(
         if view.catalog_want && !view.catalog_inflight {
             view.catalog_want = false;
             view.catalog_inflight = true;
-            let tx = catalog_tx.clone();
+            let (tx, projects) = (catalog_tx.clone(), agent_launcher::probe_projects(&view));
             tokio::spawn(async move {
-                let outcome = agent_launcher::load_catalog().await;
+                let outcome = agent_launcher::load_catalog(projects).await;
                 let _ = tx.send(outcome);
             });
         }
