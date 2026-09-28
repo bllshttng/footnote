@@ -139,13 +139,14 @@ ACQUIRE_RC_FILE="${ACQUIRE_RC_FILE:-}"
 ACQUIRE_RC_COUNTER_FILE="${ACQUIRE_RC_COUNTER_FILE:-}"
 echo "fno $*" >> "$CALL_LOG"
 
-subcmd1="${1:-}"
-subcmd2="${2:-}"
-if [ "$subcmd1 $subcmd2 ${3:-}" = "do target resolve-owned-identity" ]; then
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
   printf 'HARNESS=claude\nSESSION_ID=%s\nDISPOSITION=proven\nCOLLISION=\n' \
-    "${TARGET_TRANSCRIPT_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+    "${CLAUDE_CODE_SESSION_ID:-}"
   exit 0
 fi
+
+subcmd1="${1:-}"
+subcmd2="${2:-}"
 if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
   shift
   subcmd1="${1:-}"
@@ -178,16 +179,13 @@ case "$subcmd1 $subcmd2" in
     if [ "$node_id" = "--strict" ]; then
       node_id="${4:-unknown}"
     fi
-    if [ "${5:-}" = "--field" ]; then
-      case "${6:-}" in
-        _archived|pr_number) printf 'null\n' ;;
-        id) printf '%s\n' "$node_id" ;;
-        status) printf 'ready\n' ;;
-        *) exit 1 ;;
-      esac
-    else
-      printf '{"status":"ready","id":"%s"}\n' "$node_id"
-    fi
+    case " $* " in
+      *" --field _archived"*) printf 'null\n'; exit 0 ;;
+      *" --field id"*)        printf '%s\n' "$node_id"; exit 0 ;;
+      *" --field status"*)    printf 'ready\n'; exit 0 ;;
+      *" --field pr_number"*) printf 'null\n'; exit 0 ;;
+    esac
+    printf '{"status":"ready","id":"%s"}\n' "$node_id"
     exit 0
     ;;
   *)

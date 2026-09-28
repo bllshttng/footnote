@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: Stop - context nudge
 # hooks/context-nudge.sh - Stop hook: one context probe for EVERY session, one
 # crown-only orphan check. Used to be king-only (king-context-nudge.sh); the
 # context nudge generalizes to every session because the probe already ran for

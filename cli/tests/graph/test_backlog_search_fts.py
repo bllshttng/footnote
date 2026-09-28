@@ -12,7 +12,6 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
-
 from fno.graph import fts
 
 FULL = {
@@ -48,12 +47,6 @@ def tmp_graph(tmp_path, monkeypatch):
         _row("x-aaaa", title="resume handle provenance join", description="the ledger stores session uuids"),
         _row("x-bbbb", title="unrelated work item"),
     )
-    # two seams: the verbs mutate via _graph_path; `find`'s display reader
-    # resolves through paths.graph_json (both documented test redirects)
-    from fno.graph import cli as graph_cli
-
-    monkeypatch.setattr(graph_cli, "_graph_path", lambda: graph)
-    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     return graph
 
 
