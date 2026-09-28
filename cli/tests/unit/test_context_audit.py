@@ -695,28 +695,6 @@ def test_king_postcompact_reinject_resolves_compact_summary_node(tmp_path: Path)
         encoding="utf-8",
     )
     fno.chmod(0o755)
-    jq = bin_dir / "jq"
-    jq.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, sys\n"
-        "args = sys.argv[1:]\n"
-        "query = args[-1]\n"
-        "value = json.load(sys.stdin)\n"
-        "if query.startswith('.agents[]'):\n"
-        "    sid = args[args.index('--arg') + 2]\n"
-        "    for row in value.get('agents', []):\n"
-        "        if row.get('session_id') == sid or row.get('harness_session_id') == sid:\n"
-        "            print(json.dumps(row))\n"
-        "            break\n"
-        "elif query == '.crown_level // empty':\n"
-        "    print(value.get('crown_level') or '')\n"
-        "elif query == '.crown_scope // empty':\n"
-        "    print(value.get('crown_scope') or '')\n"
-        "else:\n"
-        "    sys.exit(1)\n",
-        encoding="utf-8",
-    )
-    jq.chmod(0o755)
     env = {
         **os.environ,
         "HOME": str(home),
