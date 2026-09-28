@@ -68,8 +68,8 @@ fn basename(token: &str) -> &str {
     token.rsplit('/').next().unwrap_or(token)
 }
 
-/// Classify one command line by TOKEN match, never substring (the
-/// fleet-poll-rate rule): a wrapper whose own line carries a pattern never
+/// Classify one command line by TOKEN match, never substring (the retired
+/// sampler's counting rule): a wrapper whose own line carries a pattern never
 /// becomes that class, because only the program basename is matched.
 /// `python3 .../fno-py agents truth` classifies by the script basename.
 pub fn classify(argv: &str) -> String {
