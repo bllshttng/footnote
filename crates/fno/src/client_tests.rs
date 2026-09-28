@@ -1,3 +1,4 @@
+use super::compositor::apply_style;
 use super::*;
 use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
 #[path = "client_tests/chrome_hit_helpers.rs"]

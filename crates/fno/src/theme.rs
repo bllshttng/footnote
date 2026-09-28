@@ -519,10 +519,8 @@ pub fn terminal_theme_file(t: &Theme, terminal: &str) -> Option<String> {
             let comp = |f: u8| format!("{:.6}", f as f64 / 255.0);
             let mut out = String::from("{\n");
             for (s, (r, g, b)) in slots.iter().enumerate() {
-                let band = if s < 8 { "Ansi" } else { "Ansi Bright" };
                 out.push_str(&format!(
-                    "  \"{band} {c} Color\" : {{ \"Red Component\" : {r}, \"Green Component\" : {g}, \"Blue Component\" : {b} }}",
-                    c = s % 8,
+                    "  \"Ansi {s} Color\" : {{ \"Red Component\" : {r}, \"Green Component\" : {g}, \"Blue Component\" : {b} }}",
                     r = comp(*r),
                     g = comp(*g),
                     b = comp(*b)
