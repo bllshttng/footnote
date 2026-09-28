@@ -39,7 +39,6 @@ One file per install. These belong at the root.
 | `decisions.jsonl.compact` | `decide/__init__.py::_compact_index` | transient; replaced onto `decisions.jsonl` in the same call |
 | `evals-history.jsonl` | `paths.evals_history()` | append-only |
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
-| `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
 | `.canary` | `scripts/ci/check-state-canary.sh` `plant` | permanent, and written ONLY into a root with no live graph, which in practice means a CI runner. A live operator root is watched read-only and never receives it. One byte of content; its job is to give the walk a file it can prove it saw. |
 | `notify-signals.json` | `crates/fno-agents/src/operator_notice.rs` (the notify_watch arm) | permanent; one entry per subscribed signal, the last token + ts; safe to delete (the next state change re-sends) |
@@ -66,10 +65,7 @@ One file per install. These belong at the root.
 | `mux/panes/<session>-<pane>.sock` | `crates/fno/src/pty.rs::keeper_dir()`, written by each `fno-agents-worker --pane` keeper | unlinked by the keeper when its child exits; a server-start sweep unlinks leftovers whose keeper is gone, and `fno mux pane keeper list` names them |
 | `mux/threads/<agent>.sock` | `cli/src/fno/agents/dispatch.py::_lane_b_keeper_socket()`, written by each `fno-agents-worker --keeper` it launches (the pane-less lane-B thread keeper; a session-keyed subfolder, never a top-level write) | unlinked by the keeper when its child exits; no server-start sweep yet - the restart journey that owns re-adoption is a later group of the same epic, so until then a crashed keeper's leftover is named by the registry row's `messaging_socket_path` |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
-| `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
-| `source-pin.json` | `crates/fno-agents/src/source_pin.rs::record_from_str` via the hidden `fno-agents source-pin record` verb, called from `update._cache_source_path` | permanent; the versioned companion to `source-path` (schema, timestamp, selection origin, worktree kind, branch, both heads, eligibility). Provenance only: eligibility is re-proven live at every resolve, and a companion that disagrees with `source-path` reads as unknown, never evidence |
 | `my-priorities.md`, `.lock` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
-| `plugin-root` | `hooks/session-start.sh` | permanent |
 | `pr-watcher-state.json`, `pr-watcher-state.lock`, `.lock` | `pr_watch/_state.py` | permanent |
 | `pr-watcher-state-delivery.json`, `.lock` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
 | `fleet-sweep-state.json`, `.lock` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
@@ -89,15 +85,12 @@ The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. T
 | `graph-archive.db`, `graph-archive.db-wal`, `graph-archive.db-shm` | the archive store (the same backlog schema as `graph.db`), populated by the operator's archive import; `read_archive` in `crates/fno-agents/src/graph_store.rs` reads the archive projection | durable; imported nodes live here under fresh ids |
 | `graph-archive.json.lock` | the store's bounded lock beside the archive anchor, the `graph.json.lock` shape | lives only for one mutation |
 | `graph.json.store.sock.lock`, `graph-archive.json.store.sock.lock` | the store keeper's bounded lock beside each `*.store.sock` IPC socket | server-managed, unlinked with the socket |
-| `graph.json.fts5` | none in this build: a pre-store FTS index sidecar left behind by the graph-store cutover | dead residue; safe to delete once an operator confirms the archive store satisfies search |
-| `graph.json.history/` | none in this build: the pre-rename note-history location; the live writer is `graph.db.history/notes.jsonl` (row above) | legacy bytes only |
 | `config.toml.bak*` (5 files, 2026-09-08 through 2026-09-22) | the operator, by hand, during config and model-routing edits | permanent: no `.db` holds their data, so deletion waits on the operator's yes |
 | `ruleset-21074865-before-smoke-hold.json` | the operator, by hand, before a smoke-hold change | permanent, same rule as the `config.toml.bak*` row |
 | `.plan-sync-watermark-v2` | `cli/src/fno/plan/cli.py` | single file, overwritten |
 | `pr-watch-bounce.json` | `cli/src/fno/pr_watch/_install.py` | transient bounce record, overwritten per deferred bounce |
 | `merge-gate-overrides.log` | `hooks/git-protection.py` (`OVERRIDE_LOG`) | append-only audit trail of merge-gate overrides |
 | `corrections.log` | the corrections git hook family (`hooks/corrections-git-postcommit.sh`, `scripts/corrections-*.sh`) | append-only autocorrect evidence |
-| `groom-2026-09-26.md` | a groom run's report, written beside the state it groomed | one per run; safe to delete once read |
 | `ntfy/` | an operator-run ntfy server (its `cache.db`) plus `ntfy.out.log` / `ntfy.err.log` | server-managed; not written by this repo |
 | `intel/` | the intel fold behind `fno intel` | regenerated per run; safe to delete |
 | `fleet.html` | `crates/fno-agents/src/fleet_page.rs` writes `<state_dir>/fleet.html` | regenerated per render |
@@ -113,6 +106,21 @@ The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. T
 | `repro-isolated/` | `cli/src/fno/observer/isolation.py`: the observer's isolated repro root | repro residue; safe to delete once a run ends |
 | `.codegraph/` | codegraph (foreign tool): its index beside the state root | tool-managed; never swept |
 | `.gitignore` | the operator, by hand | permanent |
+
+## Named root exceptions
+
+The migration (node x-4fb6, law d-8ddaba56) moves every movable file into a named subfolder (`docs/state-root-layout.tsv` is the table; `fno-agents state migrate` is the mover). These stay at the top level, each because a move is blocked on a port, an operator ruling, or a platform:
+
+| Entries | Why they cannot move yet |
+|---|---|
+| `config.toml`, `config.toml.lock`, `config.toml.bak*`, `settings.yaml`, `settings.yaml.lock` | The config contract every harness, doc and OSS install names at `~/.fno/config.toml`. The `.bak*` files await the operator's ruling (x-0165 scope). |
+| `my-priorities.md`, `my-priorities.md.lock`, `ruleset-21074865-before-smoke-hold.json` | Operator-owned, edited by hand at that path. |
+| `.env`, `.gitignore` | Operator-owned, edited by hand at that path. |
+| `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight; Spotlight reads the opt-out marker only at the folder root. |
+| `.path-migration-done` | The Python startup migration's sentinel (`cli/src/fno/cli.py`). Parking it re-fires that migration, which rewrites root files. It moves when that migration is deleted or ported. |
+| `ledger.json`, `ledger.md`, `events.jsonl`, `events.jsonl.1`, `events.jsonl.ephemeral`, `events.jsonl.shell-writers.d/`, `decisions.jsonl`, `decisions.jsonl.compact`, `decisions.jsonl.corrupt`, `questions.jsonl` | Python locators. `paths.py` derives the journals from the ledger's parent, and about 18 Python sites hardcode `state_dir() / "events.jsonl"`. Over the 30-line budget; they move when those callers port. Their `.db` stores DO move (Rust derives them). |
+| `pr-watcher-state.json`, `pr-watcher-state.json.lock`, `pr-watcher-state.lock`, `pr-watcher-state.lock.lock`, `pr-watcher-state-delivery.json`, `pr-watcher-state-delivery.json.lock`, `pr-watch-bounce.json`, `fleet-sweep-state.json`, `fleet-sweep-state.json.lock`, `provider-runtime-state.json`, `provider-runtime-state.json.update.lock`, `failover-state.json`, `failover-state.json.lock`, `health-throttle.json`, `recovery-nudges.json`, `watchdog-sweep.json` | Each writer is Python in `cli/src/fno`. About 13 more Python lines to move, over budget. They move into `state/` when their writers port. |
+| `.think-spawn-daily.json`, `.a2a-confirmed`, `.active-backlog-nudge` | Python dot-stamps in `cli/src/fno`, same reason: the writers are Python and their move waits on the port. |
 
 ## Owned subfolders and remaining root state
 
@@ -133,14 +141,16 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
 | `graph.db.history/notes.jsonl` | `crates/fno-agents/src/backlog/note_history.rs::history_path` | PERMANENT node-prose history keyed to the graph store (the bounded-state change): every replaced or cleared `current_state` pre-image and every evacuated note; append-only, hash-verified on write, deduped by (node, reason, prior revision, hash). Never rotates, never prunes; the only copy of evacuated prose. Safe to copy with the graph, fatal to delete. |
 | `graph.db.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
+| `heal/pr-heal.pid` | `crates/fno-agents/src/heal_pid.rs::pid_file` (the pr-heal drive loop, beside the global events journal) | server-managed pid file; unlinked by the loop on a clean exit and by the pid scan when the pid is dead |
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
+| `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`); every reader resolves through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |
+| `backups/state-root-migration/<stamp>/` | `crates/fno-agents/src/state_layout.rs::migrate` | parked legacy copies from the state-root migration, one stamp folder per apply run; the layout table's park rows and every conflict-parked legacy file land here. Never swept; deletion waits on the operator's yes |
 | `inbox/` | `paths.inbox_agents_root()` (`cli/src/fno/paths.py`), the mail bus's fallback root: one mailbox per agent handle under `agents/` | mail drains per handle; a drained envelope is acked away |
 | `.interrupted-writes/` | `crates/fno-agents/src/daemon.rs` (quarantine) | writes caught mid-flight; released after the write settles |
 | `lesson-candidates.jsonl` | `cli/src/fno/think_inspect.py`, `scripts/memory/append-lesson-candidate.sh` | append-only staging for the AGENTS.md pitfalls corpus; consumed by the monthly review |
 | `logs/` | `cli/src/fno/agents/mux_spawn.py` | unrotated spawn logs |
 | `logs/cargo-fallback-writers.log` | `scripts/lib/cargo-rustc-wrapper.sh` | one line per cargo that builds without the build-dir env; self-trims to its last 500 lines at 1,000 |
 | `mail-escalations/` | `cli/src/fno/mail/cli.py` (debounce markers via `O_CREAT|O_EXCL`) | one empty marker per sender/recipient pair inside the debounce window; safe to delete, the next escalation re-creates it |
-| `MOVED-TO` | `cli/src/fno/paths.py`, `crates/fno-agents/src/paths.rs`, `state_path.rs` | migration pointer; permanent until an operator confirms the old path is gone |
 | `notes/` | `cli/src/fno/research/core.py` (`notes/research`) | permanent research notes |
 | `nudge-cursors/` | `cli/src/fno/agents/nudge.py` | one cursor per nudge target, overwritten |
 | `announce-cursors/` | `fno-agents announce` (`crates/fno-agents/src/announce.rs`) | one seen-id set per session; pruned to ids still on retained bus segments |
@@ -205,15 +215,9 @@ One file per session, per day, or per throttle window.
 | `latches/.worktree-create-<session-id>` | `hooks/worktree-setup.sh` (and its /speculate copy) | create-attempt counter, deleted by the same hook on a successful create, stale copies pruned at `-mtime +2` |
 | `.a2a-confirmed` | `agents/dispatch.py` | single file, overwritten |
 | `.active-backlog-nudge` | `active_backlog.py`, `crates/fno-agents/src/active_backlog.rs` | single file |
-| `.worktree-hook-root` | `hooks/session-start.sh` | single file |
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
-| `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
-| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/cancel_sentinel.rs`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | one-shot: carries `author:`/`reason:` lines, deleted by the reader once it has terminated a run; stale copies wiped by init |
 | `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
-| `.reconcile-stamp`, `.reconcile-result.json`, `.shown`, `.reconcile-result.json.tmp`, `.reconcile-result.json.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` (the hook's consume-after-show move creates the `.shown` rename; the throttle's `mv -f` creates the `.tmp` mid-write) | throttle window |
-| `.plan-sync-watermark` | `plan/cli.py` | single file |
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |
-| `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
 | `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()`, and `crates/fno-agents/src/mail_hold.rs` via its `state_root()` (byte-identical dialect, inventory in `docs/architecture/dual-implementation-inventory.md`) | one file per held session; a clock the conversation rules wrote adds an optional `"source": "conversation"` key; deleted by the release timer (the conversation grace lapses through the same timer), by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
 | `mail-hold/<handle>.parked/` | `crates/fno-agents/src/mail_hold.rs` (`--park` writes `<ms>-<pid>.txt` payloads, `--run-parked` drains them) | parked raw payloads for one held session, waiting out its hold; each file is deleted by the runner on a sent payload and left in place on a failed send for the next park to pick up; lifetime ends with the hold plus one send |
