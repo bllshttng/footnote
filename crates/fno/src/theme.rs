@@ -27,7 +27,8 @@ pub struct Theme {
     /// (via `pane_paint`'s outline arm) and every modal/popover border. A
     /// named theme defaults it to its own `brand` (the ruling: borders wear
     /// the brand), and `mux.theme.border` overrides it everywhere at once.
-    /// `terminal` keeps Default (byte-identity).
+    /// `terminal` keeps its Indexed(3) brand; `cell_style` never reads the
+    /// field under `inherit`, so the chrome render stays byte-identical.
     pub border: Color,
     pub title: Color,
     /// The brand accent: selection, the active tab, the focused frame, the
@@ -289,7 +290,10 @@ fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",
         inherit: true,
-        border: Color::Default,
+        // Indexed(3), the brand: the pane-frame outline reads this field
+        // directly (cell_style never does under `inherit` - byte-identity),
+        // so the focused frame keeps its amber under terminal.
+        border: Color::Indexed(3),
         title: Color::Default,
         // Index 3 follows the emulator's palette (amber/yellow in every scheme),
         // preserving the pre-theme needs-attention glyph exactly. Brand and
@@ -704,8 +708,9 @@ mod tests {
                 "{name}: Role::Border paints {brand}"
             );
         }
-        // terminal stays untouched: Default border, byte-identity.
-        assert_eq!(theme_terminal().border, Color::Default);
+        // terminal keeps its own brand on the border (the pane-frame outline
+        // reads the field directly); cell_style stays byte-identical.
+        assert_eq!(theme_terminal().border, Color::Indexed(3));
     }
 
     #[test]

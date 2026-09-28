@@ -5657,28 +5657,11 @@ impl View {
         }
     }
 
-    /// A centered, inverse-video name-entry modal for the create / rename /
-    /// recruit inputs. Those used to paint the bottom-left chrome row, where they
-    /// sat outside the operator's field of view and read as "nothing happened";
-    /// centering on a mid-screen inverse-video line puts the prompt where the
-    /// operator is looking and names its target. The bottom chrome row stays
-    /// blanked so a stale bottom row never shows under the modal.
-    ///
-    /// Reported as "I can barely see the prompt", and the fix is the BLOCK: a
-    /// one-row strip hugging its own glyphs is hard to find in busy pane
-    /// content, which is a different complaint from hard to read. It already
-    /// measured 9.9:1 on the reporter's scheme.
-    ///
-    /// It must not stack `BOLD` on the inversion: bold brightens the foreground,
-    /// which reverse has made the background. The shared framer handles that.
-    ///
-    /// It wears the SHARED chrome now, the same `Chrome` + `frame` +
-    /// `blit` path the settings, connections and catch-up modals take, with the
-    /// target as the title and the blank-clears rule as the footer. It used to
-    /// hand-paint a bare three-row inverse block with no border, no title bar
-    /// and no esc chip, which under a named theme read as a different
-    /// application dropped into the middle of the screen. That was the last
-    /// modal still inventing its own look.
+    /// The centered name-entry modal (create / rename / recruit), wearing the
+    /// shared `Chrome` + `frame` + `blit` path every other modal takes: the
+    /// target as the title, the blank-clears rule as the footer, the typed
+    /// name plus cursor as the body. The bottom chrome row stays blanked so a
+    /// stale row never shows under the modal.
     fn name_modal_layout(&self, label: &str, name: &str, hint: Option<&str>) -> OverlayLayout {
         let (origin, dims) = self.overlay_viewport();
         // The typed name plus its cursor IS the body; the target and the
@@ -5696,8 +5679,15 @@ impl View {
         // narrow terminal the operator types a name they cannot see - the one
         // thing a name prompt has to get right. The shared framer truncates from
         // the head, so the tail-keeping happens HERE, before it is handed over.
-        // Body width: the chrome minimum or the wider input floor, minus pad.
-        let body_w = chrome.min_inner_w().max(40).saturating_sub(2).max(1);
+        // Body width: the chrome minimum or the wider input floor, capped to
+        // the viewport so a narrow terminal still fits the frame, minus pad.
+        let viewport_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS);
+        let body_w = chrome
+            .min_inner_w()
+            .max(40)
+            .min(viewport_w)
+            .saturating_sub(2)
+            .max(1);
         let text = format!("{name}_");
         let text = if text.chars().count() > body_w {
             let keep = body_w.saturating_sub(1);

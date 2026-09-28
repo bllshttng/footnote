@@ -662,11 +662,10 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     }
 }
 
-fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
-    match chrome.level {
-        Level::Full => edge_row('╰', '╯', '─', Vec::new(), inner_w),
-        Level::Bare => edge_row('╰', '╯', '─', Vec::new(), inner_w),
-    }
+fn bottom_border(_chrome: &Chrome, inner_w: usize) -> FramedLine {
+    // The chip lives on the top border at every level, so the bottom is
+    // plain for both.
+    edge_row('╰', '╯', '─', Vec::new(), inner_w)
 }
 
 /// A body row: `│` + body text (padded/truncated to `body_w`, per-char roles
