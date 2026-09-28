@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - register session start
 # SessionStart hook: report this session to the fno daemon so the agent
 # registry holds its full session id, transcript path and start source - for a
 # SPAWNED worker, or an operator session that opted in.

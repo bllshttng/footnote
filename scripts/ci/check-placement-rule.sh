@@ -44,6 +44,9 @@
 #      agent session and so never loads plugin hooks, which leaves the
 #      settings file the only place a WorktreeRemove hook can reach it. That
 #      is Claude Code config, not footnote state - nothing accumulates there.
+#      plans_path.rs reads Claude's own plansDirectory setting to place plan
+#      docs in the project-selected directory; it does not write footnote state
+#      under .claude.
 #      This is a large, actively-developed surface (multi-provider agent
 #      discovery) - allowlisted by file below rather than re-derived here.
 #      context_audit.py reads project-owned .claude/rules/*.md to census the
@@ -51,6 +54,8 @@
 #      guard-corpus-sweep.py joins ~/.claude/projects for the same reason: it
 #      READS Claude Code's own transcripts to replay every real Bash command
 #      hooks/target-stop-hook.sh compares the transcript path Claude Code
+#      backlog/birth.rs searches the same read-only transcript store by
+#      session id across project slugs when recreating a plan stub.
 #      hands it against the ~/.claude/projects prefix to prove the session's
 #      harness (an env marker alone is inheritable and can mislabel a claude
 #      session as codex). A string prefix match on the harness's own file;
@@ -319,6 +324,7 @@ cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
 crates/fno-agents/src/claude_config_tmp.rs
+crates/fno-agents/src/backlog/birth.rs
 crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/plans_path.rs
@@ -332,6 +338,7 @@ crates/fno-agents/src/hook/stop.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/plans_dirs.rs
+crates/fno-agents/src/plans_path.rs
 crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs

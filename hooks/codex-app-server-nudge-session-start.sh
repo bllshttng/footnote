@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - codex app server nudge session start
 # Codex SessionStart hook: nudge toward the app-server daemon when its control
 # socket is absent. Live mail to a codex session is delivered over that socket
 # (crates/fno-agents/src/codex_inject.rs); without the daemon it demotes to

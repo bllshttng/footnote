@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - inject mail drain session start
 # SessionStart hook: drain THIS session's own cross-harness mail (US5).
 #
 # The receive side of the a2a relay. `fno agents mail drain-self` computes this

@@ -26,6 +26,22 @@ from tests._init_space import install_state_path_stub
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _INIT_SCRIPT = _REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 
+
+def _ensure_feature_repo(root: Path) -> None:
+    if (root / ".git").exists():
+        return
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "fno@test"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "fno"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-q", "--allow-empty", "-m", "init"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "-q", "-b", "feature/target-denominator"],
+        check=True,
+    )
+
 # Bare-env `fno` stub: the asserted manifest value is bash-computed, so the CLI
 # round-trips the hook makes are startup-cost no-ops here. Exit codes mirror a
 # bare env (no graph/config): config/backlog -> 1, paths/worktree -> 0, claim -> 0.
@@ -57,8 +73,12 @@ esac
 
 
 def _run_init_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+    _ensure_feature_repo(tmp_path)
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("# Test plan\n")
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(exist_ok=True)
+    (home_dir / ".fno").mkdir(exist_ok=True)
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -67,7 +87,7 @@ def _run_init_script(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.Co
     fno.chmod(0o755)
     stub_env = install_state_path_stub(bin_dir, tmp_path / "space")
     env = {
-        "HOME": str(tmp_path),
+        "HOME": str(home_dir),
         "PATH": f"{bin_dir}{os.pathsep}" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "TARGET_START": "1",
         "TARGET_INPUT": str(plan_file),

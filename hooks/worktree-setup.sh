@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: WorktreeCreate - worktree setup
 # WorktreeCreate hook: install deps, copy env, symlink .fno/, verify baseline
 #
 # CC fires this INSTEAD of its default git worktree behavior.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - eval sweep session start
 # SessionStart hook: kick off a daily-throttled eval-loop ignition in the
 # background (observer sweep -> skill-diff tick), then exit instantly.
 #

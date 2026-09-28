@@ -92,21 +92,19 @@ make_repo() {
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature
-# branch (so the location gate never fires). HOME is redirected to the repo so
-# the guard's graph grep, the claim root, and any stamp read/write hit the
-# scratch tree, never the real ~/.fno; the self-contained stub shadows fno for
-# every call, so no real fno is invoked (no reprovision) either.
+# branch (so the location gate never fires). HOME is separate from the repo so
+# the home-as-repo guard does not skip init; both roots remain under the scratch
+# tree, and the self-contained stub shadows fno for every call.
 run_init() {
     local cwd="$1"; shift
-    # The hook's HOME-as-repo guard skips every write when the checkout .fno
-    # IS the state root, so the state home lives beside it, not in it.
-    mkdir -p "$cwd/fno-home"
+    local home="$cwd/home"
+    mkdir -p "$home/.fno"
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
         env TARGET_START=1 TARGET_SESSION_ID=review-gate-test-session \
-            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" FNO_HOME="$cwd/fno-home" \
+            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$home" \
             FNO_TEST_SPACE="$cwd/space" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )

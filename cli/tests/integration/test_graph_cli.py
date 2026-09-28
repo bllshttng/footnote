@@ -130,6 +130,14 @@ def _native_verb(verb: str, *args: str) -> _NativeResult:
     return _NativeResult(code, out, err)
 
 
+def _native_session(*args: str) -> _NativeResult:
+    """The Rust-owned session lifecycle door, migrated out of the Python app."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "session", *args)
+    return _NativeResult(code, out, err)
+
+
 def _read_graph(g: Path) -> list[dict]:
     # The store owns state now; graph.json is a frozen export mirror, so a
     # post-command read-back must come from the store, not the file.
@@ -138,77 +146,91 @@ def _read_graph(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
-def test_session_reap_open_returns_positive_settled_receipt(tmp_path):
+def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     """AC3: observer reap fills the exact open row and reads it back.
 
-    The session verbs are native (backlog/session_cli.rs); this drives the
-    door the way the golden receipts do."""
-    from tests.goldens._door import door, graph_rows, make_sandbox, seed_node, warm
+    Seeded in_progress with nothing else open: the settle rolls the node off
+    in_progress (the x-9657 red), so status_after reads idea."""
+    _seed_graph_text(tmp_graph, json.dumps({
+        "entries": [{
+            "id": "x-reap0001",
+            "title": "Reap me",
+            "status": "in_progress",
+            "sessions": [{
+                "phase": "execute",
+                "harness": "codex",
+                "session_id": "dead-session",
+                "started_at": "2026-08-20T00:00:00Z",
+            }],
+        }]
+    }) + "\n")
 
-    root = make_sandbox(tmp_path, [seed_node("x-reap0001", sessions=[{
-        "phase": "execute",
-        "harness": "codex",
-        "session_id": "dead-session",
-        "started_at": "2026-08-20T00:00:00Z",
-    }])])
-    warm(root, "x-reap0001")
-
-    code, out, err = door(root, [
-        "session", "reap-open", "x-reap0001",
+    result = _native_session(
+        "reap-open", "x-reap0001",
         "--harness", "codex", "--session-id", "dead-session", "--json",
-    ])
+    )
 
-    assert code == 0, err
-    receipt = json.loads(out)
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
     assert receipt["settled"] is True
     assert receipt["row_removed"] is False
     assert receipt["row_closed"] is True
     assert receipt["status_after"] == "idea"
     assert receipt["remaining_open_do"] == 0
-    saved = [r for r in graph_rows(root) if r.get("id") == "x-reap0001"][0]
+    saved = _read_graph(tmp_graph)[0]
     assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
     assert saved["status"] == "idea"
 
 
-def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_path):
+def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
     """The death-cascade form: no node named, every node with an open row
-    for the identity settles and node_ids names them all. Door-driven: the
-    verb is native."""
-    from tests.goldens._door import door, graph_rows, make_sandbox, seed_node, warm
+    for the identity settles and node_ids names them all."""
+    _seed_graph_text(tmp_graph, json.dumps({
+        "entries": [
+            {
+                "id": "x-reap0002",
+                "title": "First holder",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0003",
+                "title": "Second holder",
+                "sessions": [{
+                    "phase": "review",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0004",
+                "title": "Other session",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "alive-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+        ]
+    }) + "\n")
 
-    root = make_sandbox(tmp_path, [
-        seed_node("x-reap0002", sessions=[{
-            "phase": "ship",
-            "harness": "codex",
-            "session_id": "dead-session",
-            "started_at": "2026-08-20T00:00:00Z",
-        }]),
-        seed_node("x-reap0003", sessions=[{
-            "phase": "review",
-            "harness": "codex",
-            "session_id": "dead-session",
-            "started_at": "2026-08-20T00:00:00Z",
-        }]),
-        seed_node("x-reap0004", sessions=[{
-            "phase": "ship",
-            "harness": "codex",
-            "session_id": "alive-session",
-            "started_at": "2026-08-20T00:00:00Z",
-        }]),
-    ])
-    warm(root, "x-reap0002")
-
-    code, out, err = door(root, [
-        "session", "reap-open",
+    result = _native_session(
+        "reap-open",
         "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
-    ])
+    )
 
-    assert code == 0, err
-    receipt = json.loads(out)
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
     assert receipt["settled"] is True
     assert sorted(receipt["node_ids"]) == ["x-reap0002", "x-reap0003"]
     assert receipt["row_closed"] is True
-    saved = {e["id"]: e for e in graph_rows(root)}
+    saved = {e["id"]: e for e in _read_graph(tmp_graph)}
     assert all(
         row.get("ended_at")
         for node in ("x-reap0002", "x-reap0003")
