@@ -1335,11 +1335,9 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
     assert cleared.exit_code == 0, cleared.output
 
-    from fno.decide.cli import decide_app as decide_cli_app
+    from fno.decide import list_decisions
 
-    listed = runner.invoke(decide_cli_app, ["list", "--subject", "x-7d94", "--json"])
-    assert listed.exit_code == 0, listed.output
-    decisions = json.loads(listed.stdout)["decisions"]
+    _, decisions, _damaged = list_decisions("x-7d94")
     assert [d["question_id"] for d in decisions] == [qid]
     assert decisions[0]["decision"] == "fold"
     assert decisions[0]["question"] == "fold or migrate?"
@@ -1375,10 +1373,10 @@ def test_a_projection_failure_no_longer_holds_the_question_open(
 
     assert [q.id for q in read_open_questions(root)] == []
 
-    from fno.decide.cli import decide_app as decide_cli_app
+    from fno.decide import list_decisions
 
-    listed = runner.invoke(decide_cli_app, ["list", "--json"])
-    assert "fold" in [d["decision"] for d in json.loads(listed.stdout)["decisions"]]
+    _, decisions, _damaged = list_decisions()
+    assert "fold" in [d["decision"] for d in decisions]
 
 
 @requires_rust
