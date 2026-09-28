@@ -387,6 +387,20 @@ def test_model_accepts_both_reversal_shapes():
     assert ConsolidationBlock.model_validate(many).reversal
 
 
+def test_consolidation_entry_accepts_legacy_dashless_literal():
+    """A bare "<prefix><4hex>" legacy id references like its dashed kin.
+
+    A config prefix with no separator once minted such literals; a candidate
+    the graph holds must be recordable here, or the gate cannot say what it
+    considered. The all-hex git-hash shape stays refused (extraction safety).
+    """
+    from fno.plan.schema import ConsolidationEntry
+
+    assert ConsolidationEntry(id="x4d12", reason="parent epic, not a fold")
+    with pytest.raises(Exception):
+        ConsolidationEntry(id="a3f9c1d2", reason="bare hash is not an id")
+
+
 def test_blueprint_owns_the_consolidation_frontmatter_key():
     # The validator requires the block, so the ownership model must permit the
     # write that satisfies it, or blueprint raises OwnershipViolation instead.
