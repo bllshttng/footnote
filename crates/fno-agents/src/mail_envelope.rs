@@ -306,6 +306,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         registry(&path);
         let lock_path = path.parent().unwrap().join("locks/_registry.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         let lock = crate::state::acquire_exclusive(&lock_path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
