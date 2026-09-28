@@ -434,8 +434,7 @@ _EVERY_TICK_CAP_S: dict[str, float] = {
     # answered journal, the graph), each bounded at 10s, and guards every
     # truth read behind a 15s step floor. The 45s cap measured "budget
     # spent after 0 of 5 crowns" with truth_reads=0 (2026-09-28 fleet
-    # specimen): the fixed reads ate the slice before one crown could be
-    # evaluated. 75s fits the fixed reads plus two truth reads.
+    # specimen). 75s fits the fixed reads plus two truth reads.
     "king_wake": 75,
     # The notify phase pays the arm subprocess over every catch-up root
     # (armed pass: 23.1s measured over 12 roots 2026-09-27). 15s still cut
@@ -1203,13 +1202,11 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result: a cut sweep leaves
-                # no result, and a completed one reads few PRs under load.
-                # Bounded, not slice-derived: merge now runs before the sweep
-                # on a fresh wall, and a slice-derived timeout would let one
-                # hung read hold ~400s of tick. The read measured 38s under a
-                # 21-worker fleet, so 120s is 3x the observed worst. Still
-                # expires as a recorded failure BEFORE the phase alarm.
+                # Durable grants, never the sweep's result. Bounded, not
+                # slice-derived: merge runs on a fresh wall now, and a
+                # slice-derived timeout would let one hung read hold ~400s
+                # of tick. 120s is 3x the 38s fleet worst, and still expires
+                # as a recorded failure BEFORE the phase alarm.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd())},
@@ -1429,13 +1426,11 @@ def tick() -> None:
         # `fno backlog reconcile`'s SessionStart leg, and its sync shell is
         # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
         # a proven-stale canonical through its SessionStart hook.
-        # Value order, not cost order: the wake and the merge ran
-        # after a sweep that saturates its 150s cap under a loaded fleet, so
-        # the wake hit its slice with no crown evaluated and the merge
-        # inherited seconds, read 38s of grant queue, and executed nothing.
-        # Neither arm reads the sweep's result (merge drains Rust's durable
-        # grant store), so they run first. The sweep follows: it is the only
-        # arm that resumes per-PR across ticks, so it absorbs the cut.
+        # Value order, not cost order: behind a fleet-loaded sweep that
+        # saturates its cap, the wake evaluated no crown and the merge read
+        # 38s of grant queue and executed nothing. Both arms read durable
+        # state, never the sweep's result, so they run first; the sweep
+        # follows as the one arm that resumes per-PR across ticks.
         sweep_started = True
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         # One merge can outlast any fixed slice, so merge takes what remains
