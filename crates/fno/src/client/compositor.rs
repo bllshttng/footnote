@@ -28,6 +28,17 @@ impl Compositor {
         Compositor { last: None, ground }
     }
 
+    /// A theme switch moves the ground without rebuilding the compositor;
+    /// the next draw paints every Default-bg cell in the new base.
+    pub(super) fn set_ground(&mut self, ground: Option<Color>) {
+        self.ground = ground;
+    }
+
+    #[cfg(test)]
+    pub(super) fn ground(&self) -> Option<Color> {
+        self.ground
+    }
+
     pub(super) fn draw(&mut self, frame: &Frame) -> std::io::Result<()> {
         let mut out = std::io::stdout().lock();
         let full = match &self.last {
