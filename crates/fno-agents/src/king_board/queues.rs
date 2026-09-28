@@ -441,12 +441,14 @@ pub(crate) struct BoardInputs {
     pub(crate) drivers: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     /// The truth batch's failure receipt: `Some` when the batch timed out or
-    /// its reader panicked. The claim-dependent queues read unreadable
+    /// its reader panicked. A timeout is not-read (starved below); a panic is
+    /// a real read error, and the claim-dependent queues read unreadable
     /// rather than rendering an absent measurement as a verdict.
     pub(crate) holder_activity_error: Option<String>,
-    /// The failure receipt is a budget kill: the probe never got a slice.
-    /// The claim-dependent folds then read over_budget with it, not
-    /// unreadable - the board stopped looking, it did not fail.
+    /// The failure receipt is a budget kill: the probe never got a slice or
+    /// outlived the one it had. The claim-dependent folds then read
+    /// over_budget with it, not unreadable - the board stopped looking, it
+    /// did not fail.
     pub(crate) holder_activity_starved: bool,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,

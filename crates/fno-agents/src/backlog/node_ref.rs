@@ -72,6 +72,11 @@ pub fn has_node_id_prefix(s: &str) -> bool {
 /// (case insensitive), bare 4 to 8 lowercase hex re-prefixed by the
 /// configured prefix then the legacy `ab-`.
 pub fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value> {
+    // A dash-leading token is a leaked flag, never a node id (the grammar is
+    // lowercase-led): refuse before any graph lookup.
+    if query.starts_with('-') {
+        return None;
+    }
     for e in entries {
         if e.get("id").and_then(Value::as_str) == Some(query) {
             return Some(e);
@@ -121,6 +126,11 @@ pub fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value>
 /// ambiguous prefix names the candidates on stderr and reads as a miss, the
 /// caller's not-found contract.
 pub fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
+    // Same leaked-flag refusal as resolve_tiers: a dash-leading token never
+    // reaches the graph.
+    if node_id.starts_with('-') {
+        return None;
+    }
     if node_id.starts_with("ab-") && node_id.len() < 11 {
         let candidates: Vec<&Value> = entries
             .iter()
@@ -472,6 +482,19 @@ mod tests {
         assert!(!is_wellformed_node_id("x"));
         // A multibyte char at a would-be split point refuses, never panics.
         assert!(!is_wellformed_node_id("x\u{e9}f9c1d2"));
+    }
+
+    #[test]
+    fn resolvers_refuse_a_flag_shaped_token_before_the_graph() {
+        // A leaked flag (`claim acquire got id --strict`) must never reach the
+        // lookup tiers, exact or aliased.
+        let entries = vec![json!({"id": "x-aaaa", "slug": "a"})];
+        assert!(resolve_tiers(&entries, "--strict").is_none());
+        assert!(resolve_tiers(&entries, "-strict").is_none());
+        assert!(find_node(&entries, "--strict").is_none());
+        assert!(find_node(&entries, "-x-aaaa").is_none());
+        // The dash-shaped alias of a real id is a flag leak too, not a spelling.
+        assert!(resolve_tiers(&entries, "-aaaa").is_none());
     }
 
     #[test]
