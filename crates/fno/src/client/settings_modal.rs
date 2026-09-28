@@ -130,6 +130,10 @@ impl View {
         })
         .max()
         .unwrap_or(0);
+        // One width across every tab, with a floor at the popup width cap:
+        // the review found both the toggles and the key table cramped at the
+        // content's own minimum. render() clamps min_width to WIDTH_CAP, so
+        // the cap IS the widest this modal can go.
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
             .tabs(vec![
@@ -139,7 +143,7 @@ impl View {
                 ("colors".to_string(), tab == SettingsTab::Colors),
             ])
             .footer("tab switches section · esc close")
-            .min_width(widest)
+            .min_width(widest.max(crate::popup::WIDTH_CAP))
             .plain_body();
         AuxPopup { popup, actions }
     }

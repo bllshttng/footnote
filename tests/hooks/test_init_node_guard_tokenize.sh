@@ -52,7 +52,8 @@ make_repo() {
   cat <<'JSON' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "${_dir}/home/.fno/graph.json"
 {"entries":[
   {"id":"tst-aa00aa00","title":"first guard node","session_id":null},
-  {"id":"tst-bb00bb00","title":"second guard node","session_id":null}
+  {"id":"tst-bb00bb00","title":"second guard node","session_id":null},
+  {"id":"tstd0d1","title":"legacy dashless node","session_id":null}
 ]}
 JSON
 }
@@ -217,5 +218,29 @@ CK6="$(claim_key_of "$STATE")"
 [[ "$CK6" == "node:tst-aa00aa00" ]] \
   || fail "archived: a live node stopped resolving when an archive exists (got '${CK6}')"
 pass "archived: a live node still resolves alongside an archive"
+
+# ── A dash-less literal id binds like its dashed kin ───────────────────────
+# A config prefix with no separator minted "<prefix><4hex>" literals. Backlog
+# resolution is format-agnostic, so a literal id that the graph holds must
+# claim here too; the token shape used to require the prefix-dash and
+# silently skipped it. Free text still cannot claim: the probe is
+# presence-based, so only a literal graph id matches.
+log "dashless: literal 'tstd0d1' claims node:tstd0d1"
+
+make_repo TMP7; _ALL_TMPS+=("$TMP7")
+run_init "$TMP7" "beast mode tstd0d1"
+CK7="$(claim_key_of "$STATE")"
+[[ "$CK7" == "node:tstd0d1" ]] \
+  || fail "dashless: literal dash-less id did not claim (got '${CK7}')"
+pass "dashless: literal dash-less id claims its node"
+
+# The dashed ids in the SAME graph must still resolve, and the two shapes
+# must not read as one ambiguous pair.
+make_repo TMP8; _ALL_TMPS+=("$TMP8")
+run_init "$TMP8" "tst-aa00aa00"
+CK8="$(claim_key_of "$STATE")"
+[[ "$CK8" == "node:tst-aa00aa00" ]] \
+  || fail "dashless: a dashed id stopped resolving once a dashless sibling exists (got '${CK8}')"
+pass "dashless: dashed ids still resolve alongside a dashless sibling"
 
 log "All node-guard tokenize scenarios passed"

@@ -20,6 +20,11 @@ use crate::theme::{Role, Theme};
 /// lines ellipsize. Anchored menus are usually far narrower.
 pub const WIDTH_CAP: usize = 60;
 
+/// Cells of air between a row's right-most content and the right border: the
+/// two-cell inset the review asked for, so key hints and clipped hints never
+/// touch the edge.
+const BODY_RIGHT_GAP_COLS: usize = 2;
+
 /// Where a popup anchors. `At` opens at a screen cell (pointer / button cell)
 /// and clamps + flips to stay fully on-screen; `Center` centers a fixed block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +179,6 @@ pub struct Popup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedLine {
     pub text: String,
-    pub header: bool,
     /// Whether this line is a greyed, inert `Entry`. Computed once here (the
     /// only place that reads `enabled`) and carried through rather than
     /// re-derived by re-indexing `self.rows` later - two derivations of the
@@ -196,9 +200,8 @@ pub struct RenderedLine {
     /// popup's rows (the key column, a section heading, the cursor band); the
     /// framed pass translates them into the per-char `roles`.
     pub segs: Vec<(usize, usize, Role)>,
-    /// The role for chars no seg covers: the plain ground for a plain-body
-    /// popup ([`Role::PanelBody`]), the inverse block ([`Role::Body`])
-    /// otherwise.
+    /// The role for chars no seg covers: the theme ground
+    /// ([`Role::PanelBody`]) under every theme - one body treatment.
     pub pad_role: Role,
 }
 
@@ -507,14 +510,18 @@ impl Popup {
             .measure_content_w()
             .max(self.min_width)
             .max(self.chrome.min_inner_w());
+        // The framer paints its two pad cells INSIDE the body width, so the
+        // framed block spans `width + 4`: cap the builder width to the
+        // terminal minus the borders and the pad, or the right border leaves
+        // a full-width screen.
+        let cap = WIDTH_CAP.min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
         let width = if self.full_width_selection {
             content_w
-                .min(WIDTH_CAP)
-                .max(self.chrome.min_inner_w())
-                .min(tcols)
+                .min(cap)
+                .max(self.chrome.min_inner_w().min(tcols))
                 .max(1)
         } else {
-            content_w.clamp(1, WIDTH_CAP.min(tcols))
+            content_w.clamp(1, cap)
         };
 
         let mut target_idx = 0usize;
@@ -524,57 +531,42 @@ impl Popup {
             let line = match row {
                 PopupRow::Header(s) => {
                     let text = pad(&format!(" {s}"), width);
-                    // Plain-body: a section heading is accent TEXT, never a
-                    // band; an empty header is the inter-section spacer line.
-                    let (header, segs, pad_role) = if self.plain_body {
-                        let segs = (!s.is_empty())
-                            .then(|| vec![(0usize, text.chars().count(), Role::BodyAccent)])
-                            .unwrap_or_default();
-                        (false, segs, Role::PanelBody)
-                    } else {
-                        (true, vec![], Role::Body)
-                    };
+                    // A section heading is accent TEXT on the theme ground,
+                    // never a band; an empty header is the inter-section
+                    // spacer line. One body treatment under every theme.
+                    let segs = (!s.is_empty())
+                        .then(|| vec![(0usize, text.chars().count(), Role::BodyAccent)])
+                        .unwrap_or_default();
                     RenderedLine {
                         text,
-                        header,
                         disabled: false,
                         sel_span: None,
                         hits: vec![],
                         roles: vec![],
                         segs,
-                        pad_role,
+                        pad_role: Role::PanelBody,
                     }
                 }
                 PopupRow::Rule => RenderedLine {
                     text: "─".repeat(width),
-                    header: false,
                     disabled: false,
                     sel_span: None,
                     hits: vec![],
                     roles: vec![],
                     segs: vec![],
-                    pad_role: if self.plain_body {
-                        Role::PanelMeta
-                    } else {
-                        Role::Body
-                    },
+                    pad_role: Role::PanelMeta,
                 },
                 PopupRow::FullWidth(s) => {
                     let ti = target_idx;
                     target_idx += 1;
                     RenderedLine {
                         text: pad(&format!(" {s}"), width),
-                        header: false,
                         disabled: false,
                         sel_span: (sel == Some((ri, 0))).then_some((0, width)),
                         hits: vec![(ti, 0, width)],
                         roles: vec![],
                         segs: vec![],
-                        pad_role: if self.plain_body {
-                            Role::PanelBody
-                        } else {
-                            Role::Body
-                        },
+                        pad_role: Role::PanelBody,
                     }
                 }
                 PopupRow::Entry {
@@ -620,18 +612,20 @@ impl Popup {
                         // modal, whose hint is the stable id.
                         let left = format!(" {glyph} {label}");
                         let left_w = chrome::str_cols(&left).min(width);
-                        let room = width.saturating_sub(left_w + 2);
+                        // The hint never touches the right border: two cells
+                        // of air stay between the last column and the edge.
+                        let room = width.saturating_sub(left_w + BODY_RIGHT_GAP_COLS);
                         let hint_text = clip_cols(hint, room);
                         let gap = width
-                            .saturating_sub(left_w + chrome::str_cols(&hint_text) + 1)
-                            .max(1);
+                            .saturating_sub(left_w + chrome::str_cols(&hint_text))
+                            .max(BODY_RIGHT_GAP_COLS);
                         let mut text = left;
                         text.push_str(&" ".repeat(gap));
                         text.push_str(&hint_text);
                         (
                             pad(&text, width),
                             vec![],
-                            Role::Body,
+                            Role::PanelBody,
                             (!disabled && selected).then_some((0, width)),
                         )
                     } else {
@@ -642,18 +636,19 @@ impl Popup {
                         // A clipped `grab-…` there is worse than absent, because it
                         // still looks like an id. The label is prose and survives
                         // clipping as something a reader can still recognise.
+                        // The hint keeps the two-cell air before the border.
                         let hint_w = chrome::str_cols(hint);
                         let left = format!(" {glyph} {label}");
                         let text = if hint_w == 0 {
                             pad(&left, width)
                         } else {
-                            let room = width.saturating_sub(hint_w + 2);
+                            let room = width.saturating_sub(hint_w + 1 + BODY_RIGHT_GAP_COLS);
                             pad(&format!("{} {hint} ", pad(&left, room)), width)
                         };
                         (
                             text,
                             vec![],
-                            Role::Body,
+                            Role::PanelBody,
                             (!disabled && selected).then_some((0, width)),
                         )
                     };
@@ -670,7 +665,6 @@ impl Popup {
                     };
                     RenderedLine {
                         text,
-                        header: false,
                         disabled,
                         sel_span,
                         hits,
@@ -735,7 +729,6 @@ impl Popup {
                     };
                     RenderedLine {
                         text,
-                        header: false,
                         disabled,
                         sel_span: None,
                         hits,
@@ -743,10 +736,8 @@ impl Popup {
                         segs,
                         pad_role: if selected && self.plain_body {
                             Role::BodyCursor
-                        } else if self.plain_body {
-                            Role::PanelBody
                         } else {
-                            Role::Body
+                            Role::PanelBody
                         },
                     }
                 }
@@ -767,17 +758,12 @@ impl Popup {
                     }
                     RenderedLine {
                         text: pad(&text, width),
-                        header: false,
                         disabled: false,
                         sel_span,
                         hits,
                         roles: vec![],
                         segs: vec![],
-                        pad_role: if self.plain_body {
-                            Role::PanelBody
-                        } else {
-                            Role::Body
-                        },
+                        pad_role: Role::PanelBody,
                     }
                 }
             };
@@ -799,20 +785,26 @@ impl Popup {
             visible: body_vis_h,
         });
         // Hand the body to chrome as BodyLines; frame() shifts hit offsets past
-        // the left border and adds the chrome rows + scrollbar column.
+        // the left border and adds the chrome rows + scrollbar column. The
+        // body width arrives pad-inclusive: frame() paints the two side pads
+        // inside it, so the builder rows padded to `width` survive whole.
         let body: Vec<BodyLine> = windowed
             .iter()
             .map(|l| BodyLine {
                 segs: l.segs.clone(),
                 pad_role: l.pad_role,
                 text: l.text.clone(),
-                header: l.header,
                 disabled: l.disabled,
                 sel_span: l.sel_span,
                 hits: l.hits.clone(),
             })
             .collect();
-        let framed = chrome::frame(&body, &self.chrome, width, scroll_state);
+        let framed = chrome::frame(
+            &body,
+            &self.chrome,
+            width + chrome::Chrome::FRAME_COLS,
+            scroll_state,
+        );
         let total_h = framed.lines.len();
         let origin = origin(self.anchor, framed.width, total_h, (trows, tcols));
         // Convert framed lines back to RenderedLines (roles carry styling; hits
@@ -822,13 +814,12 @@ impl Popup {
             .into_iter()
             .map(|fl: FramedLine| RenderedLine {
                 text: fl.text,
-                header: false,
                 disabled: false,
                 sel_span: None,
                 hits: fl.hits,
                 roles: fl.roles,
                 segs: vec![],
-                pad_role: Role::Body,
+                pad_role: Role::PanelBody,
             })
             .collect();
         Rendered {
@@ -994,6 +985,30 @@ mod tests {
             enabled: false,
         }
     }
+
+    #[test]
+    fn body_rows_keep_two_cells_of_air_before_the_right_border() {
+        // The right column is EXACT; its hint ends two cells shy of the
+        // border. The label-first shape holds the same gap after its clip.
+        let rows = vec![entry("\u{25cf}", "run", "grab-x")];
+        let p = Popup::new(rows, Anchor::At { row: 1, col: 1 })
+            .full_chrome()
+            .full_width_selection();
+        let rendered = p.render((24, 120));
+        let line = rendered
+            .lines
+            .iter()
+            .find(|l| l.text.contains("grab-x"))
+            .expect("the entry row renders");
+        let text: Vec<char> = line.text.chars().collect();
+        let hint_end = text.iter().rposition(|&c| c == 'x').unwrap();
+        let width = text.len();
+        assert!(
+            width - 1 - hint_end >= 2,
+            "hint must end two cells before the border (width {width}, hint at {hint_end})"
+        );
+    }
+
     fn grid(labels: &[&str]) -> PopupRow {
         PopupRow::Grid(
             labels
@@ -1225,9 +1240,9 @@ mod tests {
         // Each body row reports one hit, offset past the left border (+1).
         assert_eq!(body0.hits.len(), 1);
         assert_eq!(body0.hits[0].0, 0);
-        // Border plus the body's one side pad.
+        // Border plus the frame's two side pad cells.
         assert_eq!(
-            body0.hits[0].1, 2,
+            body0.hits[0].1, 3,
             "hit offset shifted past the left border"
         );
         assert_eq!(body1.hits[0].0, 1);
@@ -1311,8 +1326,8 @@ mod tests {
         // The two cells occupy disjoint, adjacent spans, offset past the border.
         let (_, off0, len0) = body.hits[0];
         let (_, off1, _) = body.hits[1];
-        // Border plus the body's one side pad.
-        assert_eq!(off0, 2, "first cell past the left border");
+        // Border plus the frame's two side pad cells.
+        assert_eq!(off0, 3, "first cell past the left border");
         assert_eq!(off1, off0 + len0, "cells are disjoint and adjacent");
     }
 
@@ -1350,9 +1365,16 @@ mod tests {
         draw(&mut cells, 24, 80, &r, &theme);
         // Positive control: the popup drew its top-left border corner.
         assert!(cells.iter().any(|c| c.c == '╭'), "drew the border");
-        // Byte-identity: every cell is Default-colored.
+        // Byte-identity except the two named slots the terminal theme still
+        // colors: the border role (its own amber field, and any
+        // mux.theme.border override) and the brand accent on the key column.
+        let border = theme.border;
         for c in cells.iter() {
-            assert_eq!(c.fg, crate::proto::Color::Default);
+            assert!(
+                c.fg == crate::proto::Color::Default || c.fg == border || c.fg == theme.brand,
+                "unexpected fg {:?}",
+                c.fg
+            );
             assert_eq!(c.bg, crate::proto::Color::Default);
         }
     }
