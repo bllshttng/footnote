@@ -1960,7 +1960,14 @@ async fn inject(
     ))
     .await
     .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    let resp = read_until_id(&mut stream, &serde_json::json!(TURN_START_ID)).await?;
+    // The request is OUT once the send answers; a lost response is an
+    // acknowledgment gap, not a failed delivery. The seed lane reads this
+    // token as "in flight, never type a duplicate" - naming it keeps the
+    // caller from turning an ack loss into a second seed.
+    let resp = match read_until_id(&mut stream, &serde_json::json!(TURN_START_ID)).await {
+        Ok(resp) => resp,
+        Err(_) => return Err(ReviewStartError::Reason("turn-start-unacked")),
+    };
     classify_turn_start_response(&resp)
 }
 
@@ -3177,6 +3184,24 @@ mod tests {
         assert!(result.is_ok());
         let turn = daemon.first_params("turn/start").expect("seed ran");
         assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// An ack loss after the turn/start went out reads as
+    /// `turn-start-unacked`, the token the seed lane treats as in-flight so a
+    /// typed fallback cannot double-seed a thread that is already running.
+    #[tokio::test]
+    async fn seed_delivery_names_an_unacked_turn_start() {
+        let _guard = crate::path_test_guard();
+        let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_unacked_turn_start(),
+        );
+        let result =
+            deliver_seed_via_codex_daemon("thread-t", "hello", Path::new("/tmp/fno-t14-cwd")).await;
+        assert_eq!(
+            result,
+            Err(ReviewStartError::Reason("turn-start-unacked")),
+            "an ack loss must be named, not read as io-error"
+        );
     }
 
     /// A registry row recording full access re-asserts it: the turn carries

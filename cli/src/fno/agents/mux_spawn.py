@@ -4310,6 +4310,18 @@ def dispatch_spawn_pane(
                     seed_state, seed_source, seed_pane = "submitted", "turn-start", None
                 else:
                     seed_state, seed_detail, seed_source, seed_pane = _seed_once()
+                    if seed_state == "unconfirmed":
+                        reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                        raise DispatchAskError(
+                            f"agent {name!r} spawn seed never submitted after bind "
+                            f"({seed_detail}); pane {pane_id} "
+                            + (
+                                "reaped, no registry row written"
+                                if reaped
+                                else f"may still exist: {cleanup_detail}"
+                            ),
+                            exit_code=1,
+                        )
         elif provider == "claude" and not pin_session:
             # happy owns the id on this route, so the spawn CANNOT know it and
             # deliberately does not try. Guessing from the transcript store was

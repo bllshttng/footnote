@@ -278,6 +278,10 @@ def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> b
     env = {**os.environ, WORKER_ADD_DIRS_ENV: os.pathsep.join(dirs)}
     try:
         proc = subprocess.run([*argv, "--seed", str(cwd)], input=seed, capture_output=True, text=True, timeout=30, env=env)
-        return bool(json.loads(proc.stdout.strip())["delivered"])
+        answer = json.loads(proc.stdout.strip())
+        # An unacked turn/start is in flight, not failed: the thread may run
+        # it, so a typed fallback would seed twice. The bound pane stays
+        # mail-addressable if the turn truly died.
+        return bool(answer["delivered"]) or answer.get("reason") == "turn-start-unacked"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False

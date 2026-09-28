@@ -77,6 +77,35 @@ def test_yolo_codex_spawn_keeps_the_argv_seed(tmp_path: Path, monkeypatch) -> No
     assert (result.seed, result.seed_source) == ("submitted", "argv")
 
 
+def test_unconfirmed_typed_seed_after_bind_reaps_and_raises(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A refused typed fallback fails the spawn like the pre-bind path did."""
+    from fno.agents.dispatch_errors import DispatchAskError
+
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _capture_deliver(monkeypatch, delivered=False)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_submit_spawn_seed",
+        lambda *a, **k: ("unconfirmed", "text delivered, submission unconfirmed", "typed", "blank"),
+    )
+    monkeypatch.setattr(mux_spawn, "_reap_spawned_pane", lambda *a, **k: (True, ""))
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="codex",
+            name="noseed",
+            message=SEED,
+            runner=runner,
+        )
+
+    assert "never submitted after bind" in str(exc.value)
+    assert len(calls) == 1
+
+
 def test_failed_delivery_falls_back_to_typing_once(tmp_path: Path, monkeypatch) -> None:
     """AC2-ERR: a `delivered: false` answer types the seed, once."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -203,3 +232,13 @@ def test_deliver_seed_shells_mail_inject_with_the_computed_dirs(
 
     monkeypatch.setattr(codex_pane.subprocess, "run", bad_run)
     assert codex_pane.deliver_seed("tid", "the seed", Path("/tmp/w"), dirs) is False
+
+    def unacked_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, '{"delivered": false, "reason": "turn-start-unacked"}', ""
+        )
+
+    monkeypatch.setattr(codex_pane.subprocess, "run", unacked_run)
+    assert (
+        codex_pane.deliver_seed("tid", "the seed", Path("/tmp/w"), dirs) is True
+    ), "an unacked turn/start is in flight; typing would seed twice"
