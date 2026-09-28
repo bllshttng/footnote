@@ -11,6 +11,28 @@ use super::{Ctx, InterruptOutcome};
 use crate::codex_thread::stop_settle_bound;
 use crate::state::RegistryEntry;
 
+/// End a codex thread CONFIRMABLY: when the daemon map holds no handle, the
+/// thread itself still lives in the shared app-server (a restart, or a
+/// recovery stamp, emptied the map, never the app-server), so ending it
+/// without a re-attach answers "no-turn" against nothing and the turn keeps
+/// running there. The re-attach rides the row's durable identity (resume by
+/// session id + cwd); a refused re-attach is the caller's signal to keep the
+/// row addressable rather than report a teardown that never touched the
+/// process.
+pub(crate) async fn end_codex_thread_confirmed(
+    ctx: &Ctx,
+    entry: &RegistryEntry,
+) -> Result<String, String> {
+    if !ctx.codex_threads.lock().await.contains_key(&entry.name) {
+        super::codex_thread_resume::ensure_codex_thread_handle(ctx, entry)
+            .await
+            .map_err(|reason| {
+                format!("thread not hosted here and the re-attach refused: {reason}")
+            })?;
+    }
+    end_codex_thread(ctx, &entry.name).await
+}
+
 /// Interrupt the codex thread's in-flight turn, shut the actor down, and
 /// drop it from the map. Shared by the stop verb and rm: the caller that
 /// keeps the row stamps and emits around the answer.
@@ -59,11 +81,19 @@ pub(crate) async fn end_codex_thread(ctx: &Ctx, name: &str) -> Result<String, St
 /// rm's codex-thread arm: end the thread, then refuse unless `--force` was
 /// passed. `Some` carries the Busy refusal text that keeps the row; `None`
 /// means rm proceeds to drop the row (teardown done, or the force override).
-pub(crate) async fn codex_rm_refusal(ctx: &Ctx, name: &str, force: bool) -> Option<String> {
-    if let Err(interrupt_report) = end_codex_thread(ctx, name).await {
+/// The entry is the teardown's identity source: an unmapped thread re-attaches
+/// through its row before the interrupt, so a live thread cannot be rm'd
+/// while its turn keeps running in the shared app-server.
+pub(crate) async fn codex_rm_refusal(
+    ctx: &Ctx,
+    entry: &RegistryEntry,
+    force: bool,
+) -> Option<String> {
+    let name = entry.name.clone();
+    if let Err(interrupt_report) = end_codex_thread_confirmed(ctx, entry).await {
         if !force {
             return Some(format!(
-                "agent {name}: the codex thread's turn did not settle \
+                "agent {name}: the codex thread did not confirm teardown \
                  ({interrupt_report}); the registry row and the codex index \
                  entry are kept"
             ));
@@ -71,7 +101,7 @@ pub(crate) async fn codex_rm_refusal(ctx: &Ctx, name: &str, force: bool) -> Opti
         // The row drops without a settled teardown, so the map entry goes
         // with it: ensure_codex_thread_handle hands a respawned row the
         // stale actor when the name matches.
-        ctx.codex_threads.lock().await.remove(name);
+        ctx.codex_threads.lock().await.remove(&name);
     }
     None
 }

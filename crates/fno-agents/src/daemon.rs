@@ -4676,7 +4676,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         // shared daemon owns the thread, so a turn that survives the bounded
         // settle keeps running there, and the report below says exactly that
         // rather than claiming a kill this verb cannot perform.
-        let interrupt_report = match rm_teardown::end_codex_thread(ctx, &name).await {
+        let interrupt_report = match rm_teardown::end_codex_thread_confirmed(ctx, &entry).await {
             Ok(report) => report,
             // Keep the handle and leave the row non-terminal. The actor still
             // holds the interrupt handle for the live turn, so a retry can
@@ -5437,7 +5437,7 @@ async fn handle_rm_with(
     // that does not settle leaves the row and the codex index entry
     // untouched.
     if is_codex_thread_entry(&entry) {
-        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &name, force).await {
+        if let Some(refusal) = rm_teardown::codex_rm_refusal(ctx, &entry, force).await {
             return Response::err(req.id, ErrorCode::Busy, refusal);
         }
     }

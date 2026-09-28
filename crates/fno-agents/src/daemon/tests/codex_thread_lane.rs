@@ -1111,6 +1111,52 @@ async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daem
     .await;
 }
 
+/// An UNMAPPED codex thread (the map holds no handle; the thread itself may
+/// still be live in the shared app-server) cannot be stopped with a trivial
+/// "no-turn": the stop re-attaches through the row's durable identity, and a
+/// refused re-attach reports stopped:false and leaves the row non-terminal,
+/// exactly like an unsettled interrupt. Old shape: end_codex_thread answered
+/// "no-turn" against the missing handle and the verb reported a stop it did
+/// not perform.
+#[tokio::test]
+async fn codex_thread_stop_over_an_unmapped_thread_reports_not_stopped_when_reattach_refuses() {
+    let _guard = crate::path_test_guard();
+    let home = tmp_home("codex-stop-unmapped");
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    let mut row = thread_entry("t-unmapped", AgentStatus::Live, None);
+    row.cwd = "/nonexistent-cwd-for-unmapped-stop-f313".into();
+    row.project_root = row.cwd.clone();
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    assert!(
+        !ctx.codex_threads.lock().await.contains_key("t-unmapped"),
+        "precondition: the map holds no handle for this thread"
+    );
+
+    let stop = handle_stop(
+        &ctx,
+        &Request::new(3, "agent.stop", json!({"name": "t-unmapped"})),
+    )
+    .await;
+    let res = stop.result().expect("stop must answer, not error");
+    assert_eq!(res["stopped"], false, "stop response: {res:?}");
+    let interrupt = res["interrupt"].as_str().expect("interrupt report");
+    assert!(
+        interrupt.contains("re-attach refused"),
+        "the report names the failed re-attach: {interrupt}"
+    );
+
+    let registry = load_registry_offloaded(home.registry_json())
+        .await
+        .expect("registry readable");
+    assert_eq!(
+        registry.find("t-unmapped").map(|e| e.status),
+        Some(AgentStatus::Live),
+        "a refused stop leaves the row non-terminal"
+    );
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// The zombie-stop probe: an interrupt the daemon never confirms must NOT
 /// report a stop.
 ///
