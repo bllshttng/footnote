@@ -139,3 +139,12 @@ bundles:
         dest: code-index/providers/codegraph.toml
       - source: skills/blueprint/code-index/providers/graphify.toml
         dest: code-index/providers/graphify.toml
+
+  - skill: setup
+    files:
+      - source: scripts/lib/code-index-detect.sh
+        dest: scripts/lib/code-index-detect.sh
+      - source: skills/blueprint/code-index/providers/codegraph.toml
+        dest: code-index/providers/codegraph.toml
+      - source: skills/blueprint/code-index/providers/graphify.toml
+        dest: code-index/providers/graphify.toml

@@ -43,6 +43,11 @@ pub struct Theme {
     /// the background and the terminal's own fg carries the letters. Off-white
     /// on a dark theme, ink on a light one.
     pub stamp: Color,
+    /// The theme's own ground: what OSC 11 sets and what every drawn cell
+    /// fills with so a terminal that ignores the OSC still shows the base.
+    /// `Default` under `terminal` - the emulator's own scheme IS the ground
+    /// there, and fno paints nothing over it.
+    pub base: Color,
 }
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
@@ -245,7 +250,10 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
         Role::Subtitle => (t.dim, Color::Default, 0),
         Role::Tab(true) => (t.brand, Color::Default, cell_flags::BOLD),
-        Role::Tab(false) => (t.dim, Color::Default, 0),
+        // Inactive tabs read in the theme's full text color, not dim: a dim
+        // label on the theme ground blends into it (the user's screenshot),
+        // and an unpicked section is still a choice worth reading.
+        Role::Tab(false) => (t.title, Color::Default, 0),
         Role::Footer => (t.dim, Color::Default, 0),
         Role::ScrollTrack => (t.dim, Color::Default, cell_flags::DIM),
         Role::ScrollThumb => (t.border, Color::Default, cell_flags::BOLD),
@@ -298,6 +306,7 @@ fn theme_terminal() -> Theme {
         dim: Color::Default,
         chip: Color::Default,
         stamp: Color::Default,
+        base: Color::Default,
     }
 }
 
@@ -315,6 +324,7 @@ fn theme_footnote_superscript() -> Theme {
         dim: rgb(0xb4, 0xb4, 0xb4),       // subtext0
         chip: rgb(0xe1, 0xa6, 0xa3),      // red accent
         stamp: rgb(0xe8, 0xe8, 0xe8),     // off-white stamp label
+        base: rgb(0x14, 0x14, 0x14),      // base: the theme ground
     }
 }
 
@@ -332,6 +342,7 @@ fn theme_footnote_paper() -> Theme {
         dim: rgb(0x50, 0x50, 0x50),       // subtext0
         chip: rgb(0x96, 0x53, 0x51),      // red accent
         stamp: rgb(0x29, 0x29, 0x29),     // ink stamp label
+        base: rgb(0xf7, 0xf7, 0xf7),      // base: the theme ground
     }
 }
 
@@ -347,6 +358,7 @@ fn theme_catppuccin() -> Theme {
         dim: rgb(0xa6, 0xad, 0xc8),       // subtext0
         chip: rgb(0xf3, 0x8b, 0xa8),      // red
         stamp: rgb(0xcd, 0xd6, 0xf4),     // text
+        base: rgb(0x1e, 0x1e, 0x2e),      // base
     }
 }
 
@@ -362,6 +374,7 @@ fn theme_tokyo_night() -> Theme {
         dim: rgb(0x96, 0x9d, 0xc4),       // fg_gutter
         chip: rgb(0xf7, 0x76, 0x8e),      // red
         stamp: rgb(0xa9, 0xb1, 0xd6),     // fg
+        base: rgb(0x1a, 0x1b, 0x26),      // base
     }
 }
 
@@ -377,6 +390,7 @@ fn theme_gruvbox() -> Theme {
         dim: rgb(0xa8, 0x99, 0x84),       // fg4
         chip: rgb(0xfb, 0x49, 0x34),      // red
         stamp: rgb(0xeb, 0xdb, 0xb2),     // fg1
+        base: rgb(0x28, 0x28, 0x28),      // base
     }
 }
 
@@ -445,6 +459,90 @@ pub fn color_hex(c: Color) -> Option<String> {
         return None;
     };
     Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// The OSC sequences that paint the terminal ground under a footnote theme:
+/// default background (11), default foreground (10), and the 16 palette
+/// slots (4), all from the theme's own tokens. `None` = the theme defines no
+/// ground (`terminal`, or any theme whose base is `Default`); the caller
+/// then emits nothing.
+pub fn ground_set(t: &Theme) -> Option<Vec<u8>> {
+    let base = color_hex(t.base)?;
+    let fg = color_hex(t.stamp).unwrap_or_else(|| base.clone());
+    let mut out = Vec::with_capacity(512);
+    out.extend_from_slice(format!("\x1b]11;{base}\x1b\\\x1b]10;{fg}\x1b\\").as_bytes());
+    for slot in 0..16u8 {
+        if let Some(c) = terminal16_slot(slot, t) {
+            let hex = color_hex(c)?;
+            out.extend_from_slice(format!("\x1b]4;{slot};{hex}\x1b\\").as_bytes());
+        }
+    }
+    Some(out)
+}
+
+/// Reset the terminal's default background (111), foreground (110) and the
+/// palette (104) back to the user's own scheme. Harmless when never set.
+pub const GROUND_RESTORE: &[u8] = b"\x1b]111\x1b\\\x1b]110\x1b\\\x1b]104\x1b\\";
+
+/// The terminal theme files' text for one theme: the same token tables
+/// [`terminal16_slot`] reads, rendered per terminal. `None` = no ground or
+/// an unknown terminal.
+pub fn terminal_theme_file(t: &Theme, terminal: &str) -> Option<String> {
+    let base = color_hex(t.base)?;
+    let fg = color_hex(t.stamp)?;
+    let slots: Vec<(u8, u8, u8)> = (0..16u8)
+        .map(|s| match terminal16_slot(s, t) {
+            Some(Color::Rgb(r, g, b)) => (r, g, b),
+            _ => (0, 0, 0),
+        })
+        .collect();
+    match terminal {
+        "ghostty" => Some(format!(
+            "palette = {}\nbackground = {base}\nforeground = {fg}\n",
+            slots
+                .iter()
+                .enumerate()
+                .map(|(s, (r, g, b))| format!("{s}=#{r:02x}{g:02x}{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
+        "kitty" => Some(format!(
+            "background {base}\nforeground {fg}\n{}",
+            slots
+                .iter()
+                .enumerate()
+                .map(|(s, (r, g, b))| format!("color{s} #{r:02x}{g:02x}{b:02x}\n"))
+                .collect::<String>()
+        )),
+        "iterm" => {
+            // iTerm colors are 0.0-1.0 float components in a JSON dict.
+            let comp = |f: u8| format!("{:.6}", f as f64 / 255.0);
+            let mut out = String::from("{\n");
+            for (s, (r, g, b)) in slots.iter().enumerate() {
+                out.push_str(&format!(
+                    "  \"Ansi {s} Color\" : {{ \"Red Component\" : {r}, \"Green Component\" : {g}, \"Blue Component\" : {b} }}",
+                    r = comp(*r),
+                    g = comp(*g),
+                    b = comp(*b)
+                ));
+                out.push_str(if s == 15 { "\n" } else { ",\n" });
+            }
+            out.push_str("}\n");
+            Some(out)
+        }
+        "wezterm" => Some(format!(
+            "[colors]\nbackground = '{base}'\nforeground = '{fg}'\nansi = [{}]\nbrights = [{}]",
+            slots[..8]
+                .iter()
+                .map(|(r, g, b)| format!("'#{r:02x}{g:02x}{b:02x}',"))
+                .collect::<String>(),
+            slots[8..]
+                .iter()
+                .map(|(r, g, b)| format!("'#{r:02x}{g:02x}{b:02x}',"))
+                .collect::<String>()
+        )),
+        _ => None,
+    }
 }
 
 /// The shipped theme names, in display order. Adding a palette later is a
@@ -713,6 +811,75 @@ mod tests {
                     "{role:?} INVERSE under {}",
                     t.name
                 );
+            }
+        }
+    }
+    #[test]
+    fn ground_set_paints_background_foreground_and_palette() {
+        let (t, _) = Theme::from_name("footnote-superscript");
+        let bytes = ground_set(&t).expect("superscript defines a ground");
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.starts_with("\x1b]11;#141414\x1b\\"),
+            "OSC 11 sets the base first: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b]10;#e8e8e8\x1b\\"),
+            "OSC 10 sets the stamp fg: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b]4;1;#e1a6a3\x1b\\"),
+            "OSC 4 slot 1 from the dark table: {s:?}"
+        );
+        assert_eq!(s.matches("\x1b]4;").count(), 16, "all 16 slots");
+        // The ground restore resets all three classes.
+        assert_eq!(
+            GROUND_RESTORE,
+            b"\x1b]111\x1b\\\x1b]110\x1b\\\x1b]104\x1b\\"
+        );
+        // No ground under terminal: nothing to set, nothing to leak.
+        let (term, _) = Theme::from_name("terminal");
+        assert!(ground_set(&term).is_none());
+    }
+
+    #[test]
+    fn terminal_theme_files_generate_from_the_token_tables() {
+        let (t, _) = Theme::from_name("footnote-superscript");
+        let ghostty = terminal_theme_file(&t, "ghostty").expect("ghostty file");
+        assert!(
+            ghostty.contains("palette = 0=#404040,1=#e1a6a3,"),
+            "{ghostty:?}"
+        );
+        assert!(ghostty.contains("background = #141414"));
+        let kitty = terminal_theme_file(&t, "kitty").expect("kitty file");
+        assert!(kitty.contains("color1 #e1a6a3"));
+        let wez = terminal_theme_file(&t, "wezterm").expect("wezterm file");
+        assert!(wez.contains("ansi = ['#404040','#e1a6a3',"));
+        let iterm = terminal_theme_file(&t, "iterm").expect("iterm file");
+        assert!(iterm.contains("\"Ansi 1 Color\""));
+        assert!(terminal_theme_file(&t, "alacritty").is_none());
+        let (term, _) = Theme::from_name("terminal");
+        assert!(terminal_theme_file(&term, "ghostty").is_none());
+    }
+
+    #[test]
+    fn committed_terminal_theme_files_match_the_token_tables() {
+        // The asset files are generated from the SAME DARK/LIGHT tables
+        // terminal16_slot reads; this pins them so the two can never drift.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/terminal");
+        for name in ["footnote-superscript", "footnote-paper"] {
+            let (t, _) = Theme::from_name(name);
+            for (term, ext) in [
+                ("ghostty", ""),
+                ("kitty", ".conf"),
+                ("iterm", ".itermcolors"),
+                ("wezterm", ".toml"),
+            ] {
+                let want = terminal_theme_file(&t, term).expect("generated text");
+                let path = dir.join(term).join(format!("{name}{ext}"));
+                let got = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                assert_eq!(got, want, "drift in {}", path.display());
             }
         }
     }
