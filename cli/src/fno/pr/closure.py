@@ -411,6 +411,7 @@ def bind_created_pr(
     *,
     head_ref: str,
     pr_url: str,
+    owner: Optional[str] = None,
     node_id: Optional[str] = None,
 ) -> ClosureBindResult:
     """Bind one newly-created PR to its one real node.
@@ -420,6 +421,10 @@ def bind_created_pr(
     is free text: one that never carried the id resolves to nothing, and a reused
     or handed-off worktree still carries the PREVIOUS node's id and would bind
     the PR to it.
+
+    ``owner`` is accepted for caller compatibility and never stamped on the
+    row: the claim store is the lock's single writer, so the holder of record
+    comes from the claim the caller already acquired, not from here.
 
     With no ``node_id``, branch text is a candidate only. Exactly one well-formed
     segment must name a node in this graph; zero or several refuse before any
