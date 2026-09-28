@@ -458,56 +458,6 @@ def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]
     return out
 
 
-def _vendor_tables(settings: object, rows: dict[str, Any], lanes: list[Any]) -> dict[str, Any]:
-    """Vendor caps and live counts for every vendor the rows or inline lanes name by ``route``."""
-    caps: dict[str, int] = {}
-    counts: dict[str, int] = {}
-    errors: dict[str, str] = {}
-    try:
-        from fno.agents.spawn_gate import probe_capacity, provider_lanes_cap
-        from fno.config import provider_limits_table
-
-        table = dict(provider_limits_table(getattr(settings, "agents", None)))
-        routes = [str(row.get("route", "") or "") for row in rows.values()]
-        routes += [str(lane.get("route", "") or "") for lane in lanes if isinstance(lane, Mapping)]
-        vendors = sorted({r.replace(",", "/").partition("/")[0].strip()
-                          for r in routes if r.strip()} - {""})
-        # One probe in lanes-only mode prices no footprint probe and returns
-        # the SAME counts the gate refuses on - a resolver that recounted
-        # would route onto a lane the gate then refuses.
-        # Caps first: a vendor the table caps is the one whose read matters.
-        for vendor in vendors:
-            cap = provider_lanes_cap(table.get(vendor))
-            if cap is not None:
-                caps[vendor] = int(cap)
-        # One probe in lanes-only mode prices no footprint probe and returns
-        # the SAME counts the gate refuses on - a resolver that recounted
-        # would route onto a lane the gate then refuses.
-        answer = probe_capacity(only=["lanes"])
-        probe_lanes = answer.get("lanes") if isinstance(answer, dict) else None
-        if not isinstance(probe_lanes, dict):
-            detail = " ".join(
-                str(part)
-                for part in (
-                    answer.get("reason") if isinstance(answer, dict) else None,
-                    answer.get("error") if isinstance(answer, dict) else None,
-                )
-                if part
-            )
-            for vendor in caps:
-                errors[vendor] = f"gate probe unreadable: {detail}".rstrip(": ")
-            return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
-        for vendor, cap in caps.items():
-            lane_answer = probe_lanes.get(vendor)
-            if not isinstance(lane_answer, dict) or lane_answer.get("live") is None:
-                errors[vendor] = "the gate could not read this lane"
-                continue
-            counts[vendor] = int(lane_answer["live"])
-    except Exception:  # noqa: BLE001 - an unreadable cap table caps no lane
-        pass
-    return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
-
-
 def _account_record_vendors(settings: object) -> dict[str, str]:
     try:
         return {
@@ -623,8 +573,6 @@ def _slot_payload(
             [str(r.get("harness", "") or "") for r in inv_rows])
     except Exception:  # noqa: BLE001 - an unreadable roster degrades open
         payload["harness_installed"] = {}
-    payload.update(_vendor_tables(
-        settings, rows, lanes_payload if isinstance(lanes_payload, list) else []))
     return payload
 
 

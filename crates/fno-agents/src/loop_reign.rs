@@ -28,7 +28,7 @@
 use crate::loop_king::{same_territory, scopes_overlap};
 use crate::state::{load_registry, RegistryEntry};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -97,6 +97,76 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
     row.harness_session_id
         .clone()
         .or_else(|| row.cc_session_id.clone())
+}
+
+/// True when a king manifest in the row's own space names the row's session
+/// as crown holder. The manifest is crown truth that survives registry
+/// damage: a restore or rewrite can strip the row's stamp, so a reaper that
+/// reads only `crown_level` sees an ordinary row where a live king sits.
+/// Absence of a stamp is not absence of a crown. Only
+/// `crown_reap::sweep`'s holder verdict may vacate the manifest, so a manifest
+/// naming a session keeps the row - the fail-safe direction.
+pub(crate) fn row_holds_manifest_live_crown(row: &RegistryEntry) -> bool {
+    let mut cache = HashMap::new();
+    row_holds_manifest_live_crown_cached(row, &mut cache)
+}
+
+/// [`row_holds_manifest_live_crown`] over a per-pass cache keyed by kings
+/// dir: a sweep scanning the registry reads each space's manifests once, not
+/// once per row. Callers sweeping many rows use this form; single-row
+/// callers keep the plain wrapper.
+pub(crate) fn row_holds_manifest_live_crown_cached(
+    row: &RegistryEntry,
+    cache: &mut HashMap<PathBuf, HashSet<String>>,
+) -> bool {
+    let Some(session) = row_session(row)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let cwd = std::path::PathBuf::from(row.cwd.trim());
+    if cwd.as_os_str().is_empty() {
+        return false;
+    }
+    let kings = crate::paths::space_dir(&cwd).join("kings");
+    cache
+        .entry(kings.clone())
+        .or_insert_with(|| manifest_crown_sessions(&kings))
+        .contains(&session)
+}
+
+/// Per-pass cache for the sweep form: one map keyed by kings dir, so a
+/// registry-wide sweep reads each space's manifests once, not once per row.
+pub(crate) struct ManifestCrownCache(HashMap<PathBuf, HashSet<String>>);
+
+impl ManifestCrownCache {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// [`row_holds_manifest_live_crown`] over this pass's cache.
+    pub(crate) fn holds(&mut self, row: &RegistryEntry) -> bool {
+        row_holds_manifest_live_crown_cached(row, &mut self.0)
+    }
+}
+
+/// The harness session ids every manifest under one kings dir names as
+/// holder. Unreadable or non-manifest files are skipped; an empty dir
+/// answers an empty set.
+fn manifest_crown_sessions(kings: &Path) -> HashSet<String> {
+    let Ok(files) = fs::read_dir(kings) else {
+        return HashSet::new();
+    };
+    files
+        .flatten()
+        .map(|file| file.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| fs::read_to_string(&path).ok())
+        .filter_map(|content| crate::claude_adopt::manifest_field(&content, "harness_session_id"))
+        .map(|sid| sid.trim().to_string())
+        .filter(|sid| !sid.is_empty())
+        .collect()
 }
 
 /// Python `_find_by_session`, both of its forms. A known harness scopes the
@@ -2229,5 +2299,40 @@ mod tests {
         // reign-state: with the flag present, the missing-argument refusal
         // names --scope/--session, not the flag.
         assert_eq!(run_reign_state(&["-J".into()]), 2);
+    }
+
+    /// The reaper guard answers on the manifest, not the stamp: a manifest in
+    /// the row's own space naming the row's session is a live crown, and a
+    /// mismatch, an empty cwd, or a missing session is not.
+    #[test]
+    fn manifest_crown_guard_answers_by_session() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
+        let dir = tmp("crown-guard");
+        std::env::set_var("FNO_SPACES_DIR", dir.join("spaces"));
+        let repo = dir.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let space = crate::paths::space_dir(&repo);
+        write_manifest(&space, "x-demo", "s-king9", "pass");
+        let mut held = RegistryEntry::default();
+        held.name = "king-x-demo".into();
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = Some("s-king9".into());
+        assert!(row_holds_manifest_live_crown(&held));
+        held.harness_session_id = Some("s-other".into());
+        assert!(!row_holds_manifest_live_crown(&held));
+        held.harness_session_id = Some("s-king9".into());
+        held.cwd = String::new();
+        assert!(!row_holds_manifest_live_crown(&held));
+        held.cwd = repo.display().to_string();
+        held.harness_session_id = None;
+        assert!(!row_holds_manifest_live_crown(&held));
+        match saved_spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }
