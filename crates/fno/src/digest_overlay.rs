@@ -188,6 +188,15 @@ pub fn user_themes(
     let mut themes: Vec<(String, crate::theme::Theme)> = Vec::new();
     let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
     for (name, spec) in &merged {
+        // A blank key (`[mux.themes.""]`) materializes a theme whose name
+        // matches nothing the picker can label - report it, never quietly
+        // drop it.
+        if name.trim().is_empty() {
+            warnings.push(crate::keys::KeymapWarning(
+                "mux.themes.\"\": a theme name is required; ignored".to_string(),
+            ));
+            continue;
+        }
         let (t, mut w) = materialize_user_theme(name, spec);
         themes.push((name.clone(), t));
         warnings.append(&mut w);
@@ -225,7 +234,10 @@ fn themes_from_file(path: &Path) -> Vec<(String, Vec<(String, String)>)> {
                 spec.iter()
                     .map(|(k, v)| match v.as_str() {
                         Some(s) => (k.clone(), s.to_string()),
-                        None => (k.clone(), String::new()),
+                        // A non-string (e.g. `base = 3`) rides as its TOML
+                        // display so the materialize warning names what the
+                        // operator actually wrote.
+                        None => (k.clone(), v.to_string()),
                     })
                     .collect::<Vec<_>>(),
             ))
