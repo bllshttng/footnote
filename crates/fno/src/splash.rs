@@ -286,6 +286,18 @@ fn animated() -> bool {
     )
 }
 
+/// The terminal's block cursor parked after the last written cell reads as
+/// a dark toe past the art. Hide it for the whole animation; this guard
+/// reveals it again on every exit path, skip and early return included.
+struct Reveal;
+impl Drop for Reveal {
+    fn drop(&mut self) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[?25h");
+        let _ = out.flush();
+    }
+}
+
 /// Draw the splash before the first UI paint. `rx` is the raw stdin
 /// channel: any byte skips to the last frame. The chunk that ended the
 /// animation is handed back through `tx` WHOLE, so typed-ahead input and
@@ -302,6 +314,10 @@ pub async fn run(
         return;
     }
     let mut out = std::io::stdout();
+    // Hide the block cursor for the animation; Reveal undoes it on every
+    // exit path. SIGTERM and the client's own Drop both show it separately.
+    let _reveal = Reveal;
+    let _ = out.write_all(b"\x1b[?25l");
     // Start on a fresh line below the shell prompt, so the banner paints on
     // open ground and ends up in scrollback verbatim.
     let _ = out.write_all(b"\r\n");
