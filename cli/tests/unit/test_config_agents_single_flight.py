@@ -13,7 +13,7 @@ from fno.config._sweeps import DEGRADED
 
 def test_defaults_match_the_rust_daemon():
     block = AgentsBlock()
-    assert block.single_flight_ttl_seconds == 10
+    assert block.single_flight_ttl_seconds == 60
     assert block.single_flight_join_budget_seconds == 30
     assert block.orphan_reap_after_seconds == 5400
 
@@ -32,7 +32,7 @@ def test_configured_values_are_honored():
 def test_a_non_numeric_value_degrades_and_is_named():
     DEGRADED.clear()
     block = AgentsBlock(single_flight_ttl_seconds="banana")
-    assert block.single_flight_ttl_seconds == 10
+    assert block.single_flight_ttl_seconds == 60
     assert DEGRADED["agents.single_flight_ttl_seconds"] == "'banana'"
 
 

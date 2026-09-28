@@ -368,6 +368,9 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
         return False
+    # The state root is not a checkout journal.
+    if old.parent.resolve() == state_dir().resolve():
+        return False
     try:
         repo = _repo_root_of(old)
         if repo is not None:
@@ -1687,7 +1690,7 @@ def _plugin_root_pointer() -> Path:
     # exactly, so the hook-written pointer and this reader always agree.
     home = os.environ.get("FNO_HOME")
     base = Path(home).expanduser() if home else Path.home() / ".fno"
-    return base / _PLUGIN_ROOT_POINTER_NAME
+    return base / "install" / _PLUGIN_ROOT_POINTER_NAME
 
 
 def _is_plugin_root(root: Path) -> bool:

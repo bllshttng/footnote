@@ -164,6 +164,8 @@ eval_sweep_maybe_fire() {
     local repo_root="${1:-$PWD}"
     local canonical
     canonical="$(_eval_sweep_canonical_root "$repo_root")"
+    # HOME-as-repo guard: the state root is not a checkout; never stamp it.
+    _reconcile_repo_space_safe "$canonical" || return 0
     # Only fire in an already-initialized project; never create .fno in a virgin dir.
     [[ -d "$canonical/.fno" ]] || return 0
     local stamp="$canonical/.fno/.eval-sweep-stamp"
