@@ -20,6 +20,24 @@ const BLUEPRINT_TTL_MS: i64 = 2 * 60 * 60 * 1000;
 const SESSION_PHASES: &[&str] = &["think", "blueprint", "execute", "review", "ship"];
 
 pub fn run(tail: &[String]) -> i32 {
+    let sub = tail.first().map(String::as_str).unwrap_or("");
+    if sub != "-h" && sub != "--help" && !sub.is_empty() {
+        // The external-backend guard the Python surface carried: session
+        // verbs own graph state, so under any other tracker backend they
+        // refuse before any read or write.
+        let backend = std::env::var("FNO_TRACKER_BACKEND")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "graph".to_string());
+        if backend != "graph" {
+            eprintln!(
+                "fno backlog session {sub}: this verb owns graph state; under \
+the {backend} tracker backend it is refused. Track the item in the tracker \
+by its id."
+            );
+            return 1;
+        }
+    }
     match tail.first().map(String::as_str) {
         None | Some("-h") | Some("--help") => {
             println!("{}", include_str!("session_help.txt").trim_end());
@@ -346,37 +364,6 @@ fn run_open(args: &[String]) -> i32 {
     }
 }
 
-/// `config._dispatch_verbs.parse_verb_token`: `(verb, namespaced)` for a
-/// leading `/` or `$` sigil, no second `/`, optional `fno:` namespace, and a
-/// lowercase-word remainder.
-fn parse_verb_token(tok: &str) -> Option<(String, bool)> {
-    let b = tok.as_bytes();
-    if tok.len() < 2 || (b[0] != b'/' && b[0] != b'$') {
-        return None;
-    }
-    let body = &tok[1..];
-    if body.contains('/') {
-        return None;
-    }
-    let namespaced = body.starts_with("fno:");
-    let inner = if namespaced {
-        &body["fno:".len()..]
-    } else {
-        body
-    };
-    let valid = inner
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && inner
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-    if !valid {
-        return None;
-    }
-    Some((inner.to_string(), namespaced))
-}
-
 /// The spawn-handover holder fno agents spawn took for this session, or None:
 /// the env export first, then the registry row naming this exact session id.
 fn own_handover_holder(session_id: &str) -> Option<String> {
@@ -568,7 +555,7 @@ pass --harness/--session-id or run inside a session."
         "ended_at": ended_at, "claim_released": false,
     }));
     let launch_verb = launch.split_whitespace().next().unwrap_or("");
-    let parsed = parse_verb_token(launch_verb);
+    let parsed = crate::provider::parse_verb_token(launch_verb);
     if parsed
         .as_ref()
         .map(|(_, namespaced)| *namespaced)
@@ -620,30 +607,16 @@ pass --harness/--session-id or run inside a session."
 }
 
 /// Node ids carrying `pr_number`, optionally narrowed to one repo slug
-/// (pr_number is not unique across repos; the url carries the slug).
+/// (pr_number is not unique across repos; the url carries the slug). The
+/// matching is the keeper's own: primary or additional_prs by number, the
+/// repo compared against the `/pull/<n>` url tail.
 fn find_nodes_for_pr(rows: &[Value], pr: i64, repo: Option<&str>) -> Vec<String> {
-    let mut ids = Vec::new();
-    for entry in rows {
-        if entry.get("pr_number").and_then(Value::as_i64) != Some(pr) {
-            continue;
-        }
-        if let Some(repo) = repo {
-            let in_repo = entry
-                .get("pr_url")
-                .and_then(Value::as_str)
-                .map(|url| url.contains(&format!("github.com/{repo}/")))
-                .unwrap_or(false);
-            if !in_repo {
-                continue;
-            }
-        }
-        if let Some(id) = entry.get("id").and_then(Value::as_str) {
-            ids.push(id.to_string());
-        }
-    }
-    ids
+    rows.iter()
+        .filter(|e| crate::graph_store::is_dict(e))
+        .filter(|e| crate::graph_keeper::node_carries_pr(e, pr, repo))
+        .filter_map(|e| crate::graph_store::entry_id(e).map(str::to_string))
+        .collect()
 }
-
 /// Best-effort `owner/repo` for this checkout: git origin, parsed. None on
 /// every failure; the caller degrades to unscoped resolution.
 fn resolve_current_repo_slug() -> Option<String> {
@@ -1277,43 +1250,20 @@ status={status} remaining_open_do={remaining}"
 
 #[cfg(test)]
 mod tests {
-    use super::parse_verb_token;
-
-    #[test]
-    fn verb_tokens_parse_the_four_spellings() {
-        assert_eq!(
-            parse_verb_token("/fno:target"),
-            Some(("target".into(), true))
-        );
-        assert_eq!(
-            parse_verb_token("$fno:target"),
-            Some(("target".into(), true))
-        );
-        assert_eq!(parse_verb_token("/target"), Some(("target".into(), false)));
-        assert_eq!(parse_verb_token("$target"), Some(("target".into(), false)));
-    }
-
-    #[test]
-    fn non_verbs_refuse() {
-        assert_eq!(parse_verb_token("fno do target start"), None);
-        assert_eq!(parse_verb_token("/usr/bin/git"), None);
-        assert_eq!(parse_verb_token("/fno:/target"), None);
-        assert_eq!(parse_verb_token("/"), None);
-        assert_eq!(parse_verb_token("/fno:Target"), None);
-    }
-
     #[test]
     fn the_pr_filter_keeps_only_the_named_repo() {
         let rows = vec![
             serde_json::json!({"id": "x-aaaa1111", "pr_number": 7,
                 "pr_url": "https://github.com/o/r1/pull/7"}),
             serde_json::json!({"id": "x-bbbb2222", "pr_number": 7}),
+            serde_json::json!({"id": "x-cccc3333", "additional_prs":
+                [{"number": 7, "url": "https://github.com/o/r2/pull/7"}]}),
         ];
         assert_eq!(
             super::find_nodes_for_pr(&rows, 7, Some("o/r1")),
             vec!["x-aaaa1111"]
         );
-        assert_eq!(super::find_nodes_for_pr(&rows, 7, None).len(), 2);
+        assert_eq!(super::find_nodes_for_pr(&rows, 7, None).len(), 3);
         assert!(super::find_nodes_for_pr(&rows, 8, None).is_empty());
     }
 
