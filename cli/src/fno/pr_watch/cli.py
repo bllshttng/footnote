@@ -424,11 +424,18 @@ _STRANDED_FLOOR_S = 10.0
 #: Skipping under it costs nothing - the next tick starts the scan over.
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
-#: Each phase has a measured cap, bounded by tick time. Merge runs last uncapped. The fit test proves _MERGE_FLOOR_S.
+#: Each phase has a measured cap, bounded by tick time. Merge runs before
+#: the sweep, uncapped: its drain self-stops at its own floor. The fit test
+#: proves _MERGE_FLOOR_S.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
-    "king_wake": 45,
+    # The wake pays three fixed reads before its first crown (court, the
+    # answered journal, the graph), each bounded at 10s, and guards every
+    # truth read behind a 15s step floor. The 45s cap measured "budget
+    # spent after 0 of 5 crowns" with truth_reads=0 (2026-09-28 fleet
+    # specimen). 75s fits the fixed reads plus two truth reads.
+    "king_wake": 75,
     # The notify phase pays the arm subprocess over every catch-up root
     # (armed pass: 23.1s measured over 12 roots 2026-09-27). 15s still cut
     # it mid-arm; 30s fits at the 0.85x deadline.
@@ -442,6 +449,10 @@ _FLEET_CAP_S: dict[str, float] = {
     "watchdog": 30,
 }
 _PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S}
+
+#: The grant-queue read measured 38s under a 21-worker fleet; on a fresh
+#: wall a slice-derived timeout would let one hung read hold ~400s.
+_GRANT_QUEUE_READ_TIMEOUT_S = 120.0
 
 
 class TickDeadlineExceeded(BaseException):
@@ -1178,7 +1189,7 @@ def tick() -> None:
             assert cfg is not None
             set_tick_phase("merge")
             interval = int(getattr(cfg, "interval_seconds", 600))
-            head = f"merge sweep={'cut' if 'sweep' in cut else 'ok'}"
+            head = f"merge kw={'cut' if 'king_wake' in cut else 'ok'}"
             if not tick_enabled:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="disabled",
                                detail=f"{head} pr_watch disabled")
@@ -1190,16 +1201,16 @@ def tick() -> None:
 
             roots = _tick_roots()
             try:
-                # Durable grants, never the sweep's result: a cut sweep leaves
-                # no result, and a completed one reads few PRs under load.
-                # Slice-derived, minus the same 10s reserve _ritual_timeout
-                # keeps: the read expires as a recorded failure BEFORE the
-                # phase alarm. The old 60s literal spent a third of the slice
-                # learning only that the store was contended.
+                # Durable grants, never the sweep's result. Bounded, not
+                # slice-derived: merge runs on a fresh wall now, and a
+                # slice-derived timeout would let one hung read hold ~400s
+                # of tick. 120s is 3x the 38s fleet worst, and still expires
+                # as a recorded failure BEFORE the phase alarm.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd())},
-                                timeout=max(1.0, slice_s - 10.0))
+                                timeout=min(_GRANT_QUEUE_READ_TIMEOUT_S,
+                                            max(1.0, slice_s - 10.0)))
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
@@ -1414,9 +1425,17 @@ def tick() -> None:
         # `fno backlog reconcile`'s SessionStart leg, and its sync shell is
         # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
         # a proven-stale canonical through its SessionStart hook.
+        # Value order, not cost order: behind a fleet-loaded sweep that
+        # saturates its cap, the wake evaluated no crown and the merge read
+        # 38s of grant queue and executed nothing. Both arms read durable
+        # state, never the sweep's result, so they run first; the sweep
+        # follows as the one arm that resumes per-PR across ticks.
         sweep_started = True
-        _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
+        # One merge can outlast any fixed slice, so merge takes what remains
+        # of the wall ahead of the sweep; its own floor stops the drain.
+        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
+        _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
         _run_phase("evals", _phase_evals)
@@ -1426,8 +1445,6 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded, arm="stranded", cadence=3, slot=0)
         _run_phase("recovery", _phase_recovery, arm="recovery", cadence=3, slot=1)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog", cadence=3, slot=2)
-        # One merge can outlast any fixed slice, so merge takes what remains.
-        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where. This is the
