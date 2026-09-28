@@ -6,11 +6,11 @@ a first user walks once the advertised ``fno`` command exists: setup answers,
 a fixture node the test mints itself is initialized, and the manifest, claim,
 and node readbacks all agree. No paid worker, no production node, no remote.
 
-The verbs run as fresh subprocesses of the worktree CLI against an isolated
-HOME, so every artifact (graph, claims, spaces manifest) lands under ``tmp``
-and nothing reads the developer's real state. The native mux leg drives the
-front door compiled in THIS checkout when present, and skips honestly when it
-is not (the wheel smokes prove that leg against a real wheel).
+The verbs run as fresh subprocesses against an isolated HOME, so every artifact
+(graph, claims, spaces manifest) lands under ``tmp`` and nothing reads the
+developer's real state. Backlog idea and mux use the front door compiled in
+THIS checkout when present; the install smoke proves those legs against a real
+wheel.
 """
 from __future__ import annotations
 
@@ -89,6 +89,24 @@ def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[
     )
 
 
+def _run_front_door(
+    front: Path, repo: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a verb owned by this checkout's compiled Rust front."""
+    env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
+    env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
+    env["FNO_TRACKER_BACKEND"] = "graph"
+    return subprocess.run(
+        [str(front), *args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
 @pytest.fixture()
 def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """A disposable git repo on a feature branch, and a pristine HOME."""
@@ -148,12 +166,15 @@ def test_authorized_target_init_journey(clean_machine):
     dispatched. Every readback must agree with that one identity.
     """
     home, repo = clean_machine
+    front = _front_door()
+    if front is None:
+        pytest.skip("compiled fno front door not present (build with `cargo build -p fno`)")
 
-    # 1. The node: minted by us, in the state root we own.
-    proc = _run_fno(
-        repo, home, "backlog", "idea",
+    # 1. The node: minted by the native front in the state root we own.
+    proc = _run_front_door(
+        front, repo, "backlog", "idea",
         f"journey fixture {uuid.uuid4().hex[:8]}",
-        "--difficulty", "low", "--separate",
+        "--difficulty", "low", "--separate", "-J",
     )
     assert proc.returncode == 0, proc.stderr
     node = json.loads(proc.stdout)["id"]

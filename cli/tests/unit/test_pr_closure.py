@@ -174,6 +174,22 @@ def test_bind_created_pr_is_idempotent():
     assert entries == snapshot
 
 
+def test_bind_created_pr_accepts_compact_graph_confirmed_id():
+    entries = [_node(id="x47d8")]
+
+    result = bind_created_pr(
+        entries,
+        head_ref="feature/x47d8",
+        pr_url="https://github.com/o/r/pull/2713",
+        owner="worker-session",
+        node_id="x47d8",
+    )
+
+    assert result.outcome == "bound"
+    assert result.claimed_ids == ["x47d8"]
+    assert entries[0]["pr_number"] == 2713
+
+
 def test_bind_created_pr_refuses_unknown_ambiguous_and_malformed_without_mutation():
     cases = [
         ("feature/x-dead", "https://github.com/o/r/pull/1038"),
