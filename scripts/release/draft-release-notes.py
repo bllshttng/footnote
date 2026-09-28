@@ -97,6 +97,7 @@ def categorize(title: str, retired: list) -> str:
         if cmd.lower() in title.lower():
             return "Before you upgrade"
     head = title.split(":")[0].strip()
+    head = head.rstrip("!")
     if head.endswith(")") and "(" in head:
         head = head.split("(")[0].strip()
     return TYPE_BUCKETS.get(head.lower(), "Changes")
@@ -171,6 +172,7 @@ def draft(tag: str, since: str, prs: list, slug: str, retired: list, now: str) -
 def self_test() -> None:
     retired = ["claude rm", "fno dispatch"]
     assert categorize("feat(mux): add portals", retired) == "Features"
+    assert categorize("feat!: flip the default", retired) == "Features"
     assert categorize("fix: stop the crash", retired) == "Fixes"
     assert categorize("fno dispatch is gone, spawn instead", retired) == "Before you upgrade"
     assert categorize("ci: fix the wheel build", retired) == "Build and CI"
