@@ -1429,6 +1429,11 @@ def agents_home_dir() -> Path:
     override = os.environ.get("FNO_AGENTS_HOME")
     if override:
         return Path(override).expanduser().resolve()
+    return default_agents_home_dir()
+
+
+def default_agents_home_dir() -> Path:
+    """Return the default Rust agents home, independent of FNO_AGENTS_HOME."""
     return (Path.home() / ".fno" / "agents").resolve()
 
 

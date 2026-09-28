@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - inject agent identity
 # SessionStart hook: inject `fno whoami` output as orientation context.
 #
 # Gives every fresh session an at-a-glance view of its operating stack

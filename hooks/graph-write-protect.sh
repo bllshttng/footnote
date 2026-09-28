@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - graph write protect
 # graph-write-protect.sh - PreToolUse hook: block writes to the two forbidden
 # state files ~/.fno/graph.json and .fno/target-state.md across Edit, Write,
 # AND Bash tools (: close the Bash bypass + fail-closed parse + general

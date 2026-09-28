@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - king delegation guard
 # PreToolUse: a crowned court session does not implement (policy:
 # crates/fno-agents/src/hook/king_guard.rs). Never exec a candidate: an old
 # build answers "unknown verb: hook", and a nonzero PreToolUse refuses every

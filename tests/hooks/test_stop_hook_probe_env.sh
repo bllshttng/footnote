@@ -53,7 +53,7 @@ STUB
 }
 
 # ── E5: the agy adapter exports the same env ────────────────────────────────
-AGY_HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
+AGY_HOOK="${REPO_ROOT}/hooks/footnote-agy-target-stop-hook.sh"
 log_e5="E5: agy adapter exports the build-dir env for its loop-check child"
 if [[ -f "$AGY_HOOK" ]]; then
     {

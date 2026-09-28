@@ -281,7 +281,7 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/worktree-log.jsonl` | `hooks/worktree-setup.sh` | append-only worktree lifecycle log |
 | `<space>/wake-signals/` | `cli/src/fno/wake/signal.py` | one-shot records; drained by the wake readers |
 | `<space>/artifacts/consolidated/` | `scripts/lib/consolidate-artifacts.sh` | per-PR consolidated gate artifacts, shared across worktrees |
-| `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.king-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
+| `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.king-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/footnote-agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
 | `<space>/worktrees/<name>/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
 | `<space>/worktrees/<name>/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per worktree; retained as the lifecycle fold and deleted with a disposable worktree |
 | `<space>/worktrees/<name>/codemap.md` | `fno doctor codemap` | regenerated |

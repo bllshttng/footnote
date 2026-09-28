@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - groom self heal session start
 # Fallback trigger for the daily grooming pass.
 #
 # The gate is staleness past the predicate's threshold, NOT "no marker today":

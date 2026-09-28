@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: StopFailure - record failed target turns
 # StopFailure hook: update circuit breaker counter + detect model fallback triggers
 # Fires when a turn ends due to API error (429, 529, auth errors).
 # Output and exit code are ignored by CC - this is informational only.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - session start
 # SessionStart hook for fno plugin — cross-platform
 # Injects project vision into session context.
 # Wraps existing Claude Code-specific hooks and re-formats output per platform.

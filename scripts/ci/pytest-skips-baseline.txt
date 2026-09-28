@@ -91,6 +91,9 @@ cli/tests/integration/test_graph_status.py::test_dash_a_is_shorthand_for_all_in_
 cli/tests/integration/test_graph_status.py::test_linked_idea_stub_excluded_from_next_by_default::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_node_with_plan_path_derives_to_ready::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_update_on_archived_node_names_the_remedy::mark.skip  # on main before this ratchet
+cli/tests/integration/test_install_frontdoor_journey.py::_run_fno::pytest.skip  # the journey requires the Rust front door to route backlog commands
+cli/tests/integration/test_install_frontdoor_journey.py::_run_native_backlog::pytest.skip  # the journey requires the compiled Rust backlog door
+cli/tests/integration/test_install_frontdoor_journey.py::clean_machine::pytest.skip  # the isolated native journey requires a development build
 cli/tests/integration/test_install_frontdoor_journey.py::test_authorized_target_init_journey::pytest.skip  # smoke-pytest builds the front; local checkouts may lack it
 cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
