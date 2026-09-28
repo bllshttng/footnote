@@ -128,10 +128,16 @@ def _run_init_script(
     round-trips are startup-cost no-ops in this isolated env. With the stub a run
     is sub-second, so the timeout stops being load-sensitive.
     """
+    subprocess.run(
+        ["git", "init", "-q", "-b", "feature/init-test", str(tmpdir)],
+        check=True,
+    )
+    home_dir = tmpdir / "home"
+    home_dir.mkdir()
     plan_file = tmpdir / "plan.md"
     plan_file.write_text("# Test plan\n")
 
-    state_dir = tmpdir / ".fno"
+    state_dir = home_dir / ".fno"
     state_dir.mkdir(parents=True, exist_ok=True)
 
     bin_dir = tmpdir / "bin"
@@ -139,7 +145,7 @@ def _run_init_script(
     stub_env = install_state_path_stub(bin_dir, tmpdir / "space")
 
     env = {
-        "HOME": str(tmpdir),
+        "HOME": str(home_dir),
         # Prepend the stub dir so the hook resolves tmp/bin/fno first; keep the
         # real PATH tail so bash/date/mkdir still resolve. A stub miss degrades
         # to slow (real fno), never wrong.
@@ -374,9 +380,15 @@ def test_plan_path_env_lands_in_manifest_with_anchor(tmp_path):
 
 
 def _run_without_fno(tmp_path: Path, target_input: str) -> subprocess.CompletedProcess:
+    subprocess.run(
+        ["git", "init", "-q", "-b", "feature/init-test", str(tmp_path)],
+        check=True,
+    )
     (tmp_path / ".fno").mkdir(exist_ok=True)
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(exist_ok=True)
     env = {
-        "HOME": str(tmp_path),
+        "HOME": str(home_dir),
         "PATH": "/usr/bin:/bin",
         "TARGET_START": "1",
         "TARGET_INPUT": target_input,

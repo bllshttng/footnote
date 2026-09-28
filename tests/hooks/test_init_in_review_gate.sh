@@ -89,6 +89,7 @@ make_repo() {
     # entry before it resolves + probes (x-8e98: the ungrep'd ab- arm is gone).
     # Only presence is seeded; the derived in_review STATUS is still stubbed via fno.
     mkdir -p "$dir/.fno"
+    mkdir -p "$dir/test-home"
 }
 
 # Run init isolated. cwd is a per-scenario worktree-like repo on a feature
@@ -103,7 +104,7 @@ run_init() {
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
         env TARGET_START=1 TARGET_SESSION_ID=review-gate-test-session \
-            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
+            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd/test-home" \
             FNO_TEST_SPACE="$cwd/space" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )

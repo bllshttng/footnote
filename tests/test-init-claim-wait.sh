@@ -129,6 +129,7 @@ make_init_sandbox() {
 
   # .fno dir
   mkdir -p "$sbx/.fno"
+  mkdir -p "$sbx/home/.fno"
 
   # Stub fno binary
   mkdir -p "$sbx/stub-bin"
@@ -169,7 +170,20 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
+    node="${3:-unknown}"
+    [[ "$node" == "--strict" ]] && node="${4:-unknown}"
+    field=""; previous=""
+    for arg in "$@"; do
+      [[ "$previous" == "--field" ]] && field="$arg"
+      previous="$arg"
+    done
+    case "$field" in
+      _archived) printf 'null\n' ;;
+      id) printf '%s\n' "$node" ;;
+      status) printf 'ready\n' ;;
+      pr_number) printf 'null\n' ;;
+      *) printf '{"status":"ready","id":"%s"}\n' "$node" ;;
+    esac
     exit 0
     ;;
   *)
@@ -203,6 +217,8 @@ run_init() {
         CLAUDE_CODE_SESSION_ID="${session_id}" \
         TARGET_TRANSCRIPT_ID="${session_id}" \
         CLAUDE_PLUGIN_ROOT="$REPO_ROOT" \
+        HOME="$sbx/home" \
+        FNO_HOME="$sbx/home/.fno" \
         PATH="$sbx/stub-bin:$PATH" \
         FNO_TEST_SPACE="$sbx/space" \
         CALL_LOG="$sbx/call-log" \

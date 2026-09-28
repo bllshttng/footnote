@@ -161,15 +161,10 @@ fn observe_model(harness: &str, session_id: &str) -> Value {
         });
     }
     let path = match harness {
-        "claude" => {
-            let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
-                return json!({"kind": "no-transcript"});
-            };
-            super::super::claude_transcript_paths::resolve_transcript(
-                &home.join(".claude").join("projects"),
-                session_id,
-            )
-        }
+        "claude" => super::super::claude_transcript_paths::resolve_transcript(
+            &crate::claude_drive::claude_projects_dir(),
+            session_id,
+        ),
         _ => crate::codex_store::codex_rollout_path(None, session_id),
     };
     let Some(path) = path else {
