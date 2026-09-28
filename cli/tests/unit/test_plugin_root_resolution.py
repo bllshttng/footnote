@@ -35,6 +35,7 @@ def _make_plugin(root: Path) -> Path:
 def isolated_home(tmp_path, monkeypatch):
     """FNO_HOME -> tmp dir; all plugin-root env hints cleared."""
     home = tmp_path / "fno-home"
+    (home / "install").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FNO_HOME", str(home))
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)

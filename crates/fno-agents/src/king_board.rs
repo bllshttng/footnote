@@ -841,15 +841,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
                     (map, None, false)
                 }
-                // An empty timed-out page is UNREADABLE. A non-empty partial
-                // page remains usable, and queues name its missing holders.
+                // A batch that outlived its board-derived bound is a budget
+                // kill, not a source failure: the queues fold it over_budget,
+                // a quiet board stays certifiable, and the receipt names the
+                // read for the next wake to re-pay. A panicked reader stays
+                // UNREADABLE (the branch below). A non-empty partial page
+                // remains usable, and queues name its missing holders.
                 Ok((_, crate::truth_probe::BatchOutcome::NotMeasured)) => (
                     HashMap::new(),
                     Some(format!(
                         "truth probe: batch of {} handles timed out",
                         holders.len()
                     )),
-                    false,
+                    true,
                 ),
                 Err(_) => (
                     HashMap::new(),
@@ -2331,16 +2335,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_truth_batch_reads_the_five_queues_unreadable() {
-        // AC5-ERR: the batch's Err must arrive as an unreadable queue, never
-        // as rows about workers nobody measured. One Err, five queues blind,
-        // exit code 1: the king is told the board cannot see, which is the
-        // honest answer.
+    fn a_panicked_truth_batch_reads_the_five_queues_unreadable() {
+        // AC5-ERR: a REAL read error (the batch's reader panicked) must
+        // arrive as an unreadable queue, never as rows about workers nobody
+        // measured. One Err, five queues blind, exit code 1: the king is
+        // told the board cannot see, which is the honest answer. The
+        // timeout receipt rides the starved flag instead.
         let node = json!({"id": "x-blind", "priority": "p0", "status": "in_progress"});
         let claims = json!([{"key": "node:x-blind", "state": "live", "holder": "h"}]);
         let mut inputs = inputs_with(json!([]), claims, json!([node]));
-        inputs.holder_activity_error =
-            Some("truth probe: batch of 19 handles timed out".to_string());
+        inputs.holder_activity_error = Some("truth probe: reader panicked".to_string());
         let board = build_board(&inputs);
         assert_eq!(board["exit_code"], 1);
         let queues = board["queues"].as_array().unwrap();
@@ -3266,6 +3270,107 @@ mod tests {
         assert!(
             err.contains("timed out"),
             "the holder must read unmeasured, got holder_activity error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_truth_batch_on_a_quiet_board_reads_not_read_never_unreadable() {
+        // At load 335 on 12 cores the truth batch timed out on budget and the
+        // claim-dependent queues read unreadable, so a quiet board blocked
+        // completion on about ten consecutive stops with nothing to act on.
+        // A timeout against the board's own deadline is the board stopping,
+        // not the source failing: the queues must read not-read, the flag
+        // must stay off, and the receipt must name the read.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&[
+            "FNO_AGENTS_HOME",
+            "FNO_SPACES_DIR",
+            "HOME",
+            "FNO_CLAIMS_ROOT",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.path());
+        // ONE stale claim: the dead-stated holder is exactly the token the
+        // board probes, so the truth batch runs and (stubbed below) times
+        // out against the budget-derived page bound.
+        let now_ms = crate::claims::now_ms();
+        let lock = crate::claims::claim_path("node:king-truth-holder", Some(dir.path())).unwrap();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lock,
+            serde_json::json!({
+                "schema_version": crate::claims::PID_UNAVAILABLE_SCHEMA_VERSION,
+                "key": "node:king-truth-holder",
+                "holder": "claude:t-2440-truth",
+                "acquired_at": now_ms - 3_600_000,
+                "host": "board-test-off-host",
+                "pid_unavailable": true,
+                "expires_at": now_ms - 1_800_000,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The truth batch execs bare `fno`; stub it to sleep 30s. `gh` gets
+        // an empty-open-PR listing so the prs reads never reach the network.
+        // Everything else answers at once.
+        let stub_dir = dir.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub = crate::write_exec_stub(
+            &stub_dir,
+            "fno",
+            "#!/bin/sh\nif [ \"$1\" = agents ] && [ \"$2\" = truth ]; then exec sleep 30; fi\necho '{}'\n",
+        );
+        crate::write_exec_stub(&stub_dir, "gh", "#!/bin/sh\necho '[]'\n");
+        let prev_py = std::env::var_os("FNO_PY");
+        let prev_path = std::env::var_os("PATH");
+        let prev_bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_PY", &stub);
+        std::env::set_var("FNO_BIN", &stub);
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.display(),
+                prev_path.as_deref().and_then(|p| p.to_str()).unwrap_or("")
+            ),
+        );
+
+        let payload = read_board(&BoardOpts {
+            budget_ms: 2_000,
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        });
+
+        match prev_py {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
+        assert!(
+            !parsed.unreadable_sources,
+            "a timed-out batch is a budget kill, never an unreadable source: {payload}"
+        );
+        assert!(
+            parsed
+                .blind_queues
+                .iter()
+                .any(|q| q.contains("stale_claim not read: truth probe: batch of")),
+            "the receipt must name the timed-out read: {:?}",
+            parsed.blind_queues
         );
     }
 
