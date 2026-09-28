@@ -384,6 +384,13 @@ fn agents_history_resolves_dashless_node_ids_in_either_spelling() {
 
         assert_eq!(resolve(query, &sources).sessions, vec![SID.to_string()]);
     }
+
+    let mut sources = empty_sources();
+    sources.graph = Ok(vec![
+        json!({"id": "x-3344", "sessions": [{"session_id": SID}]}),
+        json!({"id": "x3344", "sessions": [{"session_id": OTHER_SID}]}),
+    ]);
+    assert_eq!(resolve("x-3344", &sources).sessions, vec![SID.to_string()]);
 }
 
 #[test]

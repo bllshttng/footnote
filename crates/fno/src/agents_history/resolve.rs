@@ -37,18 +37,36 @@ pub(super) fn resolve(arg: &str, sources: &Sources) -> Resolved {
     } else if let Some(node_id) = parse_node(handle).filter(|id| node_reference_exists(id, sources))
     {
         if let Ok(graph) = &sources.graph {
-            for node in graph
+            let exact = graph
                 .iter()
-                .filter(|node| node_id_of(node).is_some_and(|id| node_id_matches(id, &node_id)))
-            {
+                .filter(|node| node_id_of(node).is_some_and(|id| eq(id, &node_id)))
+                .collect::<Vec<_>>();
+            let matches = if exact.is_empty() {
+                graph
+                    .iter()
+                    .filter(|node| node_id_of(node).is_some_and(|id| node_id_matches(id, &node_id)))
+                    .collect()
+            } else {
+                exact
+            };
+            for node in matches {
                 add_graph_sessions(&mut found, node);
             }
         }
         if let Ok(ledger) = &sources.ledger {
-            for entry in ledger
+            let exact = ledger
                 .iter()
-                .filter(|entry| entry_node_matches(entry, &node_id))
-            {
+                .filter(|entry| entry_node_matches_exact(entry, &node_id))
+                .collect::<Vec<_>>();
+            let matches = if exact.is_empty() {
+                ledger
+                    .iter()
+                    .filter(|entry| entry_node_matches(entry, &node_id))
+                    .collect()
+            } else {
+                exact
+            };
+            for entry in matches {
                 add_entry_sessions(&mut found, entry);
                 if session_ids(entry).is_empty() {
                     push_unique(&mut ledger_only, entry.clone());
@@ -56,10 +74,19 @@ pub(super) fn resolve(arg: &str, sources: &Sources) -> Resolved {
             }
         }
         if let Ok(receipts) = &sources.receipts {
-            for receipt in receipts
+            let exact = receipts
                 .iter()
-                .filter(|receipt| receipt_node_matches(receipt, &node_id))
-            {
+                .filter(|receipt| receipt_node_matches_exact(receipt, &node_id))
+                .collect::<Vec<_>>();
+            let matches = if exact.is_empty() {
+                receipts
+                    .iter()
+                    .filter(|receipt| receipt_node_matches(receipt, &node_id))
+                    .collect()
+            } else {
+                exact
+            };
+            for receipt in matches {
                 if let Some(sid) = receipt.value["harness_session_id"].as_str() {
                     record_session(&mut found, sid, str_at(&receipt.value, "reaped_at"));
                 }
@@ -324,15 +351,29 @@ fn normalize_slug(slug: &str) -> String {
 }
 
 fn entry_node_matches(entry: &Value, id: &str) -> bool {
+    entry_node_matches_exact(entry, id)
+        || ["graph_node_id", "node"]
+            .iter()
+            .any(|key| str_at(entry, key).is_some_and(|v| node_id_matches(v, id)))
+}
+
+fn entry_node_matches_exact(entry: &Value, id: &str) -> bool {
     ["graph_node_id", "node"]
         .iter()
-        .any(|key| str_at(entry, key).is_some_and(|v| node_id_matches(v, id)))
+        .any(|key| str_at(entry, key).is_some_and(|v| eq(v, id)))
 }
 
 fn receipt_node_matches(receipt: &Receipt, id: &str) -> bool {
+    receipt_node_matches_exact(receipt, id)
+        || ["graph_node_id", "node"].iter().any(|key| {
+            str_at(&receipt.value["ledger"], key).is_some_and(|v| node_id_matches(v, id))
+        })
+}
+
+fn receipt_node_matches_exact(receipt: &Receipt, id: &str) -> bool {
     ["graph_node_id", "node"]
         .iter()
-        .any(|key| str_at(&receipt.value["ledger"], key).is_some_and(|v| node_id_matches(v, id)))
+        .any(|key| str_at(&receipt.value["ledger"], key).is_some_and(|v| eq(v, id)))
 }
 
 pub(super) fn node_id_of(node: &Value) -> Option<&str> {
