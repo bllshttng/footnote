@@ -863,7 +863,7 @@ mod tests {
             &anchor,
             "etl-search",
             &node,
-            Some(LocalTimestamp::from_epoch(NOW).unwrap()),
+            Some(PinnedTimestamp::from_epoch(NOW).unwrap()),
         )
         .unwrap();
         let expected = fx
