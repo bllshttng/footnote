@@ -115,11 +115,16 @@ fi
 # on a uv too old for `tool update-shell`, so on such a uv the assertion would
 # false-fail though the installer behaved correctly (the fallback is exercised).
 if uv tool update-shell --help >/dev/null 2>&1; then
-  # Assert the SUCCESS marker, not the tool name: the installer's fallback
-  # line names the failed command too, and a name-only grep would pass the
-  # check on the very failure it exists to catch.
+  # Two honest passes: uv edited the profile (the success line), or uv
+  # refused and the installer named why. The Linux runner images ship pwsh,
+  # which uv's update-shell cannot edit and refuses the whole edit over
+  # ("updating PowerShell is currently unsupported", run 36459620721), so a
+  # runner can never produce the success arm. Each arm asserts its own
+  # marker; a bare tool-name grep would pass on the failure line alone.
   if printf '%s' "$OUT" | grep -qi "added .*profile.*via 'uv tool update-shell'"; then
     pass "path-update-shell" "default path ran 'uv tool update-shell' to fix PATH"
+  elif printf '%s' "$OUT" | grep -qi "uv tool update-shell failed: error:"; then
+    pass "path-update-shell" "uv could not edit the profile here; the installer named why and surfaced the manual hint"
   else
     miss "path-update-shell" "default path did not report a 'uv tool update-shell' profile edit"
   fi
