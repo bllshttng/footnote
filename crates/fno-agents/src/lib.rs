@@ -234,6 +234,7 @@ pub mod machine_watch;
 pub mod mail_envelope;
 pub mod mail_hold;
 pub mod mail_inject;
+pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_close;
