@@ -1644,10 +1644,10 @@ mod probe_tests {
     #[test]
     fn partial_prefix_finds_unique_row() {
         let rows = vec![
-            json!({"id": "ab-e0000000", "title": "e"}),
-            json!({"id": "ab-c0000000", "title": "c", "parent": "ab-e0000000"}),
+            json!({"id": "ab-eeeeeeee", "title": "e"}),
+            json!({"id": "ab-cccccccc", "title": "c", "parent": "ab-eeeeeeee"}),
         ];
-        let found = find_node(&rows, "ab-c000");
+        let found = find_node(&rows, "ab-cccc");
         assert!(found.is_some(), "partial must resolve");
     }
 }

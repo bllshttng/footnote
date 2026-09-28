@@ -842,7 +842,12 @@ def test_ac4_fr_explicit_pr_bypasses_current_pr(tmp_graph, monkeypatch):
 
 
 def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
-    """AC4-EDGE: rc=0 but unparseable stdout -> (None, None) returned silently."""
+    """AC4-EDGE: rc=0 but unparseable stdout -> (None, None) returned silently.
+
+    The bare-id close is native now, so the rich surface is reached through
+    its own front door: a rich flag (--force-overwrite) delegates to the
+    completion surface, whose code-domain auto-detect is the reader under
+    test."""
     _seed(tmp_graph, [{
         "id": "ab-ac4ed001",
         "title": "EDGE target",
@@ -857,7 +862,9 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
         pr_view_rc=0,
         pr_view_stderr="",
     )
-    result = runner.invoke(app, ["done", "ab-ac4ed001"], catch_exceptions=False)
+    result = runner.invoke(
+        app, ["backlog", "done", "ab-ac4ed001", "--force-overwrite"], catch_exceptions=False
+    )
     assert result.exit_code == 0, result.output
     # Parse failure is "no PR for this branch", not a subprocess error -> silent.
     assert "gh pr view failed" not in result.output
