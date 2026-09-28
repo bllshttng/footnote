@@ -70,7 +70,7 @@ impl Writer {
 /// One reaped row's recovery record. Built from the registry row
 /// itself - the fields present on every row - plus the harness-DECLARED
 /// interactive resume form read from the capability table (the same single
-/// source `fno whoami ledger` renders), and enriched from the ledger entry
+/// source `fno agents history` renders), and enriched from the ledger entry
 /// when one exists. Written durably BEFORE the retain drops the row, so a
 /// reaped row stays recoverable even when its ledger entry does not exist and
 /// never will (kings, blueprint and rescue sessions never open a PR, so no
