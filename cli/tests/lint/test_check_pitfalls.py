@@ -27,12 +27,17 @@ NEXT_HEADING = "## Repository"
 
 
 def _run(
-    target: Path, *, lint: Path = LINT, env_extra: dict | None = None
+    target: Path, *, lint: Path = LINT, env_extra: dict | None = None,
+    config_dir: Path | None = None,
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
     # operator's live graph: pin an empty state root with an absent store.
-    state = target.parent / "state"
-    config = target.parent / "config.toml"
+    # The fixture config lands in config_dir (default: beside the target) -
+    # beside a symlinked target would write through the link into the real
+    # repo, which the session tripwire correctly reads as a prod leak.
+    base = config_dir if config_dir is not None else target.parent
+    state = base / "state"
+    config = base / "config.toml"
     config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
     env = {
         **os.environ,
@@ -80,7 +85,9 @@ def test_symlinked_repo_root_still_checks_bytes(tmp_path: Path) -> None:
     """AC5-HP: the byte gate must survive a symlinked repo root."""
     link = tmp_path / "repo-link"
     link.symlink_to(ROOT)
-    r = _run(link / "AGENTS.md")
+    # The fixture config stays in tmp: beside the link-resolved target it
+    # would write through the symlink into the real repo root.
+    r = _run(link / "AGENTS.md", config_dir=tmp_path)
     assert r.returncode == 0, r.stderr
     assert "preamble headroom" in r.stdout
 
