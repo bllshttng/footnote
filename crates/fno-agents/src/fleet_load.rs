@@ -1035,7 +1035,7 @@ pub fn run_fleet_cli(args: &[String]) -> i32 {
     };
     let report = analyze(&inputs);
     if html {
-        let path = out.unwrap_or_else(|| state_dir.join("fleet.html"));
+        let path = out.unwrap_or_else(|| crate::state_layout::place(&state_dir, "fleet.html"));
         let reload_s = crate::king_ledger::reload_secs(crate::agents_config::config_lookup(
             &cwd,
             &["backlog", "page_reload_s"],
