@@ -1329,7 +1329,9 @@ class RegistryWriteRefused(RuntimeError):
 
 
 def _refuse_probe_or_row_loss_write(target: Path, raw: Optional[dict], entries: list) -> None:
-    sh = (Path.home() / ".fno" / "agents" / "registry.json").resolve()
+    from fno.paths import agents_registry_path
+
+    sh = agents_registry_path().resolve()
     if sh != target.resolve() or sh.is_relative_to(Path(tempfile.gettempdir()).resolve()):
         return  # another target is the caller's own store; a sandboxed HOME has no real registry
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("FNO_TEST_HERMETIC") == "1":
