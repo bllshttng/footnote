@@ -1709,7 +1709,7 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
             stem = base[:-3]
             if len(stem) >= 4:
                 for trel, _text, _refs in reach_index():
-                    if stem in os.path.basename(trel) and "/tests/" in trel:
+                    if stem in os.path.basename(trel):
                         add("python-source-infix", rel, "pytest", trel)
             mod = _module_name(rel)
             if mod:

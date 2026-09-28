@@ -164,14 +164,20 @@ def test_duplicate_selection_is_emitted_once(tmp_path: Path) -> None:
 def test_infix_test_family_is_selected_by_name_containment(tmp_path: Path) -> None:
     """An envelope change also owns test_fno_mail_envelope.py: the same-stem
     map caught the exact spelling and left the infix one unselected, and the
-    merge went green while main ran it red."""
+    merge went green while main ran it red. Every indexed tree name-matches:
+    the reach index covers cli/tests, the root tests/ tree, and tests
+    co-located in cli/src, and the infix rule filters none of them out."""
     _write(tmp_path / "cli/src/fno/mail/envelope.py", "x = 1\n")
     _write(tmp_path / "cli/tests/relay/test_envelope.py", "def test_a(): pass\n")
     _write(tmp_path / "cli/tests/unit/test_fno_mail_envelope.py", "def test_b(): pass\n")
+    _write(tmp_path / "tests/unit/test_envelope_parse.py", "def test_c(): pass\n")
+    _write(tmp_path / "cli/src/fno/test_envelope_smoke.py", "def test_d(): pass\n")
     sel, _ = select_changed(tmp_path, ["cli/src/fno/mail/envelope.py"])
     by_rule = {(s["rule"], s["target"]) for s in sel}
     assert ("python-source-stem", "cli/tests/relay/test_envelope.py") in by_rule
     assert ("python-source-infix", "cli/tests/unit/test_fno_mail_envelope.py") in by_rule
+    assert ("python-source-infix", "tests/unit/test_envelope_parse.py") in by_rule
+    assert ("python-source-infix", "cli/src/fno/test_envelope_smoke.py") in by_rule
 
 
 def test_import_chain_through_a_source_module_is_selected(tmp_path: Path) -> None:

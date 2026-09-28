@@ -867,10 +867,9 @@ def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
     from fno.graph._decompose import canonical_child_plan_path
 
     # AC2-FR: an unparseable created_at falls back to today + a stderr warning,
-    # never raises. The fallback date renders in UTC, the same zone the durable
-    # created_at path renders, so every filename in the dir shares one zone.
+    # never raises.
     p = canonical_child_plan_path("etl", "x-dead", "/repos/web", "not-a-date")
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+    today = datetime.datetime.now().strftime("%Y%m%d")
     assert Path(p).name == f"{today}-etl-x-dead.md"
     assert "created_at" in capsys.readouterr().err
 
