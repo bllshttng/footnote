@@ -33,7 +33,10 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from fno.bus.log import Envelope
 
 from fno import paths
 
@@ -799,7 +802,7 @@ def cmd_notify_self() -> None:
 
 def cmd_control_drain() -> None:
     """Body of ``fno agents mail control-drain`` (hidden): land CONTROL bodies
-    at the recipient's next TOOL boundary (x-b553).
+    at the recipient's next TOOL boundary.
 
     A control body that demoted durable waits on ``notify-self``, which only
     fires at a prompt boundary; a busy worker holding one long turn never
@@ -839,7 +842,7 @@ def cmd_control_drain() -> None:
     present = present_mail_ids()
 
     rendered: list[str] = []
-    landed: list[tuple[str, object]] = []
+    landed: list[tuple[str, "Envelope"]] = []
     for form in forms:
         control = [
             m

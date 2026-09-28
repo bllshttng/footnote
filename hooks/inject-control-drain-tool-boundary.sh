@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fno hook: PreToolUse - control mail drain at the tool boundary (x-b553).
+# fno hook: PreToolUse - control mail drain at the tool boundary.
 #
 # A control body that demoted durable waits on notify-self, which fires only
 # at a prompt boundary; a worker holding one long turn never reaches one, so

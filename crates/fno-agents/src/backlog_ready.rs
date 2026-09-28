@@ -751,8 +751,8 @@ pub(crate) enum HoldState {
 }
 
 /// Read one node's hold (`ladder.dispatch_hold`): the plan declaration first,
-/// then the node row's own `dispatch_hold` field (x-b553 - a hold works
-/// without a plan file).
+/// then the node row's own `dispatch_hold` field (a hold works without a
+/// plan file).
 pub(crate) fn dispatch_hold(entry: &Value) -> HoldState {
     let plan = dispatch_hold_plan(entry);
     if !matches!(plan, HoldState::Absent) {

@@ -57,7 +57,7 @@ _FLEET_CHECK_UNAVAILABLE = 91
 
 
 def _merges_freeze_frozen() -> tuple[bool, str]:
-    """The fleet breaker's merges verdict for the merge arm (x-b553 breach 3).
+    """The fleet breaker's merges verdict for the merge arm.
 
     ``(frozen, why)``: a stop holding merges (exit 90) or an unreadable
     breaker (exit 91) freezes the phase - fail closed, the same policy the
@@ -1234,7 +1234,7 @@ def tick() -> None:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="disabled",
                                detail=f"{head} pr_watch disabled")
                 return
-            # The freeze gate (x-b553 breach 3): a crown-armed fleet stop
+            # The freeze gate: a crown-armed fleet stop
             # holding merges (or an unreadable breaker, fail closed) skips the
             # whole phase - the arm never asks a frozen queue to execute. The
             # per-PR crown holds still refuse inside the merge primitive.

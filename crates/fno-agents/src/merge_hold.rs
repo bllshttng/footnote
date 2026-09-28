@@ -286,7 +286,7 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value, graph: &Path) -> Stri
     }
     let probe = match resolve_plan(entry, node_id) {
         Ok(p) => p,
-        // x-b553: a hold no longer needs a plan file. The node row carries
+        // A hold no longer needs a plan file. The node row carries
         // the same block, written through the store's locked mutation.
         Err(_) => {
             return set_node_hold(
@@ -365,7 +365,7 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value, graph: &Path) -> Stri
     out.to_string()
 }
 
-/// The plan-less hold home (x-b553): the node row's own `dispatch_hold`
+/// The plan-less hold home: the node row's own `dispatch_hold`
 /// field, written through the store's locked read-modify-write and proven by
 /// the same reader the merge gate uses. Restores (clears the field) when the
 /// readback disagrees, the way `write_proven` restores the plan bytes.
@@ -583,7 +583,7 @@ fn release_hold(
     out.to_string()
 }
 
-/// Release the node row's own hold field (the plan-less arm, x-b553). The
+/// Release the node row's own hold field (the plan-less arm). The
 /// verdict reads the FRESH row - the stale `entry` still carries the field
 /// this op just cleared.
 fn release_node_hold(entry: &Value, node_id: &str, graph: &Path, evidence: &str) -> String {
@@ -866,7 +866,7 @@ mod tests {
         assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Held));
     }
 
-    // --- node-level holds (x-b553): a merge hold works without a plan file ---
+    // --- node-level holds: a merge hold works without a plan file ----
 
     fn fixture_plan_less(extra: Value) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

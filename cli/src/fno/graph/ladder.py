@@ -228,8 +228,8 @@ def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
 def dispatch_hold(entry: object) -> DispatchHold:
     """Read one node's hold: the plan declaration first, then the node field.
 
-    x-b553: a hold used to live ONLY in plan frontmatter, so the freeze
-    hold-set refused every plan-less node. The node row now carries the same
+    A hold used to live ONLY in plan frontmatter, so the freeze hold-set
+    refused every plan-less node. The node row now carries the same
     block as a fallback, and both read ABSENT before the other is consulted.
     """
     hold = _plan_dispatch_hold(entry)

@@ -144,7 +144,7 @@ def scan_unread(
     and the address never changes under a live consumer.
 
     ``cursor_name`` positions the scan at a DIFFERENT consumer's cursor while
-    still filtering ``to == name`` - the control lane (x-b553) scans the plain
+    still filtering ``to == name`` - the control lane scans the plain
     address forms but advances only its own ``control:<form>`` cursors, so
     ordinary mail keeps its prompt-boundary semantics.
 
@@ -199,7 +199,7 @@ def scan_unread(
     return after
 
 
-# --- control lane pending flags (x-b553) ------------------------------------
+# --- control lane pending flags ---------------------------------------------
 #
 # A control body that demoted durable must land at the recipient's next TOOL
 # boundary, not wait for a prompt boundary a busy worker never reaches. The
