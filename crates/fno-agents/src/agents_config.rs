@@ -753,9 +753,12 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default freshness window for a single-flight answer. Matches the Pydantic
-/// default.
-pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
+/// Default freshness window for a single-flight answer. Raised from 10 s to
+/// one liveness cadence after the 1800 s reader-cost window measured the
+/// truth class at 7 concurrent children with 502 births: callers inside one
+/// cadence join the answering child instead of spawning their own. Matches
+/// the Pydantic default.
+pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 60;
 /// Default join budget. Over the 23.2 s worst-measured roster read, so a loaded
 /// box joins instead of timing out. Matches the Pydantic default.
 pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
