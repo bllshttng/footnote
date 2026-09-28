@@ -3638,6 +3638,9 @@ def dispatch_spawn_pane(
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
     )
+    codex_seed = ""
+    if provider == "codex" and message and "--dangerously-bypass-approvals-and-sandbox" not in argv:
+        codex_seed, argv = argv[-1], argv[:-2]
     if provider == "codex" and argv and argv[0] == provider:
         # Identity rides as config-set leaves; passthrough-checked like the
         # route splice. The argv[0] guard keeps it on codex's own form.
@@ -4035,7 +4038,7 @@ def dispatch_spawn_pane(
             seed_in_argv=seed_in_argv,
         )
 
-        if message and readiness != "failed":
+        if message and readiness != "failed" and not codex_seed:
             seed_state, seed_detail, seed_source, seed_pane = _seed_once()
             if seed_state == "unattempted":
                 # One retry, and ONLY from `unattempted`. That state means no
@@ -4298,6 +4301,15 @@ def dispatch_spawn_pane(
                         f"failed: {cleanup_detail}; pane {pane_id} may still exist",
                         exit_code=1,
                     )
+            # The held seed rides a roots-carrying turn/start post-bind; a miss types it.
+            if codex_seed and not pane_died:
+                from fno.agents.codex_pane import deliver_seed
+                if session_uuid and deliver_seed(
+                    session_uuid, codex_seed, cwd, computed_writable_dirs
+                ):
+                    seed_state, seed_source, seed_pane = "submitted", "turn-start", None
+                else:
+                    seed_state, seed_detail, seed_source, seed_pane = _seed_once()
         elif provider == "claude" and not pin_session:
             # happy owns the id on this route, so the spawn CANNOT know it and
             # deliberately does not try. Guessing from the transcript store was

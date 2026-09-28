@@ -268,3 +268,16 @@ def _make_codex_bind_probe(
         return candidate
 
     return _probe
+
+
+def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> bool:
+    """Send a bounded pane's seed as a fno turn/start, which carries the roots."""
+    from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+    from fno.rust_binary import resolve_binary
+    argv = [str(resolve_binary()), "mail-inject", "--harness", "codex", "--session", thread_id]
+    env = {**os.environ, WORKER_ADD_DIRS_ENV: os.pathsep.join(dirs)}
+    try:
+        proc = subprocess.run([*argv, "--seed", str(cwd)], input=seed, capture_output=True, text=True, timeout=30, env=env)
+        return bool(json.loads(proc.stdout.strip())["delivered"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return False

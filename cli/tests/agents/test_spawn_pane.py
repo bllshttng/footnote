@@ -564,6 +564,10 @@ sleep 5
             provider="codex",
             cwd=repo,
             session=session,
+            # The bounded lane now holds the seed for a turn/start delivery
+            # (test_spawn_pane_codex_seed.py); this journey keeps proving the
+            # argv seed ride itself.
+            yolo=True,
             codex_sessions_dir=tmp_path / "no-rollouts",
         )
 
