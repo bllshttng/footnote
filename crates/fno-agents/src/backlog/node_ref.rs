@@ -464,12 +464,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn wellformed_gate_matches_the_python_grammar() {
+    fn wellformed_gate_matches_python_and_compact_legacy_grammar() {
         assert!(is_wellformed_node_id("x-aaaa1111"));
+        assert!(is_wellformed_node_id("xd863"));
         assert!(is_wellformed_node_id("ab-1234"));
         assert!(!is_wellformed_node_id("nope"));
         assert!(!is_wellformed_node_id("x-AAAA1111"));
         assert!(!is_wellformed_node_id("x-123"));
+        assert!(!is_wellformed_node_id("xg863"));
     }
 
     #[test]

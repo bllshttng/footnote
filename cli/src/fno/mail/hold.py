@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,8 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
+_FNO_MAIL_FRAME = re.compile(r"<fno_mail\b[^>]*>(.*?)</fno_mail>", re.I | re.S)
+_FNO_MAIL_TAG = re.compile(r"</?fno_mail\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -523,9 +526,17 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
             f"({getattr(message, 'ts', '?')})  id:{getattr(message, 'id', '?')} "
             f"---{suffix}"
         )
-        lines.append((getattr(message, "body", "") or "").rstrip("\n"))
+        lines.append(_digest_message_body(getattr(message, "body", "") or "").rstrip("\n"))
     lines.append('\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."')
     return "\n".join(lines)
+
+
+def _digest_message_body(body: str) -> str:
+    """Unwrap one peer frame so the outer digest gets one frame."""
+    match = _FNO_MAIL_FRAME.fullmatch(body.strip())
+    if match and not _FNO_MAIL_TAG.search(match.group(1)):
+        return match.group(1).strip("\n")
+    return _FNO_MAIL_TAG.sub(lambda match: "&lt;" + match.group()[1:], body)
 
 
 def release(handle: str, *, held_for_s: int = 0) -> dict:
@@ -599,6 +610,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     miss_reason: list = []
     if survivors:
         from fno.agents.dispatch import _deliver_live
+        from fno.mail.envelope import wrap_fno_mail
 
         digest = render_digest(handle, survivors, held_for_s)
         # Route through the LANE DISPATCHER, not the claude injector: wired to
@@ -609,9 +621,13 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
-                delivered = _deliver_live(
-                    entry, digest, "fno-mail-hold", reason_out=miss_reason
+                framed = wrap_fno_mail(
+                    digest,
+                    from_="fno-mail-hold",
+                    to=getattr(entry, "name", None),
+                    to_session=getattr(entry, "harness_session_id", None),
                 )
+                delivered = _deliver_live(entry, framed, "fno-mail-hold", reason_out=miss_reason)
             except Exception:  # noqa: BLE001 - report the miss, never crash the timer
                 delivered = False
                 miss_reason.append("deliver-raised")

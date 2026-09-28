@@ -99,9 +99,8 @@ run "Backlog-Closure: x-cccc" "feature/x-cccc-1234" \
   || fail "all-hex suffix should not invent a bogus second candidate"
 
 # slash-spanning: a path component and the next one must never re-glue into a
-# candidate. "feat/cafe" names no node - the producer
-# (fno.pr.closure.branch_node_ids) needs a literal '-' and writes no trailer for
-# it - so demanding "feat-cafe" red a PR over a line nothing could generate.
+# candidate. "feat/cafe" names no node, so demanding "feat-cafe" would red a
+# PR over a line nothing could generate.
 run "no trailer here" "feat/cafe" \
   && pass "slash-spanning segments never glue into a candidate" \
   || fail "a candidate must never span a '/'"
@@ -117,6 +116,15 @@ run "Backlog-Closure:x-aaaa" "feature/x-aaaa" \
 run "Fixes x-aaaa" "feature/x-aaaa" \
   && pass "colonless Fixes line passes" \
   || fail "colonless Fixes line should pass"
+
+# compact legacy ids are still valid closure claims.
+if OUTPUT=$(PR_BODY="Fixes xd863 x664b" PR_HEAD_REF="feature/xd863" bash "$GATE"); then
+  [[ "$OUTPUT" == *"all present in the exact trailer"* ]] \
+    || fail "compact legacy branch was skipped instead of checked"
+  pass "compact legacy id passes"
+else
+  fail "compact legacy id should pass"
+fi
 
 # lowercase keyword with colon: `fixes: <id>` reads the same.
 run "fixes: x-aaaa" "feature/x-aaaa" \

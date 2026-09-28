@@ -37,7 +37,7 @@ pub(crate) fn parse_lane(path: &Path) -> Result<Vec<LaneItem>, String> {
         Err(e) => return Err(format!("cannot read operator lane {}: {e}", path.display())),
     };
     let item_re = regex::Regex::new(r"^- \[( |x|X)\] (.*)$").expect("static regex");
-    let body = "[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}";
+    let body = NODE_ID_BODY;
     let suffix_re = regex::Regex::new(&format!(
         r"->\s*(?:(?P<node>{body})|parked:\s*(?P<reason>\S.*?))\s*$"
     ))
@@ -2226,21 +2226,23 @@ mod tests {
     }
 
     #[test]
-    fn lane_parser_carries_node_and_parked_suffixes() {
+    fn lane_parser_carries_compact_legacy_node_and_parked_suffixes() {
         let dir = tempfile::tempdir().unwrap();
         let lane = dir.path().join("my-priorities.md");
         std::fs::write(
             &lane,
-            "- [ ] ship the board -> x-bbbb\n- [ ] park me -> parked: waiting\n- [x] done item\n- [ ] open item\nnot an item\n",
+            "- [ ] ship the board -> x-bbbb\n- [ ] compact legacy -> xd863\n- [ ] park me -> parked: waiting\n- [x] done item\n- [ ] open item\nnot an item\n",
         )
         .unwrap();
         let items = parse_lane(&lane).unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         assert_eq!(items[0].node.as_deref(), Some("x-bbbb"));
         assert_eq!(items[0].text, "ship the board");
-        assert_eq!(items[1].parked.as_deref(), Some("waiting"));
-        assert!(items[2].done);
-        assert!(items[3].node.is_none() && items[3].parked.is_none() && !items[3].done);
+        assert_eq!(items[1].node.as_deref(), Some("xd863"));
+        assert_eq!(items[1].text, "compact legacy");
+        assert_eq!(items[2].parked.as_deref(), Some("waiting"));
+        assert!(items[3].done);
+        assert!(items[4].node.is_none() && items[4].parked.is_none() && !items[4].done);
     }
 
     #[test]
