@@ -3628,7 +3628,7 @@ impl Launcher {
         };
         // Pill rects for the x hit test, laid out exactly as paint does.
         let mut pill_rects: Vec<RtRect> = Vec::new();
-        if pills_row > 0 {
+        if pills_row {
             let mut x = 0usize;
             for (flag, value) in &self.draft.pills {
                 let spell = match value {

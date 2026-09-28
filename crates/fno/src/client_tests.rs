@@ -852,9 +852,8 @@ fn overlay_viewport_matches_content_origin_and_dims() {
 
 #[test]
 fn draw_lines_overlay_centers_within_viewport() {
-    // x-e9c3: popovers used to anchor at the outer terminal's top-left
-    // corner (origin_r = TAB_BAR_ROWS + 1, col 2), overlapping the
-    // sideline. They now center within the content viewport passed in.
+    // x-e9c3: popovers used to anchor at the outer terminal's top-left corner,
+    // overlapping the sideline; they now center in the content viewport.
     let (rows, cols) = (20usize, 40usize);
     let mut cells = vec![Cell::default(); rows * cols];
     let content_origin = (2usize, 4usize);
@@ -873,11 +872,10 @@ fn draw_lines_overlay_centers_within_viewport() {
         None,
     );
 
-    // The framed block (top + 2 body + bottom = 4 rows) centers in the
-    // 10-row viewport: top margin (10-4)/2 = 3, border starts at row 2+3 = 5.
+    // The framed block (top + 2 body + bottom = 4 rows) centers in the 10-row
+    // viewport; border starts at row 2+3 = 5.
     let origin_r = 2 + (10 - 4) / 2;
-    // 'a' sits one row + one col inside the frame; locate it by scan so the
-    // test does not hardcode the chrome-widened column.
+    // Locate 'a' by scan so the test does not hardcode the widened column.
     let a_col = (0..cols)
         .find(|&c| cells[(origin_r + 1) * cols + c].c == 'a')
         .expect("body row 'a' was drawn");
@@ -15334,10 +15332,8 @@ fn the_name_modal_never_bisects_a_double_width_glyph() {
 
 #[test]
 fn a_long_name_scrolls_so_the_cursor_stays_visible() {
-    // Stamping the head of the prompt cut the `_` off the right edge, so on
-    // a narrow terminal the operator typed a name they could not see. Same
-    // shape as the clipped notice and the clipped action id: the payload
-    // sits at the end, and the end is what a narrow render drops.
+    // Stamping the head of the prompt cut the `_` off the right edge: the
+    // payload sits at the end, and the end is what a narrow render drops.
     let view = shot_view(
         (24, 40),
         vec![named_meta(1, "footnote", &["main"], 0)],
@@ -15348,24 +15344,21 @@ fn a_long_name_scrolls_so_the_cursor_stays_visible() {
     let long = "a-really-quite-long-release-branch-name";
     view.draw_name_modal(&mut cells, rows, cols, "rename tab", long, None);
 
-    // (x-b465) The name is the framed body, so read the whole block: the
-    // title sits on the top border, the name a row below it.
-    let screen = |cells: &[Cell]| -> String {
-        (0..rows)
-            .map(|r| {
-                cells[r * cols..(r + 1) * cols]
-                    .iter()
-                    .map(|c| c.c)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    // The name is the framed body; read the whole block as text.
+    let screen = |cells: &[Cell]| {
+        frame_text(&Frame {
+            rows: rows as u16,
+            cols: cols as u16,
+            cells: cells.to_vec(),
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: false,
+            scroll_offset: 0,
+        })
     };
     let shot = screen(&cells);
-    // The contract is the CURSOR: the tail cell before the right border is
-    // the `_` the operator is typing at, whatever the sideline's width this
-    // minute. (The exact window width rides the clock-stamped chrome, so a
-    // literal tail substring flakes across runs.)
+    // The contract is the CURSOR: the kept tail ends in the `_` the operator
+    // types at.
     let body_line = shot
         .lines()
         .find(|l| l.contains('…'))
@@ -15766,28 +15759,16 @@ fn shot_agent(squad: u64, name: &str, badge: Option<AgentBadge>) -> AgentRow {
 
 /// Item 1. The rename prompt was `INVERSE | BOLD` over default colours, so
 /// how legible it came out was decided by the reader's theme rather than by
-/// us. The gate is the WORST case across themes, not the flag bits - the
-/// flag bits looked fine, which is exactly how this shipped.
-///
-/// Covers all three name modals: they share one painter, so the create and
-/// recruit prompts are the same cells.
+/// us. The gate is the WORST case across themes, not the flag bits.
 #[test]
 fn ux_shot_rename_prompt_is_legible() {
     use crate::frame_html::{self, write_shot};
-    // (x-b465) The modal wears the shared frame, so the typed name no longer
-    // sits on the terminal's middle row - the border, title and footer share
-    // the block. Find the BODY row by its content: that is the row whose
-    // legibility this test is about.
+    // The modal wears the shared frame; find the BODY row by its content.
     let modal_at = |view: &View| -> (Frame, usize) {
         let frame = view.compose();
         let cols = frame.cols as usize;
         let row = (0..frame.rows as usize)
-            .find(|r| {
-                (0..cols)
-                    .map(|c| frame.cells[r * cols + c].c)
-                    .collect::<String>()
-                    .contains('_')
-            })
+            .find(|&r| (0..cols).any(|c| frame.cells[r * cols + c].c == '_'))
             .unwrap_or(frame.rows as usize / 2);
         (frame, row)
     };
@@ -15796,16 +15777,14 @@ fn ux_shot_rename_prompt_is_legible() {
         vec![named_meta(1, "footnote", &["main", "review"], 0)],
         vec![],
     );
-    // The ground-body rule is tested on the terminal theme: even where the
-    // reader's scheme owns every colour, the prompt rides the ground plainly
-    // rather than inverting it.
+    // Ground-body rule on the terminal theme: the prompt rides the reader's
+    // own pair, never an inverse block.
     view.theme = crate::theme::Theme::from_name("terminal").0;
     view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
     let (frame, row) = modal_at(&view);
     let cols = frame.cols as usize;
-    // Anchor on a column the modal certainly owns - the cursor it just drew.
-    // The block is centered on the CONTENT viewport, which the sideline
-    // offsets, so the frame's own middle column can sit outside it.
+    // Anchor on the cursor: the block centers on the content viewport, so the
+    // frame's middle column can sit outside it.
     let cursor_col = (0..cols)
         .find(|&c| frame.cells[row * cols + c].c == '_')
         .expect("the prompt row painted nothing");
@@ -15826,12 +15805,9 @@ fn ux_shot_rename_prompt_is_legible() {
             0,
             "the body rides the ground; the inverse block is gone"
         );
-        // The bar is the THEME'S OWN body text, not an absolute ratio. An
-        // absolute floor asks the modal to beat the scheme its reader chose
-        // (Solarized Light is 4.1:1 by design), and the only way to meet it
-        // is to override their colours. The Default pair IS the scheme's
-        // body text, so this holds by construction unless someone paints a
-        // hard colour over it - the regression this exists to catch.
+        // The bar is the THEME'S OWN body text, not an absolute ratio: an
+        // absolute floor asks the modal to beat the scheme its reader chose,
+        // and the only way to meet it is to override their colours.
         for theme in frame_html::THEMES {
             let (ratio, body) = (
                 frame_html::contrast_ratio(cell, theme),
@@ -15846,10 +15822,9 @@ fn ux_shot_rename_prompt_is_legible() {
             );
         }
     }
-    // The block, not a text-hugging stripe: frame border rows sit within a
-    // couple of rows of the body (a footer may ride between). The column
-    // window dodges the esc chip, whose letters can sit exactly above the
-    // cursor.
+    // The block, not a text-hugging stripe: a border row sits within a couple
+    // of rows of the body. The column window dodges the esc chip, whose
+    // letters can sit exactly above the cursor.
     let border_near = |r0: usize, dir: isize| -> bool {
         for d in 1..=3usize {
             let r = (r0 as isize + dir * d as isize) as usize;
@@ -15878,10 +15853,8 @@ fn ux_shot_rename_prompt_is_legible() {
         "no frame margin below the body beside the cursor column: {}",
         frame_text(&frame)
     );
-    // The hint has to be as readable as the prompt it qualifies; it is the
-    // half the operator called out. Since x-b465 the target is the chrome
-    // title and the hint is the footer, so both live in the block on rows of
-    // their own rather than sharing one line.
+    // The hint lives in the block too: the target is the chrome title, the
+    // hint the footer.
     let text = frame_text(&frame);
     assert!(
         text.contains("rename tab"),
@@ -15904,20 +15877,15 @@ fn ux_shot_rename_prompt_is_legible() {
     sib.create = Some("growth".into());
     let (sib_frame, sib_row) = modal_at(&sib);
     let sib_cols = sib_frame.cols as usize;
-    let sib_cursor = (0..sib_cols)
-        .find(|&c| sib_frame.cells[sib_row * sib_cols + c].c == '_')
-        .expect("the sibling prompt painted its cursor");
-    // Shares the treatment: a frame row sits within a couple of rows of the
-    // sibling's body (the same windowed scan the first prompt got, since the
-    // esc chip or a title letter can sit exactly above the cursor).
-    let sib_framed = (1..=3usize).any(|d| {
-        let r = sib_row.saturating_sub(d);
-        (0..sib_cols).any(|c| matches!(sib_frame.cells[r * sib_cols + c].c, '─' | '╭' | '╰'))
-    }) && (1..=3usize).any(|d| {
-        let r = sib_row + d;
-        r < sib_frame.rows as usize
-            && (0..sib_cols).any(|c| matches!(sib_frame.cells[r * sib_cols + c].c, '─' | '╰'))
-    });
+    // Shares the treatment: a border row sits within a couple of rows of the
+    // sibling's body, above and below (the esc chip or a title letter can sit
+    // exactly above the cursor, so the scan is windowed like the first).
+    let near = |r: usize, frames: &[char]| -> bool {
+        (0..sib_cols).any(|c| frames.contains(&sib_frame.cells[r * sib_cols + c].c))
+    };
+    let sib_framed = (1..=3usize).any(|d| sib_row >= d && near(sib_row - d, &['─', '╭', '╰']))
+        && (1..=3usize)
+            .any(|d| sib_row + d < sib_frame.rows as usize && near(sib_row + d, &['─', '╰']));
     assert!(
         sib_framed,
         "the new-workspace prompt does not share the modal treatment: {}",

@@ -510,14 +510,18 @@ impl Popup {
             .measure_content_w()
             .max(self.min_width)
             .max(self.chrome.min_inner_w());
+        // The framer paints its two pad cells INSIDE the body width, so the
+        // framed block spans `width + 4`: cap the builder width to the
+        // terminal minus the borders and the pad, or the right border leaves
+        // a full-width screen.
+        let cap = WIDTH_CAP.min(tcols.saturating_sub(chrome::Chrome::FRAME_COLS * 2).max(1));
         let width = if self.full_width_selection {
             content_w
-                .min(WIDTH_CAP)
-                .max(self.chrome.min_inner_w())
-                .min(tcols)
+                .min(cap)
+                .max(self.chrome.min_inner_w().min(tcols))
                 .max(1)
         } else {
-            content_w.clamp(1, WIDTH_CAP.min(tcols))
+            content_w.clamp(1, cap)
         };
 
         let mut target_idx = 0usize;
@@ -781,7 +785,9 @@ impl Popup {
             visible: body_vis_h,
         });
         // Hand the body to chrome as BodyLines; frame() shifts hit offsets past
-        // the left border and adds the chrome rows + scrollbar column.
+        // the left border and adds the chrome rows + scrollbar column. The
+        // body width arrives pad-inclusive: frame() paints the two side pads
+        // inside it, so the builder rows padded to `width` survive whole.
         let body: Vec<BodyLine> = windowed
             .iter()
             .map(|l| BodyLine {
@@ -793,7 +799,12 @@ impl Popup {
                 hits: l.hits.clone(),
             })
             .collect();
-        let framed = chrome::frame(&body, &self.chrome, width, scroll_state);
+        let framed = chrome::frame(
+            &body,
+            &self.chrome,
+            width + chrome::Chrome::FRAME_COLS,
+            scroll_state,
+        );
         let total_h = framed.lines.len();
         let origin = origin(self.anchor, framed.width, total_h, (trows, tcols));
         // Convert framed lines back to RenderedLines (roles carry styling; hits
@@ -1229,9 +1240,9 @@ mod tests {
         // Each body row reports one hit, offset past the left border (+1).
         assert_eq!(body0.hits.len(), 1);
         assert_eq!(body0.hits[0].0, 0);
-        // Border plus the body's one side pad.
+        // Border plus the frame's two side pad cells.
         assert_eq!(
-            body0.hits[0].1, 2,
+            body0.hits[0].1, 3,
             "hit offset shifted past the left border"
         );
         assert_eq!(body1.hits[0].0, 1);
@@ -1315,8 +1326,8 @@ mod tests {
         // The two cells occupy disjoint, adjacent spans, offset past the border.
         let (_, off0, len0) = body.hits[0];
         let (_, off1, _) = body.hits[1];
-        // Border plus the body's one side pad.
-        assert_eq!(off0, 2, "first cell past the left border");
+        // Border plus the frame's two side pad cells.
+        assert_eq!(off0, 3, "first cell past the left border");
         assert_eq!(off1, off0 + len0, "cells are disjoint and adjacent");
     }
 

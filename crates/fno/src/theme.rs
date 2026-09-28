@@ -27,8 +27,9 @@ pub struct Theme {
     /// (via `pane_paint`'s outline arm) and every modal/popover border. A
     /// named theme defaults it to its own `brand` (the ruling: borders wear
     /// the brand), and `mux.theme.border` overrides it everywhere at once.
-    /// `terminal` keeps its Indexed(3) brand; `cell_style` never reads the
-    /// field under `inherit`, so the chrome render stays byte-identical.
+    /// `terminal` keeps its Indexed(3) brand; under `inherit` the field is
+    /// read only for the border role, so the rest of the chrome render stays
+    /// byte-identical while an override still reaches every border.
     pub border: Color,
     pub title: Color,
     /// The brand accent: selection, the active tab, the focused frame, the
@@ -221,6 +222,11 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             Role::Stamp => (Color::Default, Color::Default, cell_flags::INVERSE),
             // The backlog panel's slots resolved above the theme split.
             // Border and the chrome slots: plain inverse.
+            // The border is the exception: it reads `t.border` under inherit
+            // too, because the field IS the terminal theme's own amber
+            // (Indexed(3)), and an explicit mux.theme.border override has to
+            // recolor every border under every theme, this one included.
+            Role::Border => (t.border, Color::Default, 0),
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
     }
@@ -614,10 +620,11 @@ mod tests {
     fn terminal_is_a_true_no_op_on_color() {
         // The load-bearing property: under terminal every role resolves to
         // Default fg/bg, so the flag set alone carries every visual distinction
-        // and a pre-theme render is byte-identical.
+        // and a pre-theme render is byte-identical. Border is the one named
+        // exception: it reads the theme's own Indexed(3) amber (and any
+        // mux.theme.border override), the same field the pane frame paints.
         let t = theme_terminal();
         for role in [
-            Role::Border,
             Role::Title,
             Role::Chip,
             Role::Subtitle,
