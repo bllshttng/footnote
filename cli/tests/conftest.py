@@ -285,6 +285,14 @@ def _dev_build_absent() -> bool:
 
 
 @pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Show slow tests on smoke shards to measure the per-test ceiling."""
+    if os.environ.get("FNO_PYTEST_SHARD") and config.option.durations is None:
+        config.option.durations = 15
+        config.option.durations_min = 30.0
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Keep filed parallel racers on one worker without skipping them, and
     skip store-backed tests where no keeper binary can spawn."""

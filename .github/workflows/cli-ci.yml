@@ -349,6 +349,9 @@ jobs:
   # measured legs finish below the cap.
   # If a shard approaches the step cap below, split again or cut work. Do not
   # raise either cap.
+  # A hang must stay cheap: the per-test ceiling and every timeout marker stay
+  # at or under one fifth of the 12-minute step cap, enforced by
+  # cli/tests/unit/test_pytest_timeout_configured.py. Each shard lists tests over 30s.
   smoke-pytest:
     needs: [pr-affected]
     if: ${{ !cancelled() && needs.pr-affected.outputs.python_full == 'true' }}
