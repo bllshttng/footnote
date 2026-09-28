@@ -268,11 +268,11 @@ def test_map_covers_current_surface_once():
     # `agents transcript-paths` action, freeing its row: 604 -> 603.
     # The decide shim's native retract door deleted its Python action,
     # freeing the `decide retract` row: 603 -> 602.
+    # The add/idea native doors deleted their Python actions, freeing two
+    # more rows: 602 -> 600.
     # The `backlog rank` T1 row stays: the mux menu binds the leaf and
     # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
     # is required even though the python leg is gone.
-    # Moving backlog add and idea out of the Python menu retires both rows:
-    # 602 -> 600.
     assert len(mapped) == 600, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
