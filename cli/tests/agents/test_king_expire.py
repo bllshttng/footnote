@@ -36,7 +36,10 @@ def _clear_parent_markers(monkeypatch):
 
 
 @pytest.fixture
-def court(tmp_path, monkeypatch):
+def court(tmp_path, monkeypatch, native_backlog_door):
+    """An fno home with a fake claude, and the CALLER identified as a live
+    king. Pins the lock-time identity match to this checkout's dev build
+    (the abdication vacate runs through Rust's crown-identity now)."""
     from tests.agents._fake_claude import install_fake_claude
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -179,6 +182,44 @@ def test_done_refuses_when_the_crown_moved_before_the_write(court, monkeypatch) 
     assert "no longer holds" in result.output
     assert manifest.exists(), "the heir's manifest must survive the refusal"
     assert _row("heir").crown_scope == SCOPE
+
+
+def test_done_refuses_a_row_rebound_inside_the_lock_window(court, monkeypatch) -> None:
+    """The vacate matches the caller's row by name AND session under
+    the lock. A row re-registered under the same name with a new session (a
+    successor crowned over the same scope) keeps its crown; the old name-only
+    match vacated the wrong session's crown."""
+    _seat("sitting-king", CALLER_SESSION, cwd=str(court))
+    from fno.agents import registry as registry_mod
+
+    real_update = registry_mod.update_registry
+
+    def _rebind_then_update(fn):
+        # The row is dropped and re-registered under the same name with a new
+        # session between the CLI's caller read and its vacate write.
+        real_update(
+            lambda rows: [
+                (
+                    replace(row, harness_session_id="successor-session")
+                    if row.name == "sitting-king"
+                    else row
+                )
+                for row in rows
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _rebind_then_update)
+
+    result = _done()
+
+    assert result.exit_code == 1, result.output
+    assert "no longer holds" in result.output
+    row = _row("sitting-king")
+    assert (row.crown_level, row.crown_scope) == (2, SCOPE), (
+        "the rebound row keeps its crown"
+    )
+    assert row.harness_session_id == "successor-session"
 
 
 def test_done_leaves_a_successor_manifest_crowned_in_the_vacate_window(
@@ -393,16 +434,19 @@ def test_an_orphaned_scope_writes_the_manifest_clear_event(court, monkeypatch) -
 
 def _stub_graph(monkeypatch, projects: dict[str, str]) -> None:
     """Feed find_presiding_crown the epic -> project read the real graph
-    gives it; the tmp court has no tracker entries of its own."""
-    import fno.tracker.metadata as metadata
+    gives it, at the seam the CLI reads (court's ``_graph_index``). Stubbing
+    the tracker module two layers down made the stub read whatever state a
+    sibling test left ``fno.tracker.metadata`` in, and the presiding path
+    answered "graph unreadable" for every crown in the room."""
+    import fno.agents.court as court_mod
 
     monkeypatch.setattr(
-        metadata,
-        "read_entries",
-        lambda kind: [
-            {"id": epic, "type": "epic", "project": proj}
+        court_mod,
+        "_graph_index",
+        lambda: {
+            epic: {"id": epic, "type": "epic", "project": proj}
             for epic, proj in projects.items()
-        ],
+        },
     )
 
 
