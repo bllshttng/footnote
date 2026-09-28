@@ -222,7 +222,7 @@ fn status_ci_maps_the_rollup_rows() {
 /// construction the Python leg's fake runner drove at capture time.
 fn pr_json_from(name: &str) -> Value {
     let fake = FakeGh::from_fixture(name);
-    read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42).unwrap()
+    read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap()
 }
 
 /// The six live-read fixtures replay through read_pr + verdict_for and every
@@ -239,7 +239,7 @@ fn read_fixtures_replay_to_the_golden_verdict() {
     ] {
         let fixture = load_fixture(name);
         let fake = FakeGh::from_fixture(name);
-        let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42)
+        let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None)
             .unwrap_or_else(|e| panic!("{name}: read failed: {}", e.text));
         let expected: Value =
             serde_json::from_str(fixture["expected"]["stdout"].as_str().unwrap()).unwrap();
@@ -271,7 +271,7 @@ fn expected_repr_code(fixture: &Value) -> i32 {
 #[test]
 fn red_fixture_collects_the_golden_failures() {
     let fake = FakeGh::from_fixture("red_detailed_capped");
-    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42).unwrap();
+    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap();
     let rollup = without_coverage_statuses(pr_json["statusCheckRollup"].as_array().unwrap());
     let failing: Vec<Value> = crate::check_supersession::latest_per_name(&Value::Array(rollup))
         .as_array()
@@ -308,7 +308,7 @@ fn refusal_reads_the_rate_limit_class() {
     let stderr = fixture["inputs"]["fetch_stderr"].as_str().unwrap();
     let mut fake = FakeGh::from_fixture("rest_refusal_rate_limit");
     fake.pulls_fail = Some(stderr.to_string());
-    let err = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42).unwrap_err();
+    let err = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap_err();
     assert_eq!(err.rate_limit_class, "secondary", "rate limit class");
     assert!(
         err.text.contains(stderr),
@@ -332,7 +332,7 @@ fn prior_row_replays_failures_by_job_id_with_no_log_reads() {
         known.insert(id, f.clone());
     }
     let fake = FakeGh::from_fixture("prior_row_replays_failures");
-    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42).unwrap();
+    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap();
     let rollup = without_coverage_statuses(pr_json["statusCheckRollup"].as_array().unwrap());
     let failing: Vec<Value> = crate::check_supersession::latest_per_name(&Value::Array(rollup))
         .as_array()
@@ -389,7 +389,7 @@ fn job_log_caches_one_attempt_and_never_a_failure() {
 #[test]
 fn cancelled_reads_red_and_unsettled() {
     let fake = FakeGh::from_fixture("pending_mixed");
-    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42).unwrap();
+    let pr_json = read_pr(&fake, Path::new("/tmp"), "Owner/Repo", 42, None).unwrap();
     let rollup = without_coverage_statuses(pr_json["statusCheckRollup"].as_array().unwrap());
     let (verdict, code, counts) = verdict_for(&rollup);
     assert_eq!(verdict, "red");

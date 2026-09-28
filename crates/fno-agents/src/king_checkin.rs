@@ -1118,6 +1118,19 @@ fn r_territory(ctx: &Ctx) -> Result<Value, String> {
     Ok(Value::Array(rows))
 }
 
+/// The state-root drift reading: undocumented top-level entries in the fno
+/// state root. A failed doc or root read is a READER FAILED line, never a
+/// silent zero (the unmeasured-state rule).
+fn r_state_root_drift() -> Result<Value, String> {
+    let home = crate::paths::AgentsHome::from_env();
+    let state_root = crate::reclaim::reclaim_state_root(&home);
+    let rep = crate::state_root_drift::drift_report(&state_root)?;
+    Ok(json!({
+        "undocumented": rep.count,
+        "entries": rep.entries,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // gather
 
@@ -1168,6 +1181,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
     take("blocked_child", r_blocked_child(&beat.board));
     take("court", r_court(&beat.folded));
     take("territory", r_territory(ctx));
+    take("state_root_drift", r_state_root_drift());
     take("capacity", r_capacity());
     let workers_payload = crate::king_answers::fetch_workers_payload();
     take(
@@ -1916,6 +1930,37 @@ fn render_lines(
                 for entry in attention {
                     lines.push(format!("  {entry}"));
                 }
+            }
+        }
+    }
+    match failed("state_root_drift") {
+        Some(r) => lines.push(format!("READER FAILED state_root_drift: {}", r.error)),
+        None => {
+            let drift = by_name("state_root_drift")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let count = drift
+                .get("undocumented")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if count == 0 {
+                lines.push("state_root_drift: clean".into());
+            } else {
+                let entries: Vec<String> = drift
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .take(5)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let more = if count > 5 { ", ..." } else { "" };
+                lines.push(format!(
+                    "state_root_drift: {count} undocumented top-level entries: {}{more}",
+                    entries.join(", ")
+                ));
             }
         }
     }

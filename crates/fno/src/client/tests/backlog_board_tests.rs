@@ -550,7 +550,9 @@ fn backlog_panel_cells_carry_distinct_attributes() {
     let id_col = band_line.find("x-2").expect("id on the cursor row");
     let band = cell_at(&frame, band_row, id_col, cols);
     assert_eq!(band.bg, view.theme.sel, "band surface");
-    assert_eq!(band.fg, view.theme.brand, "band accent text");
+    // x-b5b8: the cursor band text is the neutral stamp pair, like every
+    // selection band - the brand never fills a banded row's text.
+    assert_eq!(band.fg, view.theme.stamp, "band accent text");
     // A non-cursor card id keeps the accent slot and a plain title.
     let id_row = text
         .lines()
