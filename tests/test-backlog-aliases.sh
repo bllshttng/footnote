@@ -94,9 +94,10 @@ verb_in_help() {
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
 # the advertised menu instead. `find` retired from the python surface; the
-# store serves it natively.
+# store serves it natively. So did `add`/`idea` (the native create door): the
+# Rust backlog help advertises them, the python fallback help does not.
 out=$(run_fno backlog --help 2>&1)
-for verb in add done next get triage; do
+for verb in done next get triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else

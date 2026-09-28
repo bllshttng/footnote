@@ -68,7 +68,6 @@ config set
 context
 cost
 decide
-decide list
 decide reindex
 delivery
 do

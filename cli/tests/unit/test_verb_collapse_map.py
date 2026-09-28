@@ -271,7 +271,11 @@ def test_map_covers_current_surface_once():
     # The `backlog rank` T1 row stays: the mux menu binds the leaf and
     # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
     # is required even though the python leg is gone.
-    assert len(mapped) == 602, (
+    # The native create door took `backlog add` and `backlog idea`; their map
+    # rows stay for the same reason (main's deletion of them forgot this pin).
+    # The native decisions listing retired the `decide list` KEEP shim,
+    # freeing its row: counted from the merged file, 602 -> 601.
+    assert len(mapped) == 601, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -339,7 +343,8 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     # those paths; the ratchet reads the generated inventory): 82 -> 81.
     # The update cut-over retired the `backlog update` KEEP row: 81 -> 80.
     # The native retract port retired the old `decide retract` Python alias: 80 -> 79.
-    assert projected == 79
+    # The native decisions listing retired the `decide list` KEEP shim: 79 -> 78.
+    assert projected == 78
     assert projected <= 99
 
 
@@ -381,6 +386,7 @@ def test_live_baseline_matches_the_projected_allocation():
     # +2 for the inbox day boundary commands (start/end): the operator-facing
     # morning and end-of-day readbacks; the native fold verb behind them stays
     # unregistered on the shrink-only binary action list.
+    # -1 for the retired `decide list` leaf (the native decisions listing).
     assert len(leaves) <= 135
     assert "fno-agents" in leaves
 
