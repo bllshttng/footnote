@@ -2230,6 +2230,7 @@ fn the_harness_preselect_is_claude_then_codex_never_alphabetical() {
 
     // The mux-dir store outranks the ladder: the harness the last launch
     // used preselects even when claude sits first in the catalog.
+    std::fs::create_dir_all(crate::proto::mux_dir()).unwrap();
     std::fs::write(
         crate::proto::mux_dir().join("composer-last-harness"),
         "agy\n",
@@ -2626,7 +2627,7 @@ fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
     std::fs::write(&key_file, "FNO_TEST_DS_KEY=file-secret\n").unwrap();
     let mut v = view_with_launcher();
     let mut rows = catalog(&[("claude", true, true)]).unwrap();
-    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+    if let CatalogOutcome::Ok(choices, _, facts) = &mut rows {
         let c = &mut choices[0];
         c.models = vec![keyed(
             "deepseek-chat",
@@ -2634,6 +2635,9 @@ fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
             "FNO_TEST_DS_KEY",
             Some(key_file.display().to_string()),
         )];
+        // The launch runs with the worktree resolve on: a `never` project
+        // keeps the request on the wire without the worktree generation.
+        *facts = git_facts("never");
     }
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
