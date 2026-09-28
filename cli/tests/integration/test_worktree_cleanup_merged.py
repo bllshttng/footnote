@@ -1504,7 +1504,7 @@ def test_done_node_process_inside_keeps_tree(repo: Path, tmp_path: Path):
         proc.wait()
 
 
-# ── worktree.prune_done: what a done tree's tracked diff is worth (x-2ce9) ──
+# ── worktree.prune_done: what a done tree's tracked diff is worth ───────────
 
 
 def _add_modified_tracked_done_wt(canon: Path, name: str, node_id: str) -> Path:

@@ -766,13 +766,13 @@ salvage_untracked() {
 # short sha appended instead of being clobbered. Empty output = a clean tree,
 # nothing to salvage. A failure keeps the worktree (exit 5).
 salvage_tracked_ref() {
-  local node ref sha short
+  local node ref sha
   node="$(_salvage_node)"
   ref="refs/fno/salvage/$node"
   sha="$(git -C "$TARGET" stash create 2>/dev/null)" || return 5
   [[ -z "$sha" ]] && return 0
-  if git show-ref --verify --quiet "$ref"; then
-    if [[ "$(git rev-parse --verify "$ref")" == "$sha" ]]; then
+  if git -C "$TARGET" show-ref --verify --quiet "$ref"; then
+    if [[ "$(git -C "$TARGET" rev-parse --verify "$ref")" == "$sha" ]]; then
       DONE_NODE_SALVAGE_REF="$ref"
       return 0
     fi

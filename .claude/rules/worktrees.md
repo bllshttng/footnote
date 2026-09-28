@@ -46,9 +46,6 @@ The removal contract, missing until 174 trees piled up (74 GB). Four buckets, on
 - **`aggressive`** - salvage first, then prune. The gate's done-node receipt carries `prune_done=aggressive`. The salvage pass writes every tracked change (staged and unstaged) to a ref named after the node (`refs/fno/salvage/<node>`). The tree prunes once the 30 minute grace passes and no live session holds it. The untracked salvage runs under both values.
 
 Both values keep the branch. Both still block on conflicts (`unmerged`), a worker mid-setup (`unborn`), an unanswerable probe, a live claim, a live cwd, and the grace window. A malformed value degrades to `balanced`.
-- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual. The daemon reaper pays after a grace window.
-- **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
-- **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
 
 Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 
