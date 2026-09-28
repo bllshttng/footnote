@@ -2520,6 +2520,19 @@ pub fn seed_rows(path: &Path, rows: &[Value]) -> Result<(), StoreError> {
         .map_err(StoreError::Sqlite)
 }
 
+/// Fixture door for the create-surface golden replays: the Python fixture
+/// path derived slugs on every store write, so the captured fixtures carry
+/// them; the plain seed does not assign them.
+#[doc(hidden)]
+pub fn seed_rows_with_slugs(path: &Path, rows: &[Value]) -> Result<(), StoreError> {
+    let _lock = BoundedLock::acquire(path, Duration::from_secs(10))?;
+    let mut seeded = rows.to_vec();
+    ensure_slugs(&mut seeded);
+    crate::backlog::authoritative_sync(path, &[], &seeded)
+        .map(|_| ())
+        .map_err(StoreError::Sqlite)
+}
+
 /// The narrowed read the merge-grant ops pay for: only the nodes a grant op
 /// can use (a PR's carriers, or the queue's grant candidates plus every
 /// carrier of their PR numbers).

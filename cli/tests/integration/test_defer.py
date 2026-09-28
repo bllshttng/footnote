@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -122,7 +123,7 @@ def test_status_deferred_derived_from_field(tmp_graph, tmp_path):
 
 def test_deferred_overrides_blocked(tmp_graph, tmp_path):
     """Deferred wins over blocked-by an unresolved blocker."""
-    a = _invoke("--json", "backlog", "add", "Blocker A")
+    a = run_native_create(tmp_graph, "add", "Blocker A", "--difficulty", "medium")
     blocker_id = json.loads(a.stdout)["id"]
 
     plan = tmp_path / "blocked-plan.md"
@@ -164,7 +165,7 @@ def test_deferred_does_not_override_done(tmp_graph, tmp_path):
     commit_rows_via_store(tmp_graph, stamp_deferred)
 
     # Trigger recompute via any mutation
-    _invoke("backlog", "add", "trigger")
+    run_native_create(tmp_graph, "add", "trigger", "--difficulty", "medium")
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "done", (
@@ -474,10 +475,10 @@ def test_triage_apply_exits_nonzero_on_drops(tmp_graph, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _seed_idea(label: str) -> str:
+def _seed_idea(g, label: str) -> str:
     """File a bare idea node and return its id."""
-    r = _invoke("--json", "backlog", "add", label)
-    assert r.exit_code == 0, r.output
+    r = run_native_create(g, "add", label, "--difficulty", "medium")
+    assert r.exit_code == 0, r.stderr
     return json.loads(r.stdout)["id"]
 
 
@@ -591,7 +592,7 @@ def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path)
     done_node = _seed_with_plan(tmp_path, "Batch Done")
     _native_update(tmp_graph, done_node, "--completion-note", "batch defer fixture")
     _invoke("backlog", "done", done_node, "--skip-stamp")
-    idea_node = _seed_idea("Batch Idea")
+    idea_node = _seed_idea(tmp_graph, "Batch Idea")
 
     r = _invoke("backlog", "defer", done_node, idea_node, "--reason", "park")
     assert r.exit_code == 2, r.output

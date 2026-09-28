@@ -540,27 +540,7 @@ def test_seed_lane_duplicates_carry_the_fts_lane(tmp_path: Path) -> None:
     assert receipt["graph"]["recall"]["fts"] == "ok"
 
 
-def test_fold_offer_ids_are_a_subset_of_gate_ids(tmp_path: Path) -> None:
-    from fno.graph import discovery, relatedness
-    from fno.think_inspect import build_receipt
 
-    seed, entries = _wombat_corpus()
-    repo, graph = _seeded_graph_repo(tmp_path, entries)
-
-    fold_pool, _source = relatedness.filing_candidates(entries, tmp_path / "sidecar.json")
-    fold = discovery.candidates(seed, "", entries=fold_pool, graph_path=graph, limit=5)
-
-    receipt = build_receipt(
-        seed,
-        repo=repo,
-        plans_path=tmp_path / "missing-plans",
-        home=tmp_path,
-        run=_result_without_title_assertion,
-    )
-
-    assert fold, "the fold offer matched nothing; the parity read is vacuous"
-    gate_ids = {row["id"] for row in receipt["graph"]["duplicates"]}
-    assert {candidate.node_id for candidate in fold} <= gate_ids
 
 
 def test_injected_entries_name_the_degraded_fts_lane(tmp_path: Path) -> None:

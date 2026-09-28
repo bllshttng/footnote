@@ -237,13 +237,24 @@ pub fn run(tail: &[String]) -> i32 {
         );
         return 2;
     }
-    if args.fts {
-        eprintln!(
-            "warning: fts unavailable (the native find has no FTS cache); \
-             using substring search"
-        );
-    }
     let graph_path = super::settings::graph_path();
+    // --fts rides the native FTS5 index (search.rs): the ids come back best
+    // first and the pool filters still apply. An unavailable index degrades
+    // to the substring search with the same warning the gap shipped with.
+    let fts_ids: Option<Vec<String>> = if args.fts {
+        match super::search::search(&super::api::Store::new(&graph_path), &args.query, None) {
+            Ok(ids) => Some(ids),
+            Err(_) => {
+                eprintln!(
+                    "warning: fts unavailable (the native find has no FTS cache); \
+                     using substring search"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     // The store's own rows, verbatim the way the keeper serves them; the
     // `--json` render re-orders into the model dump shape, the TSV rows read
     // the live fields off the raw row.
@@ -269,7 +280,7 @@ pub fn run(tail: &[String]) -> i32 {
         .filter(|r| r.get("archived_at").is_none())
         .cloned()
         .collect();
-    let mut matched = resolve_against(&live, &args);
+    let mut matched = resolve_against(&live, &args, &fts_ids);
     matched.retain(|e| passes_filters(e, &args));
     if matched.is_empty() {
         let archived: Vec<Value> = entries
@@ -277,7 +288,7 @@ pub fn run(tail: &[String]) -> i32 {
             .filter(|r| r.get("archived_at").is_some())
             .cloned()
             .collect();
-        let mut hits = resolve_against(&archived, &args);
+        let mut hits = resolve_against(&archived, &args, &fts_ids);
         hits.retain(|e| passes_filters(e, &args));
         for h in hits {
             let mut row = h.clone();
@@ -309,14 +320,33 @@ pub fn run(tail: &[String]) -> i32 {
     0
 }
 
-/// Resolve against one pool: exact tiers, then the ab- prefix tier, then the
-/// describe-it search.
-fn resolve_against(pool: &[Value], args: &FindArgs<'_>) -> Vec<Value> {
+/// Resolve against one pool: exact tiers, then the ab- prefix tier, then
+/// the describe-it search. With `--fts`, the FTS ids order the search lane
+/// (best first); an unavailable index keeps the substring fallback.
+fn resolve_against(
+    pool: &[Value],
+    args: &FindArgs<'_>,
+    fts_ids: &Option<Vec<String>>,
+) -> Vec<Value> {
     if let Some(candidates) = exact_tier(pool, args.query) {
         return candidates;
     }
     if args.query.starts_with("ab-") {
         return ab_prefix_hits(pool, args.query);
+    }
+    if let Some(ids) = fts_ids {
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(e) = pool
+                .iter()
+                .find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            {
+                out.push(e.clone());
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
     }
     search_entries(pool, args.query)
 }

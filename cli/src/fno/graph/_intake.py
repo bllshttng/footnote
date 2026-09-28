@@ -891,7 +891,7 @@ def detect_project(entries: list[dict]) -> str | None:
             continue
         # expanduser BEFORE normpath so historical entries stored with
         # tilde-form paths (e.g. "~/code/me/chingu") match the absolute
-        # repo_root. The writer side (cmd_add/cmd_idea) stores absolute
+        # repo_root. The writer side (the native create path) stores absolute
         # paths since PR #167, but pre-#167 entries and any direct edits
         # use ~. Without expanduser, the comparison silently never matches
         # and detect_project falls through to the global-scope fallback.
