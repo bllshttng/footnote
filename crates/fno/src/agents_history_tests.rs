@@ -116,7 +116,11 @@ fn transcript_fixture() -> (tempfile::TempDir, TranscriptFacts) {
 
 #[test]
 fn agents_history_card_joins_transcript_stages_and_events() {
-    let sources = specimen_sources(None, "glm-5.3-flash");
+    let mut sources = specimen_sources(None, "");
+    sources.registry.as_mut().unwrap()[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("requested_model");
     let (_dir, transcript) = transcript_fixture();
     let lines = card(SID, &sources, Some(&transcript));
     let card = lines.join("\n");
@@ -126,7 +130,7 @@ fn agents_history_card_joins_transcript_stages_and_events() {
     assert!(!card.contains("spawned as worker"));
     assert!(card.contains("node:       x-3344  Session card fixture"));
     assert!(card.contains("harness:    claude"));
-    assert!(card.contains("spawn glm-5.3-flash (registry requested_model)"));
+    assert!(card.contains("spawn glm-5.3-flash (first transcript turn)"));
     assert!(card.contains("observed claude-opus-5-5 (last turn 2026-09-23T14:01:16Z)"));
     assert!(card.contains("last glm-5.3-flash turn 2026-09-23T06:36:29Z, first claude-opus-5-5 turn 2026-09-23T14:01:16Z"));
     assert!(card.contains("between: adopt 2026-09-23T13:41:05Z, resume 2026-09-23T13:41:09Z, send 2026-09-23T14:01:04Z"));
