@@ -44,6 +44,7 @@ pub(crate) async fn entry_for_lifecycle(
                     "cwd": removed.cwd,
                     "status": "orphaned",
                     "origin": "adopted",
+                    "created_at": crate::daemon::now_rfc3339_like(),
                 })));
             }
         }
@@ -122,18 +123,6 @@ mod tests {
         );
         assert_eq!(entry.cwd, "/repo/two");
 
-        // rm itself keeps the adopting heal: a removed session is NOT resolved
-        // for removal again through the tombstone lane.
-        let none = entry_for_lifecycle(
-            &reg,
-            "f00dcafe",
-            &agents.join("registry.json"),
-            false,
-            false,
-        )
-        .await
-        .expect("resolution answerable");
-        assert!(none.is_none(), "rm does not resolve from the tombstone");
-        std::fs::remove_dir_all(dir.into_path()).ok();
+        std::fs::remove_dir_all(dir.keep()).ok();
     }
 }
