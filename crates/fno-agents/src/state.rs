@@ -1925,6 +1925,21 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
     result
 }
 
+/// Best-effort registry read for metadata that must not hold up delivery.
+/// Returns `None` when a writer owns the registry lock.
+pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
+    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
+        return Ok(None);
+    };
+    let result = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => read_registry_tolerant(path, &file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
+        Err(error) => Err(error.into()),
+    };
+    let _ = lock.unlock();
+    result.map(|(registry, _)| Some(registry))
+}
+
 /// The raw on-disk row count the typed decode is reconciled against:
 /// the canonical `agents` array, falling back to the legacy `entries` alias,
 /// mirroring [`Registry`]'s serde rename/alias precedence. A missing or
@@ -3159,6 +3174,23 @@ fn acquire_shared(lock_file: &Path) -> Result<File, StateError> {
         .open(lock_file)?;
     file.lock_shared()?;
     Ok(file)
+}
+
+fn try_acquire_shared(lock_file: &Path) -> Result<Option<File>, StateError> {
+    if let Some(parent) = lock_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_file)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateError> {

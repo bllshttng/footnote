@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - guard target subagent lifecycle
 # SubagentStart/SubagentStop hook: git checkpoints around subagent execution
 # SubagentStart: stash uncommitted changes as a recovery point
 # SubagentStop: log completion, optionally verify build

@@ -1724,7 +1724,7 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
         return Ok("agy plugin imported; hooks.json status unknown (no HOME)".to_string());
     };
     let hooks = home.join(".gemini").join("config").join("hooks.json");
-    let adapter = stage.join("hooks").join("agy-target-stop-hook.sh");
+    let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
     let crown = stage.join("hooks").join("agy-crown-inject.sh");
     let s = crate::agy_hooks::status(
         &hooks,

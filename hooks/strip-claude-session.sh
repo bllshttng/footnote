@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: commit-msg - strip Claude session URLs
 # strip-claude-session.sh - commit-msg hook: strip the private Claude session
 # URL from a commit message BEFORE the commit exists. scripts/ci/check-no-session-urls.sh
 # is only the backstop: once a commit carrying the URL is pushed, a force-push

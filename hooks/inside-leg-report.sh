@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - report inside-leg state
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
 PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - generated write guard
 # generated-write-guard.sh - PreToolUse hook: refuse Edit, Write, Bash writes,
 # and codex apply_patch on generated copies, because the next regeneration
 # silently wipes the edit. The refusal names the canonical source and the regen
