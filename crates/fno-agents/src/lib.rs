@@ -238,6 +238,7 @@ pub mod main_ci_proof;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_close;
+pub mod merge_freeze;
 pub mod merge_gates;
 pub mod merge_grant;
 pub mod merge_hold;

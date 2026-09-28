@@ -1271,6 +1271,42 @@ def _run_tick(
 _MERGE_FLOOR_S = 150.0
 
 
+def merge_freeze_refusal(pr: int) -> Optional[str]:
+    """The scoped merge freeze's answer for one PR, or None when it may merge.
+
+    The record lives in the agents home, written by the crown through the
+    authorized-merge verb's freeze ops; the merge owner's own Rust gate is
+    the authoritative reader and refuses off-list PRs on every merge path.
+    This pre-check only spares the arm's queue a round of doomed merges and
+    names the freeze in the arm's own receipt. Fail posture mirrors the
+    fleet breaker: an unreadable record refuses, absence is a real answer.
+    """
+    import json as _json
+
+    from fno.paths import agents_home_dir
+
+    path = Path(agents_home_dir()) / "merge-freeze.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"merge-freeze record unreadable ({exc}); the arm fails closed"
+    try:
+        record = _json.loads(raw)
+    except ValueError as exc:
+        return f"merge-freeze record unreadable ({exc}); the arm fails closed"
+    if not isinstance(record, dict) or record.get("version") != 1:
+        return f"merge-freeze record at {path} is not a version-1 freeze; the arm fails closed"
+    subject = record.get("subject")
+    allow = record.get("allow")
+    if not isinstance(subject, str) or not isinstance(allow, list):
+        return f"merge-freeze record at {path} is not a version-1 freeze; the arm fails closed"
+    if pr in allow:
+        return None
+    return f"a merge freeze holds ({subject}); PR {pr} is not on its allow-list"
+
+
 def run_execute_queue(
     queue: list,
     *,
@@ -1296,6 +1332,14 @@ def run_execute_queue(
     slowest = 0.0
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
+        # The scoped merge freeze: an off-list PR skips with a receipt naming
+        # the freeze; the merge owner's own gate refuses it on the merge path.
+        freeze_why = merge_freeze_refusal(pr)
+        if freeze_why:
+            _grant("held", pr, cand, grant_fields, reason=freeze_why)
+            emit("pr_watch_skipped", {"pr": pr, "reason": "merge-freeze"})
+            counts["held"] += 1
+            continue
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
         set_tick_phase("merge:prepare")
         try:

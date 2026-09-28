@@ -2165,7 +2165,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Err(message) => return (2, String::new(), message),
     };
     // The hold ops are merge-authority writes riding this verb's payload, not
-    // a new top-level root: `{"op": "hold-set"|"hold-release", ...}` answers
+    // a new top-level root: `{"op": "hold-set"|"freeze-set"|..., ...}` answers
     // with one receipt instead of a merge verdict.
     if payload
         .get("op")
@@ -2173,6 +2173,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         .is_some_and(|op| op.starts_with("hold-"))
     {
         let out = crate::merge_hold::run(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
+    // The freeze ops are the scoped merge freeze's transport, riding the same
+    // payload the hold ops use: `{"op": "freeze-set"|"freeze-clear"|"freeze-check",
+    // ...}` writes and reads the crown's freeze record.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("freeze-"))
+    {
+        let out = crate::merge_freeze::run(
             payload.get("op").and_then(Value::as_str).unwrap_or(""),
             &payload,
         );
@@ -2222,6 +2236,11 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // normally, and the quota ops above never touch the breaker.
     if !request.decide_only && matches!(request.effect, Effect::Merge | Effect::Arm) {
         if let Some((code, message)) = merges_breaker_refusal() {
+            return (code, String::new(), message);
+        }
+        // The scoped merge freeze: an off-list PR refuses with a receipt
+        // naming the freeze; an unreadable record refuses fail closed.
+        if let Some((code, message)) = crate::merge_freeze::refusal(request.pr) {
             return (code, String::new(), message);
         }
     }
