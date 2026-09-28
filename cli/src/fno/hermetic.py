@@ -112,6 +112,11 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # a developer's terminal reports its own palette, and a suite must not
     # resolve the theme from the machine it happens to run on.
     "COLORFGBG",
+    # The splash screen's animation suppression (splash.rs). Like NO_COLOR it
+    # SUPPRESSES behaviour rather than describing a capability, so an operator
+    # with reduced motion enabled would otherwise flip what the client draws
+    # under test.
+    "REDUCED_MOTION",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
     "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
