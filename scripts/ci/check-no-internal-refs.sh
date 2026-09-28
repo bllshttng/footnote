@@ -120,6 +120,10 @@ NODE_ID_ALLOWLIST=(
     "x-dddd"
     "x-eeee"
     "x-ffff"
+    # The dash-less twins of the repeated-letter pool, for examples of the
+    # compact shape the grammar accepts. Same contract: provably synthetic.
+    "xbbbb"
+    "xaaaa"
     "x-0000"
     "x-1111"
     "x-2222"
