@@ -59,9 +59,11 @@ pub(crate) struct FeedOverlay {
 /// always armed - history may have moved since the last open, and the fold is
 /// cheap and off-loop.
 pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay {
+    let items = prior.map(|f| f.items).unwrap_or_default();
+    let sel = first_item_slot(&items);
     FeedOverlay {
-        items: prior.map(|f| f.items).unwrap_or_default(),
-        sel: 0,
+        items,
+        sel,
         error: None,
         inflight: false,
         want: true,
@@ -271,7 +273,9 @@ fn pad_to_spans(row: &mut Vec<Span>, w: usize) {
 }
 
 /// The panel body as text: [`feed_panel_rows`] flattened, the shape the text
-/// tests read and `draw_feed_panel` no longer re-derives.
+/// tests read and `draw_feed_panel` no longer re-derives. Test-only: the
+/// paint path reads [`feed_panel_rows`] spans directly.
+#[cfg(test)]
 pub(crate) fn feed_panel_lines(
     o: &FeedOverlay,
     w: usize,
@@ -681,11 +685,6 @@ impl View {
         if self.feed.is_none() {
             return;
         }
-        let len = self
-            .feed
-            .as_ref()
-            .map(|f| display_slots(&f.items).len())
-            .unwrap_or(0);
         let feed_w = self.feed_panel_w();
         let d = if feed_w > 0 && col > self.term.1 - feed_w {
             let items = &self.feed.as_ref().unwrap().items;
@@ -766,7 +765,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
             f.items = items;
             match kept {
                 None => {
-                    f.sel = 0;
+                    f.sel = first_item_slot(&f.items);
                     view.feed_offset = 0;
                 }
                 Some((ts, kind, title)) => {
@@ -782,6 +781,15 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
         }
         Err(e) => f.error = Some(e),
     }
+}
+
+/// The first ITEM slot: where a fresh selection parks, so the marker never
+/// sits on a group header.
+pub(crate) fn first_item_slot(items: &[FeedItem]) -> usize {
+    display_slots(items)
+        .iter()
+        .position(|s| matches!(s, Slot::Item(_)))
+        .unwrap_or(0)
 }
 
 /// The SLOT index a storage index renders at, for selection-keeping across

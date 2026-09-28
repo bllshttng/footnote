@@ -1362,7 +1362,7 @@ mod tests {
         r.removed_by = "fno-py".into();
         r.verb = Some("fno-py agents spawn --substrate pane --crown".into());
         r.reason = Some("no unique codex rollout for this cwd after spawn".into());
-        r.crown = Some("L2 x-0e67".into());
+        r.crown = Some("L2 x-eeee".into());
         r.receipt = None;
         r.resume = None;
         r.cwd = None;
@@ -1379,7 +1379,7 @@ mod tests {
             row.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        assert_eq!(row.crown.as_deref(), Some("L2 x-0e67"));
+        assert_eq!(row.crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(row.detail, None);
     }
 
@@ -1408,8 +1408,8 @@ mod tests {
         // AC5: the same crown pair landing in both journals yields exactly
         // one granted and one vacated row.
         let crown = [
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-0e67"}}"#,
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crown_vacated","source":"python","data":{"cause":"succession","grantor":"vellum","holder":"warden","level":2,"scope":"x-0e67","successor":"jolly-finch"}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee"}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crown_vacated","source":"python","data":{"cause":"succession","grantor":"vellum","holder":"warden","level":2,"scope":"x-eeee","successor":"jolly-finch"}}"#,
         ]
         .join("\n");
         let both = format!("{crown}\n{crown}");
@@ -1425,12 +1425,12 @@ mod tests {
             .filter(|r| r.kind == "crown_vacated")
             .collect();
         assert_eq!(granted.len(), 1, "granted dedupes");
-        assert_eq!(granted[0].title, "jolly-finch crowned L2 x-0e67");
-        assert_eq!(granted[0].crown.as_deref(), Some("L2 x-0e67"));
+        assert_eq!(granted[0].title, "jolly-finch crowned L2 x-eeee");
+        assert_eq!(granted[0].crown.as_deref(), Some("L2 x-eeee"));
         assert_eq!(vacated.len(), 1, "vacated dedupes");
         assert_eq!(
             vacated[0].title,
-            "warden left L2 x-0e67: succession -> jolly-finch"
+            "warden left L2 x-eeee: succession -> jolly-finch"
         );
     }
 

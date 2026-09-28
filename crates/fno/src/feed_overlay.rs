@@ -183,11 +183,11 @@ mod tests {
 
     #[test]
     fn new_fields_deserialize_when_the_projection_sends_them() {
-        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-0e67","owner":"epic x-29a8 the epic","parent":"s-lead"}]"#;
+        let body = br#"[{"ts":"2026-09-28T16:48:49Z","kind":"session_reaped","title":"heir removed","reason":"why","crown":"L2 x-eeee","owner":"epic x-2222 the epic","parent":"s-lead"}]"#;
         let items = parse_feed(body, b"").expect("a body carrying the new fields parses");
         assert_eq!(items[0].reason.as_deref(), Some("why"));
-        assert_eq!(items[0].crown.as_deref(), Some("L2 x-0e67"));
-        assert_eq!(items[0].owner.as_deref(), Some("epic x-29a8 the epic"));
+        assert_eq!(items[0].crown.as_deref(), Some("L2 x-eeee"));
+        assert_eq!(items[0].owner.as_deref(), Some("epic x-2222 the epic"));
         assert_eq!(items[0].parent.as_deref(), Some("s-lead"));
     }
 

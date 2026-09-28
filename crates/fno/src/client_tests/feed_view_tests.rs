@@ -58,9 +58,10 @@ fn reaped_item(sid: &str, resume: &str) -> crate::feed_overlay::FeedItem {
 }
 
 fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
+    let sel = feed_view::first_item_slot(&items);
     FeedOverlay {
         items,
-        sel: 0,
+        sel,
         error: None,
         inflight: false,
         want: false,
@@ -124,11 +125,15 @@ fn view_with_rows(rows: Vec<AgentRow>) -> View {
 
 #[test]
 fn lines_render_newest_first_with_marker() {
-    let o = overlay(vec![
-        feed_item(Some("x-a"), Some("s-1")),
-        feed_item(Some("x-b"), Some("s-2")),
-        feed_item(Some("x-c"), Some("s-3")),
-    ]);
+    let o = {
+        let mut a = feed_item(Some("x-a"), Some("s-1"));
+        a.ts = "2026-09-02T16:27:06Z".into();
+        let mut b = feed_item(Some("x-b"), Some("s-2"));
+        b.ts = "2026-09-02T17:27:06Z".into();
+        let mut c = feed_item(Some("x-c"), Some("s-3"));
+        c.ts = "2026-09-02T18:27:06Z".into();
+        overlay(vec![a, b, c])
+    };
     let lines = feed_panel_lines(&o, W, ROWS, 0);
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
@@ -154,11 +159,15 @@ fn lines_render_newest_first_with_marker() {
 
 #[test]
 fn offset_windows_the_items() {
-    let o = overlay(vec![
-        feed_item(Some("x-a"), Some("s-1")),
-        feed_item(Some("x-b"), Some("s-2")),
-        feed_item(Some("x-c"), Some("s-3")),
-    ]);
+    let o = {
+        let mut a = feed_item(Some("x-a"), Some("s-1"));
+        a.ts = "2026-09-02T16:27:06Z".into();
+        let mut b = feed_item(Some("x-b"), Some("s-2"));
+        b.ts = "2026-09-02T17:27:06Z".into();
+        let mut c = feed_item(Some("x-c"), Some("s-3"));
+        c.ts = "2026-09-02T18:27:06Z".into();
+        overlay(vec![a, b, c])
+    };
     // Slot offset 1 skips the group header, so the newest row (x-c) leads
     // the window now.
     let lines = feed_panel_lines(&o, W, ROWS, 1);
@@ -248,10 +257,12 @@ fn click_resolver_inverts_the_painter() {
     // Row 0 is the panel header, the last row is the footer; painted row 1 is
     // the group HEADER (no detail), row 2 the first item. The resolver reads
     // the same slot list the painter drew.
+    // Distinct timestamps, so the slot order is total: newest first.
     let items: Vec<_> = (0..3)
         .map(|i| {
             let mut it = feed_item(Some("x-n"), Some("s-n"));
             it.title = format!("event {i}");
+            it.ts = format!("2026-09-02T1{i}:27:06Z");
             it
         })
         .collect();
@@ -268,7 +279,9 @@ fn click_resolver_inverts_the_painter() {
         None,
         "past the last item: blank"
     );
-    assert_eq!(feed_row_item(&items, 3, ROWS, 2), Some(0), "offset applies");
+    // Offset 2 scrolls the header and the newest row off: painted row 2 is
+    // now the OLDEST row (slot 3 = storage 0).
+    assert_eq!(feed_row_item(&items, 2, ROWS, 2), Some(0), "offset applies");
 }
 
 #[test]
@@ -277,11 +290,13 @@ fn a_click_on_a_feed_row_opens_that_rows_provenance() {
     // geometry the painter draws, hit = that row's provenance view. The deep
     // link moved to that view's own action; a click inspects, never attaches.
     let mut v = view_with_rows(vec![]);
-    v.feed = Some(overlay(vec![
-        feed_item(Some("x-a"), Some("s-1")),
-        feed_item(Some("x-b"), Some("s-2")),
-        feed_item(Some("x-c"), Some("s-3")),
-    ]));
+    let mut a = feed_item(Some("x-a"), Some("s-1"));
+    a.ts = "2026-09-02T16:27:06Z".into();
+    let mut b = feed_item(Some("x-b"), Some("s-2"));
+    b.ts = "2026-09-02T17:27:06Z".into();
+    let mut c = feed_item(Some("x-c"), Some("s-3"));
+    c.ts = "2026-09-02T18:27:06Z".into();
+    v.feed = Some(overlay(vec![a, b, c]));
     let w = v.feed_panel_w() as u16;
     assert!(w > 0, "the panel must render at the 100-col view");
     let col = v.term.1 - w + 2; // inside the panel text area
@@ -904,8 +919,8 @@ fn short_ts_renders_local_time() {
 
 // (AC10-EDGE) A settled fold goes stale and refolds on its own; the
 // operator's selected row survives the refresh.
-#[test]
-fn a_stale_fold_refolds_and_keeps_the_selection() {
+#[tokio::test]
+async fn a_stale_fold_refolds_and_keeps_the_selection() {
     let mut v = view_with_rows(vec![]);
     let mut it = feed_item(Some("x-a"), Some("s-1"));
     it.ts = "2026-09-28T16:00:00Z".into();

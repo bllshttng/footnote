@@ -391,7 +391,7 @@ mod tests {
             reason: Some(
                 "no unique codex rollout for this cwd after spawn, and here is a very long tail that cannot fit forty columns at all".into(),
             ),
-            crown: Some("L2 x-0e67".into()),
+            crown: Some("L2 x-eeee".into()),
             owner: Some("king jolly-finch L2".into()),
             parent: None,
         }
@@ -413,7 +413,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.starts_with("crown") && l.contains("L2 x-0e67")),
+                .any(|l| l.starts_with("crown") && l.contains("L2 x-eeee")),
             "{lines:?}"
         );
         assert!(

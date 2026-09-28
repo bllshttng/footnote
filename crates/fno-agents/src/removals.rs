@@ -6,9 +6,9 @@
 //! daemon/list_rows.rs joined those files with the event journal for a cause.
 //! But a row with no harness session identity is refused a receipt
 //! (`receipt.rs` builds none), so its removal exists ONLY as the
-//! `registry_row_removed` event the registry choke point emits. On
-//! 2026-09-28 that exact shape dropped a crowned heir from the feed (node
-//! x-4b87): the event sat in the store, the projection never read it.
+//! `registry_row_removed` event the registry choke point emits. Measured
+//! 2026-09-28: a crowned heir dropped out of the feed in exactly that
+//! shape - the event sat in the store, the projection never read it.
 //!
 //! The fold reads the receipts AND the registry events, keys every cause by
 //! session id, and recovers a receipt-less removal from its own event. Pure
@@ -399,7 +399,7 @@ mod tests {
             r#"{"ts":"2026-09-28T16:48:49Z","type":"registry_row_removed","source":"python","data":{"harness":"codex","harness_session_id":"","name":"jolly-finch","pid":40417,"reason":"row 'jolly-finch': missing harness session identity","receipt_staged":false,"remover":"fno-py","short_id":""}}"#,
         ]);
         let global = lines(&[
-            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-0e67,x-48b5","vacated_scope":null}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-eeee,x-4444","vacated_scope":null}}"#,
             r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_session_id_uncaptured","source":"python","data":{"harness":"codex","name":"jolly-finch","reason":"no unique codex rollout for this cwd after spawn"}}"#,
         ]);
         let out = fold(&[], &agent, &global);
@@ -416,7 +416,7 @@ mod tests {
             r.reason.as_deref(),
             Some("no unique codex rollout for this cwd after spawn")
         );
-        assert_eq!(r.crown.as_deref(), Some("L2 x-0e67,x-48b5"));
+        assert_eq!(r.crown.as_deref(), Some("L2 x-eeee,x-4444"));
         assert_eq!(r.resume, None, "no receipt, no resume line");
     }
 
