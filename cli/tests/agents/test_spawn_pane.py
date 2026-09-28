@@ -325,7 +325,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         lambda *_args, **_kwargs: [
             "/bin/sh",
             "-c",
-            'exec 3<"$1"; (sleep 3; printf "seed accepted\\n") & read submitted; printf "%s\\n" "$submitted"; sleep 60',
+            'exec 3<"$1"; (sleep 3; printf "seed accepted\\n") & read submitted; printf "%s\\n" "$submitted"; sleep 20',
             "sh",
             str(rollout),
         ],
@@ -538,7 +538,7 @@ sleep 5
             "--",
             "/bin/sh",
             "-c",
-            "sleep 60",
+            "sleep 30",
         ],
         cwd=repo,
         env=env,
