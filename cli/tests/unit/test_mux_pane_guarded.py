@@ -56,6 +56,14 @@ def _idle_pane(monkeypatch):
         lambda **_kwargs: None,
     )
     _stub_envelope(monkeypatch)
+    # The confirm lane routes to the Rust typed pane lane whenever a deployed
+    # binary resolves. This module pins the Python lane's confirm contract (the
+    # rust lane's own tests live in crates/fno-agents), so the resolve reads as
+    # absent here on machines that carry the binary -- the same condition CI's
+    # pytest shard manufactures by deleting it.
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda *args, **kwargs: None
+    )
 
 
 def _stub_envelope(monkeypatch):
