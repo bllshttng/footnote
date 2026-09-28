@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests._native_door import run_native
+
 from fno.paths_testing import use_tmpdir
 
 
@@ -114,6 +116,9 @@ def graph_cli_home(tmp_path: Path, monkeypatch) -> Path:
     use_tmpdir(monkeypatch, tmp_path)
     _seed_graph()
     monkeypatch.setattr(graph_cli, "_graph_path", lambda: paths.graph_json())
+    # The native door reads FNO_STATE_DIR first; name the same tmp root the
+    # settings file serves python, so door-driving tests see the same graph.
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
     return tmp_path
 
 
@@ -542,47 +547,31 @@ def test_spawn_bad_session_phase_refuses_before_spawn(
 
 def test_session_add_accepts_review_phase(graph_cli_home) -> None:
     """`session add --phase review` stamps and exits 0 (exit 2 before x-4342)."""
-    import fno.graph.cli as graph_cli
-
-    result = CliRunner().invoke(
-        graph_cli.cli,
-        [
-            "session", "add", NODE, "--phase", "review",
-            "--harness", "claude", "--session-id", FULL_UUID,
-            "--started-at", "2026-08-23T10:00:00Z", "--json",
-        ],
-        catch_exceptions=False,
+    code, out, err = run_native(
+        "backlog", "session", "add", NODE, "--phase", "review",
+        "--harness", "claude", "--session-id", FULL_UUID,
+        "--started-at", "2026-08-23T10:00:00Z", "--json",
     )
-    assert result.exit_code == 0, result.output
+    assert code == 0, f"{out}{err}"
     rows = _node_rows()
     assert len(rows) == 1 and rows[0]["phase"] == "review"
 
 
 def test_roster_renders_review_between_do_and_ship(graph_cli_home) -> None:
     """The lifecycle roster gains a review slot between do and ship."""
-    import fno.graph.cli as graph_cli
+    for phase, harness, sid, start, end in [
+        ("do", "codex", "c" * 32, "2026-08-23T09:00:00Z", "2026-08-23T10:00:00Z"),
+        ("review", "claude", FULL_UUID, "2026-08-23T10:00:00Z", "2026-08-23T11:00:00Z"),
+        ("ship", "codex", "d" * 32, "2026-08-23T11:00:00Z", "2026-08-23T12:00:00Z"),
+    ]:
+        code, out, err = run_native(
+            "backlog", "session", "add", NODE, "--phase", phase,
+            "--harness", harness, "--session-id", sid,
+            "--started-at", start, "--ended-at", end,
+        )
+        assert code == 0, f"{out}{err}"
 
-    CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "add", NODE, "--phase", "do",
-         "--harness", "codex", "--session-id", "c" * 32,
-         "--started-at", "2026-08-23T09:00:00Z", "--ended-at", "2026-08-23T10:00:00Z"],
-        catch_exceptions=False,
-    )
-    CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "add", NODE, "--phase", "review",
-         "--harness", "claude", "--session-id", FULL_UUID,
-         "--started-at", "2026-08-23T10:00:00Z", "--ended-at", "2026-08-23T11:00:00Z"],
-        catch_exceptions=False,
-    )
-    CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "add", NODE, "--phase", "ship",
-         "--harness", "codex", "--session-id", "d" * 32,
-         "--started-at", "2026-08-23T11:00:00Z", "--ended-at", "2026-08-23T12:00:00Z"],
-        catch_exceptions=False,
-    )
+    import fno.graph.cli as graph_cli
 
     lines, summary = graph_cli._lifecycle_roster(_node_rows())
     text = "\n".join(lines)
@@ -599,24 +588,18 @@ def test_roster_renders_review_between_do_and_ship(graph_cli_home) -> None:
 
 
 def test_reap_open_fills_review_row_and_keeps_it(graph_cli_home) -> None:
-    import fno.graph.cli as graph_cli
-
-    CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "add", NODE, "--phase", "review",
-         "--harness", "claude", "--session-id", FULL_UUID,
-         "--started-at", "2026-08-23T10:00:00Z"],
-        catch_exceptions=False,
+    run_native(
+        "backlog", "session", "add", NODE, "--phase", "review",
+        "--harness", "claude", "--session-id", FULL_UUID,
+        "--started-at", "2026-08-23T10:00:00Z",
     )
 
-    result = CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "reap-open", NODE, "--harness", "claude",
-         "--session-id", FULL_UUID, "--phase", "review", "--json"],
-        catch_exceptions=False,
+    code, out, err = run_native(
+        "backlog", "session", "reap-open", NODE, "--harness", "claude",
+        "--session-id", FULL_UUID, "--phase", "review", "--json",
     )
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.stdout)
+    assert code == 0, f"{out}{err}"
+    receipt = json.loads(out)
     assert receipt["row_closed"] is True
     assert receipt["row_removed"] is False
 
@@ -629,25 +612,19 @@ def test_reap_open_fills_review_row_and_keeps_it(graph_cli_home) -> None:
 def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
     """The death-cascade spelling: one session holding a do window AND a review
     window settles both - each row filled and kept."""
-    import fno.graph.cli as graph_cli
-
     for phase in ("execute", "review"):
-        CliRunner().invoke(
-            graph_cli.cli,
-            ["session", "add", NODE, "--phase", phase,
-             "--harness", "claude", "--session-id", FULL_UUID,
-             "--started-at", "2026-08-23T10:00:00Z"],
-            catch_exceptions=False,
+        run_native(
+            "backlog", "session", "add", NODE, "--phase", phase,
+            "--harness", "claude", "--session-id", FULL_UUID,
+            "--started-at", "2026-08-23T10:00:00Z",
         )
 
-    result = CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "reap-open", NODE, "--harness", "claude",
-         "--session-id", FULL_UUID, "--phase", "all", "--json"],
-        catch_exceptions=False,
+    code, out, err = run_native(
+        "backlog", "session", "reap-open", NODE, "--harness", "claude",
+        "--session-id", FULL_UUID, "--phase", "all", "--json",
     )
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.stdout)
+    assert code == 0, f"{out}{err}"
+    receipt = json.loads(out)
     assert receipt["row_removed"] is False and receipt["row_closed"] is True
 
     rows = _node_rows()
@@ -658,24 +635,18 @@ def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
 def test_reap_open_do_fills_and_keeps(graph_cli_home) -> None:
     """The do flavor fills ended_at and keeps the row (status unwedges either
     way, and the provenance survives), default phase."""
-    import fno.graph.cli as graph_cli
-
-    CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "add", NODE, "--phase", "do",
-         "--harness", "codex", "--session-id", "c" * 32,
-         "--started-at", "2026-08-23T10:00:00Z"],
-        catch_exceptions=False,
+    run_native(
+        "backlog", "session", "add", NODE, "--phase", "do",
+        "--harness", "codex", "--session-id", "c" * 32,
+        "--started-at", "2026-08-23T10:00:00Z",
     )
 
-    result = CliRunner().invoke(
-        graph_cli.cli,
-        ["session", "reap-open", NODE, "--harness", "codex",
-         "--session-id", "c" * 32, "--json"],
-        catch_exceptions=False,
+    code, out, err = run_native(
+        "backlog", "session", "reap-open", NODE, "--harness", "codex",
+        "--session-id", "c" * 32, "--json",
     )
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.stdout)
+    assert code == 0, f"{out}{err}"
+    receipt = json.loads(out)
     assert receipt["row_removed"] is False
     assert receipt["row_closed"] is True
     rows = _node_rows()

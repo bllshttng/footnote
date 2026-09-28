@@ -3741,11 +3741,9 @@ def cmd_provenance(
     typer.echo("\n".join(lines))
 
 
-# Session lifecycle verbs (stamp/close/reap) live in _session.py: this file is
-# over its line budget and shrink-only, so code a change touches moves out with it.
-from fno.graph._session import session_app  # noqa: E402
-
-cli.add_typer(session_app, name="session", hidden=True)
+# Session lifecycle verbs (add/open/close/backfill/reap-open) went native:
+# crates/fno-agents/src/backlog/session_cli.rs answers `fno backlog session`
+# at the door, and the Python surface no longer mounts a twin.
 
 
 # -- task rows + task claims (epic  group 3) --
@@ -9672,7 +9670,6 @@ def iter_backlog_registry():
         ("batch", _batch_cli),
         ("relatedness", _relatedness_cli),
         ("epic", _epic_cli),
-        ("session", session_app),
         ("task", task_app),
         ("collisions", collisions_app),
     ]

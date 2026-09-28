@@ -1,7 +1,6 @@
-//! What did a human type into a pane? The two rows the mux writes at its
-//! one human-keystroke choke point (`CoreMsg::Input`): `human_touch`
-//! steering telemetry (moved unchanged from server.rs) and the
-//! `operator_submit` witness recorded when a person's Enter reaches a pane.
+//! What did a human type into a pane? At its one human-keystroke choke point
+//! (`CoreMsg::Input`), the mux writes `human_touch` telemetry and the
+//! `operator_submit` / `operator_typing` witnesses.
 //! Machine transports (pane send, control.sock mail, codex turn/start)
 //! never reach that arm, so a row here is the positive marker that a
 //! person typed.
@@ -9,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+#[cfg(test)]
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -222,12 +222,10 @@ fn typing_row(
 }
 
 impl Core {
-    /// (graph node id, squad cwd) for a `human_touch` emit on `pane`. Node id:
-    /// the pane's `FNO_NODE` provenance; fallback, the owning squad's
-    /// cwd basename when it is node-id shaped (the worktree-per-node
-    /// convention). Neither -> None, and the event carries resolution=failed
-    /// rather than being dropped (AC4-FR).
-    pub(super) fn pane_touch_provenance(&self, pane: u64) -> (Option<String>, Option<String>) {
+    /// Node id for a `human_touch` event on `pane`: the pane's `FNO_NODE`
+    /// provenance, or a node-shaped owning-squad cwd basename. Missing
+    /// provenance is preserved as a present-null event field.
+    pub(super) fn pane_touch_node(&self, pane: u64) -> Option<String> {
         let cwd = self
             .session
             .find_pane(pane)
@@ -244,73 +242,40 @@ impl Core {
                     .filter(|b| super::node_id_shaped(b))
                     .map(str::to_owned)
             });
-        (node, cwd)
+        node
     }
 
-    /// Emit `human_touch` for one steering action on `pane` (W4 touch
-    /// telemetry). `coalesced` applies the per-pane window (inject bursts);
-    /// answer submits are one emit per action. The write rides the Python
-    /// `type` envelope via a fire-and-forget `fno doctor event emit` shell-out (the
-    /// digest idiom) - no Rust-side `kind`, so the three-places rule
-    /// never applies. The shell-out runs in the squad's cwd so the event
-    /// lands in that project's events.jsonl. A failure bumps
-    /// `touch_emit_failures` and never touches the steering path (AC4-ERR).
+    /// Append one coalesced touch row to the agents journal. A failed append
+    /// is counted and reported without changing input handling.
     pub(super) fn touch(&mut self, pane: u64, source: &'static str, coalesced: bool) {
         if coalesced && !touch_coalesce(&mut self.touch_last_emit, pane, Instant::now()) {
             return;
         }
-        // cfg!(test): in unit tests current_exe is the test binary, and
-        // exec'ing it with event-emit args would re-enter the test harness.
-        // FNO_TOUCH_EMIT=0 is the operator kill switch.
-        if cfg!(test) || std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
+        // This emergency switch controls telemetry only, never input witnesses.
+        if std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
             return;
         }
-        let (node, cwd) = self.pane_touch_provenance(pane);
-        let failures = Arc::clone(&self.touch_emit_failures);
-        tokio::spawn(async move {
-            let resolution = if node.is_some() { "ok" } else { "failed" };
-            let data = serde_json::json!({
+        let node = self.pane_touch_node(pane);
+        let resolution = if node.is_some() { "ok" } else { "failed" };
+        let event = serde_json::json!({
+            "ts": crate::review_invocation::review_invocation_timestamp(),
+            "type": "human_touch",
+            "source": "daemon",
+            "data": {
                 "graph_node_id": node,
                 "source": source,
                 "resolution": resolution,
-            })
-            .to_string();
-            const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut cmd = crate::process_admission::tokio_command(super::fno_bin());
-            cmd.args([
-                "doctor",
-                "event",
-                "emit",
-                "--type",
-                "human_touch",
-                "--source",
-                "daemon",
-                "--data",
-                &data,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            let ok = matches!(
-                tokio::time::timeout(
-                    TOUCH_EMIT_TIMEOUT,
-                    crate::process_admission::tokio_status(&mut cmd),
-                )
-                .await,
-                Ok(Ok(s)) if s.success()
-            );
-            if !ok {
-                // Counted AND visible (never swallowed): a 100%-failing
-                // emitter silently inflates the autonomy rate, so each miss
-                // logs to the server's stderr alongside the running total.
-                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
             }
         });
+        if crate::pane_send_audit::append_agents_event(
+            &crate::pane_send_audit::pane_send_audit_events_path(),
+            &event,
+        )
+        .is_err()
+        {
+            let n = self.touch_emit_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
+        }
     }
 
     /// One `operator_submit` witness row for a human Enter on `pane`: bind
@@ -321,9 +286,7 @@ impl Core {
     /// join it. A failed append bumps `touch_emit_failures` and never
     /// touches the keystroke path.
     pub(super) fn witness_submit(&self, pane: u64) {
-        let Some(event) = self.witness_row(pane, "operator_submit") else {
-            return;
-        };
+        let event = self.witness_row(pane, "operator_submit");
         // ponytail: the append runs inline on the core loop, one O_APPEND
         // line per Enter; move it off-loop if keystroke latency ever shows it.
         if crate::pane_send_audit::append_agents_event(
@@ -340,11 +303,9 @@ impl Core {
     /// One `operator_typing` witness row for a burst of keystrokes with no
     /// Enter on `pane` (C11 feed): the same binding and journal append as
     /// [`Self::witness_submit`], throttled to the touch burst window by the
-    /// caller. Honors the same `FNO_TOUCH_EMIT=0` kill switch.
+    /// caller. The human_touch kill switch does not suppress this witness.
     pub(super) fn witness_typing(&self, pane: u64) {
-        let Some(event) = self.witness_row(pane, "operator_typing") else {
-            return;
-        };
+        let event = self.witness_row(pane, "operator_typing");
         if crate::pane_send_audit::append_agents_event(
             &crate::pane_send_audit::pane_send_audit_events_path(),
             &event,
@@ -358,13 +319,8 @@ impl Core {
 
     /// The witness envelope for `pane` (`operator_submit` or
     /// `operator_typing`): bind the pane to its registry row (mux ref, then
-    /// attach), else its portal row. `None` only when the operator kill
-    /// switch `FNO_TOUCH_EMIT=0` is set.
-    fn witness_row(&self, pane: u64, kind: &str) -> Option<serde_json::Value> {
-        // The same operator kill switch `touch` honors.
-        if std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
-            return None;
-        }
+    /// attach), else its portal row.
+    fn witness_row(&self, pane: u64, kind: &str) -> serde_json::Value {
         let bound = super::agent_rows_join::bind_agent_to_pane(
             &self.agents,
             &self.session_name,
@@ -394,7 +350,7 @@ impl Core {
             ),
             None => (None, None, None),
         };
-        Some(match kind {
+        match kind {
             "operator_submit" => submit_row(
                 &self.session_name,
                 pane,
@@ -413,7 +369,7 @@ impl Core {
                 harness.as_deref(),
                 fno_id.as_deref(),
             ),
-        })
+        }
     }
 
     /// The tail of the `CoreMsg::Input` arm, one call from `handle_msg` so
@@ -463,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_touch_provenance_cwd_fallback_and_none() {
+    fn pane_touch_node_cwd_fallback_and_none() {
         use crate::tree::{Node, Tab};
         let mut core = super::super::tests::empty_core();
         // No PaneEntry exists for either pane (no FNO_NODE provenance), so
@@ -490,16 +446,10 @@ mod tests {
                 focus: 8,
             },
         );
-        let (node, cwd) = core.pane_touch_provenance(7);
-        assert_eq!(node.as_deref(), Some("x-cccc"));
-        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-cccc"));
-        // Unshaped basename: no node (the emit carries resolution=failed,
-        // never a drop - AC4-FR), but the squad cwd still routes the event.
-        let (node, cwd) = core.pane_touch_provenance(8);
-        assert!(node.is_none());
-        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/footnote"));
-        // Unknown pane: (None, None).
-        assert_eq!(core.pane_touch_provenance(99), (None, None));
+        assert_eq!(core.pane_touch_node(7).as_deref(), Some("x-cccc"));
+        // Unshaped basename: no node; the event carries a present null and failed resolution.
+        assert!(core.pane_touch_node(8).is_none());
+        assert!(core.pane_touch_node(99).is_none());
     }
 
     #[test]
@@ -882,6 +832,58 @@ mod tests {
             journal_rows(&dir, "operator_submit").is_empty(),
             "no Enter, no submit row"
         );
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn human_touch_event_uses_agent_journal_inline() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("human-touch");
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"ship it\r".to_vec(),
+        });
+
+        let rows = journal_rows(&dir, "human_touch");
+        assert_eq!(
+            rows.len(),
+            1,
+            "one touch event for the first key in a burst"
+        );
+        assert_eq!(rows[0]["type"], "human_touch");
+        assert_eq!(rows[0]["source"], "daemon");
+        assert_eq!(rows[0]["data"]["source"], "inject");
+        assert_eq!(rows[0]["data"]["resolution"], "failed");
+        assert_eq!(rows[0]["data"]["graph_node_id"], serde_json::Value::Null);
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_human_touch_append_is_counted_without_panicking() {
+        use crate::server::CoreMsg;
+        let (guard, dir) = witness_env("human-touch-failure");
+        let blocked_home = dir.join("file");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&blocked_home, b"not a directory").unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &blocked_home);
+        let mut core = typing_client_core();
+        core.handle(CoreMsg::Input {
+            id: 1,
+            bytes: b"ship it\r".to_vec(),
+        });
+
+        assert_eq!(
+            core.touch_emit_failures.load(Ordering::Relaxed),
+            2,
+            "both human_touch and operator_submit append failures are counted"
+        );
+
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
