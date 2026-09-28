@@ -40,6 +40,7 @@ pub mod relations;
 pub mod render;
 pub mod schema_v4;
 pub mod search;
+pub mod session_cli;
 pub mod sessions;
 pub mod settings;
 pub mod style_check;
