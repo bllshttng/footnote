@@ -688,13 +688,15 @@ impl View {
             .unwrap_or(0);
         let feed_w = self.feed_panel_w();
         let d = if feed_w > 0 && col > self.term.1 - feed_w {
+            let items = &self.feed.as_ref().unwrap().items;
+            // The resolver answers in STORAGE indexes; `sel` is a SLOT index.
             feed_row_item(
-                &self.feed.as_ref().unwrap().items,
+                items,
                 row as usize,
                 self.term.0 as usize,
                 self.feed_offset_clamped(),
             )
-            .map(|d| d.min(len.saturating_sub(1)))
+            .map(|storage| slot_of(items, storage))
             .unwrap_or(0)
         } else {
             0
@@ -947,11 +949,19 @@ pub(crate) async fn feed_keys(
         match tok {
             ModalKey::Esc => {}
             ModalKey::Up => {
-                f.sel = f.sel.saturating_sub(1);
+                // The marker skips headers: the nearest ITEM slot above.
+                let slots = display_slots(&f.items);
+                f.sel = (0..f.sel)
+                    .rev()
+                    .find(|s| matches!(slots.get(*s), Some(Slot::Item(_))))
+                    .unwrap_or(f.sel);
                 view.follow_feed_selection();
             }
             ModalKey::Down => {
-                f.sel = (f.sel + 1).min(len.saturating_sub(1));
+                let slots = display_slots(&f.items);
+                f.sel = (f.sel + 1..slots.len())
+                    .find(|s| matches!(slots.get(*s), Some(Slot::Item(_))))
+                    .unwrap_or(f.sel);
                 view.follow_feed_selection();
             }
             // Panning moves the TITLE only; the stamp, kind and node stay

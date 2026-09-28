@@ -1456,6 +1456,13 @@ mod tests {
             .find(|r| r.node == Some("x-child".into()))
             .unwrap();
         assert_eq!(child.owner.as_deref(), Some("king heir L2"));
+        // The crown row itself renders in the crowns band: no owner on it.
+        let granted = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "crown_granted")
+            .expect("the crown projects a granted row");
+        assert_eq!(granted.owner, None, "crown rows carry no owner");
         let epic = p
             .rows
             .iter()
@@ -1476,8 +1483,5 @@ mod tests {
             .find(|r| r.node == Some("x-epic".into()))
             .unwrap();
         assert_eq!(epic.owner, None);
-        // Crown rows render in the crowns band: no owner on them.
-        let granted = p.rows.iter().find(|r| r.kind == "crown_granted");
-        assert!(granted.is_none() || granted.unwrap().owner.is_none());
     }
 }
