@@ -444,6 +444,8 @@ def backlog_decide_retract(
 
     The retraction logic is native; this leaf exists so the old spellings
     keep resolving and the pinned surface sets do not shift.
+
+    Retractions are append-only and have no inverse.
     """
     import os
 
