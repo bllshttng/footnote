@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - setup nudge session start
 # SessionStart hook: nudge a brand-new user toward setup when no fno config
 # exists yet. Install lands the CLI but never prompts, so the setup wizard is
 # otherwise undiscoverable. One advisory line; goes silent the moment any

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - inject project vision
 # SessionStart hook: inject project vision from settings.yaml into context
 #
 # Reads vision and goals from settings.yaml so the agent has semantic

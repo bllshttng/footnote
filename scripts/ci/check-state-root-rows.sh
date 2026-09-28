@@ -50,7 +50,11 @@ if not doc.is_file() or not baseline.is_file():
     print(f"check-state-root-rows: {doc} or {baseline} is unreadable", file=sys.stderr)
     sys.exit(2)
 head = set(top_level_patterns(doc))
-base = {line.strip() for line in baseline.read_text().splitlines() if line.strip()}
+base = {
+    entry
+    for line in baseline.read_text().splitlines()
+    if (entry := line.partition("#")[0].strip())
+}
 banked = sorted(base - head)
 added = sorted(head - base)
 
@@ -112,7 +116,7 @@ if [[ "$SELF_TEST" == 1 ]]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     printf '| `graph.db` | store |\n| `backups/` | rotation |\n' >"$tmp/base.md"
-    printf 'backups\ngraph.db\n' >"$tmp/baseline.txt"
+    printf 'backups\ngraph.db # fno-rename-keep: historical row\n' >"$tmp/baseline.txt"
     printf '| `graph.db` | store |\n| `backups/` | rotation |\n| `new-junk.out` | someone |\n' >"$tmp/grown.md"
     printf '| `graph.db` | store |\n' >"$tmp/shrunk.md"
     check_rows "$tmp/base.md" "$tmp/baseline.txt" --quiet || {

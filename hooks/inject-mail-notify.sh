@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: UserPromptSubmit - notify about pending mail
 # hooks/inject-mail-notify.sh -- durable mail delivery at the turn boundary.
 #
 # The hidden CLI verb owns rendering, UserPromptSubmit JSON serialization,

@@ -34,8 +34,6 @@ runner = CliRunner()
 # --------------------------------------------------------------------------- #
 
 PHASE2_HELP_SURFACES: dict[str, list[str]] = {
-    # backlog-add / backlog-idea moved with the create port: the native
-    # binary answers --help now (pinned below, next to native-find).
     "backlog-intake": ["backlog", "intake", "--help"],
     # backlog-update moved with the update port: the native binary answers
     # --help now (pinned below, next to native-find).
@@ -103,6 +101,16 @@ def test_backlog_update_native_help_registers() -> None:
     code, out, err = run_native("backlog", "update", "--help")
     assert code == 0, err
     assert "Usage" in out + err
+
+
+def test_backlog_native_help_registers_add_and_idea() -> None:
+    """The Rust dispatcher owns the backlog create groups after the port."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "--help")
+    assert code == 0, err
+    assert "add" in out
+    assert "idea" in out
 
 
 @pytest.fixture

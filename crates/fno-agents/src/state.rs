@@ -1893,35 +1893,6 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
     Ok(registry)
 }
 
-/// Best-effort registry read for enrichment-only callers: a lock contended by
-/// a writer degrades to no registry instead of blocking the caller behind it.
-/// The envelope renderer reads the registry with `.ok()` semantics already
-/// (a missing or unreadable file renders unresolved identities), so a skipped
-/// read costs the same, while a blocking one deadlocked the send child behind
-/// the Python stamp lock until the subprocess timeout killed it.
-pub fn load_registry_best_effort(path: &Path) -> Option<Registry> {
-    let lock_file = registry_lock_path(path);
-    if let Some(parent) = lock_file.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_file)
-        .ok()?;
-    if lock_file.try_lock_shared().is_err() {
-        return None;
-    }
-    let result = match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(path, &file).ok().map(|(r, _)| r),
-        Err(_) => None,
-    };
-    let _ = lock_file.unlock();
-    result
-}
-
 /// [`load_registry`] plus the raw on-disk row count the typed decode must be
 /// reconciled against. The daemon's startup assertion (AC5) reads both:
 /// a registry whose rows the typed reader dropped (today only a future-schema
@@ -1952,6 +1923,21 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
     };
     let _ = lock.unlock();
     result
+}
+
+/// Best-effort registry read for metadata that must not hold up delivery.
+/// Returns `None` when a writer owns the registry lock.
+pub fn try_load_registry(path: &Path) -> Result<Option<Registry>, StateError> {
+    let Some(lock) = try_acquire_shared(&registry_lock_path(path))? else {
+        return Ok(None);
+    };
+    let result = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => read_registry_tolerant(path, &file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Registry::default(), 0)),
+        Err(error) => Err(error.into()),
+    };
+    let _ = lock.unlock();
+    result.map(|(registry, _)| Some(registry))
 }
 
 /// The raw on-disk row count the typed decode is reconciled against:
@@ -3188,6 +3174,23 @@ fn acquire_shared(lock_file: &Path) -> Result<File, StateError> {
         .open(lock_file)?;
     file.lock_shared()?;
     Ok(file)
+}
+
+fn try_acquire_shared(lock_file: &Path) -> Result<Option<File>, StateError> {
+    if let Some(parent) = lock_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_file)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(mut file: &File) -> Result<T, StateError> {

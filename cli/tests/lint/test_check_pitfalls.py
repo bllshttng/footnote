@@ -15,6 +15,7 @@ from tests.fixtures.graph_seed import seed_graph
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -27,31 +28,28 @@ NEXT_HEADING = "## Repository"
 
 
 def _run(
-    target: Path, *, lint: Path = LINT, env_extra: dict | None = None,
-    config_dir: Path | None = None,
+    target: Path, *, lint: Path = LINT, env_extra: dict | None = None
 ) -> subprocess.CompletedProcess:
     # Fixture corpora name no real nodes, so resolution must not consult the
     # operator's live graph: pin an empty state root with an absent store.
-    # The fixture config lands in config_dir (default: beside the target) -
-    # beside a symlinked target would write through the link into the real
-    # repo, which the session tripwire correctly reads as a prod leak.
-    base = config_dir if config_dir is not None else target.parent
-    state = base / "state"
-    config = base / "config.toml"
-    config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
-    env = {
-        **os.environ,
-        "FNO_CONFIG": str(config),
-        "FNO_GRAPH_JSON": str(state / "graph.json"),
-    }
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        ["bash", str(lint), str(target)],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="fno-pitfalls-test-") as temp_dir:
+        config_dir = Path(temp_dir) if target.resolve() == AGENTS.resolve() else target.parent
+        state = config_dir / "state"
+        config = config_dir / "config.toml"
+        config.write_text(f'state_dir = "{state}"\n', encoding="utf-8")
+        env = {
+            **os.environ,
+            "FNO_CONFIG": str(config),
+            "FNO_GRAPH_JSON": str(state / "graph.json"),
+        }
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", str(lint), str(target)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def _fixture(tmp_path: Path, entries):
@@ -85,9 +83,7 @@ def test_symlinked_repo_root_still_checks_bytes(tmp_path: Path) -> None:
     """AC5-HP: the byte gate must survive a symlinked repo root."""
     link = tmp_path / "repo-link"
     link.symlink_to(ROOT)
-    # The fixture config stays in tmp: beside the link-resolved target it
-    # would write through the symlink into the real repo root.
-    r = _run(link / "AGENTS.md", config_dir=tmp_path)
+    r = _run(link / "AGENTS.md")
     assert r.returncode == 0, r.stderr
     assert "preamble headroom" in r.stdout
 
