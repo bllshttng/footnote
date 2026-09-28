@@ -200,10 +200,11 @@ def _state_roots() -> list[Path]:
     try:
         from fno.paths import agents_registry_path
 
-        # The registry module's real write directory, which FNO_AGENTS_HOME
-        # relocates independently of state_dir: a worker that cannot write it
-        # cannot stamp its row after a hosted delivery.
-        out.append(agents_registry_path().parent)
+        # The registry module's real write directory; FNO_AGENTS_HOME
+        # relocates it independently of state_dir.
+        registry_dir = agents_registry_path().parent
+        if not any(registry_dir.is_relative_to(root) for root in out):
+            out.append(registry_dir)
     except Exception:
         pass
     return out

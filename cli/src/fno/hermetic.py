@@ -113,8 +113,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # resolve the theme from the machine it happens to run on.
     "COLORFGBG",
     # The OS reduced-motion request (splash.rs animated()): a developer's
-    # accessibility setting decides whether the splash animates, so splash
-    # output is not comparable across machines unless it is scrubbed.
+    # accessibility setting decides whether the splash animates at all.
     "REDUCED_MOTION",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
