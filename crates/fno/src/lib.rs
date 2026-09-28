@@ -70,6 +70,7 @@ pub mod sprites;
 pub mod squad;
 pub mod squad_cascade;
 pub mod squad_store;
+pub mod state_layout;
 pub mod store_client;
 pub mod templates;
 #[cfg(test)]

@@ -180,10 +180,13 @@ impl RepairFacts {
         }
     }
 
-    /// The facts from this machine: the install pin under `~/.fno`.
+    /// The facts from this machine: the install pin under `~/.fno`, resolved
+    /// through the layout table (place) so a migrated install reads
+    /// `install/source-pin.json`.
     pub fn live(findings: &[Finding]) -> Self {
         let pin = std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".fno").join("source-pin.json"))
+            .map(PathBuf::from)
+            .map(|root| crate::state_layout::place(&root.join(".fno"), "source-pin.json"))
             .and_then(|p| std::fs::read_to_string(p).ok());
         Self::new(install_off_main(pin.as_deref()), findings)
     }

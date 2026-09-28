@@ -155,6 +155,11 @@ fn main() {
         opts.reconcile_on_start = false;
     }
 
+    // State-root migration: move the layout-table entries into their
+    // subfolders BEFORE the daemon opens a store. Best effort; a refusal
+    // retries on the daemon's reclaim lane.
+    fno_agents::state_layout::run_at_daemon_start(&home);
+
     let outcome = rt.block_on(run(home, opts));
 
     // Bound the wind-down instead of letting `rt` drop at the end of `main`.

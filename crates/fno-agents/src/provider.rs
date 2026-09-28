@@ -534,7 +534,7 @@ pub(crate) fn plugin_root() -> Option<PathBuf> {
         Ok(home) => PathBuf::from(home),
         Err(_) => home_dir()?,
     };
-    pointer.push("plugin-root");
+    pointer = crate::state_layout::place(&pointer, "plugin-root");
     let text = std::fs::read_to_string(pointer).ok()?;
     let root = PathBuf::from(text.trim());
     // Only a root carrying the plugin manifest answers: a stale pointer

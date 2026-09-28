@@ -1198,6 +1198,27 @@ def test_ledger_json_honors_fno_state_dir_env(
     assert ledger_json() == (tmp_path / "pinned").resolve() / "ledger.json"
 
 
+def test_migrate_from_checkout_refuses_the_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC5-EDGE: the state root is not a checkout journal. A session whose
+    cwd was $HOME outside a checkout once moved the GLOBAL journal into a fake
+    space behind a MOVED-TO pointer at the top level of the state root; the
+    refusal keeps the pointer and the fake-space move from ever recurring."""
+    state = tmp_path / ".fno"
+    state.mkdir()
+    old = state / "events.jsonl"
+    old.write_text("global rows\n")
+    new = tmp_path / "spaces" / "x" / "events.jsonl"
+    monkeypatch.setenv("FNO_STATE_DIR", str(state))
+
+    from fno.paths import migrate_from_checkout
+
+    assert migrate_from_checkout(old, new) is False
+    assert old.exists()
+    assert not (state / "MOVED-TO").exists()
+
+
 def test_agents_registry_path_follows_declared_agents_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
