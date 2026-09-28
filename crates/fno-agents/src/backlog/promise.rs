@@ -123,7 +123,7 @@ fn promise_refusal_d(node_id: &str, deferred: &[Value]) -> String {
         rows.push(format!("    {id}: {label}"));
     }
     let more = if deferred.len() > cap {
-        format!("\n    ...and {}", deferred.len() - cap)
+        format!("\n    ...and {} more", deferred.len() - cap)
     } else {
         String::new()
     };
