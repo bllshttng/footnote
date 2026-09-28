@@ -1988,6 +1988,18 @@ def register_existing_session(
     # anycast or a lane cap.
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
+    # A restore can strip a row's stamp; a manifest naming this session re-stamps it when bare.
+    from fno.king.state import manifest_crown_for_session
+
+    manifest_crown = manifest_crown_for_session(session_id, owner_cwd=cwd)
+
+    def _apply_manifest_crown(entry: AgentEntry) -> None:
+        if manifest_crown and not entry.crown_scope:
+            digits = manifest_crown.get("crown_level") or ""
+            entry.crown_level = int(digits) if digits.isdecimal() else None
+            entry.crown_scope = manifest_crown["crown_scope"]
+            entry.crown_grantor = manifest_crown.get("crown_grantor") or None
+
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         def _address_is_taken(
             token: str,
@@ -2117,6 +2129,7 @@ def register_existing_session(
                 # the current one is the wrong answer to keep.
                 if last_message_at is not None:
                     entry.last_message_at = last_message_at
+                _apply_manifest_crown(entry)
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated, same_session_only=True):
@@ -2209,6 +2222,7 @@ def register_existing_session(
             if _DERIVED_SHORT_RE.match(derived) and not _address_is_taken(derived):
                 fresh.short_id = derived
         entries.append(fresh)
+        _apply_manifest_crown(fresh)
         return entries
 
     persisted = update_registry(_updater, path=registry_path)
