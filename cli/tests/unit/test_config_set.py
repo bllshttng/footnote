@@ -38,6 +38,16 @@ def test_set_int_coercion(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
+def test_mux_theme_set_persists_for_the_settings_picker(tmp_path):
+    # The composer settings theme picker persists its apply through this key;
+    # the Rust client latches it back at startup (same config ladder).
+    res = set_config_value(
+        "config.mux.theme", "footnote-paper", scope="project", repo_root=tmp_path
+    )
+    assert res.value == "footnote-paper"
+    assert _read(tmp_path)["mux"]["theme"] == "footnote-paper"
+
+
 def test_set_max_open_ideas_round_trips(tmp_path):
     """The Rust idea cap's key sets through the setter and stores an int."""
     res = set_config_value(
