@@ -5727,8 +5727,8 @@ def _mux_pane_send(
     #
     #   wrap + gate   default a2a mail
     #   gate only     an operational payload that must land verbatim (a ritual
-    #                 command, a busy-hold digest). It is not mail, so it must
-    #                 not be dressed as mail, but a submit into a showing prompt
+    #                 command or a preframed busy-hold digest). Its producer
+    #                 owns the one envelope, but a submit into a showing prompt
     #                 discards it exactly the same way.
     #   neither       a genuine keystroke ANSWERING a prompt (a digit, a control
     #                 key). Gating this one breaks the caller that needs the
@@ -7111,14 +7111,13 @@ def _deliver_live(
 
     if entry.mux:
         # `mail is None` means this is NOT a2a mail: it is an operational
-        # payload that has to land verbatim (a post-merge ritual command, a
-        # busy-hold digest). Enveloping it by default did three separate wrongs.
-        # A digest EMBEDS `<fno_mail>` bodies, and `wrap_fno_mail` refuses a body
-        # holding one, so every hold release to a pane raised and the cursor
-        # never advanced. A ritual arrived dressed as chat and the caller's
-        # `True` suppressed its cold-dispatch fallback, losing it silently. And
-        # the auto-wrap stamped this process's own handle rather than the
-        # declared `from_name`, so the envelope named the wrong peer.
+        # payload that has to land verbatim (for example, a post-merge ritual).
+        # Wrapping it as chat dressed the ritual up and the caller's `True`
+        # suppressed its cold-dispatch fallback, losing it silently. The
+        # auto-wrap also stamped this process's own handle rather than the
+        # declared `from_name`, so the envelope named the wrong peer. Hold
+        # release frames its digest once after flattening message frames, then
+        # sends it verbatim through this operational path.
         #
         # `sender` is passed for the wrapped case too. It costs nothing there
         # (the body is already enveloped, so `prepare` passes it through) and it
@@ -7131,12 +7130,11 @@ def _deliver_live(
                 guarded=False,
                 confirm=True,
                 raw=mail is None,
-                # Verbatim, but STILL GATED. `raw` alone skipped `prepare` whole,
-                # and `prepare` is where the read-back gate lives, so a digest or a
-                # ritual went into a pane nobody had looked at. On a codex auth wall
-                # the CR takes the wall's default, the payload is discarded, and the
-                # bytes-written verdict still reads True -- so the hold release then
-                # advances the cursor and retires every held message unread.
+                # Verbatim operational payloads still need this gate. `raw` alone
+                # skipped `prepare`, where the read-back gate lives; on a codex auth
+                # wall the CR can take the wall's default and discard the payload
+                # even though the send reports bytes written. Held digests are now
+                # wrapped mail and go through `prepare`.
                 gate=True,
                 sender=from_name or None,
                 failure_out=attempt_failure,

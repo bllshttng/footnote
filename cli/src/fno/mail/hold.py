@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,9 @@ from fno import paths
 DEFAULT_MINUTES = 5
 CLOCK_IDLE = "idle"
 CLOCK_WALL = "wall"
+_FNO_MAIL_OPEN = re.compile(r"<fno_mail\b", re.IGNORECASE)
+_FNO_MAIL_CLOSE = re.compile(r"</fno_mail>", re.IGNORECASE)
+_FNO_MAIL_TAG = re.compile(r"</?fno_mail\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -523,9 +527,31 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
             f"({getattr(message, 'ts', '?')})  id:{getattr(message, 'id', '?')} "
             f"---{suffix}"
         )
-        lines.append((getattr(message, "body", "") or "").rstrip("\n"))
+        lines.append(_digest_message_body(getattr(message, "body", "") or "").rstrip("\n"))
     lines.append('\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."')
     return "\n".join(lines)
+
+
+def _digest_message_body(body: str) -> str:
+    """Flatten one held peer envelope into digest text before the outer frame."""
+    open_tags = list(_FNO_MAIL_OPEN.finditer(body))
+    close_tags = list(_FNO_MAIL_CLOSE.finditer(body))
+    trimmed = body.strip()
+    if (
+        len(open_tags) == 1
+        and len(close_tags) == 1
+        and trimmed.lower().startswith("<fno_mail ")
+        and trimmed.lower().endswith("</fno_mail>")
+    ):
+        open_end = trimmed.find(">")
+        close_start = trimmed.lower().rfind("</fno_mail>")
+        if 0 < open_end < close_start:
+            return trimmed[open_end + 1 : close_start].strip("\n")
+    if open_tags or close_tags:
+        # A malformed frame cannot become an authority-bearing part of the
+        # release envelope. Keep its spelling visible as ordinary text.
+        return _FNO_MAIL_TAG.sub(lambda match: "&lt;" + match.group()[1:], body)
+    return body
 
 
 def release(handle: str, *, held_for_s: int = 0) -> dict:
@@ -599,6 +625,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     miss_reason: list = []
     if survivors:
         from fno.agents.dispatch import _deliver_live
+        from fno.mail.envelope import wrap_fno_mail
 
         digest = render_digest(handle, survivors, held_for_s)
         # Route through the LANE DISPATCHER, not the claude injector: wired to
@@ -609,8 +636,17 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
             miss_reason.append("no-registry-row")
         else:
             try:
+                framed_digest = wrap_fno_mail(
+                    from_="fno-mail-hold",
+                    body=digest,
+                    to=getattr(entry, "name", None),
+                    to_session=getattr(entry, "harness_session_id", None),
+                )
                 delivered = _deliver_live(
-                    entry, digest, "fno-mail-hold", reason_out=miss_reason
+                    entry,
+                    framed_digest,
+                    "fno-mail-hold",
+                    reason_out=miss_reason,
                 )
             except Exception:  # noqa: BLE001 - report the miss, never crash the timer
                 delivered = False
