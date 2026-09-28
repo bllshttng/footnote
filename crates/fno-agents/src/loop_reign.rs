@@ -130,15 +130,25 @@ pub(crate) fn row_holds_manifest_live_crown_cached(
         return false;
     }
     let kings = crate::paths::space_dir(&cwd).join("kings");
-    let sessions = match cache.get(&kings) {
-        Some(sessions) => sessions,
-        None => {
-            let sessions = manifest_crown_sessions(&kings);
-            cache.insert(kings, sessions);
-            cache.get(&kings).expect("just inserted")
-        }
-    };
-    sessions.contains(&session)
+    cache
+        .entry(kings.clone())
+        .or_insert_with(|| manifest_crown_sessions(&kings))
+        .contains(&session)
+}
+
+/// Per-pass cache for the sweep form: one map keyed by kings dir, so a
+/// registry-wide sweep reads each space's manifests once, not once per row.
+pub(crate) struct ManifestCrownCache(HashMap<PathBuf, HashSet<String>>);
+
+impl ManifestCrownCache {
+    pub(crate) fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// [`row_holds_manifest_live_crown`] over this pass's cache.
+    pub(crate) fn holds(&mut self, row: &RegistryEntry) -> bool {
+        row_holds_manifest_live_crown_cached(row, &mut self.0)
+    }
 }
 
 /// The harness session ids every manifest under one kings dir names as
