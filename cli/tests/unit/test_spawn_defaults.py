@@ -1877,6 +1877,7 @@ def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch
     assert "--substrate" not in out or out[out.index("--substrate") + 1] != "bg"
 
 
+@requires_rust
 def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(tmp_path, monkeypatch):
     """FNO_SPAWN_GATE=0 is the admission escape and its contract is that it never
     blocks a spawn. Cap-SKIPPING still runs: steering onto a free lane blocks
