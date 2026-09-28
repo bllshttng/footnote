@@ -22,8 +22,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crossterm::style::Color as CtColor;
-use crossterm::{cursor, queue, style, terminal};
+use crossterm::terminal;
 use ratatui_core::buffer::Buffer as RtBuffer;
 use ratatui_core::layout::{Alignment, Constraint, Flex, Layout, Rect as RtRect};
 use ratatui_core::style::Style as RtStyle;
@@ -8102,6 +8101,23 @@ async fn attach_and_run(
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
     let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
+    // The OSC ground: set + restore ride together through the kill switch,
+    // so an operator who opts out gets byte-for-byte the old launch. Computed
+    // here because `cwd` moves into the Attach below.
+    let paint = crate::digest_overlay::paint_background_enabled(Path::new(&cwd));
+    let ground = if paint {
+        crate::theme::ground_set(&theme)
+    } else {
+        None
+    };
+    let ground_color = if paint {
+        match theme.base {
+            Color::Default => None,
+            c => Some(c),
+        }
+    } else {
+        None
+    };
     view.theme = theme;
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
@@ -8284,8 +8300,15 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(&mut stdin_rx, &splash_tx, &theme, &stashed_modesync).await?;
-    let mut compositor = Compositor::new();
+    let guard = launch::begin(
+        &mut stdin_rx,
+        &splash_tx,
+        &theme,
+        &stashed_modesync,
+        ground.as_deref(),
+    )
+    .await?;
+    let mut compositor = Compositor::new(ground_color);
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer
     // (US4). Client-local; the scanner state is the single source of truth
@@ -13712,109 +13735,10 @@ fn exit_with_notice(notice: String) -> i32 {
     0
 }
 
-/// Draws frames with a row-level diff against what was actually drawn last -
-/// safe precisely because it diffs against its own output, never against a
-/// prediction of server state.
-struct Compositor {
-    last: Option<Frame>,
-}
+#[path = "client/compositor.rs"]
+mod compositor;
 
-impl Compositor {
-    fn new() -> Self {
-        Compositor { last: None }
-    }
-
-    fn draw(&mut self, frame: &Frame) -> std::io::Result<()> {
-        let mut out = std::io::stdout().lock();
-        let full = match &self.last {
-            Some(prev) => prev.rows != frame.rows || prev.cols != frame.cols,
-            None => true,
-        };
-        if full {
-            queue!(out, terminal::Clear(terminal::ClearType::All))?;
-        }
-        queue!(out, cursor::Hide)?;
-        for r in 0..frame.rows as usize {
-            if !full {
-                // Row unchanged since we drew it? Skip the write entirely.
-                let prev = self.last.as_ref().unwrap();
-                let w = frame.cols as usize;
-                if prev.cells[r * w..(r + 1) * w] == frame.cells[r * w..(r + 1) * w] {
-                    continue;
-                }
-            }
-            self.draw_row(&mut out, frame, r)?;
-        }
-        queue!(out, cursor::MoveTo(frame.cursor_col, frame.cursor_row))?;
-        if frame.cursor_visible {
-            queue!(out, cursor::Show)?;
-        } else {
-            queue!(out, cursor::Hide)?;
-        }
-        out.flush()?;
-        self.last = Some(frame.clone());
-        Ok(())
-    }
-
-    fn draw_row(&self, out: &mut impl Write, frame: &Frame, r: usize) -> std::io::Result<()> {
-        queue!(out, cursor::MoveTo(0, r as u16))?;
-        let w = frame.cols as usize;
-        let mut style_of: Option<(Color, Color, u8)> = None;
-        for cell in &frame.cells[r * w..(r + 1) * w] {
-            if cell.flags & proto::cell_flags::WIDE_SPACER != 0 {
-                continue; // the wide glyph before it already covers this column
-            }
-            let key = (cell.fg, cell.bg, cell.flags);
-            if style_of != Some(key) {
-                apply_style(out, cell)?;
-                style_of = Some(key);
-            }
-            queue!(out, style::Print(cell.c))?;
-        }
-        // Leave the line in a reset state so scrolling artifacts never bleed.
-        queue!(out, style::SetAttribute(style::Attribute::Reset))?;
-        Ok(())
-    }
-}
-
-fn apply_style(out: &mut impl Write, cell: &Cell) -> std::io::Result<()> {
-    use proto::cell_flags as cf;
-    // Reset first: attribute REMOVAL (e.g. bold -> plain) has no incremental
-    // form worth tracking at this scale.
-    queue!(out, style::SetAttribute(style::Attribute::Reset))?;
-    if cell.flags & cf::BOLD != 0 {
-        queue!(out, style::SetAttribute(style::Attribute::Bold))?;
-    }
-    if cell.flags & cf::ITALIC != 0 {
-        queue!(out, style::SetAttribute(style::Attribute::Italic))?;
-    }
-    if cell.flags & cf::UNDERLINE != 0 {
-        queue!(out, style::SetAttribute(style::Attribute::Underlined))?;
-    }
-    // A SELECTED cell (US2) toggles reverse-video: XOR with the cell's own
-    // inverse so the selection is always a visible delta, even over already-
-    // inverse text.
-    if (cell.flags & cf::INVERSE != 0) ^ (cell.flags & cf::SELECTED != 0) {
-        queue!(out, style::SetAttribute(style::Attribute::Reverse))?;
-    }
-    if cell.flags & cf::DIM != 0 {
-        queue!(out, style::SetAttribute(style::Attribute::Dim))?;
-    }
-    queue!(
-        out,
-        style::SetForegroundColor(map_color(cell.fg)),
-        style::SetBackgroundColor(map_color(cell.bg))
-    )?;
-    Ok(())
-}
-
-fn map_color(c: Color) -> CtColor {
-    match c {
-        Color::Default => CtColor::Reset,
-        Color::Indexed(i) => CtColor::AnsiValue(i),
-        Color::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
-    }
-}
+use compositor::Compositor;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -13839,6 +13763,10 @@ mod feed_view_tests;
 #[cfg(test)]
 #[path = "client_tests/keys_modal_tests.rs"]
 mod keys_modal_tests;
+
+#[cfg(test)]
+#[path = "client_tests/ground_tests.rs"]
+mod ground_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;
