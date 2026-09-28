@@ -20,7 +20,12 @@ from fno.graph import _constants as c
 
 @pytest.mark.parametrize(
     "good",
-    ["ab-55ba9adb", "xy-a3f9", "fno-abcd", "f-1234", "abcdefgh-12345678"],
+    [
+        "ab-55ba9adb", "xy-a3f9", "fno-abcd", "f-1234", "abcdefgh-12345678",
+        "xb299",           # dash-less: the pre-2026-09-27 minter shape
+        "x6a95",
+        "a3f9c1d2",        # bare hex now reads as prefix 'a' + 7 hex
+    ],
 )
 def test_wellformed_accepts(good):
     assert c.is_wellformed_node_id(good)
@@ -33,10 +38,10 @@ def test_wellformed_accepts(good):
         "ab-123456789",    # 9 hex (> 8)
         "AB-12345678",     # uppercase prefix
         "ab-1234567g",     # non-hex char
-        "a3f9c1d2",        # bare hex, no prefix-dash
         "1ab-1234",        # digit-led prefix
         "-12345678",       # empty prefix
         "",                # empty
+        "x123",            # 3 hex after the prefix
     ],
 )
 def test_wellformed_rejects(bad):
@@ -63,9 +68,13 @@ def test_extract_finds_configured_and_legacy():
     assert c.extract_node_ids(text) == ["xy-a3f9", "ab-55ba9adb"]
 
 
-def test_extract_skips_bare_hash():
-    # A bare git short-hash has no prefix-dash -> not a candidate (AC4-ERR).
-    assert c.extract_node_ids("commit a3f9c1d2 fixed it") == []
+def test_extract_returns_bare_hash_for_caller_to_filter():
+    # The dash-less id shape makes an 8-hex git short-hash shape-valid, so it
+    # comes back as a CANDIDATE. Identity stays a graph lookup (AC4-ERR): no
+    # all-hex token can confirm, since mint always prepends the configured
+    # prefix, so the caller's graph filter drops it.
+    assert c.extract_node_ids("commit a3f9c1d2 fixed it") == ["a3f9c1d2"]
+    assert c.extract_node_ids("shipped xb299 today") == ["xb299"]
 
 
 def test_extract_returns_sibling_candidates_for_caller_to_filter():

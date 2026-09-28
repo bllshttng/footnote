@@ -3165,10 +3165,13 @@ def test_guard_refuses_probe_and_mass_drop_on_shared_root(
             log_path=f"/tmp/{name}.log",
         )
 
-    # Seed with the guard standing down: HOME sits under the temp dir view,
-    # which is the sandbox shape the carve-out exists for.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    shared = tmp_path / "home" / ".fno" / "agents" / "registry.json"
+    # Seed with the guard standing down: the shared root sits under the temp
+    # dir view, which is the sandbox shape the carve-out exists for. Armed
+    # through the resolver's own first branch (FNO_AGENTS_HOME) so the
+    # guard's comparison and the seeded path cannot drift.
+    agents_home = tmp_path / "home" / ".fno" / "agents"
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
+    shared = agents_home / "registry.json"
     write_registry([probe_row(f"worker-{i}") for i in range(5)], path=shared)
 
     # Arm the guard: present a "real" home OUTSIDE the temp dir view.

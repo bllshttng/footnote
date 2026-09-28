@@ -62,6 +62,7 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
                 // offered in tests that do not name a list.
                 efforts: Some(Vec::new()),
                 permission_modes: Some(Vec::new()),
+                launch_flags: None,
             })
             .collect(),
         None,
@@ -183,23 +184,23 @@ fn tab_walks_the_chip_row_and_wraps() {
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // A fresh open focuses the input. The cycle is Message -> Plus ->
-    // Permission -> Harness -> Model -> Effort -> Where -> Project ->
-    // Branch -> Worktree -> back: ten stops (facts unread, so the Branch
-    // chip and worktree box paint `?` until the probe lands), so ten tabs
-    // land on Message again.
+    // A fresh open focuses the input. The cycle is Message -> Permission ->
+    // Harness -> Model -> Effort -> Where -> Project -> Branch -> Worktree
+    // -> back: nine stops (facts unread, so the Branch chip and worktree
+    // box paint `?` until the probe lands), so nine tabs land on Message
+    // again.
     assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
     });
-    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Plus);
+    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Permission);
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
         Focus::Model,
-        "three more tabs reach the Model chip"
+        "two more tabs reach the Model chip"
     );
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t", &mut sock).await;
@@ -223,11 +224,10 @@ fn the_effort_chip_drops_when_the_harness_has_no_effort_surface() {
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // Nine stops without Effort: Message -> Plus -> Permission -> Harness
-    // -> Model -> Where -> Project -> Branch -> Worktree -> Message.
+    // Eight stops without Effort: Message -> Permission -> Harness ->
+    // Model -> Where -> Project -> Branch -> Worktree -> Message.
     rt.block_on(async {
-        let _ =
-            super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
@@ -1156,6 +1156,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
             models_error: None,
             efforts: Some(Vec::new()),
             permission_modes: Some(Vec::new()),
+            launch_flags: None,
         }],
         Some("routing inventory unavailable".into()),
         Vec::new(),
@@ -1204,11 +1205,13 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
     );
 }
 
-#[test]
-fn extra_flags_chip_parses_argv_without_shell_expansion() {
+/// A claude catalog with a captured flags list and the facts row the
+/// worktree resolve wants; the sidecar answers at the worktree generation.
+fn pill_harness_view() -> (View, std::sync::MutexGuard<'static, ()>, WireVersionFixture) {
+    // One shared FNO_STATE_DIR lock with the model_catalog tests, held for
+    // the whole body.
+    let guard = crate::model_catalog::state_env_lock();
     let mut v = view_with_launcher();
-    // Wire 95: the worktree default (checked, policy external) must ride
-    // the request, so the sidecar answers at the worktree generation.
     let (session, _wire_fixture) = wire_fixture_at(95);
     v.session = session;
     let own = std::env::current_dir().unwrap().display().to_string();
@@ -1223,6 +1226,7 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
             models_error: None,
             efforts: Some(Vec::new()),
             permission_modes: Some(Vec::new()),
+            launch_flags: Some(vec!["--agent <agent>".into(), "--verbose".into()]),
         }],
         None,
         vec![super::agent_launcher::ProjectFacts {
@@ -1233,41 +1237,163 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
         }],
     ));
     sync_catalog(&mut v);
-    v.launcher.as_mut().unwrap().focus = Focus::ExtraFlags;
-    let mut sock = Vec::new();
+    (v, guard, _wire_fixture)
+}
+
+fn launch_argv(v: &mut View, keys: &[u8]) -> Vec<String> {
+    let mut sock: Vec<u8> = Vec::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(
-            &mut v,
-            b"--agent abc --name 'two words' --label $HOME",
-            &mut sock,
-        )
-        .await;
+        let _ = super::agent_launcher::launcher_keys(v, keys, &mut sock).await;
     });
-    let draft = &v.launcher.as_ref().unwrap().draft;
-    assert!(draft.extra_flags.starts_with("--agent abc"));
+    if sock.is_empty() {
+        panic!("no launch went to the wire for {keys:?}");
+    }
+    let mut wire = std::io::Cursor::new(sock);
+    match crate::proto::read_msg_sync(&mut wire).unwrap() {
+        crate::proto::ClientMsg::AgentLaunch(request) => request.extra_flags,
+        other => panic!("composer wrote a different client message: {other:?}"),
+    }
+}
 
-    v.launcher.as_mut().unwrap().focus = Focus::Message;
+#[test]
+fn an_unlisted_typed_flag_rides_the_argv_verbatim() {
+    // AC11-HP: `--foo bar` typed and committed launches --foo and bar as
+    // argv, and the message excludes them.
+    let (mut v, _lock, _fx) = pill_harness_view();
+    // The picker opens on the second dash and filters "foo"; Space in the
+    // picker commits the word verbatim; value capture takes "bar".
+    let argv = launch_argv(&mut v, b"--foo bar\r");
+    assert_eq!(argv, vec!["--foo", "bar"]);
+    let draft = &v.launcher.as_ref().unwrap().draft;
+    assert!(
+        !draft.message.contains("--foo"),
+        "the message excludes the flag"
+    );
+}
+
+#[test]
+fn chip_pin_model_sets_the_chip_and_holds_no_pill() {
+    // AC10-EDGE: `--model x` committed reads the model chip x and stores no
+    // pill; the argv carries no --model element.
+    let (mut v, _lock, _fx) = pill_harness_view();
+    let argv = launch_argv(&mut v, b"--model x\r");
+    assert!(
+        argv.is_empty(),
+        "no --model element rides the argv: {argv:?}"
+    );
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.model, "x", "the model chip reads the pinned value");
+    assert!(
+        l.draft.pills.is_empty(),
+        "no pill stores for a chip-owned flag"
+    );
+}
+
+#[test]
+fn backspace_at_an_empty_message_removes_the_last_pill() {
+    let (mut v, _lock, _fx) = pill_harness_view();
+    v.launcher.as_mut().unwrap().draft.pill_value_capture = false;
+    v.launcher
+        .as_mut()
+        .unwrap()
+        .draft
+        .pills
+        .push(("--verbose".to_string(), None));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        // Backspace with an empty message removes the pill, not message text.
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x7f", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.draft.pills.is_empty(), "the pill is gone");
+}
+
+#[test]
+fn the_flags_picker_lists_the_harness_launch_flags() {
+    // AC10-HP: `--` at a word start opens the picker over the harness's
+    // launch_flags; its rows carry AddPill with the parsed value arity.
+    let (mut v, _lock, _fx) = pill_harness_view();
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"--", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    let picker = l.picker.as_ref().expect("the flags picker opened");
+    assert_eq!(picker.field, super::agent_launcher::Focus::Plus);
+    let (rows, actions) = super::agent_launcher::picker_rows(
+        l,
+        super::agent_launcher::Focus::Plus,
+        &v.launcher_catalog,
+        &v.backlog,
+    );
+    let labels: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "--agent <agent>"),
+        "the captured flags list: {labels:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Some(super::agent_launcher::PickerAction::AddPill {
+                flag,
+                picks_value
+            }) if flag == "--agent" && *picks_value
+        )),
+        "the flag row commits AddPill"
+    );
+}
+
+#[test]
+fn a_picked_flag_adds_the_pill_and_drops_the_typed_word() {
+    let (mut v, _lock, _fx) = pill_harness_view();
+    // `--` opens the picker; "ag" narrows to --agent; Enter picks it; the
+    // trailing Space ends the empty value capture; Enter launches. The flag
+    // takes a value and nothing follows: it stores valueless.
+    let argv = launch_argv(&mut v, b"--ag\r \r");
+    assert_eq!(argv, vec!["--agent"]);
+    let draft = &v.launcher.as_ref().unwrap().draft;
+    assert!(
+        !draft.message.contains("--"),
+        "the typed dashes left the message"
+    );
+    assert_eq!(draft.pills.len(), 1, "the pill stores");
+}
+
+#[test]
+fn a_chip_owned_typed_flag_still_refuses_at_submit() {
+    // AC11-ERR: `--cwd /x` committed verbatim refuses at submit, naming the
+    // composer chip that owns it.
+    let (mut v, _lock, _fx) = pill_harness_view();
+    v.launcher
+        .as_mut()
+        .unwrap()
+        .draft
+        .pills
+        .push(("--cwd".to_string(), Some("/x".to_string())));
+    let mut sock: Vec<u8> = Vec::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
     });
-    let mut wire = std::io::Cursor::new(sock);
-    let crate::proto::ClientMsg::AgentLaunch(request) =
-        crate::proto::read_msg_sync(&mut wire).unwrap()
-    else {
-        panic!("composer wrote a different client message");
-    };
-    assert_eq!(
-        request.extra_flags,
-        vec!["--agent", "abc", "--name", "two words", "--label", "$HOME"]
-    );
-    // The launch remembers its harness: the next composer opens preselected
-    // on it.
-    assert_eq!(
-        std::fs::read_to_string(crate::proto::mux_dir().join("composer-last-harness")).unwrap(),
-        "claude\n",
-        "the launch writes the last-used harness"
-    );
+    let l = v.launcher.as_ref().unwrap();
+    match &l.phase {
+        super::agent_launcher::Phase::Refused { reason, .. } => {
+            assert!(
+                reason.contains("composer chip"),
+                "the refusal names the chip: {reason}"
+            );
+        }
+        other => panic!("expected the chip refusal, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1399,7 +1525,7 @@ fn typing_in_the_harness_picker_filters_the_rows() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     // Walk to the Harness chip and open its picker.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t", &mut sock).await;
     });
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
@@ -1456,7 +1582,7 @@ fn enter_commits_the_highlighted_row_under_an_active_filter() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     // Walk to the Harness chip, open the picker, and narrow to codex.
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t", &mut sock).await;
     });
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
@@ -1722,6 +1848,7 @@ fn a_pin_on_a_ready_row_under_more_survives_clear_unoffered_pins() {
             models_error: None,
             efforts: Some(Vec::new()),
             permission_modes: Some(Vec::new()),
+            launch_flags: None,
         }],
         None,
         Vec::new(),
@@ -1843,7 +1970,8 @@ fn fresh_state_dir() -> std::path::PathBuf {
 #[test]
 fn the_sheet_paints_the_chip_row_not_a_tab_strip() {
     // AC1-HP: no tab strip and no values strip; a chip row above the input
-    // and the bottom row (`+ mode` left, harness/model/effort right).
+    // and the bottom row (`mode` left, harness/model/effort right). The
+    // `+` chip left the row: typed flags are pills now.
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
@@ -1861,7 +1989,7 @@ fn the_sheet_paints_the_chip_row_not_a_tab_strip() {
     };
     // The chip values paint; the capitalized axis names of the old tab bar
     // never do.
-    for chip in ["Local", "auto", "claude", "default", "+"] {
+    for chip in ["Local", "auto", "claude", "default"] {
         let seen = (0..sl.framed_h)
             .map(row_text)
             .any(|text| text.contains(chip));
@@ -1895,16 +2023,13 @@ fn the_right_chip_group_wraps_to_its_own_row_when_narrow() {
             .y
     };
     assert!(
-        y_of(Focus::Harness) > y_of(Focus::Plus),
+        y_of(Focus::Harness) > y_of(Focus::Permission),
         "the right group wrapped below the left: {:?}",
         sl.chips
     );
     // A chip value is never truncated below its full text: each rect fits
     // its whole label plus the caret.
     for (f, r) in &sl.chips {
-        if *f == Focus::Plus {
-            continue;
-        }
         assert!(
             l.chip_label(*f, &v.launcher_catalog).chars().count() + 1 <= r.width as usize,
             "chip {:?} rect fits its value: {:?} width {}",
@@ -1994,7 +2119,7 @@ fn a_picker_open_across_the_catalog_landing_refreshes_on_input() {
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\r", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\r", &mut sock).await;
     });
     let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
     assert!(
