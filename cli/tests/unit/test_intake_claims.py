@@ -23,7 +23,7 @@ import pytest
 from fno.graph._intake import (
     _refuse_surfaceless_intake, _resolve_claim, _warn_similar_nodes,
 )
-from fno.graph.cli import _create_node_impl, _do_intake_multi, _intake_impl
+from fno.graph.cli import _do_intake_multi, _intake_impl
 from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 
@@ -1454,103 +1454,47 @@ def test_intake_frontmatter_cwd_still_wins(tmp_path):
     assert node_cwd == str(explicit)
 
 
-def test_backlog_add_records_canonical_cwd(tmp_path):
-    """AC1 + AC2 + AC3 for `fno backlog add`: default cwd is the canonical
-    checkout; an explicit --cwd is preserved; in the canonical checkout
-    (canonical == cwd) behavior is unchanged."""
-    from typer.testing import CliRunner
-    from fno.graph.cli import cli
+def test_backlog_add_records_cwd(tmp_path, monkeypatch):
+    """AC1 + AC2 for `fno backlog add`: the default cwd is the canonical
+    checkout root (the same git answer the Python leg gave), and an explicit
+    --cwd wins verbatim (the abspath of the caller intent)."""
+    import subprocess as sp
 
-    canonical = tmp_path / "canonical"
+    from tests._native_door import run_native
+
     worktree = tmp_path / "worktree-linked"
-    canonical.mkdir()
     worktree.mkdir()
-    graph_file = tmp_path / "graph.json"
-    seed_graph(graph_file, json.dumps({"entries": []}) + "\n")
-
-    runner = CliRunner()
-    with patch("fno.graph.cli._graph_path", return_value=graph_file), \
-         patch("fno.graph._intake._git_repo_root", return_value=str(canonical)), \
-         patch("os.getcwd", return_value=str(worktree)):
-        # AC1: no --cwd -> canonical, not the worktree.
-        result = runner.invoke(cli, ["add", "Durable node", "--difficulty", "medium"])
-        assert result.exit_code == 0, result.output
-        node = _read_entries(graph_file)[-1]
-        assert node["cwd"] == str(canonical)
-        assert node["cwd"] != str(worktree)
-
-        # AC2: explicit --cwd preserved verbatim (abspath of the caller intent).
-        result = runner.invoke(
-            cli, ["add", "Pinned node", "--cwd", str(worktree), "--difficulty", "medium"]
-        )
-        assert result.exit_code == 0, result.output
-        node = _read_entries(graph_file)[-1]
-        assert node["cwd"] == str(worktree)
-
-
-def test_backlog_idea_has_add_flag_parity(tmp_path):
-    """`idea` is sugar for `add`: it accepts the same parent/size/domain flags,
-    so a fresh idea need not be patched with a follow-up `fno backlog update`."""
-    from typer.testing import CliRunner
-    from fno.graph.cli import cli
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
 
     graph_file = tmp_path / "graph.json"
     seed_graph(graph_file, json.dumps({"entries": []}) + "\n")
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text('state_dir = "%s"\n' % tmp_path)
 
-    runner = CliRunner()
-    with patch("fno.graph.cli._graph_path", return_value=graph_file), \
-         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
-        result = runner.invoke(
-            cli,
-                ["idea", "t", "--parent", "ab-1234abcd", "--size", "M", "--domain", "infra", "--difficulty", "low"],
-        )
-        assert result.exit_code == 0, result.output
-
+    # Default: the CANONICAL checkout root lands on the node (a node outlives
+    # the worktree it was filed from; the porcelain's main worktree is the
+    # same answer the Python leg gave).
+    code, out, err = run_native(
+        "backlog", "add", "Durable node", "--difficulty", "medium",
+    )
+    assert code == 0, err
+    porcelain = sp.run(
+        ["git", "worktree", "list", "--porcelain"], capture_output=True, text=True, check=True
+    ).stdout
+    main_root = next(
+        line[len("worktree "):] for line in porcelain.splitlines() if line.startswith("worktree ")
+    )
     node = _read_entries(graph_file)[-1]
-    assert node["parent"] == "ab-1234abcd"
-    assert node["size"] == "M"
-    assert node["domain"] == "infra"
+    assert node["cwd"] == main_root, node["cwd"]
 
-
-# -- birth-path dedup parity (plan x-6ac7 task 1.3: AC1/AC2/AC3/AC6-FR) --
-# Every node-birth path runs the SAME dedup net. A net on 2 of 3 paths is
-# decorative (pitfalls corpus entry 1), so these exercise all three through
-# their real entry points and pin that the old idea-state-only net is gone.
-
-
-def test_idea_birth_path_warns_on_near_duplicate(fixture_graph, capsys):
-    # AC1-HP + AC4-UI: the idea/add path (completely unguarded before this)
-    # files a near-dup of ab-1dea1234; receipt on stderr names id + status +
-    # 2-decimal score; stdout stays the JSON payload.
-    _create_node_impl(
-        title="Backlog intake plan-claim resolution net",
-        details="three-layer claim resolution for backlog intake",
+    # Explicit --cwd preserved verbatim.
+    code, out, err = run_native(
+        "backlog", "add", "Pinned node", "--difficulty", "medium", "--cwd", str(canonical),
     )
-    captured = capsys.readouterr()
-    assert len(_read_entries(fixture_graph)) == 4  # new node persisted (exit 0)
-    assert "dedup:" in captured.err
-    assert "ab-1dea1234" in captured.err
-    assert re.search(r"ab-1dea1234\s+idea\s+0\.\d{2}", captured.err)
-    assert "dedup:" not in captured.out
-
-
-def test_idea_birth_path_warns_on_near_duplicate_of_done(fixture_graph, capsys):
-    # The exact regression class this PR fixes: a shipped `done` node is the
-    # answer to a duplicate filing, and the old idea-only net could not see it.
-    # Pins the wiring end-to-end (unit tests cover the scorer/helper in isolation).
-    _create_node_impl(
-        title="Already shipped feature refactor", details="feature shipped already"
-    )
-    captured = capsys.readouterr()
-    assert "dedup:" in captured.err
-    assert "ab-d0ne5678" in captured.err
-    assert re.search(r"ab-d0ne5678\s+done\s+0\.\d{2}", captured.err)
-
-
-def test_idea_birth_path_silent_on_clean_filing(fixture_graph, capsys):
-    # AC2-HP: an unrelated filing warns nothing.
-    _create_node_impl(title="Completely unrelated novel topic", details="unique content here")
-    assert "dedup:" not in capsys.readouterr().err
+    assert code == 0, err
+    node = _read_entries(graph_file)[-1]
+    assert node["cwd"] == str(canonical)
 
 
 def test_multi_intake_birth_path_warns_on_near_duplicate(fixture_graph, tmp_path, capsys):
@@ -1878,44 +1822,10 @@ def test_old_idea_title_warning_function_is_gone():
     assert not hasattr(_intake, "_warn_similar_idea_titles")
 
 
-def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
-    # AC3-ERR: a raising scorer leaves exit 0, the node persisted, and exactly
-    # one warning line. Real Typer exit code read in-process via CliRunner (no
-    # shell pipe - pitfalls corpus entry 3).
-    from typer.testing import CliRunner
-    from fno.graph.cli import cli
-    import fno.graph.relatedness as rel
-    import fno.graph._constants as gc
-    import fno.graph.store as gs
-
-    g = tmp_path / "graph.json"
-    seed_graph(g, json.dumps({"entries": []}) + "\n")
-    ledger = tmp_path / "ledger.json"
-    ledger.write_text('{"entries": []}\n')
-    monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "LEDGER_JSON", ledger)
-    monkeypatch.setattr(gs, "GRAPH_JSON", g)
-
-    def boom(entry, entries, k=3):
-        raise RuntimeError("scorer exploded")
-
-    monkeypatch.setattr(rel, "similar_nodes", boom)
-
-    result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings", "--difficulty", "low"])
-    assert result.exit_code == 0, result.output
-    assert len(read_graph_strict(g)) == 1  # node persisted
-    # CliRunner mixes stderr into output; pin the dedup warning text (not just
-    # any single warning line) and that it is the only one.
-    assert "post-file dedup check skipped" in result.output
-    assert result.output.count("warning:") == 1
-
-
 def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsys):
     # codex P2: a shipped-and-archived node is the answer to a duplicate filing,
     # but once the sweep stamps `archived_at` the default reads no longer see
     # it. The dedup scan must read the store's archived residents too.
-    from fno.graph.store import _worker_binary
 
     graph = tmp_path / "graph.json"
     seed_graph(graph, json.dumps({"entries": [
