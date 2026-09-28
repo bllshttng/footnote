@@ -1705,6 +1705,31 @@ fn load_catalog_keeps_the_harness_rows_when_the_cache_is_missing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn the_composer_picker_never_lists_the_retired_gemini() {
+    // The user retired gemini: load_catalog filters the capability table's
+    // row out of the picker list (the table keeps it for resume argv and
+    // state grants).
+    let _env = crate::model_catalog::state_env_lock();
+    let dir = fresh_state_dir();
+    std::env::set_var("FNO_STATE_DIR", &dir);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let outcome = rt.block_on(super::agent_launcher::load_catalog(Vec::new()));
+    let rows = match outcome {
+        CatalogOutcome::Ok(rows, _, _) => rows,
+        CatalogOutcome::Degraded(reason) => panic!("harness rows must not degrade: {reason}"),
+    };
+    assert!(
+        rows.iter().all(|r| r.name != "gemini"),
+        "gemini never lists in the composer picker"
+    );
+    assert!(
+        rows.iter().any(|r| r.name == "claude"),
+        "the rest of the catalog still loads"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A fresh state root with no cache/ subdir, so a fetch cannot even write.
 fn fresh_state_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
