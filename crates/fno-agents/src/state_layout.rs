@@ -270,7 +270,22 @@ pub fn migrate(root: &Path, apply: bool) -> Receipt {
         match row.kind {
             // Glob rows: every root entry the pattern matches parks.
             Kind::Park if row.legacy.contains('*') => {
-                for name in glob_matches(root, &row.legacy) {
+                let names = glob_matches(root, &row.legacy);
+                if names.is_empty() {
+                    continue;
+                }
+                // The mux server owns its residue's timing (change 3.1); the
+                // daemon never parks mux rows, glob or not.
+                if row.owner == Owner::Mux {
+                    receipt.entries.push(Entry {
+                        legacy: row.legacy.to_string(),
+                        status: Status::Pending(
+                            "owner mux (the mux server parks it at its start)".to_string(),
+                        ),
+                    });
+                    continue;
+                }
+                for name in names {
                     let status = if apply {
                         park_entry(root, &stamp, &name)
                     } else {
@@ -424,16 +439,16 @@ fn move_entry(legacy: &Path, new: &Path) -> std::io::Result<()> {
 /// Legacy bytes then new bytes, through a tmp file in the new folder, fsync,
 /// rename over the new file. The new file's mode carries over (same dir).
 fn append_merge(legacy: &Path, new: &Path) -> std::io::Result<()> {
-    let legacy_bytes = std::fs::read(legacy)?;
-    let new_bytes = std::fs::read(new)?;
     let mode = std::fs::metadata(new)?.permissions().mode();
     let tmp = new.with_extension(format!("migrating.{}", std::process::id()));
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&legacy_bytes)?;
-        f.write_all(&new_bytes)?;
-        f.sync_all()?;
+        let mut dst = std::fs::File::create(&tmp)?;
+        // Streamed: the logs this merges are documented unbounded, and a full
+        // read would spike the daemon's memory by both files' size.
+        std::io::copy(&mut std::fs::File::open(legacy)?, &mut dst)?;
+        std::io::copy(&mut std::fs::File::open(new)?, &mut dst)?;
+        dst.sync_all()?;
     }
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
     std::fs::rename(&tmp, new)?;
@@ -847,8 +862,19 @@ mod tests {
         std::fs::write(root.join("mux-view.json"), b"view").unwrap();
         std::fs::write(root.join("events.db"), b"SQLite format 3").unwrap();
         std::fs::write(root.join("graph.json.lock"), b"").unwrap();
+        std::fs::write(root.join("squads.json.tmp.77"), b"t").unwrap();
         let receipt = migrate(&root, false);
-        assert_eq!(receipt.pending_count(), 3);
+        assert_eq!(receipt.pending_count(), 4);
+        let tmp = receipt
+            .entries
+            .iter()
+            .find(|e| e.legacy == "squads.json.tmp.*")
+            .unwrap();
+        assert!(
+            matches!(tmp.status, Status::Pending(ref d) if d.contains("mux")),
+            "the mux owner parks its own tmp residue: {:?}",
+            tmp.status
+        );
         clean(&root);
     }
 

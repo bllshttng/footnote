@@ -795,17 +795,24 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     // The state root is not a checkout journal (law d-8ddaba56): a session
     // whose cwd was $HOME outside git resolved <repo>/.fno to the state root,
     // and moving its global journal stranded it in a fake space behind a
-    // MOVED-TO pointer at the top level of the state root.
+    // MOVED-TO pointer at the top level of the state root. Cheap compares
+    // only: this runs on every journal resolve, and a config parse here
+    // would tax every call for a corner a config override owns.
     if let Some(parent) = old.parent() {
         if parent
             .file_name()
             .map(|n| n == std::ffi::OsStr::new(".fno"))
             .unwrap_or(false)
-            && crate::agents_config::state_dir(parent)
-                .map(|root| same_path(parent, &root))
-                .unwrap_or(false)
         {
-            return false;
+            let is_state_root = match std::env::var_os("FNO_STATE_DIR") {
+                Some(pinned) => same_path(parent, Path::new(&pinned)),
+                None => std::env::var_os("HOME")
+                    .map(|h| same_path(parent, &PathBuf::from(h).join(".fno")))
+                    .unwrap_or(false),
+            };
+            if is_state_root {
+                return false;
+            }
         }
     }
     if let Some(repo) = repo_root_of(old) {
