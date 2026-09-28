@@ -31,7 +31,7 @@ FAKE_BIN="$TMP_DIR/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/fno" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-} ${2:-}" == "target resolve-owned-identity" ]]; then
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
   printf 'HARNESS=%s\nSESSION_ID=fixture-session\nDISPOSITION=proven\nCOLLISION=\n' \
     "${FNO_TEST_HARNESS:-}"
   exit 0
@@ -42,6 +42,7 @@ fi
 if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
   case " $* " in
     *" --field _archived"*) printf 'null\n'; exit 0 ;;
+    *" --field id"*)        printf '%s\n' "${3:-unknown}"; exit 0 ;;
     *" --field status"*)    printf 'in_review\n'; exit 0 ;;
     *" --field pr_number"*) printf '4242\n'; exit 0 ;;
   esac
