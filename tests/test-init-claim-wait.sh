@@ -169,7 +169,22 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
+    # Parse like the real CLI: flags (--strict, --field F) are never the id.
+    # PR 2723 added --strict to init's probes; reading ${3} made the flag the
+    # id and poisoned the canonicalized claim key with a full JSON row.
+    shift 2
+    field=""; id=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--field" ]; then field="$a"
+      elif [ "$a" != "--strict" ] && [ "$prev" != "--field" ] && [ -z "$id" ]; then id="$a"
+      fi
+      prev="$a"
+    done
+    case "$field" in
+      id) printf '%s\n' "$id" ;;
+      status) printf 'ready\n' ;;
+      *) printf 'null\n' ;;  # _archived/pr_number/...: the fiction is a live node
+    esac
     exit 0
     ;;
   *)
