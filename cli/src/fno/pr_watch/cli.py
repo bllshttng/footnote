@@ -450,9 +450,8 @@ _FLEET_CAP_S: dict[str, float] = {
 }
 _PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S}
 
-#: The grant-queue read measured 38s under a 21-worker fleet. Merge runs
-#: before the sweep on a fresh wall, so a slice-derived read timeout would
-#: let one hung read hold ~400s of tick. 120s is 3x the observed worst.
+#: The grant-queue read measured 38s under a 21-worker fleet; on a fresh
+#: wall a slice-derived timeout would let one hung read hold ~400s.
 _GRANT_QUEUE_READ_TIMEOUT_S = 120.0
 
 
