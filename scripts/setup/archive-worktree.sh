@@ -66,6 +66,7 @@ if [[ "$DONE_NODE" -eq 1 ]]; then
 fi
 # Set by the done-node path; receipt lines name them when set.
 DONE_NODE_SALVAGE_DIR=""
+DONE_NODE_SALVAGE_REF=""
 DONE_NODE_PINNED_BRANCH=""
 
 # Resolve target worktree path. Three input shapes:
@@ -756,6 +757,36 @@ salvage_untracked() {
   return 0
 }
 
+# Under worktree.prune_done=aggressive the arm's receipt covers modified
+# tracked content too, so the diff is rescued before removal the same way the
+# detached HEAD is: a ref names it, the tree may go. `git stash create`
+# writes a commit holding every tracked change (staged and unstaged) without
+# touching the working tree, HEAD, or the shared stash stack; the ref points
+# at it and survives the removal. An existing ref at a DIFFERENT sha gets the
+# short sha appended instead of being clobbered. Empty output = a clean tree,
+# nothing to salvage. A failure keeps the worktree (exit 5).
+salvage_tracked_ref() {
+  local node ref sha
+  node="$(_salvage_node)"
+  ref="refs/fno/salvage/$node"
+  sha="$(git -C "$TARGET" stash create 2>/dev/null)" || return 5
+  [[ -z "$sha" ]] && return 0
+  if git -C "$TARGET" show-ref --verify --quiet "$ref"; then
+    if [[ "$(git -C "$TARGET" rev-parse --verify "$ref")" == "$sha" ]]; then
+      DONE_NODE_SALVAGE_REF="$ref"
+      return 0
+    fi
+    ref="$ref-$(git -C "$TARGET" rev-parse --short "$sha")"
+  fi
+  if ! git -C "$TARGET" update-ref "$ref" "$sha"; then
+    echo "archive-worktree: salvage failed: tracked diff -> $ref" >&2
+    return 5
+  fi
+  DONE_NODE_SALVAGE_REF="$ref"
+  echo "archive-worktree: salvaged tracked diff to $ref" >&2
+  return 0
+}
+
 if [[ "$DONE_NODE" -eq 1 ]]; then
   # A detached HEAD pins first: its commit belongs to no branch, so removal
   # would leave it unreachable. An existing salvage branch at a DIFFERENT sha
@@ -779,6 +810,15 @@ if [[ "$DONE_NODE" -eq 1 ]]; then
   if ! salvage_untracked; then
     echo "archive-worktree: keeping worktree $TARGET (untracked salvage failed, nothing removed)" >&2
     exit 5
+  fi
+  # Only an aggressive receipt puts a tracked diff in scope: under balanced
+  # the gate keeps such a tree before salvage is ever reached, so the marker
+  # is the contract, not a second config read.
+  if [[ "$WT_REAPABLE_LINE" == *prune_done=aggressive* ]]; then
+    if ! salvage_tracked_ref; then
+      echo "archive-worktree: keeping worktree $TARGET (tracked-diff salvage failed, nothing removed)" >&2
+      exit 5
+    fi
   fi
   DONE_NODE_SALVAGE_DIR="$CANONICAL/.fno/salvage/$(date +%Y%m%d)-$(_salvage_node)/untracked"
 fi
@@ -893,6 +933,7 @@ fi
 # removal; neither can fail the run.
 if [[ "$DONE_NODE" -eq 1 ]]; then
   [[ -n "$DONE_NODE_SALVAGE_DIR" ]] && echo "archive-worktree: untracked content salvaged to $DONE_NODE_SALVAGE_DIR" >&2
+  [[ -n "$DONE_NODE_SALVAGE_REF" ]] && echo "archive-worktree: tracked diff salvaged to $DONE_NODE_SALVAGE_REF" >&2
   [[ -n "$DONE_NODE_PINNED_BRANCH" ]] && echo "archive-worktree: detached HEAD pinned to $DONE_NODE_PINNED_BRANCH" >&2
 fi
 exit "$BRANCH_DELETE_RC"
