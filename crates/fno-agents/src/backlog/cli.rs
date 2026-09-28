@@ -181,6 +181,9 @@ pub fn run(args: &[String]) -> i32 {
         // not (the same split the `get` arm makes).
         "decide-retract" if carries(resolved.tail, &["--help", "-h"]) => forward_python(&resolved),
         "decide-retract" => crate::law_match::run_backlog_retract(resolved.tail),
+        // The blueprint session lifecycle is native end to end: identity,
+        // claims substrate, session rows, receipts. The Python twin is gone.
+        "session" => super::session_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }

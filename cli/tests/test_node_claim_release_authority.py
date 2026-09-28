@@ -78,16 +78,17 @@ ALLOWLIST = {
     # completion). Scratch-graph closures are gated out; only the process's
     # configured graph releases.
     "cli/src/fno/graph/store.py",
-    # graph/_session.py cmd_session_close: the BLUEPRINT-CLOSE terminal release.
-    # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and a
-    # blueprint session never runs init, so the close is the only terminal that
-    # lifecycle has. Holder-scoped and strict=True: it releases ONLY the
-    # session's own spawn-handover holder and REFUSES (loud stderr, receipt
-    # false) when a successor target session already rebound the claim, so the
-    # ab-588326a7 shape (a helper releasing somebody else's claim) cannot
-    # occur here by construction. Not releasing at all leaves the node
-    # un-dispatchable until TTL with advance skipping it as already-claimed.
-    "cli/src/fno/graph/_session.py",
+    # crates/fno-agents/src/backlog/session_cli.rs run_close: the
+    # BLUEPRINT-CLOSE terminal release. A spawn dispatch acquires
+    # node:<id> under spawn-handover:<worker> and a blueprint session never
+    # runs init, so the close is the only terminal that lifecycle has.
+    # Holder-scoped: it releases ONLY the session's own spawn-handover or
+    # blueprint-session holder and leaves a successor target session's
+    # rebound claim intact, so the ab-588326a7 shape (a helper releasing
+    # somebody else's claim) cannot occur here by construction. Not releasing
+    # at all leaves the node un-dispatchable until TTL with advance skipping
+    # it as already-claimed.
+    "crates/fno-agents/src/backlog/session_cli.rs",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}
@@ -182,6 +183,7 @@ _RS_ADORN = r"(?:\.to_string\(\)|\.into\(\)|\.to_owned\(\))?"
 _RS_RELEASE = re.compile(
     r'"claim"' + _RS_ADORN + r'\s*,\s*"release"' + _RS_ADORN + r"\s*,\s*(&?\s*[^,\]\)]+)"
 )
+_RS_DIRECT_RELEASE = re.compile(r"\brelease\s*\(\s*(&?\s*[^,\]\)]+)")
 _RS_BIND = re.compile(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=]+)?=\s*(.+)$")
 
 
@@ -205,6 +207,13 @@ def _rust_node_release_lines(text: str) -> list[int]:
         # membership catches a `&claim_key` bound to `format!("node:...)`
         # elsewhere. The leading-quote anchor avoids the `dispatch-node:` holder
         # substring trap.
+        if '"node:' in key or key in node_vars:
+            hits.append(scrubbed.count("\n", 0, m.start()) + 1)
+    # The direct form: `release(claim_key, ...)` — the same key check, so the
+    # claims::release front the session verbs call is as visible as the
+    # literal-argument spelling above.
+    for m in _RS_DIRECT_RELEASE.finditer(scrubbed):
+        key = m.group(1).strip().lstrip("&").strip()
         if '"node:' in key or key in node_vars:
             hits.append(scrubbed.count("\n", 0, m.start()) + 1)
     return sorted(set(hits))
