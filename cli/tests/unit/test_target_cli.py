@@ -1073,7 +1073,10 @@ def _unreadable_graph(tmp_path, monkeypatch):
     return gp
 
 
-def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("node", ["x-5a5c", "x47d8"])
+def test_target_init_refuses_named_node_when_graph_unreadable(
+    tmp_path, monkeypatch, node
+):
     """Round-12 finding 10: the resolver's fail-open swallowed an unreadable
     graph before the hold gate could refuse on it, so a named dispatch
     silently skipped the hold check exactly when nothing could prove the plan
@@ -1081,7 +1084,7 @@ def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypa
     _unreadable_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["do", "target", "init", "--input", "x-5a5c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", node])
     assert result.exit_code == 2, result.output
     assert "dispatch-hold-invalid" in result.output
     assert "backlog graph is unreadable" in result.output
