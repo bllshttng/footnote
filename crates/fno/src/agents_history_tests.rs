@@ -212,6 +212,22 @@ fn agents_history_receipts_resolve_short_and_row_names_and_render_verbatim_resum
 }
 
 #[test]
+fn agents_history_session_handle_resolves_ledger_entry() {
+    let mut sources = empty_sources();
+    sources.ledger = Ok(vec![json!({
+        "graph_node_id": "x-3344",
+        "session_id": SID,
+        "pr_number": 44,
+        "status": "done"
+    })]);
+
+    let resolved = resolve(SID, &sources);
+    assert_eq!(resolved.sessions, vec![SID.to_string()]);
+    let rendered = card(SID, &sources, None).join("\n");
+    assert!(rendered.contains("ledger:     x-3344 #44 done"));
+}
+
+#[test]
 fn agents_history_empty_handle_never_matches_blank_receipt_fields() {
     let mut sources = empty_sources();
     sources.receipts = Ok(vec![receipt(
@@ -387,36 +403,58 @@ fn agents_history_node_prints_ledger_only_row_and_missing_session_reason() {
     fs::write(
         &ledger,
         json!({
-            "entries": [{
-                "graph_node_id": "x-3344",
-                "pr_number": 44,
-                "status": "done",
-                "completed": "2026-09-23T12:00:00Z"
-            }]
+            "entries": [
+                {
+                    "graph_node_id": "x-3344",
+                    "pr_number": 44,
+                    "status": "done",
+                    "completed": "2026-09-23T12:00:00Z"
+                },
+                {
+                    "graph_node_id": "x-9f2e",
+                    "pr_number": 45,
+                    "status": "done",
+                    "sessions": ["unresolved:no-harness-session"]
+                }
+            ]
         })
         .to_string(),
     )
     .unwrap();
-    let args = vec![
-        OsString::from("x-3344"),
-        OsString::from("--graph"),
-        dir.path().join("graph.db").into_os_string(),
-        OsString::from("--ledger"),
-        ledger.into_os_string(),
-        OsString::from("--events"),
-        dir.path().join("events.jsonl").into_os_string(),
-        OsString::from("--agents-home"),
-        agents_home.into_os_string(),
-    ];
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
+    let run = |arg: &str| {
+        let args = vec![
+            OsString::from(arg),
+            OsString::from("--graph"),
+            dir.path().join("graph.db").into_os_string(),
+            OsString::from("--ledger"),
+            ledger.clone().into_os_string(),
+            OsString::from("--events"),
+            dir.path().join("events.jsonl").into_os_string(),
+            OsString::from("--agents-home"),
+            agents_home.clone().into_os_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_to(&args, &mut stdout, &mut stderr);
+        (
+            code,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    };
 
-    assert_eq!(run_to(&args, &mut stdout, &mut stderr), 0);
-    let stdout = String::from_utf8(stdout).unwrap();
+    let (code, stdout, _) = run("x-3344");
+    assert_eq!(code, 0);
     assert!(stdout.contains("ledger:     x-3344 #44 done"));
     assert!(stdout.contains(
         "session: not recorded (ledger uuid coverage is write-path only; this row predates it)"
     ));
+
+    let (code, stdout, _) = run("x-9f2e");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ledger:     x-9f2e #45 done"));
+    assert!(stdout.contains("session: no resume handle was recorded for this run"));
+    assert!(!stdout.contains("session: not recorded (ledger uuid coverage"));
 }
 
 #[test]

@@ -70,10 +70,25 @@ fn run_to(args: &[OsString], stdout: &mut impl Write, stderr: &mut impl Write) -
             );
         }
         let _ = writeln!(output, "{}", ledger_line(entry));
-        let _ = writeln!(
-            output,
-            "session: not recorded (ledger uuid coverage is write-path only; this row predates it)"
-        );
+        if entry
+            .get("sessions")
+            .and_then(Value::as_array)
+            .is_some_and(|sessions| {
+                sessions
+                    .iter()
+                    .any(|value| value.as_str() == Some("unresolved:no-harness-session"))
+            })
+        {
+            let _ = writeln!(
+                output,
+                "session: no resume handle was recorded for this run"
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "session: not recorded (ledger uuid coverage is write-path only; this row predates it)"
+            );
+        }
         if index + 1 < resolved.ledger_only.len() {
             let _ = writeln!(output, "---");
         }
