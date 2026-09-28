@@ -1833,8 +1833,7 @@ def _claude_create_path(
             assert crown_plan is not None  # set by the pre-launch call above
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
                 entries, scope=crown_scope, plan=crown_plan,
-                exclude_name=name if revive else None,
-                heir=name,
+                exclude_name=name if revive else None, heir=name,
             )
             if crown_outcome == "succeeded":
                 crown_succeeded = True
