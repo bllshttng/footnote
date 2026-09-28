@@ -45,6 +45,32 @@ fn ground_set_and_restore_ride_the_launch_and_exit() {
     );
 }
 
+/// SIGTERM must restore the ground too: the async-signal-safe handler writes
+/// the color reset and leaves the alternate screen before dying.
+#[test]
+fn sigterm_restores_the_ground_too() {
+    let scratch = Scratch::new("ground-sigterm");
+    let mut h = ClientHarness::spawn_sized_with(&scratch, 30, 100, &[("COLORFGBG", "15;0")]);
+    h.wait_prompt(20);
+    settle(&mut h, 1500);
+
+    let pid = h.child.process_id().expect("client pid");
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = h.wait_exit(15);
+    settle(&mut h, 500);
+    let raw = h.raw_output();
+    assert!(
+        raw.contains("\x1b]111\x1b\\\x1b]110\x1b\\\x1b]104\x1b\\"),
+        "SIGTERM restores background, foreground and palette"
+    );
+    assert!(
+        raw.contains("\x1b[?1049l"),
+        "SIGTERM leaves the alternate screen"
+    );
+}
+
 #[test]
 fn the_kill_switch_removes_both_directions() {
     let scratch = Scratch::new("ground-kill-switch");
