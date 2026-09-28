@@ -46,6 +46,42 @@ const MAX_FILES_PER_NODE: usize = 200;
 /// (`coverage-audit-20260908/REPORT.md`); deeper nesting is not a report home.
 const MAX_DEPTH: usize = 3;
 
+/// The verdict rows the promise gate reads, assembled the same way the verb
+/// assembles them (graph rows + readiness overlay + rulings + journal), so
+/// the gate and the operator surface can never disagree about what is open.
+pub(crate) fn prove_it_verdict_rows() -> Result<Vec<Value>, String> {
+    let graph_path = default_graph_path();
+    let mut entries = graph_store::read_rows(&graph_path)?;
+    graph_store::apply_readiness_overlay(&mut entries);
+    let journal_bodies: HashMap<String, Vec<String>> =
+        match crate::backlog::note_history::read(&graph_path, None, 0, usize::MAX) {
+            Ok((records, _)) => {
+                let mut map: HashMap<String, Vec<String>> = HashMap::new();
+                for rec in records {
+                    let Some(node) = rec.get("node_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let body = rec
+                        .get("original")
+                        .map(crate::backlog::note_history::record_body)
+                        .unwrap_or("")
+                        .to_string();
+                    map.entry(node.to_string()).or_default().push(body);
+                }
+                map
+            }
+            Err(_) => HashMap::new(),
+        };
+    let mut unreadable: Vec<Value> = Vec::new();
+    let rulings = load_rulings();
+    Ok(build_rows(
+        &entries,
+        &mut unreadable,
+        &rulings,
+        &journal_bodies,
+    ))
+}
+
 pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
     let mut route = false;
     let mut graph_path = default_graph_path();
