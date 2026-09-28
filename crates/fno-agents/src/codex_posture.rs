@@ -225,7 +225,9 @@ pub fn resolve_thread_posture(
             _ => Err(format!(
                 "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
                  (full-auto, yolo) or the <sandbox>:<approval> form \
-                 (e.g. workspace-write:on-request)"
+                 (e.g. workspace-write:on-request); a claude word such as \
+                 bypassPermissions belongs under agents.*.harness.claude, and codex reads \
+                 agents.*.harness.codex.permission_mode"
             )),
         },
     }
@@ -374,7 +376,8 @@ pub fn entry_posture_is_full_access(entry: &crate::state::RegistryEntry) -> bool
 /// Python, `fno.agents.mux_spawn.permission_pane_tokens`, which shrinks to a
 /// bridge over this answer). Fail-closed: an unmappable (provider, value)
 /// pair refuses with the harness's own vocabulary, never a silent downgrade.
-/// Keep every refusal message byte-identical to the Python it replaced.
+/// The vocabulary is Rust-owned: the Python seam prints these refusals
+/// verbatim, so an edit here is the one edit.
 /// ---------------------------------------------------------------------------
 pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>, String> {
     if mode.is_empty() {
@@ -413,7 +416,9 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
                 _ => Err(format!(
                     "codex --permission-mode {mode:?} unmappable; use a shortcut \
                      (full-auto, yolo) or the <sandbox>:<approval> form \
-                     (e.g. workspace-write:on-request)"
+                     (e.g. workspace-write:on-request); a claude word such as \
+                     bypassPermissions belongs under agents.*.harness.claude, and codex \
+                     reads agents.*.harness.codex.permission_mode"
                 )),
             },
         },

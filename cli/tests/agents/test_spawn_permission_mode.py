@@ -83,6 +83,15 @@ def test_mapping_fail_closed_on_unmappable(rust_door, provider, mode):
     assert exc.value.exit_code == 2
 
 
+@pytest.mark.dev_build
+def test_codex_refusal_names_the_overlay_key(rust_door):
+    """AC5-HP: a claude word refused for codex teaches the config key that
+    fixes it, so the operator reads the repair at spawn time."""
+    with pytest.raises(DispatchAskError) as exc:
+        permission_pane_tokens("codex", "bypassPermissions")
+    assert "agents.*.harness.codex.permission_mode" in str(exc.value)
+
+
 # --- agy pane posture: default bypass, explicit mode replaces it -------------
 
 
