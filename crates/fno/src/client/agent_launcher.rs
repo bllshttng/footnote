@@ -1708,9 +1708,8 @@ pub(crate) async fn launcher_keys(
                                     // Space finalizes the captured value.
                                     finalize_pill_value(l);
                                 } else {
-                                    let room = MAX_LAUNCH_FLAGS_CHARS.saturating_sub(
-                                        l.draft.pill_value_draft.chars().count(),
-                                    );
+                                    let room = MAX_LAUNCH_FLAGS_CHARS
+                                        .saturating_sub(l.draft.pill_value_draft.chars().count());
                                     if room > 0 {
                                         l.draft.pill_value_draft.push(c);
                                         l.draft.bump();

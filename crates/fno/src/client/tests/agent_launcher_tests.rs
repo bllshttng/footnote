@@ -227,8 +227,7 @@ fn the_effort_chip_drops_when_the_harness_has_no_effort_surface() {
     // Eight stops without Effort: Message -> Permission -> Harness ->
     // Model -> Where -> Project -> Branch -> Worktree -> Message.
     rt.block_on(async {
-        let _ =
-            super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t\t\t\t", &mut sock).await;
     });
     assert_eq!(
         v.launcher.as_ref().unwrap().focus,
@@ -1111,11 +1110,7 @@ fn degraded_inventory_names_the_failure_and_keeps_defaults() {
 
 /// A claude catalog with a captured flags list and the facts row the
 /// worktree resolve wants; the sidecar answers at the worktree generation.
-fn pill_harness_view() -> (
-    View,
-    std::sync::MutexGuard<'static, ()>,
-    WireVersionFixture,
-) {
+fn pill_harness_view() -> (View, std::sync::MutexGuard<'static, ()>, WireVersionFixture) {
     // One shared FNO_STATE_DIR lock with the model_catalog tests, held for
     // the whole body.
     let guard = crate::model_catalog::state_env_lock();
