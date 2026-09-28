@@ -71,10 +71,10 @@ def test_pointer_gated_on_git_shape(tmp_path, git_shape, pointer_names_root):
     root = _make_plugin_root(tmp_path / "plugin", git_shape)
     home = tmp_path / "home"
     fno_home = home / ".fno"
-    fno_home.mkdir(parents=True)
-    (fno_home / "plugin-root").write_text(INSTALLED + "\n")
+    (fno_home / "install").mkdir(parents=True, exist_ok=True)
+    (fno_home / "install" / "plugin-root").write_text(INSTALLED + "\n")
     _run_hook(root, home)
-    ptr = fno_home / "plugin-root"
+    ptr = fno_home / "install" / "plugin-root"
     if pointer_names_root:
         assert ptr.read_text().strip() == str(root)
     else:
@@ -109,10 +109,10 @@ def test_real_linked_worktree_never_writes_pointer(tmp_path):
     (wt / "hooks" / "session-start.sh").symlink_to(HOOK)
     home = tmp_path / "home"
     fno_home = home / ".fno"
-    fno_home.mkdir(parents=True)
-    (fno_home / "plugin-root").write_text(INSTALLED + "\n")
+    (fno_home / "install").mkdir(parents=True, exist_ok=True)
+    (fno_home / "install" / "plugin-root").write_text(INSTALLED + "\n")
     _run_hook(wt, home)
-    assert (fno_home / "plugin-root").read_text().strip() == INSTALLED
+    assert (fno_home / "install" / "plugin-root").read_text().strip() == INSTALLED
 
 
 def test_worktree_start_neither_flips_stamp_nor_repairs(tmp_path):
@@ -121,7 +121,8 @@ def test_worktree_start_neither_flips_stamp_nor_repairs(tmp_path):
     root = _make_plugin_root(tmp_path / "plugin", "file")
     home = tmp_path / "home"
     fno_home = home / ".fno"
-    fno_home.mkdir(parents=True)
+    (fno_home / "install").mkdir(parents=True, exist_ok=True)
+    (fno_home / "install").mkdir(parents=True, exist_ok=True)
     (fno_home / ".worktree-hook-root").write_text(INSTALLED + "\n")
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text(

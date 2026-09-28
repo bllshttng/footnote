@@ -138,87 +138,77 @@ def _read_graph(g: Path) -> list[dict]:
     return read_graph_strict(g)
 
 
-def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
-    """AC3: observer reap fills the exact open row and reads it back."""
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [{
-            "id": "x-reap0001",
-            "title": "Reap me",
-            "sessions": [{
-                "phase": "execute",
-                "harness": "codex",
-                "session_id": "dead-session",
-                "started_at": "2026-08-20T00:00:00Z",
-            }],
-        }]
-    }) + "\n")
+def test_session_reap_open_returns_positive_settled_receipt(tmp_path):
+    """AC3: observer reap fills the exact open row and reads it back.
 
-    result = _invoke(
-        "backlog", "session", "reap-open", "x-reap0001",
+    The session verbs are native (backlog/session_cli.rs); this drives the
+    door the way the golden receipts do."""
+    from tests.goldens._door import door, graph_rows, make_sandbox, seed_node, warm
+
+    root = make_sandbox(tmp_path, [seed_node("x-reap0001", sessions=[{
+        "phase": "execute",
+        "harness": "codex",
+        "session_id": "dead-session",
+        "started_at": "2026-08-20T00:00:00Z",
+    }])])
+    warm(root, "x-reap0001")
+
+    code, out, err = door(root, [
+        "session", "reap-open", "x-reap0001",
         "--harness", "codex", "--session-id", "dead-session", "--json",
-    )
+    ])
 
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output)
+    assert code == 0, err
+    receipt = json.loads(out)
     assert receipt["settled"] is True
     assert receipt["row_removed"] is False
     assert receipt["row_closed"] is True
     assert receipt["status_after"] == "idea"
     assert receipt["remaining_open_do"] == 0
-    saved = _read_graph(tmp_graph)[0]
+    saved = [r for r in graph_rows(root) if r.get("id") == "x-reap0001"][0]
     assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
     assert saved["status"] == "idea"
 
 
-def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
+def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_path):
     """The death-cascade form: no node named, every node with an open row
-    for the identity settles and node_ids names them all."""
-    _seed_graph_text(tmp_graph, json.dumps({
-        "entries": [
-            {
-                "id": "x-reap0002",
-                "title": "First holder",
-                "sessions": [{
-                    "phase": "ship",
-                    "harness": "codex",
-                    "session_id": "dead-session",
-                    "started_at": "2026-08-20T00:00:00Z",
-                }],
-            },
-            {
-                "id": "x-reap0003",
-                "title": "Second holder",
-                "sessions": [{
-                    "phase": "review",
-                    "harness": "codex",
-                    "session_id": "dead-session",
-                    "started_at": "2026-08-20T00:00:00Z",
-                }],
-            },
-            {
-                "id": "x-reap0004",
-                "title": "Other session",
-                "sessions": [{
-                    "phase": "ship",
-                    "harness": "codex",
-                    "session_id": "alive-session",
-                    "started_at": "2026-08-20T00:00:00Z",
-                }],
-            },
-        ]
-    }) + "\n")
+    for the identity settles and node_ids names them all. Door-driven: the
+    verb is native."""
+    from tests.goldens._door import door, graph_rows, make_sandbox, seed_node, warm
 
-    result = _invoke(
-        "backlog", "session", "reap-open",
+    root = make_sandbox(tmp_path, [
+        seed_node("x-reap0002", sessions=[{
+            "phase": "ship",
+            "harness": "codex",
+            "session_id": "dead-session",
+            "started_at": "2026-08-20T00:00:00Z",
+        }]),
+        seed_node("x-reap0003", sessions=[{
+            "phase": "review",
+            "harness": "codex",
+            "session_id": "dead-session",
+            "started_at": "2026-08-20T00:00:00Z",
+        }]),
+        seed_node("x-reap0004", sessions=[{
+            "phase": "ship",
+            "harness": "codex",
+            "session_id": "alive-session",
+            "started_at": "2026-08-20T00:00:00Z",
+        }]),
+    ])
+    warm(root, "x-reap0002")
+
+    code, out, err = door(root, [
+        "session", "reap-open",
         "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
-    )
+    ])
 
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output)
+    assert code == 0, err
+    receipt = json.loads(out)
     assert receipt["settled"] is True
     assert sorted(receipt["node_ids"]) == ["x-reap0002", "x-reap0003"]
     assert receipt["row_closed"] is True
-    saved = {e["id"]: e for e in _read_graph(tmp_graph)}
+    saved = {e["id"]: e for e in graph_rows(root)}
     assert all(
         row.get("ended_at")
         for node in ("x-reap0002", "x-reap0003")

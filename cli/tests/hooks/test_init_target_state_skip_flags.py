@@ -134,12 +134,21 @@ def _run_init_script(
     state_dir = tmpdir / ".fno"
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    # The hook's HOME-as-repo guard (e6bfa11921) skips every write when the
+    # checkout has no git toplevel, or when the checkout .fno IS the state
+    # root. A bare tmpdir is both, so the sandbox plays a real checkout: git
+    # init, and the state home off the checkout.
+    subprocess.run(["git", "init", "-q", str(tmpdir)], check=True, capture_output=True)
+    fno_home = tmpdir / "fno-home"
+    fno_home.mkdir(parents=True, exist_ok=True)
+
     bin_dir = tmpdir / "bin"
     _stub_fno(bin_dir)
     stub_env = install_state_path_stub(bin_dir, tmpdir / "space")
 
     env = {
         "HOME": str(tmpdir),
+        "FNO_HOME": str(fno_home),
         # Prepend the stub dir so the hook resolves tmp/bin/fno first; keep the
         # real PATH tail so bash/date/mkdir still resolve. A stub miss degrades
         # to slow (real fno), never wrong.
@@ -375,8 +384,16 @@ def test_plan_path_env_lands_in_manifest_with_anchor(tmp_path):
 
 def _run_without_fno(tmp_path: Path, target_input: str) -> subprocess.CompletedProcess:
     (tmp_path / ".fno").mkdir(exist_ok=True)
+    # The HOME-as-repo guard (e6bfa11921) skips the write when the checkout
+    # has no git toplevel, or when the checkout .fno IS the state root. The
+    # sandbox plays a real checkout: git init, and the state home elsewhere
+    # (the legacy fallback target stays tmp/.fno, which these tests pin).
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    fno_home = tmp_path / "fno-home"
+    fno_home.mkdir(parents=True, exist_ok=True)
     env = {
         "HOME": str(tmp_path),
+        "FNO_HOME": str(fno_home),
         "PATH": "/usr/bin:/bin",
         "TARGET_START": "1",
         "TARGET_INPUT": target_input,

@@ -98,12 +98,15 @@ make_repo() {
 # every call, so no real fno is invoked (no reprovision) either.
 run_init() {
     local cwd="$1"; shift
+    # The hook's HOME-as-repo guard skips every write when the checkout .fno
+    # IS the state root, so the state home lives beside it, not in it.
+    mkdir -p "$cwd/fno-home"
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
         env TARGET_START=1 TARGET_SESSION_ID=review-gate-test-session \
-            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
+            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" FNO_HOME="$cwd/fno-home" \
             FNO_TEST_SPACE="$cwd/space" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )
