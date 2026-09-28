@@ -122,7 +122,6 @@ def test_worktree_start_neither_flips_stamp_nor_repairs(tmp_path):
     home = tmp_path / "home"
     fno_home = home / ".fno"
     (fno_home / "install").mkdir(parents=True, exist_ok=True)
-    (fno_home / "install").mkdir(parents=True, exist_ok=True)
     (fno_home / ".worktree-hook-root").write_text(INSTALLED + "\n")
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text(

@@ -159,7 +159,6 @@ def test_worktree_verbs_resolve_via_persisted_pointer(foreign_git_repo: Path, pl
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     fno_home = tmp_path / "custom-fno-home"
     (fno_home / "install").mkdir(parents=True, exist_ok=True)
-    fno_home.mkdir(parents=True, exist_ok=True)
     (fno_home / "install" / "plugin-root").write_text(str(plugin_root) + "\n", encoding="utf-8")
     monkeypatch.setenv("FNO_HOME", str(fno_home))
 
