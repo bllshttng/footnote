@@ -1702,7 +1702,7 @@ pub(crate) struct Core {
     /// its recruited members (attach-ids + tombstone bits). Populated only by
     /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
     /// squad persistent (an attach-born origin squad is absent and never
-    /// written). Written through to `~/.fno/squads.json` on every membership
+    /// written). Written through to `~/.fno/mux/squads.json` on every membership
     /// mutation. Keyed by session-scoped id, so a removed squad's entry is
     /// inert (ids never reused; no GC - ponytail: a dead-sid leak is one small
     /// map entry per closed workspace per session, bounded by session length).
@@ -12728,6 +12728,9 @@ async fn serve(
     // Attached-client count for the periodic readers: Core owns the
     // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
     let (client_count_tx, client_count_rx) = watch::channel(0usize);
+    // The mux server is the long-lived writer of its `owner = mux` sidecars,
+    // so it moves them at its own start, before the first store opens.
+    crate::proto::migrate_mux_sidecars();
     let persisted_pane_floor = crate::squad_store::load().next_pane_id;
     let initial_agents = read_guard_agents().await;
 

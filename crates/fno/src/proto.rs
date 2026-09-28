@@ -1789,7 +1789,7 @@ pub enum Command {
     /// each id is validated through the exact `AttachAgent` gates (8-hex shape +
     /// catalog membership); an id already paned or already a member is a dedup
     /// no-op; per-id outcomes fold into one partial-success notice. Members are
-    /// written through to `~/.fno/squads.json`.
+    /// written through to `~/.fno/mux/squads.json`.
     RecruitAgents {
         squad: String,
         ids: Vec<String>,
@@ -2951,10 +2951,39 @@ fn resolved_state_root() -> PathBuf {
 /// The root for mux sidecars that are not sockets (`mux-view.json`): the same
 /// resolved state root, so a pinned `FNO_CONFIG` isolates them with the
 /// sockets. `FNO_MUX_DIR` relocates the sockets alone by design and does not
-/// move sidecars.
+/// move sidecars. The sidecars themselves resolve under `mux/` (see
+/// [`mux_sidecar_path`]); this root stays the state root so the resolver can
+/// see both spellings.
 #[cfg(not(test))]
 pub(crate) fn mux_sidecar_root() -> PathBuf {
     resolved_state_root()
+}
+
+/// The server-start move of the `owner = mux` rows: the mux server is their
+/// long-lived writer and migrates them at its own start, before it opens
+/// them. See [`crate::state_layout::migrate_mux_sidecars_at`].
+#[cfg(not(test))]
+pub(crate) fn migrate_mux_sidecars() {
+    crate::state_layout::migrate_mux_sidecars_at(&resolved_state_root());
+}
+
+/// The resolved sidecar path: `mux/<file>` when it exists, else the gated
+/// legacy root spelling when it exists, else `mux/<file>` (fresh install).
+/// One seam for both stores; the explicit `legacy_sidecar` read stays as the
+/// stores' last step for a file that appears between the two probes.
+#[cfg(not(test))]
+pub(crate) fn mux_sidecar_path(file: &str) -> PathBuf {
+    let new = mux_sidecar_root().join("mux").join(file);
+    if new.exists() {
+        return new;
+    }
+    if legacy_fallback_allowed() {
+        let legacy = legacy_sidecar_path(file);
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    new
 }
 
 /// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set

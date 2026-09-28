@@ -1532,8 +1532,9 @@ pub fn stats(json: bool) -> i32 {
 /// `squad` in this crate's identifiers - is a decision, not an unfinished
 /// rename: renaming ~2900 internal sites buys no user-visible change. The
 /// remaining user-adjacent `squad` spellings, the key in the `--json`
-/// placement receipt and `~/.fno/squads.json`, ride the next change that
-/// bumps `PROTO_VERSION` or migrates the store for a real reason.
+/// placement receipt and the `~/.fno/mux/squads.json` file name, ride the
+/// next change that bumps `PROTO_VERSION` or renames the store for a real
+/// reason.
 pub fn workspace(
     op: crate::cli_args::WorkspaceOp,
     args: &[OsString],
