@@ -85,7 +85,6 @@ inbox board
 inbox day end
 inbox day start
 inbox decide !--decision !--origin !--subject
-inbox decisions !--subject
 inbox notify
 inbox operator ack
 inbox operator list
