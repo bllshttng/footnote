@@ -2740,7 +2740,7 @@ mod tests {
             "barnaby",
         )
         .unwrap();
-        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa").unwrap();
+        crate::crown_names::carry_succession(&home.crown_names_json(), "x-aaaa", None).unwrap();
         write_registry(
             &home,
             serde_json::json!([{

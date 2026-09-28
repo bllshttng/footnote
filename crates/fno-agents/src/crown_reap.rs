@@ -130,6 +130,13 @@ pub struct CrownReap {
     /// holder session.
     #[serde(default)]
     pub names_pruned: Vec<String>,
+    /// Successions reverted (or would-revert, dry run): an heir that died
+    /// unbound past the window, its crown restored to the predecessor.
+    #[serde(default)]
+    pub successions_reverted: Vec<crate::crown_names::RevertedSuccession>,
+    /// Pending successions the sweep kept, with the reason (a live heir).
+    #[serde(default)]
+    pub successions_kept: Vec<String>,
 }
 
 /// A crown this sweep vacated (or would vacate, under a dry run).
@@ -459,6 +466,37 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
         &transcript_age_now,
         Utc::now(),
     );
+    // The succession revert runs BEFORE the prune: a pending record whose
+    // heir died unbound restores its predecessor's session, so the prune's
+    // own live-crown rule judges the reverted state, not the pre-revert
+    // limbo.
+    let window_s = 3 * crate::king_verdict_inputs::checkin_interval_secs(cwd);
+    match crate::crown_names::revert_stale_pending(
+        &home.crown_names_json(),
+        &home.registry_json(),
+        Utc::now(),
+        window_s,
+        apply,
+    ) {
+        Ok((reverted, kept)) => {
+            if apply {
+                for r in &reverted {
+                    let _ = events.emit(
+                        "crown_succession_reverted",
+                        &serde_json::json!({
+                            "scope": r.scope, "heir_name": r.heir_name,
+                            "predecessor_name": r.predecessor_name,
+                            "predecessor_session": r.predecessor_session,
+                            "evidence": r.evidence,
+                        }),
+                    );
+                }
+            }
+            out.successions_reverted = reverted;
+            out.successions_kept = kept;
+        }
+        Err(e) => eprintln!("crown-reap: succession revert: {e}"),
+    }
     // The name prune reads the same live-crown truth the sweep judged with:
     // a record whose scope has no live crown (a stale `fno agents crown` or
     // `reclaim_crown` grant, a reaped king) is the machine sweep's to drop
@@ -1064,6 +1102,77 @@ mod tests {
         assert!(out.unread.is_some(), "{:?}", out);
         assert!(out.vacated.is_empty() && out.kept.is_empty());
         assert!(read_events(&dir).is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC: the production sweep wires the revert in BEFORE the prune, fills
+    /// the report fields, and journals one receipt per reverted succession.
+    #[test]
+    fn production_sweep_reverts_an_unbound_heir_and_journals_the_receipt() {
+        use serde_json::json;
+        let old_home = std::env::var("FNO_AGENTS_HOME").ok();
+        let seeded = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", seeded.path());
+        let dir = tmp("sweep-revert");
+        pin_window(&dir, None);
+        // The predecessor row survives (exited, resumable); the heir's row
+        // was removed by the bind-window reaper. Store carries a pending
+        // succession well past the 12h window (3 * 4h checkin interval).
+        let registry = registry_file(
+            &dir,
+            &[json!({
+                "name": "king-old", "status": "exited", "cwd": "/repo",
+                "harness": "claude", "harness_session_id": "sess-old",
+                "created_at": "2026-09-23T20:00:00Z",
+            })],
+        );
+        std::fs::write(
+            seeded.path().join("crown_names.json"),
+            serde_json::to_string(&json!({
+                "version": 1,
+                "crowns": {"x-sweep": {
+                    "name": "Folio", "regnal": 2,
+                    "holder_session": null,
+                    "nodes": [], "updated_at": "2026-09-28T00:00:00Z",
+                    "pending_succession": {
+                        "heir_name": "jolly-finch", "predecessor_name": "king-old",
+                        "predecessor_session": "sess-old", "ts": "2026-08-01T00:00:00Z"
+                    }
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let home = crate::paths::AgentsHome::from_env();
+        let out = production_sweep(&home, &dir, true);
+
+        assert_eq!(out.successions_reverted.len(), 1, "{:?}", out);
+        assert_eq!(out.successions_reverted[0].scope, "x-sweep");
+        assert_eq!(out.successions_kept, Vec::<String>::new());
+        // The revert ran before the prune; the prune then judged the
+        // reverted state by its own live-crown rule: the predecessor row is
+        // exited, no live crown holds the scope, so the record is the
+        // prune's to drop. The report and the journal receipt are the
+        // deliverable the operator reads.
+        let store_doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(seeded.path().join("crown_names.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(store_doc["crowns"].get("x-sweep").is_none(), "{store_doc}");
+        assert_eq!(out.names_pruned, vec!["x-sweep".to_string()]);
+        // One receipt per reverted succession, from the production emitter.
+        let events = read_events(seeded.path());
+        let receipts: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "crown_succession_reverted")
+            .collect();
+        assert_eq!(receipts.len(), 1, "{:?}", events);
+        assert_eq!(receipts[0]["data"]["scope"], "x-sweep");
+        let _ = registry;
+        match old_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
         fs::remove_dir_all(&dir).ok();
     }
 }
