@@ -34,11 +34,11 @@ def _graph_json() -> Path:
 
 
 def _graph_md() -> Path:
-    return _state_dir() / "graph.md"
+    return _state_dir() / "pages" / "graph.md"
 
 
 def _graph_html() -> Path:
-    return _state_dir() / "graph.html"
+    return _state_dir() / "pages" / "graph.html"
 
 
 def _graph_archive_json() -> Path:

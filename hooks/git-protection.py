@@ -57,14 +57,14 @@ from urllib.parse import unquote
 # ${FNO_HOME:-$HOME/.fno} shell hook has). A custom config.state_dir in
 # settings.yaml is therefore not honored here.
 FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
-STATE_FILE = FNO_HOME / "git-protection.json"
+STATE_FILE = FNO_HOME / "state" / "git-protection.json"
 APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
 # Merge-gate override, `gh pr merge` ONLY. Deliberately NOT named
 # git-protection.disabled: that file was an unconditional pre-gate exit(0), so
 # one touch dropped main-branch protection for every session on every harness
 # lane. The rename leaves any stale old marker inert - fail-safe, no migration.
 MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
-OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
+OVERRIDE_LOG = FNO_HOME / "logs" / "merge-gate-overrides.log"
 # Both markers expire and are consumed: a forgotten sentinel must not linger.
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.
@@ -156,7 +156,7 @@ def save_state(state):
     push to main would proceed. Recording the attempt is best-effort; refusing
     is not. load_state already degrades to defaults for the same reason."""
     try:
-        FNO_HOME.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
     except OSError:
