@@ -6,6 +6,7 @@
 //! disagree with the routing the dispatch doors answer.
 use serde_json::{json, Value};
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The default blueprint-subagent ceiling when no provider budget applies
@@ -25,7 +26,11 @@ const DEFAULT_BLUEPRINT_CEILING: usize = 1;
 /// a zero: an unreadable claim list read as `running 0` would name starts
 /// past the ceiling. Starts also wait until plans ready fall below the
 /// king's worker slots - a blueprint nobody can build is the exact spend the
-/// wake meter exists to name.
+/// wake meter exists to name. `other_owned` is the fold's owner read, the
+/// nodes a deeper live crown holds: the scope line counts owned active with
+/// it, so the starts and target-ready lines answer with the same one and a
+/// child of another king's crown never prints. An unread map is this
+/// reading's error - an empty read would name starts in foreign territory.
 pub(crate) fn r_blueprint(
     board: &Result<Value, String>,
     cwd: &Path,
@@ -33,10 +38,12 @@ pub(crate) fn r_blueprint(
     claims: Result<Vec<String>, String>,
     slots: Result<usize, String>,
     floor: &str,
+    other_owned: &Result<HashMap<String, String>, String>,
 ) -> Result<Value, String> {
     let session_id = session_id
         .ok_or_else(|| "no session id; cannot count this king's blueprint subagents".to_string())?;
     let holders = claims?;
+    let other_owned = other_owned.as_ref().map_err(Clone::clone)?;
     let holder = format!("blueprint-session:{session_id}");
     let running = holders.iter().filter(|h| **h == holder).count();
     let board = board.as_ref()?;
@@ -58,6 +65,10 @@ pub(crate) fn r_blueprint(
                 continue;
             }
         };
+        if let Some(owner) = other_owned.get(&id) {
+            skips.push(json!({"id": id, "reason": format!("owned by crown {owner}")}));
+            continue;
+        }
         match crate::backlog_ready::effective_verb_with_floor(row, floor) {
             Ok((verb, _)) if verb.as_deref() == Some("/blueprint") => candidates.push(id),
             Ok((verb, _)) if verb.as_deref() == Some("/target") => target_ready.push(id),
@@ -163,6 +174,29 @@ mod tests {
         slots: Result<usize, String>,
         floor: &str,
     ) -> Result<Value, String> {
+        blueprint_reading_owned(
+            dir,
+            config_toml,
+            board,
+            session_id,
+            holders,
+            slots,
+            floor,
+            Ok(HashMap::new()),
+        )
+    }
+
+    /// The same call with the owner map named, for the deeper-crown filter.
+    fn blueprint_reading_owned(
+        dir: &std::path::Path,
+        config_toml: &str,
+        board: Value,
+        session_id: Option<&str>,
+        holders: Vec<String>,
+        slots: Result<usize, String>,
+        floor: &str,
+        other_owned: Result<HashMap<String, String>, String>,
+    ) -> Result<Value, String> {
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(fnodir.join("config.toml"), config_toml).unwrap();
@@ -179,6 +213,7 @@ mod tests {
             Ok(holders),
             slots,
             floor,
+            &other_owned,
         );
         match prior_provider {
             Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
@@ -502,6 +537,62 @@ mod tests {
                 .contains("out-of-family"),
             "{reading}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child of a deeper live crown never prints, on either dispatch line:
+    /// both x-8240 and x-9657 leaked as target-ready past Quill's crown on
+    /// 2026-09-28 while kestrel's L2 crown held their parent. The row skips
+    /// naming the crown that owns it.
+    #[test]
+    fn a_child_of_a_deeper_live_crown_never_prints_as_start_or_target_ready() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-owned-{}", std::process::id()));
+        let reading = blueprint_reading_owned(
+            &dir,
+            "",
+            unplanned_board(
+                &[("x-8240", "low"), ("x-9657", "low"), ("x-mine", "low")],
+                Some(0),
+            ),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "high",
+            Ok(HashMap::from([
+                ("x-8240".to_string(), "x-8b8d".to_string()),
+                ("x-9657".to_string(), "x-8b8d".to_string()),
+            ])),
+        )
+        .unwrap();
+        assert_eq!(reading["target_ready"], json!(["x-mine"]), "{reading}");
+        assert_eq!(reading["starts"], json!([]), "{reading}");
+        assert_eq!(
+            reading["skips"],
+            json!([
+                {"id": "x-8240", "reason": "owned by crown x-8b8d"},
+                {"id": "x-9657", "reason": "owned by crown x-8b8d"},
+            ]),
+            "{reading}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unread owner read is the reading's error, never an empty filter:
+    /// an empty map would print a foreign crown's nodes as dispatchable.
+    #[test]
+    fn an_unread_owner_map_fails_the_blueprint_reading() {
+        let dir = std::env::temp_dir().join(format!("fno-bp-unowned-{}", std::process::id()));
+        let reading = blueprint_reading_owned(
+            &dir,
+            "",
+            unplanned_board(&[("x-1", "low")], Some(0)),
+            Some("sess-1"),
+            vec![],
+            Ok(4),
+            "high",
+            Err("a live crown's scope does not compile: e-x: unknown".to_string()),
+        );
+        assert!(reading.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
