@@ -198,3 +198,61 @@ fn a_crowned_parent_is_kept_and_its_court_reads_as_child() {
         summary.kept_crowned
     );
 }
+
+/// x-2b6f: the crown gate reads the MANIFEST, not just the stamp. An
+/// unstamped row whose space carries a king manifest naming its session is a
+/// live king for the sweep: kept under kept_crowned, never retired. The row
+/// carries no crown field at all - the restore-stripped-stamp shape.
+#[test]
+fn an_unstamped_row_with_a_live_manifest_is_kept_crowned() {
+    let _lock = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_spaces = std::env::var_os("FNO_SPACES_DIR");
+    let (dir, home) = staged_graph_home();
+    let spaces = dir.path().join("spaces");
+    std::env::set_var("FNO_SPACES_DIR", spaces);
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let space = crate::paths::space_dir(&repo);
+    let kings = space.join("kings");
+    std::fs::create_dir_all(&kings).unwrap();
+    std::fs::write(
+        kings.join("x-demo.md"),
+        "---\nscope: x-demo\nshape: pass\nharness: claude\n\
+         harness_session_id: s-kingm\nowner_pid: 1\ncreated_at: 2026-09-01T00:00:00Z\n\
+         crown_scope: x-demo\ncrown_level: 2\ncrown_grantor: vellum\n---\n",
+    )
+    .unwrap();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-demo",
+            "status": "idea",
+            "project": "p",
+        }]),
+    );
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut king = parent_row("king-x-demo", "s-kingm");
+        king.cwd = repo.display().to_string();
+        r.entries.push(king);
+    })
+    .unwrap();
+    let summary = lineage_sweep(&home, &emitter);
+    assert!(
+        !summary.retired.iter().any(|(id, _)| id == "king-x-demo"),
+        "{:?}",
+        summary.retired
+    );
+    assert!(
+        summary.kept_crowned.iter().any(|id| id == "king-x-demo"),
+        "{:?}",
+        summary.kept_crowned
+    );
+    match saved_spaces {
+        Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+        None => std::env::remove_var("FNO_SPACES_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -48,6 +48,7 @@ pub mod acceptance_evidence;
 pub mod acp_stdio;
 pub mod active_backlog;
 pub mod additional_prs;
+pub(crate) mod adopt_carry;
 mod agent_lock;
 pub mod agents_config;
 pub(crate) mod agents_event;

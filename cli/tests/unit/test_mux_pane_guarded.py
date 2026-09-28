@@ -223,58 +223,70 @@ def test_unguarded_follow_up_omits_the_flag_and_holds_claim(monkeypatch):
     assert _verbs(calls) == ["claim", "send", "send", "release"]
 
 
-def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tmp_path):
-    """x-1904: bytes-written alone is not enough (Locked Decision 4). The
-    unguarded mail-delivery paste only reports True once the recipient's OWN
-    transcript carries the injected turn's content."""
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("")
-    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
-    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
-
+def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch):
+    """x-1904 / Locked Decision 4: mail reports True only on a content-confirmed
+    verdict. Since C11/C12/C17 that verdict is the Rust mail-inject lane's, so
+    this test pins the routing and the honor: the delivered verdict is the True,
+    and no pane burst is typed behind it."""
     calls: list[list[str]] = []
-    # The mail-envelope render passes through to the real renderer (captured
-    # before the patch below replaces subprocess.run process-wide), so the
-    # echoed marker below is the envelope this run actually pastes.
-    real_run = dispatch.subprocess.run
 
-    def _run(argv, **kwargs):
-        # The envelope render (`fno-agents mail-envelope`) is a foreign call
-        # whose stdout IS the payload: a synthetic empty success sends empty
-        # panes, so foreign calls run for real and stay unrecorded.
-        if argv[1:3] != ["mux", "pane"]:
-            return _REAL_RUN(argv, **kwargs)
+    def _run(argv, **_kwargs):
         calls.append(list(argv))
-        if "mail-envelope" in argv:
-            return real_run(argv, **kwargs)
-        if "--stdin" in argv:
-            # The recipient "processes" the paste and it lands in its transcript
-            # before the confirm poll runs. Echo back what was actually pasted:
-            # since node x-3a64 the lane envelopes the body, so the confirm
-            # marker is the envelope's open tag rather than the caller's first
-            # word, and a hardcoded copy here would test yesterday's bytes.
-            pasted = (kwargs.get("input") or "").strip().split("\n", 1)[0]
-            transcript.write_text(
-                '{"type":"queue-operation","content":' + json.dumps(pasted) + "}\n"
+        if "mail-inject" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"delivered": True, "reason": "ok"}),
+                stderr="",
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    # The envelope render is a foreign binary call; the wrap itself is what the
+    # lane pastes, so a stubbed wrap keeps the test off the developer's PATH.
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prepare",
+        lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
+    )
+    # The lane refuses before any subprocess when no binary resolves, which is
+    # every smoke runner's shape; pin the routing, not the developer's install.
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: "/usr/bin/true"
+    )
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
     assert dispatch._mux_pane_send(_entry(), "hi there", guarded=False, confirm=True) is True
-    assert _verbs(calls) == ["claim", "send", "send", "release"]
+    assert any("mail-inject" in argv for argv in calls)
+    assert not any(
+        argv[1:3] == ["mux", "pane"] and "send" in argv for argv in calls
+    ), "a confirmed mail delivery types nothing behind the binary's verdict"
 
 
 def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
-    monkeypatch, tmp_path
+    monkeypatch,
 ):
-    """The paste-then-CR burst can exit 0 (bytes written) while the paste sits
-    unread in the recipient's input box -- exactly the Locked Decision 4 gap a
-    bytes-only verdict would paper over."""
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("")  # never gets the marker
-    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
-    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+    """The paste-then-CR burst exiting 0 (bytes written) was never the verdict:
+    Locked Decision 4 makes content confirmation the gate. Since C11/C12/C17
+    the confirm lives in the Rust lane, so the pane lane's contract is that a
+    not-delivered verdict reports False and names the reason twice - the
+    binary's word and the demotion."""
+
+    def _run(argv, **_kwargs):
+        if "mail-inject" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"delivered": False, "reason": "not-confirmed"}),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prepare",
+        lambda text, **_kw: f"<fno_mail>{text}</fno_mail>",
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: "/usr/bin/true"
+    )
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
 
     failure: list[str] = []
     assert (
@@ -283,7 +295,8 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
         )
         is False
     )
-    assert failure == ["unconfirmed"]
+    assert "not-confirmed" in failure
+    assert "pane-lane-not-confirmed" in failure
 
 
 def test_mail_delivery_timeout_after_paste_does_not_retry(monkeypatch):
