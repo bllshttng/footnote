@@ -250,7 +250,7 @@ fn url_string(v: Option<&Value>) -> Option<String> {
 }
 
 /// One REST read: `gh api repos/{slug}/pulls/{n}` -> (state, html_url).
-fn query_pr_state(
+pub(crate) fn query_pr_state(
     pr_number: i64,
     repo: Option<&str>,
     cwd: Option<&str>,
@@ -274,7 +274,8 @@ fn query_pr_state(
         &["api", "--allow-escape-sequences", &path],
         cwd_path,
         GH_TIMEOUT,
-    );
+    )
+    .map_err(|e| PrReadError::new(e, "availability"))?;
     if !ok {
         let message = if err.trim().is_empty() { out } else { err };
         return Err(PrReadError::new(message, ""));

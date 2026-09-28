@@ -51,7 +51,7 @@ const MAX_DEPTH: usize = 3;
 /// the gate and the operator surface can never disagree about what is open.
 pub(crate) fn prove_it_verdict_rows() -> Result<Vec<Value>, String> {
     let graph_path = default_graph_path();
-    let mut entries = graph_store::read_rows(&graph_path)?;
+    let mut entries = graph_store::read_rows(&graph_path).map_err(|e| e.to_string())?;
     graph_store::apply_readiness_overlay(&mut entries);
     let journal_bodies: HashMap<String, Vec<String>> =
         match crate::backlog::note_history::read(&graph_path, None, 0, usize::MAX) {
