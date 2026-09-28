@@ -1476,11 +1476,14 @@ pub(crate) async fn launcher_keys(
                     LKey::Char(' ') if picker.field == Focus::Plus => {
                         // Space commits the typed text as a verbatim flag:
                         // the filter is the word after the dashes the
-                        // message still holds.
-                        let word = format!("--{}", picker.filter);
+                        // message still holds. An empty filter is no flag:
+                        // the picker closes and the dashes stay typed.
+                        let filter = std::mem::take(&mut picker.filter);
                         l.picker = None;
-                        cut_trailing_word(l);
-                        add_pill(l, word, true);
+                        if !filter.is_empty() {
+                            cut_trailing_word(l);
+                            add_pill(l, format!("--{filter}"), true);
+                        }
                     }
                     LKey::Char(c) => {
                         // Type-to-filter: the query narrows the rows in
@@ -1660,7 +1663,7 @@ pub(crate) async fn launcher_keys(
                 };
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
-                        Focus::Message if c == '@' => {
+                        Focus::Message if c == '@' && !l.draft.pill_value_capture => {
                             open_picker_at(
                                 l,
                                 &view.launcher_catalog,
@@ -1669,7 +1672,7 @@ pub(crate) async fn launcher_keys(
                                 Focus::Message,
                             );
                         }
-                        Focus::Message if c == '-' => {
+                        Focus::Message if c == '-' && !l.draft.pill_value_capture => {
                             // The second dash of a word-start `--` opens the
                             // flags picker; the typed text stays in the
                             // message until a pick or a Space commits it.
@@ -1686,7 +1689,7 @@ pub(crate) async fn launcher_keys(
                                 insert_char(&mut l.draft, c);
                             }
                         }
-                        Focus::Message if c == ' ' => {
+                        Focus::Message if c == ' ' && !l.draft.pill_value_capture => {
                             // Space while a `--word` trails commits it as a
                             // verbatim pill; value capture takes the next
                             // word. Otherwise the space is message text.
@@ -1701,11 +1704,17 @@ pub(crate) async fn launcher_keys(
                         }
                         Focus::Message => {
                             if l.draft.pill_value_capture {
-                                let room = MAX_LAUNCH_FLAGS_CHARS
-                                    .saturating_sub(l.draft.pill_value_draft.chars().count());
-                                if room > 0 {
-                                    l.draft.pill_value_draft.push(c);
-                                    l.draft.bump();
+                                if c == ' ' {
+                                    // Space finalizes the captured value.
+                                    finalize_pill_value(l);
+                                } else {
+                                    let room = MAX_LAUNCH_FLAGS_CHARS.saturating_sub(
+                                        l.draft.pill_value_draft.chars().count(),
+                                    );
+                                    if room > 0 {
+                                        l.draft.pill_value_draft.push(c);
+                                        l.draft.bump();
+                                    }
                                 }
                             } else {
                                 insert_char(&mut l.draft, c);
