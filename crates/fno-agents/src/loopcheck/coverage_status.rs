@@ -177,7 +177,6 @@ pub(super) fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> La
         stopgate_read_timeout(),
     ) {
         BoundedRun::Completed(out) if out.status.success() => {
-            let parsed = serde_json::from_slice::<Value>(&out.stdout).ok();
             // Mirror `law_authority` exactly: filter the rows to operator
             // authority BEFORE the count, because a waiver asserts a person
             // at a terminal read the diff and only `operator` carries that
@@ -189,20 +188,12 @@ pub(super) fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> La
             // a waiver the merge gate honors. An affirmative row with no
             // readable decision stays malformed authority, Unknown, never a
             // clean no.
-            let Some(rows) = parsed
-                .as_ref()
-                .and_then(|v| v.get("decisions"))
-                .and_then(|d| d.as_array())
-            else {
+            let Some(rows) = operator_law_rows(&out.stdout) else {
                 // A payload without the decisions array is not a shape the
                 // CLI emits: a failed instrument, never a clean no.
                 return LawStatus::Unknown;
             };
-            let operator_rows: Vec<&Value> = rows
-                .iter()
-                .filter(|r| r.get("authority_source").and_then(|a| a.as_str()) == Some("operator"))
-                .collect();
-            match operator_rows.as_slice() {
+            match rows.as_slice() {
                 [] => LawStatus::NoLaw,
                 [row] => match row.get("decision").and_then(|s| s.as_str()) {
                     Some(d) if d == WAIVER_DECISION => LawStatus::Single,
@@ -214,6 +205,22 @@ pub(super) fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> La
         }
         _ => LawStatus::Unknown,
     }
+}
+
+/// The `operator`-authority rows of one `fno backlog decisions --json`
+/// payload, or `None` when the payload carries no `decisions` array (a shape
+/// the CLI never emits: a failed instrument). Shared with the head-scoped
+/// merge-grant reader, which applies the same trust boundary - only a person
+/// at a terminal carries `operator` authority - over its own subject.
+pub(crate) fn operator_law_rows(stdout: &[u8]) -> Option<Vec<Value>> {
+    let parsed = serde_json::from_slice::<Value>(stdout).ok()?;
+    let rows = parsed.get("decisions")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter(|r| r.get("authority_source").and_then(|a| a.as_str()) == Some("operator"))
+            .cloned()
+            .collect(),
+    )
 }
 
 /// The operator-waiver overlay for a head the computed verdict did not cover:

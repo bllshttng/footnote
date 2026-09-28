@@ -41,6 +41,17 @@ pub const HELD: &str = "held";
 pub const ABSENT: &str = "absent";
 pub const UNKNOWN: &str = "unknown";
 
+/// The law-lane subject prefix of the head-scoped operator merge grant.
+/// The full subject is `{MERGE_GRANT_SUBJECT}:<owner/repo>#<pr>@<40-hex head>`,
+/// so a push invalidates the grant by construction: the new head's subject
+/// has no rows.
+pub const MERGE_GRANT_SUBJECT: &str = "merge-grant";
+
+/// The one decision value that counts as an affirmative grant, mirroring the
+/// waiver's exact-match polarity (`coverage_status::WAIVER_DECISION`): row
+/// existence carries none, so a note or a denial at the subject reads no.
+pub const MERGE_GRANT_DECISION: &str = "merge authorized for this head";
+
 /// The live-config arms of the verdict, read once per node after a receipt
 /// clears. `cfg` is a closure so config files are read only after a receipt
 /// clears, which is the Python order.
@@ -368,6 +379,64 @@ pub fn repo_slug_from_pr_url(pr_url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{owner}/{repo}"))
+}
+
+/// The head-scoped subject one merge grant lives at. Same trust shape as the
+/// review-coverage waiver's `scoped_waiver_subject`, over a different action.
+pub fn head_grant_subject(repo_slug: &str, pr: i64, head: &str) -> String {
+    format!("{MERGE_GRANT_SUBJECT}:{repo_slug}#{pr}@{head}")
+}
+
+/// The attended command an operator runs in their own terminal to record the
+/// grant. Only that door can carry it: `decide/__init__.py` refuses
+/// `--authority operator` from any agent session, so a worker can never mint
+/// one, and this string is what a per-run refusal names as its one remedy.
+pub fn attended_grant_command(repo_slug: &str, pr: i64, head: &str) -> String {
+    format!(
+        "fno backlog decide '{}' '{}' --authority operator",
+        head_grant_subject(repo_slug, pr, head),
+        MERGE_GRANT_DECISION
+    )
+}
+
+/// The head-grant reading over one `decisions` payload. Same polarity as the
+/// durable verdict: only a positively affirmative operator row set grants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadGrant {
+    /// Every operator row at the subject carries `MERGE_GRANT_DECISION`, so
+    /// identical duplicates read granted once (idempotent re-records).
+    Granted,
+    /// No operator row at the subject. `chat_attested` and unattributed rows
+    /// are already filtered out by `operator_law_rows`.
+    Absent,
+    /// Operator rows disagree, or one carries no readable decision.
+    Conflict,
+    /// No payload (nonzero exit, dead probe) or a payload without the
+    /// `decisions` array. Never reads as either grant or absence.
+    Unreadable(String),
+}
+
+/// The pure grant reader over an already-read `decisions` stdout.
+/// `None` stdout (the read failed) is `Unreadable`, never `Absent`.
+pub fn head_grant_status(stdout: Option<&[u8]>) -> HeadGrant {
+    let Some(bytes) = stdout else {
+        return HeadGrant::Unreadable("the decisions read did not answer".to_string());
+    };
+    let Some(rows) = crate::loopcheck::coverage_status::operator_law_rows(bytes) else {
+        return HeadGrant::Unreadable("malformed decisions payload".to_string());
+    };
+    if rows.is_empty() {
+        return HeadGrant::Absent;
+    }
+    let missing = rows
+        .iter()
+        .filter(|r| r.get("decision").and_then(|d| d.as_str()) != Some(MERGE_GRANT_DECISION))
+        .count();
+    if missing > 0 {
+        HeadGrant::Conflict
+    } else {
+        HeadGrant::Granted
+    }
 }
 
 /// Which PRs a dispatch lane may execute this tick, counted over

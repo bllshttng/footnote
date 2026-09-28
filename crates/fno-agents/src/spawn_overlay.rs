@@ -158,9 +158,10 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("fallback") => resolve_fallback(&payload),
         Some("codex-route") => resolve_codex_route_kind(&payload),
         Some("crown-settle") => crate::crown_settle::resolve(&payload),
+        Some("crown-identity") => crate::crown_identity::resolve(&payload),
         Some("crown-widen") => crate::crown_widen::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-widen"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-identity|crown-widen"
         )),
     }
 }
