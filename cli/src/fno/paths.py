@@ -368,7 +368,7 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
         return False
-    # The state root is not a checkout journal (law d-8ddaba56).
+    # The state root is not a checkout journal.
     if old.parent.resolve() == state_dir().resolve():
         return False
     try:

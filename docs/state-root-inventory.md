@@ -109,11 +109,11 @@ The 2026-09-27 sweep found 71 undocumented top-level entries on one real root. T
 
 ## Named root exceptions
 
-The migration (node x-4fb6, law d-8ddaba56) moves every movable file into a named subfolder (`docs/state-root-layout.tsv` is the table; `fno-agents state migrate` is the mover). These stay at the top level, each because a move is blocked on a port, an operator ruling, or a platform:
+The migration moves every movable file into a named subfolder (`docs/state-root-layout.tsv` is the table, and `fno-agents state migrate` is the mover). These stay at the top level, each because a move is blocked on a port, an operator ruling, or a platform:
 
 | Entries | Why they cannot move yet |
 |---|---|
-| `config.toml`, `config.toml.lock`, `config.toml.bak*`, `settings.yaml`, `settings.yaml.lock` | The config contract every harness, doc and OSS install names at `~/.fno/config.toml`. The `.bak*` files await the operator's ruling (x-0165 scope). |
+| `config.toml`, `config.toml.lock`, `config.toml.bak*`, `settings.yaml`, `settings.yaml.lock` | The config contract every harness, doc and OSS install names at `~/.fno/config.toml`. The `.bak*` files await the operator's ruling on their deletion. |
 | `my-priorities.md`, `my-priorities.md.lock`, `ruleset-21074865-before-smoke-hold.json` | Operator-owned, edited by hand at that path. |
 | `.env`, `.gitignore` | Operator-owned, edited by hand at that path. |
 | `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight; Spotlight reads the opt-out marker only at the folder root. |
@@ -143,7 +143,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `graph.db.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
 | `heal/pr-heal.pid` | `crates/fno-agents/src/heal_pid.rs::pid_file` (the pr-heal drive loop, beside the global events journal) | server-managed pid file; unlinked by the loop on a clean exit and by the pid scan when the pid is dead |
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
-| `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`); every reader resolves through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |
+| `install/` | `update.py` (`installed-rev`, `installed-rust-rev`, `source-path`, `source-pin.json`), `hooks/session-start.sh` (`plugin-root`, `.worktree-hook-root`), every reader resolving through the layout table (`crates/fno-agents/src/state_layout.rs`, `crates/fno/src/state_layout.rs`) | permanent install markers; the state-root migration moved them off the root (law d-8ddaba56), and `fno-agents state migrate` keeps the legacy names readable until it runs |
 | `backups/state-root-migration/<stamp>/` | `crates/fno-agents/src/state_layout.rs::migrate` | parked legacy copies from the state-root migration, one stamp folder per apply run; the layout table's park rows and every conflict-parked legacy file land here. Never swept; deletion waits on the operator's yes |
 | `inbox/` | `paths.inbox_agents_root()` (`cli/src/fno/paths.py`), the mail bus's fallback root: one mailbox per agent handle under `agents/` | mail drains per handle; a drained envelope is acked away |
 | `.interrupted-writes/` | `crates/fno-agents/src/daemon.rs` (quarantine) | writes caught mid-flight; released after the write settles |

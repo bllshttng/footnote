@@ -1,7 +1,7 @@
 //! The state-root layout: one table (`docs/state-root-layout.tsv`, read at
 //! build time) that names where every movable top-level file of the state
 //! root lives after the migration, plus the one resolver ([`place`]) and the
-//! one mover ([`migrate`]). Law d-8ddaba56: nothing writes at the top level
+//! one mover ([`migrate`]). The tidiness law: nothing writes at the top level
 //! of the state root when a named subfolder can hold it.
 //!
 //! `place` is read-old-as-fallback: a migrated root reads the new path, an

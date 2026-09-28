@@ -1,4 +1,4 @@
-# The one state-root layout table (node x-4fb6, law d-8ddaba56).
+# The one state-root layout table for the fno state root.
 #
 # Columns (TAB-separated): legacy_name <TAB> new_relative_path <TAB> kind <TAB> owner
 #
