@@ -2961,9 +2961,10 @@ pub(crate) fn mux_sidecar_root() -> PathBuf {
 
 /// The server-start move of the `owner = mux` rows: the mux server is their
 /// long-lived writer and migrates them at its own start, before it opens
-/// them. See [`crate::state_layout::migrate_mux_sidecars_at`].
+/// them. See [`crate::state_layout::migrate_mux_sidecars_at`]. Pub: the
+/// binary's `run_server` calls it; the lib target sees no other caller.
 #[cfg(not(test))]
-pub(crate) fn migrate_mux_sidecars() {
+pub fn migrate_mux_sidecars() {
     crate::state_layout::migrate_mux_sidecars_at(&resolved_state_root());
 }
 
@@ -2973,17 +2974,7 @@ pub(crate) fn migrate_mux_sidecars() {
 /// stores' last step for a file that appears between the two probes.
 #[cfg(not(test))]
 pub(crate) fn mux_sidecar_path(file: &str) -> PathBuf {
-    let new = mux_sidecar_root().join("mux").join(file);
-    if new.exists() {
-        return new;
-    }
-    if legacy_fallback_allowed() {
-        let legacy = legacy_sidecar_path(file);
-        if legacy.exists() {
-            return legacy;
-        }
-    }
-    new
+    crate::state_layout::resolve_sidecar(&resolved_state_root(), file, legacy_fallback_allowed())
 }
 
 /// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set

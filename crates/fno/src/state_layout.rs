@@ -255,6 +255,22 @@ fn mtime_of(p: &Path) -> std::time::SystemTime {
         .unwrap_or(std::time::UNIX_EPOCH)
 }
 
+/// The gated sidecar resolution the mux stores share: `mux/<file>` when it
+/// exists, else the legacy root spelling when allowed and present, else
+/// `mux/<file>` (fresh install). The legacy gate is the test-isolation read
+/// (`proto::legacy_fallback_allowed`), which `place` cannot see.
+pub fn resolve_sidecar(root: &Path, file: &str, legacy_allowed: bool) -> PathBuf {
+    let new = root.join("mux").join(file);
+    if new.exists() {
+        return new;
+    }
+    let legacy = root.join(file);
+    if legacy_allowed && legacy.exists() {
+        return legacy;
+    }
+    new
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +382,40 @@ mod tests {
         );
         assert!(!legacy_path.exists());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sidecar_resolution_matches_the_acceptance() {
+        let root = std::env::temp_dir().join(format!("fno-mux-res-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("squads.json"), b"members").unwrap();
+        // Unmigrated root, client lane: the legacy file is the store.
+        assert_eq!(
+            resolve_sidecar(&root, "squads.json", true),
+            root.join("squads.json")
+        );
+        assert!(!root.join("mux").exists(), "nothing lands under mux/");
+        // Gate off: even a present legacy file never resolves (test isolation).
+        assert_eq!(
+            resolve_sidecar(&root, "squads.json", false),
+            root.join("mux").join("squads.json")
+        );
+        // Migrated root: mux/ wins over the parked legacy twin.
+        std::fs::create_dir_all(root.join("mux")).unwrap();
+        std::fs::write(root.join("mux").join("squads.json"), b"new").unwrap();
+        assert_eq!(
+            resolve_sidecar(&root, "squads.json", true),
+            root.join("mux").join("squads.json")
+        );
+        // Fresh root: mux/ is the default.
+        let fresh = std::env::temp_dir().join(format!("fno-mux-fresh-{}", std::process::id()));
+        std::fs::create_dir_all(&fresh).unwrap();
+        assert_eq!(
+            resolve_sidecar(&fresh, "mux-view.json", true),
+            fresh.join("mux").join("mux-view.json")
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&fresh).ok();
     }
 
     fn touch_mtime(p: &Path, t: std::time::SystemTime) {
