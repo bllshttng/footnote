@@ -354,11 +354,68 @@ fn agents_history_legacy_node_and_unrecoverable_rows_remain_distinct() {
 }
 
 #[test]
+fn agents_history_node_prints_ledger_only_row_and_missing_session_reason() {
+    let dir = tempdir().unwrap();
+    let ledger = dir.path().join("ledger.json");
+    let agents_home = dir.path().join("agents");
+    fs::create_dir_all(&agents_home).unwrap();
+    fs::write(
+        &ledger,
+        json!({
+            "entries": [{
+                "graph_node_id": "x-3344",
+                "pr_number": 44,
+                "status": "done",
+                "completed": "2026-09-23T12:00:00Z"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let args = vec![
+        OsString::from("x-3344"),
+        OsString::from("--graph"),
+        dir.path().join("graph.db").into_os_string(),
+        OsString::from("--ledger"),
+        ledger.into_os_string(),
+        OsString::from("--events"),
+        dir.path().join("events.jsonl").into_os_string(),
+        OsString::from("--agents-home"),
+        agents_home.into_os_string(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    assert_eq!(run_to(&args, &mut stdout, &mut stderr), 0);
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.contains("ledger:     x-3344 #44 done"));
+    assert!(stdout.contains(
+        "session: not recorded (ledger uuid coverage is write-path only; this row predates it)"
+    ));
+}
+
+#[test]
 fn agents_history_pr_resolution_filters_repo_slug_and_keeps_both_when_unresolved() {
     let mut sources = empty_sources();
     sources.graph = Ok(vec![
         json!({"id":"x-3344", "pr_number":44, "pr_url":"https://github.com/acme/one/pull/44", "sessions":[{"session_id":SID}]}),
         json!({"id":"x-9f2e", "pr_number":44, "pr_url":"https://github.com/acme/two/pull/44", "sessions":[{"session_id":OTHER_SID}]}),
+    ]);
+    sources.ledger = Ok(vec![
+        json!({
+            "graph_node_id": "x-3344",
+            "pr_number": 44,
+            "pr_url": "https://github.com/acme/one/pull/44",
+            "sessions": [SID],
+            "status": "done"
+        }),
+        json!({
+            "graph_node_id": "x-9f2e",
+            "pr_number": 44,
+            "pr_url": "https://github.com/acme/two/pull/44",
+            "sessions": [OTHER_SID],
+            "status": "done"
+        }),
     ]);
     sources.repo_slug = Some("acme/one".to_string());
 
