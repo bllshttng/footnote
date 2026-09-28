@@ -61,11 +61,6 @@ join
 # footnote-owned DATA with a graph-resident write path (refused until the
 # write moves to the sidecar seam)
 cost
-session add
-session backfill
-session close
-session open
-session reap-open
 decide
 decisions
 decide-retract

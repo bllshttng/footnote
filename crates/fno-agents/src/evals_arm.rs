@@ -425,6 +425,7 @@ fn run_tick_mode(
                 reason: Some("evals scheduled regression run".into()),
                 metadata: None,
                 pid_provenance: None,
+                identity: None,
                 root: claims_root.clone(),
                 events_dir: None,
             };
