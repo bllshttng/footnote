@@ -1502,3 +1502,72 @@ def test_done_node_process_inside_keeps_tree(repo: Path, tmp_path: Path):
     finally:
         proc.kill()
         proc.wait()
+
+
+# ── worktree.prune_done: what a done tree's tracked diff is worth ───────────
+
+
+def _add_modified_tracked_done_wt(canon: Path, name: str, node_id: str) -> Path:
+    """A done-node tree whose tracked file carries an uncommitted edit."""
+    wt = _add_done_node_wt(canon, name, node_id)
+    _commit(wt, "tracked.txt", "original\n")
+    (wt / "tracked.txt").write_text("edited\n")
+    return wt
+
+
+def _prune_cfg(tmp_path: Path, value: str) -> dict[str, str]:
+    """Pin worktree.prune_done for the gate binary: the first config
+    candidate for a tmp path, so a test never reads the operator's global
+    file."""
+    cfg = tmp_path / f"prune-{value}.toml"
+    cfg.write_text(f'[worktree]\nprune_done = "{value}"\n')
+    return {"FNO_CONFIG": str(cfg)}
+
+
+@requires_gate
+def test_balanced_keeps_a_done_tree_with_a_modified_tracked_file(
+    repo: Path, tmp_path: Path
+):
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-b4ln1", "status": "done"}])
+    env.update(_prune_cfg(tmp_path, "balanced"))
+    wt = _add_modified_tracked_done_wt(repo, "wt-bal", "x-b4ln1")
+
+    r = _sweep(repo, "--apply", env_extra=env)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (dirty)" in r.stdout, diag
+    assert wt.exists(), "balanced pruned a tree holding uncommitted work" + diag
+    assert (wt / "tracked.txt").read_text() == "edited\n", diag
+
+
+@requires_gate
+def test_aggressive_salvages_the_tracked_diff_to_a_ref_then_prunes(
+    repo: Path, tmp_path: Path
+):
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-4ggr1", "status": "done"}])
+    env.update(_prune_cfg(tmp_path, "aggressive"))
+    wt = _add_modified_tracked_done_wt(repo, "wt-4gg", "x-4ggr1")
+    branch_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    r = _sweep(repo, "--apply", env_extra=env)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "archived" in r.stdout, diag
+    assert not wt.exists(), "aggressive did not prune the salvaged tree" + diag
+    assert (
+        _git(repo, "rev-parse", "--verify", "feature/wt-4gg").stdout.strip()
+        == branch_sha
+    ), "the branch did not survive" + diag
+    ref = "refs/fno/salvage/x-4ggr1"
+    assert _git(repo, "rev-parse", "--verify", ref, check=False).returncode == 0, (
+        "no salvage ref after removal" + diag
+    )
+    salvaged = _git(repo, "show", f"{ref}:tracked.txt").stdout
+    assert salvaged == "edited\n", f"the ref does not hold the diff: {salvaged}" + diag
+    # The untracked salvage still runs under aggressive.
+    untracked = list((repo / ".fno" / "salvage").glob("*-x-4ggr1/untracked/scratch.txt"))
+    assert untracked, "the untracked file was not salvaged" + diag
