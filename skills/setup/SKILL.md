@@ -198,6 +198,16 @@ If RTK is detected (e.g. `~/code/dotfiles/bin/rtk-claude-hook.sh`), note that it
 is already wired and do NOT run `rtk init -g` (it would double-wire). This is
 informational only; it is not a `config.toml` key.
 
+## Companions (code index)
+
+When the repo has a code index, a blueprint asks it before it searches. footnote ships no indexer and never installs one. From the repo root, run `bash "${SKILL_DIR}/scripts/lib/code-index-detect.sh"`. It prints one line per index it finds: the name, the roles, `ready` or `unavailable:<reason>`, and the manifest path.
+
+- A `ready` line: tell the user a blueprint will ask that index. Read the `refresh` line in its manifest and name it as the command that keeps the index current. Do not run it.
+- An `unavailable` line: the index exists, but its CLI is not on PATH. Name the reason. A blueprint records the index as unavailable and continues.
+- No line: tell the user a blueprint works without an index. Name codegraph for code and graphify for docs as examples they can install. For a provider of their own, link [code-index-providers.md](../../docs/code-index-providers.md).
+
+This is informational only. It writes no `config.toml` key.
+
 ## Known Limitations and Deferred Work
 
 - New policy waits for a shipped schema field. See [LIMITATIONS.md](LIMITATIONS.md).

@@ -1,0 +1,10 @@
+schema = 1
+name = "codegraph"
+roles = ["symbol"]
+detect = ".codegraph"
+requires = "codegraph"
+ask = ["codegraph", "query", "--json", "-l", "5", "{term}"]
+timeout_secs = 10
+fresh = ["codegraph", "status"]
+fresh_match = "Index is up to date"
+refresh = ["codegraph", "sync"]

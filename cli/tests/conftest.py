@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 import warnings
@@ -775,6 +776,25 @@ from fno.hermetic import neutralise  # noqa: E402
 _HARNESS_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
 
 _SANDBOX = tempfile.mkdtemp(prefix="fno-test-sandbox-")
+
+# Session tripwire: snapshot the live roots under the REAL env before the swap
+# below scrubs it. Controller only: xdist workers' basetemps sit under the
+# controller's, so the controller's finish hook sees every worker's leak.
+_TRIPWIRE = None
+if not os.environ.get("PYTEST_XDIST_WORKER"):
+    from tests.prod_tripwire import live_roots, resolve_real_plans_dir, snapshot
+
+    _REAL_ENV = dict(os.environ)
+    _CANONICAL_CHECKOUT = Path(__file__).resolve().parents[2]
+    _real_home = _REAL_ENV.get("HOME")
+    _real_plans_dir = resolve_real_plans_dir(_REAL_ENV, _CANONICAL_CHECKOUT)
+    _tripwire_roots = (
+        live_roots(Path(_real_home), _CANONICAL_CHECKOUT, _real_plans_dir)
+        if _real_home
+        else []
+    )
+    _TRIPWIRE = (_tripwire_roots, snapshot(_tripwire_roots))
+
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
 os.environ.update(_hermetic_env)
@@ -795,6 +815,24 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Remove the throwaway sandbox created for state isolation."""
     import shutil
 
+    if _TRIPWIRE is not None:
+        from tests.prod_tripwire import find_leaks
+
+        roots, before = _TRIPWIRE
+        markers: set[str] = {str(_SANDBOX), os.path.realpath(_SANDBOX)}
+        try:
+            basetemp = Path(session.config._tmp_path_factory.getbasetemp())
+            markers |= {str(basetemp), os.path.realpath(basetemp)}
+        except Exception:
+            print(
+                "prod tripwire: could not read the session basetemp; watching sandbox markers only",
+                file=sys.stderr,
+            )
+        leaks = find_leaks(before, roots, markers)
+        for leak in leaks:
+            print(f"prod tripwire: {leak} was created by this test session", file=sys.stderr)
+        if leaks:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
     shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
