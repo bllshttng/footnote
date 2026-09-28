@@ -1988,15 +1988,15 @@ def register_existing_session(
     # anycast or a lane cap.
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
-    # A restore can strip a row's crown stamp; a manifest naming this session
-    # re-stamps an UNstamped row. A stamped row is never touched.
+    # A restore can strip a row's stamp; a manifest naming this session re-stamps it when bare.
     from fno.king.state import manifest_crown_for_session
 
     manifest_crown = manifest_crown_for_session(session_id, owner_cwd=cwd)
 
     def _apply_manifest_crown(entry: AgentEntry) -> None:
         if manifest_crown and not entry.crown_scope:
-            entry.crown_level = int(manifest_crown.get("crown_level") or 0) or None
+            digits = manifest_crown.get("crown_level") or ""
+            entry.crown_level = int(digits) if digits.isdecimal() else None
             entry.crown_scope = manifest_crown["crown_scope"]
             entry.crown_grantor = manifest_crown.get("crown_grantor") or None
 

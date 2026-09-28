@@ -2427,6 +2427,22 @@ def test_register_re_stamps_crown_from_a_live_manifest(tmp_path, monkeypatch):
     )
     assert bare.crown_scope is None
 
+    # A malformed crown_level registers the row BARE instead of raising:
+    # a junk stamp must never cost the session its row.
+    (kings / "x-junk.md").write_text(
+        manifest_body("88888888-0000-0000-0000-000000000000", "x-junk").replace(
+            "crown_level: 2", "crown_level: two"
+        ),
+        encoding="utf-8",
+    )
+    junky = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="88888888-0000-0000-0000-000000000000",
+        cwd=str(tmp_path),
+        name="junky",
+    )
+    assert junky.crown_level is None
+
     # A row already stamped is never touched by a manifest naming it.
     seeded = AgentEntry(
         name="quill2",

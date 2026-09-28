@@ -28,7 +28,7 @@
 use crate::loop_king::{same_territory, scopes_overlap};
 use crate::state::{load_registry, RegistryEntry};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -107,7 +107,22 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
 /// `crown_reap::sweep`'s holder verdict may vacate the manifest, so a manifest
 /// naming a session keeps the row - the fail-safe direction.
 pub(crate) fn row_holds_manifest_live_crown(row: &RegistryEntry) -> bool {
-    let Some(session) = row_session(row).filter(|s| !s.trim().is_empty()) else {
+    let mut cache = HashMap::new();
+    row_holds_manifest_live_crown_cached(row, &mut cache)
+}
+
+/// [`row_holds_manifest_live_crown`] over a per-pass cache keyed by kings
+/// dir: a sweep scanning the registry reads each space's manifests once, not
+/// once per row. Callers sweeping many rows use this form; single-row
+/// callers keep the plain wrapper.
+pub(crate) fn row_holds_manifest_live_crown_cached(
+    row: &RegistryEntry,
+    cache: &mut HashMap<PathBuf, HashSet<String>>,
+) -> bool {
+    let Some(session) = row_session(row)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
         return false;
     };
     let cwd = std::path::PathBuf::from(row.cwd.trim());
@@ -115,24 +130,33 @@ pub(crate) fn row_holds_manifest_live_crown(row: &RegistryEntry) -> bool {
         return false;
     }
     let kings = crate::paths::space_dir(&cwd).join("kings");
-    let Ok(files) = fs::read_dir(&kings) else {
-        return false;
+    let sessions = match cache.get(&kings) {
+        Some(sessions) => sessions,
+        None => {
+            let sessions = manifest_crown_sessions(&kings);
+            cache.insert(kings, sessions);
+            cache.get(&kings).expect("just inserted")
+        }
     };
-    for file in files.flatten() {
-        let path = file.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if crate::claude_adopt::manifest_field(&content, "harness_session_id").as_deref()
-            == Some(session.trim())
-        {
-            return true;
-        }
-    }
-    false
+    sessions.contains(&session)
+}
+
+/// The harness session ids every manifest under one kings dir names as
+/// holder. Unreadable or non-manifest files are skipped; an empty dir
+/// answers an empty set.
+fn manifest_crown_sessions(kings: &Path) -> HashSet<String> {
+    let Ok(files) = fs::read_dir(kings) else {
+        return HashSet::new();
+    };
+    files
+        .flatten()
+        .map(|file| file.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| fs::read_to_string(&path).ok())
+        .filter_map(|content| crate::claude_adopt::manifest_field(&content, "harness_session_id"))
+        .map(|sid| sid.trim().to_string())
+        .filter(|sid| !sid.is_empty())
+        .collect()
 }
 
 /// Python `_find_by_session`, both of its forms. A known harness scopes the

@@ -26,7 +26,7 @@
 //! survive the retirement, so `fno agents resume` still opens the session
 //! afterwards.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1824,13 +1824,16 @@ pub(crate) fn run_with_release(
         }
     }
 
+    let mut manifest_crown_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
         }
-        if e.crown_level.is_some() || crate::loop_reign::row_holds_manifest_live_crown(e) {
+        if e.crown_level.is_some()
+            || crate::loop_reign::row_holds_manifest_live_crown_cached(e, &mut manifest_crown_cache)
+        {
             summary.kept_crowned.push(id);
             continue;
         }
