@@ -19,10 +19,18 @@ const FRESH_WINDOW_MS: i64 = 5 * 60 * 1000;
 const SECURITY_ITEM_NOT_FOUND: i32 = 44;
 const SECURITY_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 struct Principal {
     account_uuid: String,
     organization_uuid: String,
+    // Carried for receipts ("wrong-account (<email>)"); identity is the uuids.
+    email: Option<String>,
+}
+
+impl PartialEq for Principal {
+    fn eq(&self, other: &Self) -> bool {
+        self.account_uuid == other.account_uuid && self.organization_uuid == other.organization_uuid
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,11 +45,14 @@ enum ExternalFailure {
     Malformed,
 }
 
-trait External {
+pub(crate) trait External {
     fn keychain(&self, service: &str) -> Result<Option<String>, ExternalFailure>;
     fn profile(&self, bearer: &str) -> Result<Principal, ExternalFailure>;
     fn refresh(&self, refresh_token: &str) -> Result<Value, ExternalFailure>;
     fn live_claude(&self) -> Vec<LiveClaude>;
+    // Interactive: runs `claude auth login --claudeai` with stdio inherited.
+    // None config_dir means the unscoped item (no CLAUDE_CONFIG_DIR).
+    fn login(&self, config_dir: Option<&Path>, email: Option<&str>) -> Result<(), ExternalFailure>;
 }
 
 struct SystemExternal;
@@ -141,6 +152,28 @@ impl External for SystemExternal {
             })
             .collect()
     }
+
+    fn login(&self, config_dir: Option<&Path>, email: Option<&str>) -> Result<(), ExternalFailure> {
+        let mut command = Command::new("claude");
+        command.args(["auth", "login", "--claudeai"]);
+        if let Some(email) = email {
+            command.args(["--email", email]);
+        }
+        match config_dir {
+            Some(dir) => {
+                command.env("CLAUDE_CONFIG_DIR", dir);
+            }
+            None => {
+                command.env_remove("CLAUDE_CONFIG_DIR");
+            }
+        }
+        command
+            .status()
+            .map_err(|_| ExternalFailure::Unavailable)?
+            .success()
+            .then_some(())
+            .ok_or(ExternalFailure::Unavailable)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,8 +215,9 @@ pub fn run(args: &[String]) -> i32 {
     let action = match args.first().map(String::as_str) {
         Some("sync") => "sync",
         Some("refresh") => "refresh",
+        Some("login") => "login",
         _ => {
-            eprintln!("usage: provider-cap vault sync|refresh --json [options]");
+            eprintln!("usage: provider-cap vault sync|refresh|login --json [options]");
             return 2;
         }
     };
@@ -248,8 +282,8 @@ fn parse_options(action: &str, args: &[String]) -> Result<Options, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
-    if action == "refresh" && options.id.is_none() {
-        return Err("--id is required for refresh".to_string());
+    if matches!(action, "refresh" | "login") && options.id.is_none() {
+        return Err(format!("--id is required for {action}"));
     }
     Ok(options)
 }
@@ -289,6 +323,7 @@ fn execute(action: &str, options: &Options, external: &dyn External) -> (i32, Re
     match action {
         "sync" => sync(options, external),
         "refresh" => refresh(options, external),
+        "login" => login(options, external),
         _ => (2, Receipt::new(action, "unsupported", None)),
     }
 }
@@ -503,13 +538,287 @@ fn live_owner(
     })
 }
 
+/// `vault login --id <id>`: put any Claude account on the shared slot with two
+/// browser logins. Runs only when `fno config accounts use <id>` hit a dead or
+/// missing stored credential: sync the outgoing account, sign in for the
+/// unscoped then the scoped reader, prove each item before the next login, and
+/// write the store so the next `use` is a plain switch.
+fn login(options: &Options, external: &dyn External) -> (i32, Receipt) {
+    let action = "login";
+    let Some(id) = options.id.as_deref() else {
+        return (2, Receipt::new(action, "missing-id", None));
+    };
+    let meta = read_json(&options.store.join(id).join("meta.json"));
+    let expected = meta.as_ref().and_then(principal_from_meta);
+    let expected_email = expected
+        .as_ref()
+        .and_then(|principal| principal.email.clone());
+    let scoped = match scoped_service(&options.slot_dir) {
+        Ok(service) => service,
+        Err(verdict) => return (4, Receipt::new(action, verdict, Some(id.to_string()))),
+    };
+    // 1. Save the outgoing account first: the logins below overwrite both slot
+    // items, and a credential fno has not saved would be lost.
+    let (code, receipt) = sync(options, external);
+    if !matches!(
+        receipt.verdict.as_str(),
+        "written" | "unchanged" | "empty-slot" | "unproven"
+    ) {
+        return (code, Receipt::new(action, receipt.verdict, receipt.record));
+    }
+    let readers: [(&str, Option<&Path>); 2] = [
+        ("Claude Code-credentials", None),
+        (scoped.as_str(), Some(options.slot_dir.as_path())),
+    ];
+    let mut finished: Vec<&str> = Vec::new();
+    let mut proven: Vec<(String, Principal)> = Vec::new();
+    for (step, (service, config_dir)) in readers.into_iter().enumerate() {
+        let label = if step == 0 { "unscoped" } else { "scoped" };
+        let email = expected_email.as_deref();
+        match email {
+            Some(email) => eprintln!("Sign in as {email} (step {} of 2)", step + 1),
+            None => eprintln!("Sign in as the {id} account (step {} of 2)", step + 1),
+        }
+        if external.login(config_dir, email).is_err() {
+            let finished = if finished.is_empty() {
+                "none".to_string()
+            } else {
+                finished.join(", ")
+            };
+            return (
+                1,
+                Receipt::new(
+                    action,
+                    format!("login-aborted (finished: {finished})"),
+                    Some(id.to_string()),
+                ),
+            );
+        }
+        let blob = match external.keychain(service) {
+            Ok(Some(blob)) if has_credential(&blob) => blob,
+            _ => {
+                return (
+                    1,
+                    Receipt::new(
+                        action,
+                        format!("login-aborted ({label} unread)"),
+                        Some(id.to_string()),
+                    ),
+                )
+            }
+        };
+        let bearer = match oauth(&blob).and_then(|item| item.access_token) {
+            Some(token) => token,
+            None => {
+                return (
+                    1,
+                    Receipt::new(
+                        action,
+                        format!("login-aborted ({label} unread)"),
+                        Some(id.to_string()),
+                    ),
+                )
+            }
+        };
+        let principal = match external.profile(&bearer) {
+            Ok(principal) => principal,
+            Err(_) => {
+                return (
+                    1,
+                    Receipt::new(
+                        action,
+                        format!("login-aborted ({label} unproven)"),
+                        Some(id.to_string()),
+                    ),
+                )
+            }
+        };
+        if let Some(expected) = &expected {
+            if principal != *expected {
+                let who = principal
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| principal.account_uuid.clone());
+                return (
+                    4,
+                    Receipt::new(
+                        action,
+                        format!("wrong-account ({who})"),
+                        Some(id.to_string()),
+                    ),
+                );
+            }
+        } else {
+            let others: Vec<String> = matching_records(&options.store, &principal)
+                .into_iter()
+                .filter(|record| record != id)
+                .collect();
+            if let Some(other) = others.first() {
+                return (
+                    4,
+                    Receipt::new(action, format!("claimed-by-{other}"), Some(id.to_string())),
+                );
+            }
+        }
+        finished.push(label);
+        proven.push((blob, principal));
+    }
+    // The blob with the later expiry is the live token; write it into the store
+    // so the next `use` is a plain switch.
+    let mut best = 0usize;
+    let mut best_expiry = oauth(&proven[0].0).and_then(|item| item.expires_at);
+    for (index, (blob, _)) in proven.iter().enumerate().skip(1) {
+        let expiry = oauth(blob).and_then(|item| item.expires_at);
+        if expiry > best_expiry {
+            best = index;
+            best_expiry = expiry;
+        }
+    }
+    let (blob, principal) = proven.swap_remove(best);
+    let dir = options.store.join(id);
+    if fs::create_dir_all(&dir).is_err() || crate::paths::set_dir_mode_0700(&dir).is_err() {
+        return (
+            1,
+            Receipt::new(action, "store-unavailable", Some(id.to_string())),
+        );
+    }
+    if atomic_write(&dir.join("blob"), &blob).is_err() {
+        return (
+            1,
+            Receipt::new(action, "store-write-failed", Some(id.to_string())),
+        );
+    }
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut meta = json!({
+        "harness": "claude",
+        "account_id": id,
+        "captured_at": now,
+        "kind": "keychain",
+    });
+    let mut principal_json = json!({
+        "account_uuid": principal.account_uuid,
+        "organization_uuid": principal.organization_uuid,
+    });
+    if let Some(email) = &principal.email {
+        principal_json["email"] = json!(email);
+    }
+    meta["principal"] = principal_json;
+    meta["principal_at"] = json!(now);
+    if atomic_write(
+        &dir.join("meta.json"),
+        &serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    )
+    .is_err()
+    {
+        return (
+            1,
+            Receipt::new(action, "store-write-failed", Some(id.to_string())),
+        );
+    }
+    if atomic_write(&options.store.join(".active-claude"), id).is_err() {
+        return (
+            1,
+            Receipt::new(action, "stamp-write-failed", Some(id.to_string())),
+        );
+    }
+    match principal.email.as_deref().or(expected_email.as_deref()) {
+        Some(email) => eprintln!(
+            "Both keychain items hold {id} ({email}). Check usage: fno config accounts usage --refresh"
+        ),
+        None => eprintln!(
+            "Both keychain items hold {id}. Check usage: fno config accounts usage --refresh"
+        ),
+    }
+    (0, Receipt::new(action, "logged-in", Some(id.to_string())))
+}
+
+/// The stored-login verdict for `<id>`, for the daemon's early alert. `None`
+/// means "cannot judge now": the switch lock is held, or the slot items are
+/// unreadable, so a refresh here could spend the slot's live token.
+pub(crate) fn stored_health(
+    store: &Path,
+    slot_dir: &Path,
+    id: &str,
+    external: &dyn External,
+) -> Option<String> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(store.join(".switch.lock"))
+        .ok()?;
+    if lock.try_lock().is_err() {
+        return None;
+    }
+    // Held to the end of this function on purpose: the refresh below must not
+    // race a switch.
+    let blobs = match slot_blobs(slot_dir, external) {
+        Ok(blobs) => blobs,
+        Err(_) => return None,
+    };
+    let stored_refresh = fs::read_to_string(store.join(id).join("blob"))
+        .ok()
+        .and_then(|blob| oauth(&blob).and_then(|item| item.refresh_token));
+    // Refreshing the record whose stored token IS the slot's live token would
+    // spend that token; skip before any network call.
+    if stored_refresh.is_some_and(|token| {
+        blobs.iter().any(|blob| {
+            oauth(blob).and_then(|item| item.refresh_token).as_deref() == Some(token.as_str())
+        })
+    }) {
+        return Some("slot-owner".to_string());
+    }
+    let options = Options {
+        store: store.to_path_buf(),
+        slot_dir: slot_dir.to_path_buf(),
+        config_dir: slot_dir.to_path_buf(),
+        id: Some(id.to_string()),
+        json: false,
+        lock_held: true,
+    };
+    Some(refresh(&options, external).1.verdict)
+}
+
+/// The store + slot paths the daemon's health check reads, resolved the way
+/// Python's `store_root()` does: `$FNO_STATE_DIR` > config `state_dir` > `~/.fno`.
+pub fn stored_health_for(config_cwd: &Path, id: &str) -> Option<String> {
+    let mut state = std::env::var_os("FNO_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if state.is_none() {
+        state = crate::agents_config::config_lookup(config_cwd, &["state_dir"])
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|value| !value.is_empty())
+            .map(|raw| {
+                let expanded = raw.strip_prefix("~/").map(|rest| {
+                    std::env::var_os("HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_default()
+                        .join(rest)
+                });
+                expanded.unwrap_or_else(|| PathBuf::from(raw))
+            });
+    }
+    if state.is_none() {
+        state = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".fno"));
+    }
+    let state = state.unwrap_or_else(|| PathBuf::from(".fno"));
+    let slot_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".claude"))
+                .unwrap_or_else(|| PathBuf::from(".claude"))
+        });
+    stored_health(&state.join("providers"), &slot_dir, id, &SystemExternal)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OAuth {
     access_token: Option<String>,
     refresh_token: Option<String>,
     expires_at: Option<i64>,
 }
-
 fn oauth(blob: &str) -> Option<OAuth> {
     let value: Value = serde_json::from_str(blob).ok()?;
     let oauth = value.get("claudeAiOauth")?.as_object()?;
@@ -540,27 +849,40 @@ fn integer(value: Option<&Value>) -> Option<i64> {
 }
 
 fn principal_from_profile(value: &Value) -> Option<Principal> {
-    let account_uuid = value.get("account")?.get("uuid")?.as_str()?;
-    let organization_uuid = value.get("organization")?.get("uuid")?.as_str()?;
+    let account = value.get("account")?;
+    let account_uuid = account.get("uuid")?.as_str()?.to_string();
+    let organization_uuid = value
+        .get("organization")?
+        .get("uuid")?
+        .as_str()?
+        .to_string();
     if account_uuid.is_empty() || organization_uuid.is_empty() {
         return None;
     }
     Some(Principal {
-        account_uuid: account_uuid.to_string(),
-        organization_uuid: organization_uuid.to_string(),
+        account_uuid,
+        organization_uuid,
+        email: account
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
 fn principal_from_meta(value: &Value) -> Option<Principal> {
     let principal = value.get("principal")?;
-    let account_uuid = principal.get("account_uuid")?.as_str()?;
-    let organization_uuid = principal.get("organization_uuid")?.as_str()?;
+    let account_uuid = principal.get("account_uuid")?.as_str()?.to_string();
+    let organization_uuid = principal.get("organization_uuid")?.as_str()?.to_string();
     if account_uuid.is_empty() || organization_uuid.is_empty() {
         return None;
     }
     Some(Principal {
-        account_uuid: account_uuid.to_string(),
-        organization_uuid: organization_uuid.to_string(),
+        account_uuid,
+        organization_uuid,
+        email: principal
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -768,6 +1090,10 @@ mod tests {
     #[derive(Default, Clone)]
     struct MockExternal {
         keychain: HashMap<String, Option<String>>,
+        // Blobs the mocked logins leave behind, served before the static map.
+        post_login: Arc<Mutex<HashMap<String, String>>>,
+        login_result: Arc<Mutex<Option<Result<(), ExternalFailure>>>>,
+        logins: Arc<Mutex<Vec<(Option<PathBuf>, Option<String>)>>>,
         profiles: HashMap<String, Result<Principal, ExternalFailure>>,
         refresh: Arc<Mutex<Option<Result<Value, ExternalFailure>>>>,
         live: Vec<LiveClaude>,
@@ -775,6 +1101,9 @@ mod tests {
 
     impl External for MockExternal {
         fn keychain(&self, service: &str) -> Result<Option<String>, ExternalFailure> {
+            if let Some(blob) = self.post_login.lock().unwrap().get(service).cloned() {
+                return Ok(Some(blob));
+            }
             Ok(self.keychain.get(service).cloned().flatten())
         }
 
@@ -796,12 +1125,29 @@ mod tests {
         fn live_claude(&self) -> Vec<LiveClaude> {
             self.live.clone()
         }
+
+        fn login(
+            &self,
+            config_dir: Option<&Path>,
+            email: Option<&str>,
+        ) -> Result<(), ExternalFailure> {
+            self.logins
+                .lock()
+                .unwrap()
+                .push((config_dir.map(PathBuf::from), email.map(str::to_string)));
+            self.login_result
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(Err(ExternalFailure::Unavailable))
+        }
     }
 
     fn principal(account: &str, organization: &str) -> Principal {
         Principal {
             account_uuid: account.to_string(),
             organization_uuid: organization.to_string(),
+            email: None,
         }
     }
 
@@ -1072,5 +1418,179 @@ mod tests {
         );
         assert_eq!(code, 4);
         assert_eq!(receipt.verdict, "live-owner");
+    }
+    #[test]
+    fn login_syncs_then_signs_in_twice_and_writes_the_store() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = Principal {
+            account_uuid: "acct-makers".to_string(),
+            organization_uuid: "org-makers".to_string(),
+            email: Some("jn@makersof.xyz".to_string()),
+        };
+        record(
+            temp.path(),
+            "makers",
+            &who,
+            &blob("dead", "dead-refresh", now_ms() - 1),
+        );
+        fs::write(
+            temp.path().join("makers/meta.json"),
+            json!({
+                "harness": "claude",
+                "account_id": "makers",
+                "kind": "keychain",
+                "principal": {
+                    "account_uuid": who.account_uuid,
+                    "organization_uuid": who.organization_uuid,
+                    "email": "jn@makersof.xyz"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let unscoped = blob("m1", "m1-refresh", now_ms() + 1_000);
+        let scoped = blob("m2", "m2-refresh", now_ms() + 2_000);
+        let mut external = MockExternal::default();
+        let mut post = external.post_login.lock().unwrap();
+        post.insert("Claude Code-credentials".to_string(), unscoped);
+        post.insert(scoped_service(&slot).unwrap(), scoped.clone());
+        drop(post);
+        external.profiles.insert("m1".to_string(), Ok(who.clone()));
+        external.profiles.insert("m2".to_string(), Ok(who.clone()));
+        *external.login_result.lock().unwrap() = Some(Ok(()));
+
+        let (code, receipt) = execute(
+            "login",
+            &options(temp.path(), &slot, Some("makers")),
+            &external,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(receipt.verdict, "logged-in");
+        assert_eq!(receipt.record.as_deref(), Some("makers"));
+        let logins = external.logins.lock().unwrap().clone();
+        assert_eq!(logins.len(), 2);
+        assert_eq!(logins[0], (None, Some("jn@makersof.xyz".to_string())));
+        assert_eq!(
+            logins[1],
+            (Some(slot.clone()), Some("jn@makersof.xyz".to_string()))
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+            scoped
+        );
+        let meta: Value = serde_json::from_str(
+            &fs::read_to_string(temp.path().join("makers/meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["account_id"], "makers");
+        assert_eq!(meta["kind"], "keychain");
+        assert_eq!(meta["principal"]["email"], "jn@makersof.xyz");
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".active-claude")).unwrap(),
+            "makers"
+        );
+    }
+
+    #[test]
+    fn login_refuses_a_wrong_account_before_the_second_login() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-makers", "org-makers");
+        let original = blob("dead", "dead-refresh", now_ms() - 1);
+        record(temp.path(), "makers", &who, &original);
+        let wrong = Principal {
+            account_uuid: "acct-jason".to_string(),
+            organization_uuid: "org-jason".to_string(),
+            email: Some("jason@readyrule.com".to_string()),
+        };
+        let mut external = MockExternal::default();
+        external.post_login.lock().unwrap().insert(
+            "Claude Code-credentials".to_string(),
+            blob("w1", "w1-refresh", now_ms()),
+        );
+        external.profiles.insert("w1".to_string(), Ok(wrong));
+        *external.login_result.lock().unwrap() = Some(Ok(()));
+
+        let (code, receipt) = execute(
+            "login",
+            &options(temp.path(), &slot, Some("makers")),
+            &external,
+        );
+        assert_eq!(code, 4);
+        assert!(receipt.verdict.starts_with("wrong-account"));
+        assert!(receipt.verdict.contains("jason@readyrule.com"));
+        assert_eq!(external.logins.lock().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+            original
+        );
+        assert!(!temp.path().join(".active-claude").exists());
+    }
+
+    #[test]
+    fn login_aborts_without_touching_the_store_when_login_fails() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-makers", "org-makers");
+        let original = blob("dead", "dead-refresh", now_ms() - 1);
+        record(temp.path(), "makers", &who, &original);
+        let external = MockExternal::default();
+        *external.login_result.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
+
+        let (code, receipt) = execute(
+            "login",
+            &options(temp.path(), &slot, Some("makers")),
+            &external,
+        );
+        assert_eq!(code, 1);
+        assert!(receipt.verdict.starts_with("login-aborted"));
+        assert!(receipt.verdict.contains("finished: none"));
+        assert_eq!(external.logins.lock().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("makers/blob")).unwrap(),
+            original
+        );
+        assert!(!temp.path().join(".active-claude").exists());
+    }
+
+    #[test]
+    fn stored_health_skips_the_slot_owner_without_refreshing() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-live", "org-live");
+        record(
+            temp.path(),
+            "makers",
+            &who,
+            &blob("slot-access", "shared-refresh", now_ms()),
+        );
+        let mut external = MockExternal::default();
+        external.keychain.insert(
+            scoped_service(&slot).unwrap(),
+            Some(blob("slot-access", "shared-refresh", now_ms())),
+        );
+        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Unavailable));
+
+        let verdict = stored_health(temp.path(), &slot, "makers", &external);
+        assert_eq!(verdict, Some("slot-owner".to_string()));
+    }
+
+    #[test]
+    fn stored_health_reports_dead_when_refresh_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-makers", "org-makers");
+        record(
+            temp.path(),
+            "makers",
+            &who,
+            &blob("stored", "spent-refresh", now_ms() - 1),
+        );
+        let external = MockExternal::default();
+        *external.refresh.lock().unwrap() = Some(Err(ExternalFailure::Rejected));
+
+        let verdict = stored_health(temp.path(), &slot, "makers", &external);
+        assert_eq!(verdict, Some("dead".to_string()));
     }
 }
