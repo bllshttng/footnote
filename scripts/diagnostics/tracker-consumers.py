@@ -66,7 +66,7 @@ READ_ALLOWLIST = (
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the
 # stated class. Absence of either control fails the census - a green run over
 # a registry that silently lost its creation verb is not evidence.
-KNOWN_TRACKER_OWNED_VERB = "add"
+KNOWN_TRACKER_OWNED_VERB = "new"
 KNOWN_FOOTNOTE_OWNED_VERB = "get"
 
 SELF_TEST_OK_MARKER = "tracker-consumers: self-test OK"
@@ -273,10 +273,6 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
     refusal_calls = {
         "_refuse_tracker_owned_on_external_backend",
         "_refuse_create_on_external_backend",
-        # Creation delegation: _create_node_impl refuses on an external
-        # backend before any store access, so a helper that routes births
-        # through it is guarded by that first act.
-        "_create_node_impl",
     }
 
     def _is_read_graph(node):

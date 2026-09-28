@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -118,9 +119,7 @@ def test_set_related_keeps_held_row_references_live(monkeypatch):
 
 def test_ac7_hp_related_at_filing_time(tmp_graph):
     """AC7-HP: --related on idea holds symmetry with no follow-up update."""
-    result = runner.invoke(
-        app, ["backlog", "idea", "co-delivered work", "--related", "x-bbbb", "--difficulty", "low"]
-    )
+    result = run_native_create(tmp_graph, "idea", "co-delivered work", "--related", "x-bbbb", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
     assert _related(tmp_graph, new_id) == ["x-bbbb"]
@@ -129,9 +128,7 @@ def test_ac7_hp_related_at_filing_time(tmp_graph):
 
 def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
     before = len(read_graph_strict(tmp_graph))
-    result = runner.invoke(
-        app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium"]
-    )
+    result = run_native_create(tmp_graph, "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium")
     assert result.exit_code != 0
     assert len(read_graph_strict(tmp_graph)) == before
 
@@ -225,9 +222,7 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     the stated invariant (null or resolves, never a dangling string) is held by
     clearing.
     """
-    created = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low"]
-    )
+    created = run_native_create(tmp_graph, "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low")
     new_id = json.loads(created.stdout)["id"]
 
     assert runner.invoke(

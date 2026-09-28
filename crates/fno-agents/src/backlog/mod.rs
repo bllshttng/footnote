@@ -4,10 +4,13 @@
 //! Every mutation writes only the changed nodes' rows in one transaction.
 
 pub mod api;
+pub mod autolink;
+pub mod birth;
 pub mod cli;
 pub mod commands;
 pub mod comments;
 pub mod costs;
+pub mod create_cli;
 pub mod decisions;
 pub mod done_evidence;
 pub mod encounters;
@@ -32,12 +35,14 @@ pub mod pr_link;
 pub mod pull_requests;
 pub mod rank_cli;
 pub mod receipt;
+pub mod relatedness;
 pub mod relations;
 pub mod render;
 pub mod schema_v4;
 pub mod search;
 pub mod sessions;
 pub mod settings;
+pub mod style_check;
 pub mod title_gate;
 pub mod update_cli;
 

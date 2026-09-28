@@ -169,6 +169,10 @@ pub fn run(args: &[String]) -> i32 {
         // The lane pin is native: id gate, operator fence, lane/epic scoping
         // and midpoint arithmetic over the single-row write seam.
         "rank" => super::rank_cli::run(resolved.tail),
+        // The create verbs are native end to end as of this wave: parse,
+        // gates, locked write with the rollup inside it, receipts.
+        "add" => super::create_cli::run(resolved.tail),
+        "idea" => super::create_cli::run_idea(resolved.tail),
         // The retraction door is native: every lane through the same door
         // `fno inbox law retract` uses, laws still operator-only. The
         // Python twin this arm replaces is deleted in the same change

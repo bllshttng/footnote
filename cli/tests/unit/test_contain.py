@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.store import commit_rows_via_store, read_graph_strict
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -100,10 +101,8 @@ def _seed_idea(g: Path, title: str, *extra: str) -> str:
     resembling an existing node prints "fold offered" and mints nothing.
     """
     before = {e.get("id") for e in _read_entries(g)}
-    r = _invoke(
-        "backlog", "idea", title, "--difficulty", "medium", "--separate", *extra
-    )
-    assert r.exit_code == 0, r.output
+    r = run_native_create(g, "idea", title, "--difficulty", "medium", "--separate", *extra)
+    assert r.exit_code == 0, r.stderr
     new = [e["id"] for e in _read_entries(g) if e.get("id") not in before]
     assert len(new) == 1, f"expected one new node, saw {new}"
     return new[0]
