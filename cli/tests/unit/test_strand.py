@@ -236,13 +236,31 @@ def _by_id_file(g: Path) -> dict:
 
 
 def _seed_idea(g: Path, title: str, *extra: str) -> str:
+    # The idea leaf answers natively; drive the dev binary over the same
+    # store the fixture seeded.
+    import os as _os
+    import subprocess as _sp
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     before = {e.get("id") for e in _read_entries(g)}
-    r = runner.invoke(
-        app,
-        ["backlog", "idea", title, "--difficulty", "medium", "--separate", *extra],
-        catch_exceptions=False,
+    proc = _sp.run(
+        [str(binary), "backlog", "idea", title, "--difficulty", "medium", "--separate", *extra],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **_os.environ,
+            "HOME": str(g.parent),
+            "FNO_STATE_DIR": str(g.parent),
+            "FNO_TRACKER_BACKEND": "graph",
+        },
+        cwd=str(g.parent),
     )
-    assert r.exit_code == 0, r.output
+    assert proc.returncode == 0, proc.stderr
     new = [e["id"] for e in _read_entries(g) if e.get("id") not in before]
     assert len(new) == 1, f"expected one new node, saw {new}"
     return new[0]

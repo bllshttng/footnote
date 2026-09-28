@@ -91,6 +91,30 @@ WORKER_ADD_DIRS_ENV = "FNO_WORKER_ADD_DIRS"
 
 ADD_DIR_PROVIDERS = ("claude", "codex", "agy", "cursor-agent")
 
+
+def strip_remote_add_dirs(argv: list[str]) -> list[str]:
+    """Drop ``--add-dir`` grants from a codex argv that rides ``--remote``; the
+    0.156.1 refusal kills an unstripped pane; the resume lanes trade the same.
+    """
+    if "--remote" not in argv:
+        return argv
+    out: list[str] = []
+    drop = False
+    for tok in argv:
+        if drop:
+            drop = False
+        elif tok == "--add-dir":
+            drop = True
+        elif tok.startswith("--add-dir="):
+            continue
+        else:
+            out.append(tok)
+    if len(out) != len(argv):
+        print("codex pane: dropped --add-dir grants;"
+              " codex >= 0.156.1 refuses them on --remote", file=sys.stderr)
+    return out
+
+
 #: Providers already warned about the skipped grant, once per process.
 _SKIP_NOTED: set[str] = set()
 

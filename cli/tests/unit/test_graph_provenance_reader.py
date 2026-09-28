@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -91,13 +92,13 @@ def test_ac1_ui_null_origin_renders_explicitly(graph):
 
 def test_ac1_ui_filing_receipt_names_the_origin_on_stderr(graph, monkeypatch):
     """A filing that resolved an origin says which one; stdout stays JSON."""
-    graph([_node("x-aaaa")])
+    g = graph([_node("x-aaaa")])
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-1")
     monkeypatch.setenv("FNO_NODE", "x-aaaa")
 
-    result = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
-    assert result.exit_code == 0, result.output
-    assert "origin: x-aaaa" in result.output
+    result = run_native_create(g, "idea", "follow-up", "--difficulty", "low")
+    assert result.exit_code == 0, result.stderr
+    assert "origin: x-aaaa" in result.stderr
     # stdout remains a clean JSON payload for `| jq` consumers.
     assert json.loads(result.stdout)["title"] == "follow-up"
 

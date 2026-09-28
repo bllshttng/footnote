@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import threading
 from pathlib import Path
 
@@ -40,8 +39,14 @@ def _child_env(tmp_path: Path, worker: str) -> dict:
 
 
 def _run_backlog(env: dict, *args: str, timeout: float = 300.0) -> subprocess.CompletedProcess:
+    # The create verb is native; the child is the binary, not the Python app.
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     return subprocess.run(
-        [sys.executable, "-c", "from fno.cli import app; app()", *args],
+        [str(binary), *args],
         env=env,
         capture_output=True,
         text=True,

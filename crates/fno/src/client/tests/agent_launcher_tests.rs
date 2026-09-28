@@ -1164,6 +1164,13 @@ fn extra_flags_chip_parses_argv_without_shell_expansion() {
         request.extra_flags,
         vec!["--agent", "abc", "--name", "two words", "--label", "$HOME"]
     );
+    // The launch remembers its harness: the next composer opens preselected
+    // on it.
+    assert_eq!(
+        std::fs::read_to_string(crate::proto::mux_dir().join("composer-last-harness")).unwrap(),
+        "claude\n",
+        "the launch writes the last-used harness"
+    );
 }
 
 #[test]
@@ -2221,6 +2228,26 @@ fn the_harness_preselect_is_claude_then_codex_never_alphabetical() {
         "a catalog with neither still shows a value"
     );
 
+    // The mux-dir store outranks the ladder: the harness the last launch
+    // used preselects even when claude sits first in the catalog.
+    std::fs::write(
+        crate::proto::mux_dir().join("composer-last-harness"),
+        "agy\n",
+    )
+    .unwrap();
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[
+        ("claude", true, true),
+        ("codex", true, true),
+        ("agy", true, true),
+    ]);
+    sync_catalog(&mut v);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.harness(),
+        "agy",
+        "the stored last-used harness outranks the claude ladder"
+    );
+
     // The retained draft carries the last harness used across close/open.
     if let Some(l) = v.launcher.as_mut() {
         l.draft.harness_idx = l.draft.harnesses.iter().position(|h| h == "agy").unwrap();
@@ -2232,4 +2259,428 @@ fn the_harness_preselect_is_claude_then_codex_never_alphabetical() {
         "agy",
         "the retained draft is the last-harness memory"
     );
+}
+fn floor(name: &str) -> super::agent_launcher::ModelChoice {
+    super::agent_launcher::ModelChoice {
+        name: name.to_string(),
+        model: name.to_string(),
+        route: String::new(),
+        provider: None,
+        state: ModelState::Ready,
+        key_env: None,
+        key_file: None,
+    }
+}
+fn choice_ready(name: &str, provider: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = floor(name);
+    m.provider = Some(provider.to_string());
+    m
+}
+
+fn nokey(name: &str, provider: &str, env: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.state = ModelState::NoKey {
+        key_env: env.to_string(),
+        steps: vec![],
+    };
+    m.key_env = Some(env.to_string());
+    m
+}
+fn unreachable(name: &str, provider: &str, reason: &str) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.state = ModelState::Unreachable {
+        reason: reason.to_string(),
+    };
+    m
+}
+
+fn row_labels(rows: &[crate::popup::PopupRow]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn glyph_of(rows: &[crate::popup::PopupRow], label: &str) -> String {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry {
+                glyph, label: l, ..
+            } if l == label => Some(glyph.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+#[test]
+fn flagship_row_leads_and_the_more_row_closes_the_model_list() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![
+            floor("opus"),
+            floor("sonnet"),
+            choice_ready("glm-4.6", "zai"),
+        ];
+        c.more = vec![
+            choice_ready("glm-4.5-air", "zai"),
+            nokey("MiniMax-M2", "minimax", "MINIMAX_API_KEY"),
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let l = v.launcher.take().unwrap();
+    let (body, _) =
+        super::agent_launcher::picker_rows(&l, Focus::Model, &v.launcher_catalog, &v.backlog);
+    let labels = row_labels(&body);
+    let expected = vec![
+        "harness default".to_string(),
+        "opus".to_string(),
+        "glm-4.6".to_string(),
+        "sonnet".to_string(),
+        format!("more{}", '\u{2026}'),
+    ];
+    assert_eq!(
+        labels, expected,
+        "flagship leads the groups; the more row closes the list: {labels:?}"
+    );
+    assert!(
+        body.iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Header(h) if h == "zai")),
+        "the routed provider group renders its header"
+    );
+    assert_eq!(
+        glyph_of(&body, "opus"),
+        "\u{25cf}",
+        "flagship row carries the filled mark"
+    );
+    assert_eq!(
+        glyph_of(&body, "glm-4.6"),
+        "\u{25cf}",
+        "ready rows carry the filled mark"
+    );
+}
+#[test]
+fn more_list_groups_marks_and_esc_steps_back_to_the_main_list() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![
+            choice_ready("glm-4.5-air", "zai"),
+            nokey("MiniMax-M2", "minimax", "MINIMAX_API_KEY"),
+            unreachable(
+                "glm-5",
+                "zai-openai",
+                "claude speaks anthropic; zai-openai serves openai",
+            ),
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let picker = l.picker.as_ref().expect("more list open");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::More);
+    let body = &picker.all_rows;
+    assert_eq!(glyph_of(body, "glm-4.5-air"), "\u{25cf}");
+    assert_eq!(
+        glyph_of(body, "MiniMax-M2"),
+        "\u{25cb}",
+        "nokey rows carry the hollow mark"
+    );
+    assert_eq!(
+        glyph_of(body, "glm-5"),
+        "\u{2013}",
+        "unreachable rows carry the dash"
+    );
+    let minimax_enabled = body.iter().any(|r| {
+        matches!(r,
+        crate::popup::PopupRow::Entry { label, enabled, .. } if label == "MiniMax-M2" && *enabled)
+    });
+    assert!(
+        minimax_enabled,
+        "every more row is enabled so the cursor lands on it"
+    );
+    assert!(
+        body.iter().any(|r| matches!(r,
+        crate::popup::PopupRow::Header(h) if h == "zai")),
+        "rows group by provider"
+    );
+    let (filtered, _) = super::agent_launcher::filtered_popup(
+        Focus::Model,
+        body,
+        &picker.all_actions,
+        "minimax",
+        picker.anchor,
+    );
+    let visible = row_labels(&filtered.rows);
+    assert_eq!(
+        visible,
+        vec!["MiniMax-M2".to_string()],
+        "typing narrows the more list to the matching rows: {visible:?}"
+    );
+    assert!(
+        filtered
+            .rows
+            .iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Header(h) if h == "minimax")),
+        "the matching row's provider header survives the filter"
+    );
+    let current = l.picker.take().unwrap();
+    super::agent_launcher::picker_step_down(&mut l, &v.launcher_catalog, &v.backlog, current);
+    let picker = l.picker.as_ref().expect("back on the main list");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::Main);
+    assert!(
+        picker
+            .all_rows
+            .iter()
+            .any(|r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "harness default")),
+        "esc returns to the main list: {:?}",
+        picker.all_rows,
+    );
+}
+#[test]
+fn nokey_row_enter_shows_connect_steps_and_esc_returns_to_more() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![nokey_steps(
+            "MiniMax-M2",
+            "minimax",
+            "MINIMAX_API_KEY",
+            "export MINIMAX_API_KEY=<your key>",
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let action = more_row_action(&l, "MiniMax-M2").expect("the nokey row carries an action");
+    assert!(
+        matches!(
+            action,
+            super::agent_launcher::PickerAction::ShowSteps { .. }
+        ),
+        "a nokey rows enter names the connect steps: {action:?}"
+    );
+    if let super::agent_launcher::PickerAction::ShowSteps { title, lines } = action {
+        assert_eq!(title, "connect minimax");
+        assert_eq!(lines, vec!["export MINIMAX_API_KEY=<your key>".to_string()]);
+        super::agent_launcher::show_steps(&mut l, title, lines, anchor);
+    }
+    let picker = l.picker.as_ref().expect("steps sheet open");
+    assert_eq!(
+        picker.mode,
+        super::agent_launcher::PickerMode::Steps {
+            title: "connect minimax".to_string()
+        }
+    );
+    let rows_now: Vec<String> = picker
+        .all_rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Header(h) => Some(format!("# {h}")),
+            crate::popup::PopupRow::Entry { label, enabled, .. } => {
+                Some(format!("{} {}", if *enabled { "+" } else { "-" }, label))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows_now,
+        vec![
+            "# connect minimax".to_string(),
+            "- export MINIMAX_API_KEY=<your key>".to_string()
+        ],
+        "the steps sheet is one header plus disabled lines: {rows_now:?}"
+    );
+    assert_eq!(l.draft.model, "", "nothing was picked");
+    let current = l.picker.take().unwrap();
+    super::agent_launcher::picker_step_down(&mut l, &v.launcher_catalog, &v.backlog, current);
+    let picker = l.picker.as_ref().expect("back on the more list");
+    assert_eq!(picker.mode, super::agent_launcher::PickerMode::More);
+}
+fn nokey_steps(
+    name: &str,
+    provider: &str,
+    env: &str,
+    step: &str,
+) -> super::agent_launcher::ModelChoice {
+    let mut m = nokey(name, provider, env);
+    m.state = ModelState::NoKey {
+        key_env: env.to_string(),
+        steps: vec![step.to_string()],
+    };
+    m
+}
+
+fn more_row_action(
+    l: &super::agent_launcher::Launcher,
+    label: &str,
+) -> Option<super::agent_launcher::PickerAction> {
+    let picker = l.picker.as_ref()?;
+    let row = picker.all_rows.iter().position(|r| {
+        matches!(r,
+        crate::popup::PopupRow::Entry { label: l, .. } if l == label)
+    })?;
+    picker.all_actions.get(row)?.clone()
+}
+#[test]
+fn unreachable_row_enter_names_the_gap_and_picks_nothing() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.more = vec![unreachable(
+            "glm-5",
+            "zai-openai",
+            "claude speaks anthropic; zai-openai serves openai",
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    let anchor = crate::popup::Anchor::At { row: 4, col: 10 };
+    super::agent_launcher::open_more(&mut l, &v.launcher_catalog, anchor);
+    let action = more_row_action(&l, "glm-5").expect("the unreachable row carries an action");
+    let (title, lines) = match action {
+        super::agent_launcher::PickerAction::ShowSteps { title, lines } => (title, lines),
+        other => panic!("expected ShowSteps, got {other:?}"),
+    };
+    assert_eq!(title, "zai-openai on claude");
+    assert_eq!(
+        lines,
+        vec!["claude speaks anthropic; zai-openai serves openai".to_string()]
+    );
+    super::agent_launcher::show_steps(&mut l, title, lines, anchor);
+    assert_eq!(l.draft.model, "", "nothing was picked");
+}
+#[test]
+fn launch_refuses_a_pinned_pick_whose_key_does_not_resolve() {
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![keyed("deepseek-chat", "deepseek", "FNO_TEST_DS_KEY", None)];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        let idx = l
+            .draft
+            .harnesses
+            .iter()
+            .position(|h| h == "claude")
+            .unwrap();
+        l.draft.harness_idx = idx;
+    }
+    let mut l = v.launcher.take().unwrap();
+    let pin = super::agent_launcher::PickerAction::PickRow {
+        harness: "claude".to_string(),
+        name: "deepseek-chat".to_string(),
+        model: "deepseek-chat".to_string(),
+        route: String::new(),
+        provider: Some("deepseek".to_string()),
+    };
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, pin, 0, Focus::Model);
+    v.launcher = Some(l);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    match &l.phase {
+        Phase::Refused { reason, .. } => {
+            assert!(
+                reason.contains("FNO_TEST_DS_KEY is not set"),
+                "the refusal names the env var: {reason}"
+            );
+        }
+        other => panic!("expected a key refusal, got {other:?}"),
+    }
+    assert!(sock.is_empty(), "nothing went on the wire");
+}
+#[test]
+fn launch_proceeds_when_the_key_lives_in_the_api_key_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "fno-aad3-keyfile-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join(".env");
+    std::fs::write(&key_file, "FNO_TEST_DS_KEY=file-secret\n").unwrap();
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _, _) = &mut rows {
+        let c = &mut choices[0];
+        c.models = vec![keyed(
+            "deepseek-chat",
+            "deepseek",
+            "FNO_TEST_DS_KEY",
+            Some(key_file.display().to_string()),
+        )];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        let idx = l
+            .draft
+            .harnesses
+            .iter()
+            .position(|h| h == "claude")
+            .unwrap();
+        l.draft.harness_idx = idx;
+    }
+    let mut l = v.launcher.take().unwrap();
+    let pin = super::agent_launcher::PickerAction::PickRow {
+        harness: "claude".to_string(),
+        name: "deepseek-chat".to_string(),
+        model: "deepseek-chat".to_string(),
+        route: String::new(),
+        provider: Some("deepseek".to_string()),
+    };
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, pin, 0, Focus::Model);
+    v.launcher = Some(l);
+    let (session, _fx) = wire_fixture_at(91);
+    v.session = session;
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(
+        matches!(l.phase, Phase::Submitting { .. }),
+        "the file-only key passes the launch check: {:?}",
+        l.phase,
+    );
+    assert!(!sock.is_empty(), "the request went to the wire");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+fn keyed(
+    name: &str,
+    provider: &str,
+    env: &str,
+    key_file: Option<String>,
+) -> super::agent_launcher::ModelChoice {
+    let mut m = choice_ready(name, provider);
+    m.key_env = Some(env.to_string());
+    m.key_file = key_file;
+    m
 }

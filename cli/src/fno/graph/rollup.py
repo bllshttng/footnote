@@ -1,10 +1,12 @@
-"""Rollup resolution: which mission (epic) does this feature serve?
+"""Rollup visibility: which mission (epic) does this feature serve?
 
 Agent throughput makes feature-at-a-time cheap, so a backlog fills with
-locally-good features that never compose into a mission. This module answers
-"what epic does this serve?" at intake and keeps the answer visible afterward.
+locally-good features that never compose into a mission. The filing-time
+ladder that linked one lives in Rust now (`backlog/autolink.rs`); this module
+keeps the visibility half the board, the health metric and the tiebreaker
+read: which existing nodes are orphans, and how an epic grew.
 
-Two contracts hold everywhere this is used:
+The contract that holds here:
 
 - **Metadata-only.** Rollup writes ``parent`` and ``orphan_ok`` and nothing
   else. It never gates, blocks, or reshapes a feature.
@@ -16,10 +18,7 @@ they cannot disagree about what counts.
 """
 from __future__ import annotations
 
-import importlib
 from typing import Any, NamedTuple, Optional
-
-from fno.graph.relatedness import _RETIRED_EPIC_STATUSES, epic_candidates
 
 Entry = dict[str, Any]
 
@@ -30,35 +29,6 @@ ROLLUP_TYPES = frozenset({"feature", "task"})
 # Work that is over. A shipped feature with no mission edge is history, not a
 # rollup an operator can still make.
 CLOSED_STATUSES = frozenset({"done", "superseded", "deferred"})
-
-# Auto-link bar. Deliberately high, and margin-gated so two plausible epics
-# never coin-flip a parent edge - below either bar we suggest instead.
-AUTO_LINK_MIN = 0.55
-AUTO_LINK_MARGIN = 0.20
-
-#: ``module:attr`` of a zero-arg crown reader, set by the CLI layer. The
-#: boundary check bars fno.graph from importing fno.agents, so the seam
-#: rides as data and the ladder resolves it lazily - the same string-loaded
-#: idiom the root CLI uses for its own sub-apps.
-crown_reader_spec: Optional[str] = None
-
-
-class Resolution(NamedTuple):
-    """Outcome of the rollup ladder for one node.
-
-    ``kind`` is ``exempt`` | ``linked`` | ``suggest`` | ``orphan`` | ``crown``.
-    ``epic_id`` and ``score`` are set only for ``linked``; ``candidates``
-    carries the scored top-K for ``suggest``. ``crown`` carries ``epic_id``
-    with no score: the filing session's own crown named the epic, so the
-    scorer never ranked it.
-    """
-
-    kind: str
-    epic_id: Optional[str] = None
-    score: float = 0.0
-    candidates: tuple[tuple[str, float, str], ...] = ()
-    reason: str = ""
-
 
 def _id_index(entries: list[Entry]) -> dict[str, Entry]:
     return {
@@ -118,144 +88,6 @@ def orphan_ids(entries: list[Entry]) -> frozenset[str]:
     return frozenset(
         nid for nid, e in index.items() if is_orphan(e, index)
     )
-
-
-def resolve(node: Entry, entries: list[Entry], crown: Any = None) -> Resolution:
-    """Run the rollup ladder for a node that already exists in ``entries``.
-
-    Pure: scores and decides, never mutates. The caller applies a ``linked``
-    result and prints the receipt, so the mutation stays on the locked path.
-
-    ``crown`` is the filing session's crown reading, when it holds one. On
-    a ``suggest``/``orphan`` outcome it gets one override: parent the node
-    to the crown's own single live epic, so the filing lands on the board
-    that session reigns by instead of nowhere. The scorer's own link keeps
-    precedence, and the guess is named in the receipt either way.
-    """
-    if node.get("type") not in ROLLUP_TYPES or node.get("orphan_ok"):
-        return Resolution("exempt")
-    # ANY explicit parent is the operator's answer to "what does this serve",
-    # even one pointing at a plain feature rather than an epic. Rollup proposes
-    # an edge where none exists; it never overrules one a human set, because the
-    # printed undo (`--parent null`) could not restore what it overwrote.
-    if node.get("parent"):
-        return Resolution("exempt", reason="parent already set")
-
-    candidates = tuple(epic_candidates(node, entries))
-    if not candidates:
-        # "This serves no mission" is only advice worth giving when missions
-        # exist to serve. On a graph with no live epic there is nothing to link
-        # to and nothing the operator can do, so the line would fire on every
-        # single intake and carry no information. The health metric and the
-        # board flag still count the node; only the intake line is suppressed.
-        if not any(
-            isinstance(e, dict)
-            and e.get("type") == "epic"
-            and e.get("status") not in _RETIRED_EPIC_STATUSES
-            for e in entries
-        ):
-            return Resolution("exempt", reason="no epics in graph")
-        return _crown_or_orphan(node, entries, crown)
-
-    top_id, top_score, top_reason = candidates[0]
-    runner_up = candidates[1][1] if len(candidates) > 1 else 0.0
-    if top_score >= AUTO_LINK_MIN and (top_score - runner_up) >= AUTO_LINK_MARGIN:
-        return Resolution("linked", top_id, top_score, candidates, top_reason)
-    return _crown_or_orphan(node, entries, crown, candidates=candidates)
-
-
-def _crown_or_orphan(
-    node: Entry, entries: list[Entry], crown: Any, *, candidates: tuple = ()
-) -> Resolution:
-    """The tail of the ladder: a crown override if one applies, else today."""
-    if crown is None and crown_reader_spec:
-        module_name, _, attr = crown_reader_spec.partition(":")
-        crown = getattr(importlib.import_module(module_name), attr)()
-    if crown is not None:
-        crowned = crown_resolution(node, entries, crown)
-        if crowned is not None:
-            return crowned
-    return Resolution("orphan") if not candidates else Resolution("suggest", candidates=candidates)
-
-
-def crown_epic_from_scope(scope: Optional[str], entries: list[Entry]) -> Optional[str]:
-    """The one epic a crown scope names, or ``None``.
-
-    A crowned session's own board is the scope it was crowned over, so a
-    parentless filing from that session has its mission edge already
-    asserted - by the crown, not the scorer. Only a scope that IS one live
-    epic can parent: a project portfolio names no node, and a multi-member
-    epic set names several.
-    """
-    members = [s.strip() for s in (scope or "").split(",") if s.strip()]
-    if len(members) != 1:
-        return None
-    for e in entries:
-        if not isinstance(e, dict) or e.get("id") != members[0]:
-            continue
-        if e.get("type") != "epic" or e.get("status") in _RETIRED_EPIC_STATUSES:
-            return None
-        return members[0]
-    return None
-
-
-def crown_resolution(node: Entry, entries: list[Entry], crown: Any) -> Optional[Resolution]:
-    """The ``crown`` outcome for a crowned filer's unlinked node, or ``None``.
-
-    The guess rides ``reason`` and the caller prints its receipt, so the
-    edge is never silent. Nesting and cycle guards match the auto-link
-    path: a refusal degrades to the unlinked receipt, never a bad edge.
-    """
-    from fno.graph._intake import _find_node, _would_create_cycle, _would_exceed_epic_depth
-
-    epic_id = crown_epic_from_scope((crown or {}).get("scope"), entries)
-    if epic_id is None:
-        return None
-    target = _find_node(entries, epic_id)
-    if target is None or _would_exceed_epic_depth(entries, node, target):
-        return None
-    if _would_create_cycle(entries, node.get("id") or "", target["id"]):
-        return None
-    return Resolution("crown", epic_id=target["id"], reason="filing session crown scope")
-
-
-def receipt_lines(
-    resolution: Resolution, node_id: str, id_to_entry: dict[str, Entry]
-) -> list[str]:
-    """Operator-facing lines for a resolution. Empty for ``exempt``."""
-
-    def _title(eid: str) -> str:
-        entry = id_to_entry.get(eid) or {}
-        return str(entry.get("title") or eid)
-
-    if resolution.kind == "linked":
-        eid = resolution.epic_id or ""
-        return [
-            f'rollup: auto-linked {node_id} -> {eid} "{_title(eid)}" '
-            f"(score {resolution.score:.2f}); "
-            f"undo: fno backlog update {node_id} --parent null",
-        ]
-    if resolution.kind == "crown":
-        eid = resolution.epic_id or ""
-        return [
-            f'rollup: crown-linked {node_id} -> {eid} "{_title(eid)}" '
-            f"(filing session crown scope); "
-            f"undo: fno backlog update {node_id} --parent null",
-        ]
-    if resolution.kind == "suggest":
-        lines = [f"rollup: no clear mission edge for {node_id}; candidates:"]
-        for eid, score, _reason in resolution.candidates:
-            lines.append(
-                f'  {score:.2f}  {eid}  "{_title(eid)}"  '
-                f"-> fno backlog update {node_id} --parent {eid}"
-            )
-        return lines
-    if resolution.kind == "orphan":
-        return [
-            f"rollup: no mission edge (orphan); mark deliberate with: "
-            f'fno backlog update {node_id} --orphan-ok "<reason>"',
-        ]
-    return []
 
 
 # ---------------------------------------------------------------------------
