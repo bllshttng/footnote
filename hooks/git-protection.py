@@ -1692,12 +1692,12 @@ def _find_pr_create_segments(segments):
 # interpreter that may not import fno at all, so it cannot defer to either.
 # test_pr_closure_producer.py pins this copy against fno.pr.closure.
 # branch_node_ids so the three cannot drift apart in silence.
-_HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
+_HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}"
 _HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
 _CLOSURE_MARKER_RE = re.compile(
     # Composition evidence in the command itself: the generator variable, the
     # retired `Backlog-Closure:` spelling, or the new `Fixes <id>` line.
-    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}",
+    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}",
     re.IGNORECASE,
 )
 _BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large

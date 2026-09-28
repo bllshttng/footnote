@@ -208,6 +208,11 @@ pub struct AcquireOpts {
     /// Where audit events land (the dir containing `.fno/events.jsonl`).
     /// `None` = current working directory, matching the Python emitter.
     pub events_dir: Option<PathBuf>,
+    /// `(session_id, harness)` the CALLER vouches for, overriding the ambient
+    /// identity walk. The blueprint-session open passes the operator-supplied
+    /// `--harness`/`--session-id` so the record names the session the verb
+    /// promised, exactly as the Python writer did.
+    pub identity: Option<(String, String)>,
 }
 
 /// Outcome of [`acquire`] (mirrors core.py's acquire/`ClaimHeldByOther`).
@@ -1864,8 +1869,13 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let pid_unavailable = opts.pid_unavailable;
     // Resolved ONCE and used for the `harness` field, the `session_id` field,
     // and the provenance stamp below, so a record can never disagree with
-    // itself about which harness (or session) wrote it.
-    let (session_id, harness) = resolve_identity();
+    // itself about which harness (or session) wrote it. A caller-vouched
+    // identity (AcquireOpts::identity) outranks the ambient walk.
+    let (session_id, harness) = opts
+        .identity
+        .clone()
+        .map(|(session, harness)| (Some(session), Some(harness)))
+        .unwrap_or_else(resolve_identity);
     ClaimRecord {
         schema_version: if pid_unavailable {
             PID_UNAVAILABLE_SCHEMA_VERSION
@@ -2531,6 +2541,15 @@ pub(crate) fn durable_session_pid() -> Option<i32> {
     crate::spawn_context::session_identity_ambient(std::process::id())
         .0
         .map(|pid| pid as i32)
+}
+
+/// The durable session pid for a lease WRITER, mirroring the resolution order
+/// the Python shim served through `fno agents claim session-pid`: the nearest
+/// harness ancestor of this process that is not pool machinery. `None`
+/// degrades the caller to the TTL-only liveness arm (the claim records
+/// `pid_unavailable`), never to a transient pid that reads stale at once.
+pub fn open_session_pid() -> Option<i32> {
+    durable_session_pid()
 }
 
 /// The live pid the fleet registry records for `session_id`, or `None`.

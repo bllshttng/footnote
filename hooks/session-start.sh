@@ -44,11 +44,11 @@ prime_plugin_root_pointer() {
     [[ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]] || return 0
     [[ -f "$PLUGIN_ROOT/.git" ]] && return 0
     local home="${FNO_HOME:-$HOME/.fno}"
-    local ptr="$home/plugin-root"
+    local ptr="$home/install/plugin-root"
     if [[ -f "$ptr" ]] && [[ "$(cat "$ptr" 2>/dev/null)" == "$PLUGIN_ROOT" ]]; then
         return 0
     fi
-    mkdir -p "$home" 2>/dev/null || return 0
+    mkdir -p "$home/install" 2>/dev/null || return 0
     printf '%s\n' "$PLUGIN_ROOT" > "$ptr" 2>/dev/null || true
 }
 prime_plugin_root_pointer || true
@@ -68,14 +68,14 @@ heal_claude_worktree_hook() {
     [[ -f "$settings" ]] || return 0
     grep -q 'worktree-remove\.sh' "$settings" 2>/dev/null || return 0
     local home="${FNO_HOME:-$HOME/.fno}" stamp
-    stamp="$home/.worktree-hook-root"
+    stamp="$home/install/.worktree-hook-root"
     [[ -f "$stamp" && "$(cat "$stamp" 2>/dev/null)" == "$PLUGIN_ROOT" ]] && return 0
     command -v fno >/dev/null 2>&1 || return 0
     # Stamp only on success. Stamping a failed repair (fno missing, or too old
     # to know --repair-only) would mark the heal done and never retry it.
     fno config setup cli-hooks --no-codex --no-gemini --claude --repair-only \
         >/dev/null 2>&1 || return 0
-    mkdir -p "$home" 2>/dev/null || return 0
+    mkdir -p "$home/install" 2>/dev/null || return 0
     printf '%s\n' "$PLUGIN_ROOT" > "$stamp" 2>/dev/null || true
 }
 heal_claude_worktree_hook || true

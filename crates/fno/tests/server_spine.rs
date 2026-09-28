@@ -49,6 +49,26 @@ impl Drop for Server {
     }
 }
 
+struct CpuLoad(Child);
+
+impl CpuLoad {
+    fn start() -> Self {
+        let child = Command::new("yes")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start CPU load");
+        Self(child)
+    }
+}
+
+impl Drop for CpuLoad {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn spawn_server(sock: &Path, shell: &str) -> Server {
     spawn_server_with_env(sock, shell, &[])
 }
@@ -313,6 +333,83 @@ fn server_spine_echo_roundtrips_via_fake_client() {
     wait_for_frame(&mut stream, 10, |text| {
         common::screen_has_line(text, "hello")
     });
+}
+
+#[test]
+fn server_spine_human_touch_keystroke_echo_latency_under_cpu_load() {
+    let scratch = Scratch::new("human-touch-latency");
+    let _server = spawn_server(&scratch.sock(), "/bin/sh");
+    let mut stream = attach(&scratch.sock(), 24, 80);
+    wait_for_frame(&mut stream, 10, |_| true);
+    let _load = CpuLoad::start();
+
+    let started = Instant::now();
+    send(
+        &mut stream,
+        &ClientMsg::Input(b"echo 'latency-marker'\r".to_vec()),
+    );
+    wait_for_frame(&mut stream, 10, |text| {
+        common::screen_has_line(text, "latency-marker")
+    });
+    let latency = started.elapsed();
+    assert!(
+        latency < Duration::from_secs(2),
+        "keystroke-to-echo took {latency:?} under CPU load"
+    );
+
+    let events_path = scratch.0.join("iso-agents").join("events.jsonl");
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(events_path)
+        .expect("the input event journal is isolated under the scratch home")
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let touch = rows
+        .iter()
+        .find(|row| row["type"] == "human_touch")
+        .expect("the first human key in the burst writes human_touch");
+    assert_eq!(touch["source"], "daemon");
+    assert_eq!(touch["data"]["source"], "inject");
+    assert!(touch["data"].get("graph_node_id").is_some());
+}
+
+#[test]
+fn server_spine_touch_kill_switch_preserves_operator_witnesses() {
+    let scratch = Scratch::new("touch-kill-switch");
+    let _server = spawn_server_with_env(&scratch.sock(), "/bin/sh", &[("FNO_TOUCH_EMIT", "0")]);
+    let mut stream = attach(&scratch.sock(), 24, 80);
+    wait_for_frame(&mut stream, 10, |_| true);
+    send(
+        &mut stream,
+        &ClientMsg::Input(b"echo witness-switch".to_vec()),
+    );
+    wait_for_frame(&mut stream, 10, |text| text.contains("witness-switch"));
+    send(&mut stream, &ClientMsg::Input(b"\r".to_vec()));
+    wait_for_frame(&mut stream, 10, |text| {
+        common::screen_has_line(text, "witness-switch")
+    });
+
+    let events_path = scratch.0.join("iso-agents").join("events.jsonl");
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(events_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["type"] == "operator_typing")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["type"] == "operator_submit")
+            .count(),
+        1
+    );
+    assert!(
+        rows.iter().all(|row| row["type"] != "human_touch"),
+        "FNO_TOUCH_EMIT=0 suppresses only human_touch"
+    );
 }
 
 #[test]

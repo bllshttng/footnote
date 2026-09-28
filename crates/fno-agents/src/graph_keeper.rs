@@ -2690,7 +2690,7 @@ fn stamp_utc(v: &str) -> Result<String, StoreError> {
 /// settles a session that worked several nodes. `found` means "the named
 /// node exists" on the exact form and "at least one node matched" on the
 /// identity form; `node_ids` names every node the write touched.
-fn session_reap_open(
+pub(crate) fn session_reap_open(
     entries: &mut Vec<Value>,
     node_id: Option<&str>,
     phase: &str,

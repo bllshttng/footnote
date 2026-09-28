@@ -94,7 +94,9 @@ class SweepKeys(BaseModel):
     """Flat ``config.agents.*`` seconds that the sweeps read.
 
     ``single_flight_ttl_seconds`` is how long one child's written answer counts
-    as fresh, so five callers arriving inside it cost one child.
+    as fresh, so five callers arriving inside it cost one child. One liveness
+    cadence (60 s): the reader-cost window measured the truth class at seven
+    concurrent children when callers outnumbered the 10 s window.
 
     ``single_flight_join_budget_seconds`` is how long a later caller waits for
     the holder's answer before running its own. It sits over the 23.2 s
@@ -106,7 +108,7 @@ class SweepKeys(BaseModel):
     is three times the longest thing allowed to be running.
     """
 
-    single_flight_ttl_seconds: int = 10
+    single_flight_ttl_seconds: int = 60
     single_flight_join_budget_seconds: int = 30
     orphan_reap_after_seconds: int = 5400
 

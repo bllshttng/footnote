@@ -144,6 +144,26 @@ fn run_wrapped(
     }
 }
 
+/// One sandboxed write probe: the always-cleanup shell form, then the file is
+/// removed from THIS process whatever the child did. When the wrapper or the
+/// timeout kills the shell between the write and its `rm -f`, the file stays
+/// in the worker cwd - which for a codex spawn is the canonical checkout - so
+/// the shell's own rm alone is not enough.
+fn probe_write(sandbox: &[String], path: &Path, inside: bool, cwd: &Path) -> (i32, String, String) {
+    let argv = [
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "printf x > {p}; c=$?; rm -f {p}; exit $c",
+            p = path.display()
+        ),
+    ];
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let result = run_wrapped(sandbox, &refs, inside, cwd);
+    let _ = std::fs::remove_file(path);
+    result
+}
+
 /// [`run_wrapped`] with stdin: the git ref-lock transaction.
 fn run_wrapped_stdin(
     sandbox: &[String],
@@ -265,20 +285,11 @@ pub fn probe_codex_sandbox(
         };
     }
     // AC7-HP canary: a harmless write INSIDE the granted roots must succeed.
-    // The subshell removes the file whatever the write did, so a blocked or
-    // partial write never litters the worker's cwd (observed live: the plain
-    // `printf > f; rm f` form left the file behind when the write failed).
+    // `probe_write` removes the file whatever the write did, so a blocked or
+    // partial write never litters the worker's cwd (observed live: the shell's
+    // own `rm -f` was skipped when the wrapper died first).
     let canary = cwd.join(format!("fno-probe-canary-{nonce}"));
-    let canary_argv = [
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        format!(
-            "printf x > {p}; c=$?; rm -f {p}; exit $c",
-            p = canary.display()
-        ),
-    ];
-    let canary_refs: Vec<&str> = canary_argv.iter().map(String::as_str).collect();
-    let (code, _out, stderr) = run_wrapped(&argv, &canary_refs, true, cwd);
+    let (code, _out, stderr) = probe_write(&argv, &canary, true, cwd);
     if code != 0 {
         blocked.push((
             "canary-write".to_string(),
@@ -298,16 +309,7 @@ pub fn probe_codex_sandbox(
     // fail and the verdict is `unknown`, never `reachable`.
     let outside_dir = outside_probe_dir(cwd, state_dirs);
     let outside_target = outside_dir.join(format!("fno-probe-outside-{nonce}"));
-    let outside_argv = [
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        format!(
-            "printf x > {p}; c=$?; rm -f {p}; exit $c",
-            p = outside_target.display()
-        ),
-    ];
-    let outside_refs: Vec<&str> = outside_argv.iter().map(String::as_str).collect();
-    let (outside_code, _out, outside_err) = run_wrapped(&argv, &outside_refs, true, cwd);
+    let (outside_code, _out, outside_err) = probe_write(&argv, &outside_target, true, cwd);
     if outside_code == 0 {
         return SandboxProbeResult {
             verdict: "unknown".into(),
@@ -470,5 +472,29 @@ mod tests {
         assert_eq!(why("", 3), "exit 3");
         let long = "x".repeat(400);
         assert_eq!(why(&long, 1).chars().count(), 160);
+    }
+
+    /// AC3-HP: whatever the wrapped child did, the probe's own process removes
+    /// the file. The child here writes and never runs its own rm.
+    #[test]
+    fn probe_write_removes_the_file_when_the_child_does_not() {
+        let dir = std::env::temp_dir().join(format!("fno-probe-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("canary-left");
+        let sandbox = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf x > \"$1\"; exit 0".to_string(),
+            "sh".to_string(),
+            path.display().to_string(),
+        ];
+        let (code, _out, _err) = probe_write(&sandbox, &path, true, &dir);
+        assert_eq!(code, 0);
+        assert!(
+            !path.exists(),
+            "the probe's own process removes what the child left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
