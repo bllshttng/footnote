@@ -130,6 +130,14 @@ def _native_verb(verb: str, *args: str) -> _NativeResult:
     return _NativeResult(code, out, err)
 
 
+def _native_session(*args: str) -> _NativeResult:
+    """The Rust-owned session lifecycle door, migrated out of the Python app."""
+    from tests._native_door import run_native
+
+    code, out, err = run_native("backlog", "session", *args)
+    return _NativeResult(code, out, err)
+
+
 def _read_graph(g: Path) -> list[dict]:
     # The store owns state now; graph.json is a frozen export mirror, so a
     # post-command read-back must come from the store, not the file.
@@ -144,6 +152,7 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
         "entries": [{
             "id": "x-reap0001",
             "title": "Reap me",
+            "status": "ready",
             "sessions": [{
                 "phase": "execute",
                 "harness": "codex",
@@ -153,8 +162,8 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
         }]
     }) + "\n")
 
-    result = _invoke(
-        "backlog", "session", "reap-open", "x-reap0001",
+    result = _native_session(
+        "reap-open", "x-reap0001",
         "--harness", "codex", "--session-id", "dead-session", "--json",
     )
 
@@ -163,11 +172,11 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     assert receipt["settled"] is True
     assert receipt["row_removed"] is False
     assert receipt["row_closed"] is True
-    assert receipt["status_after"] == "idea"
+    assert receipt["status_after"] == "ready"
     assert receipt["remaining_open_do"] == 0
     saved = _read_graph(tmp_graph)[0]
     assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
-    assert saved["status"] == "idea"
+    assert saved["status"] == "ready"
 
 
 def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
@@ -208,8 +217,8 @@ def test_session_reap_open_without_node_settles_every_node_holding_the_identity(
         ]
     }) + "\n")
 
-    result = _invoke(
-        "backlog", "session", "reap-open",
+    result = _native_session(
+        "reap-open",
         "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
     )
 
