@@ -14,7 +14,10 @@ use std::path::PathBuf;
 
 /// The config candidates, highest priority first. Each settings.yaml
 /// location also yields its config.toml sibling, which wins (the flat
-/// config.toml-first cut the Python reader applies).
+/// config.toml-first cut the Python reader applies). The cwd and HOME
+/// entries are DISCOVERED, so they honor `FNO_CONFIG_SEARCH_ROOT`
+/// ([`crate::agents_config::within_search_ceiling`]); the FNO_CONFIG and
+/// FNO_GLOBAL_SETTINGS_PATH entries are explicit and read as-is.
 fn candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut push_dir = |dir: PathBuf| {
@@ -22,7 +25,10 @@ fn candidates() -> Vec<PathBuf> {
         out.push(dir.join("settings.yaml"));
     };
     if let Ok(cwd) = std::env::current_dir() {
-        push_dir(cwd.join(".fno"));
+        let dir = cwd.join(".fno");
+        if crate::agents_config::within_search_ceiling(&dir.join("config.toml")) {
+            push_dir(dir);
+        }
     }
     // The project config the FNO_CONFIG redirect names (python's
     // `config_file()` candidate), then the global file.
@@ -38,8 +44,12 @@ fn candidates() -> Vec<PathBuf> {
         _ => {
             if let Some(home) = std::env::var_os("HOME") {
                 let home = PathBuf::from(home);
-                out.push(home.join(".fno").join("config.toml"));
-                out.push(home.join(".fno").join("settings.yaml"));
+                if crate::agents_config::within_search_ceiling(
+                    &home.join(".fno").join("config.toml"),
+                ) {
+                    out.push(home.join(".fno").join("config.toml"));
+                    out.push(home.join(".fno").join("settings.yaml"));
+                }
             }
         }
     }
