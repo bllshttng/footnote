@@ -1,8 +1,7 @@
-"""Full-text search lives in the store (task 16.1): ``fts.search`` is a
-thin client for the keeper's ``search`` read op over the ``nodes_fts``
-FTS5 index in graph.db. Results come from the store, no sidecar cache
-file is ever written, and an unreachable keeper degrades ``find --fts``
-to substring search with a warning.
+"""Full-text search lives in the store, with no sidecar cache file.
+
+The Python reader tests cover keeper lookup and query neutralization. The
+native ``backlog find --fts`` test covers the compiled store index.
 
 Filter: ``fno doctor test cli/tests/graph/test_backlog_search_fts.py``
 """
@@ -13,12 +12,8 @@ from tests.fixtures.graph_seed import seed_graph
 import json
 
 import pytest
-from typer.testing import CliRunner
 
 from fno.graph import fts
-from fno.graph.cli import cli
-
-runner = CliRunner()
 
 FULL = {
     "type": "feature",
@@ -46,9 +41,7 @@ def _seed(graph, *rows) -> None:
 
 @pytest.fixture()
 def tmp_graph(tmp_path, monkeypatch):
-    """A temp machine with a real keeper. Skips where no worker binary."""
-    from fno.graph.store import _worker_binary
-
+    """A temporary graph store rooted under the test directory."""
     graph = tmp_path / "graph.json"
     _seed(
         graph,
@@ -76,27 +69,14 @@ def test_query_syntax_is_neutralized_end_to_end(tmp_graph):
     assert fts.search('"unbalanced quote AND (', tmp_graph) == []
 
 
-def test_find_fts_answers_through_the_native_index(tmp_graph, tmp_path, monkeypatch):
-    """`find --fts` is the native binary's now, and it rides the store's own
-    FTS5 index (search.rs): the seeded row comes back best-first with no
-    warning. The substring-degrade warning fires only when the index errors,
-    which a seeded store no longer produces."""
-    import os as _os
-    import subprocess as _sp
+def test_find_fts_uses_the_native_index_without_degrade_warning(tmp_graph, tmp_path, monkeypatch):
+    """The native `backlog find --fts` path answers from the store index."""
+    from tests._native_door import run_native
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
     (tmp_path / "config.toml").write_text(f'state_dir = "{tmp_path}"\n')
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
 
-    proc = _sp.run(
-        [str(binary), "backlog", "find", "--fts", "resume handle", "-J"],
-        capture_output=True,
-        text=True,
-        env={**_os.environ, "FNO_TRACKER_BACKEND": "graph"},
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert [e["id"] for e in json.loads(proc.stdout)] == ["x-aaaa"]
+    code, out, err = run_native("backlog", "find", "--fts", "resume handle", "-J")
+    assert code == 0, err
+    assert "warning: fts unavailable" not in err
+    assert [e["id"] for e in json.loads(out)] == ["x-aaaa"]
