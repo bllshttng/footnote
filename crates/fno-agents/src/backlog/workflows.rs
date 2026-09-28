@@ -654,6 +654,19 @@ fn close_node(tail: &[String], args: &DoneArgs, task_id: &str) -> i32 {
         eprintln!("Error: feature {task_id} not found");
         return 1;
     };
+    // The store's row space includes imported archive rows; a direct wheel
+    // spelling answered "not found" for those, so the close keeps that
+    // contract instead of closing a row that is not on the board.
+    if truthy_field(node, "archived_at") {
+        eprintln!("Error: feature {task_id} not found");
+        return 1;
+    }
+    // The CANONICAL id, not the argument: the partial-id spellings resolve
+    // here, and the cascade and receipts must walk the full id.
+    let task_id = text_at(node, "id")
+        .map(String::from)
+        .unwrap_or_else(|| task_id.to_string());
+    let task_id = task_id.as_str();
     if node
         .get("completed_at")
         .map(|v| !v.is_null())
@@ -948,6 +961,22 @@ pub fn run_reopen(tail: &[String]) -> i32 {
         eprintln!("Error: feature {task_id} not found");
         return 1;
     };
+    // The store's row space includes imported archive rows: an archived row
+    // resolves through the same lookup, so the refusal must fire before the
+    // not-done check, not only on a miss.
+    if truthy_field(&node, "archived_at") {
+        let when = text_at(&node, "completed_at")
+            .or_else(|| text_at(&node, "updated"))
+            .unwrap_or("unknown");
+        eprintln!(
+            "Refused: {task_id} is archived (terminal since {when}), not in the \
+             working graph. Run `fno backlog unarchive {task_id}` first, then reopen it."
+        );
+        return 4;
+    }
+    // The CANONICAL id, not the argument: a partial-id spelling resolves
+    // here, and the cascade walks full ids.
+    let task_id: String = text_at(node, "id").map(String::from).unwrap_or(task_id);
     if !truthy_field(&node, "completed_at") {
         eprintln!("warning: {task_id} is not done; nothing to reopen");
         return 0;
@@ -1063,7 +1092,7 @@ pub fn run_reopen(tail: &[String]) -> i32 {
     let cascade_out = cascade.into_inner();
     let canonical_id = canonical.into_inner().unwrap_or_else(|| task_id.clone());
     for pid in warned.into_inner() {
-        eprintln!(
+        println!(
             "warning: parent {pid} is done on its own evidence and now has an open child; \
              `fno backlog reopen {pid} --reason \"...\"` if that is wrong"
         );

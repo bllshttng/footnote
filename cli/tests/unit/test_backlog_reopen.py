@@ -59,16 +59,24 @@ def write_pr_stub(root: Path, states: dict[int, str] | None = None, *, fail_stde
     stay hermetic. states: {41: "OPEN"} -> {"state": ..., "html_url": ...}."""
     stubbin = root / "stubbin"
     stubbin.mkdir(exist_ok=True)
-    arms = []
-    for n, s in sorted((states or {}).items()):
-        body = json.dumps({"state": s, "html_url": f"https://github.com/o/r/pull/{n}"})
-        arm = '  case "$a" in */pulls/{n}) printf \'{b}\'; exit 0;; esac'
-        arms.append(arm.replace("{n}", str(n)).replace("{b}", body))
-    tail = ["printf '{}'", "exit 0"]
     if fail_stderr:
+        # A failing gh answers nothing: every call fails, which is the shape
+        # both the outage and the routing refusal tests need.
         escaped = fail_stderr.replace("'", "'\\''")
-        tail = [f"printf '%s' '{escaped}' >&2", "exit 1"]
-    script = "\n".join(["#!/bin/sh"] + arms + tail)
+        script = "\n".join(
+            [
+                "#!/bin/sh",
+                f"printf '%s' '{escaped}' >&2",
+                "exit 1",
+            ]
+        )
+    else:
+        arms = []
+        for n, s in sorted((states or {}).items()):
+            body = json.dumps({"state": s, "html_url": f"https://github.com/o/r/pull/{n}"})
+            arm = '  case "$a" in */pulls/{n}) printf \'{b}\'; exit 0;; esac'
+            arms.append(arm.replace("{n}", str(n)).replace("{b}", body))
+        script = "\n".join(["#!/bin/sh", 'for a in "$@"; do'] + arms + ["done", "printf '{}'", "exit 0"])
     stub = stubbin / "gh"
     stub.write_text(script)
     stub.chmod(0o755)
@@ -98,7 +106,7 @@ def test_the_status_recomputes_off_the_cleared_completion(tmp_path):
 def test_a_reopened_pr_bearing_node_reads_in_review(tmp_path):
     """Not a dispatchable state, and deliberately so: the node has a PR, and
     reopening records that its close was wrong, not that a worker should go."""
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "OPEN"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "early close"], path_prepend=str(root / "stubbin"))
     node = _read(root)["ab-11111111"]
@@ -113,7 +121,7 @@ def test_a_reopened_pr_bearing_node_reads_in_review(tmp_path):
 def test_merge_status_survives_a_reopen(tmp_path):
     """It records that GitHub confirmed a merge, which stays true after a
     reopen. Clearing it would erase a fact to express an opinion."""
-    root = sandbox(tmp_path, _node("ab-11111111", merge_status="merged", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", merge_status="merged", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "MERGED"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "wrong", "--force"], path_prepend=str(root / "stubbin"))
     assert code == 0, err
@@ -153,7 +161,7 @@ def test_completion_note_is_cleared_not_overwritten(tmp_path):
 def test_a_merged_pr_refuses_the_reopen(tmp_path):
     """done's gate, inverted: it refuses when nothing merged, this when
     something did."""
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "MERGED"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "changed my mind"], path_prepend=str(root / "stubbin"))
     assert code == 3
@@ -161,7 +169,7 @@ def test_a_merged_pr_refuses_the_reopen(tmp_path):
 
 
 def test_the_merged_refusal_names_the_remedy(tmp_path):
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "MERGED"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "changed my mind"], path_prepend=str(root / "stubbin"))
     assert "fno backlog idea" in err
@@ -169,7 +177,7 @@ def test_the_merged_refusal_names_the_remedy(tmp_path):
 
 
 def test_force_overrides_the_merged_refusal(tmp_path):
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "MERGED"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "closed the wrong node", "-F"], path_prepend=str(root / "stubbin"))
     assert code == 0, err
@@ -214,7 +222,7 @@ def test_a_forced_reopen_names_the_pr_that_produced_the_state(tmp_path):
 
 def test_an_open_pr_does_not_block_a_reopen(tmp_path):
     """Only a MERGED PR is evidence the work shipped."""
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "OPEN"})
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "early close"], path_prepend=str(root / "stubbin"))
     assert code == 0, err
@@ -223,7 +231,7 @@ def test_an_open_pr_does_not_block_a_reopen(tmp_path):
 def test_a_gh_outage_leaves_the_node_done(tmp_path):
     """An unreachable gh is a missing answer, not a permitting one (exit 4,
     the retryable-outage slot)."""
-    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7))
+    root = sandbox(tmp_path, _node("ab-11111111", pr_number=7, pr_url="https://github.com/o/r/pull/7"))
     write_pr_stub(root, {7: "OPEN"}, fail_stderr="gh: network unreachable")
     code, out, err = door(root, ["reopen", "ab-11111111", "--reason", "x"], path_prepend=str(root / "stubbin"))
     assert code == 4
@@ -338,7 +346,7 @@ def test_an_epic_closed_on_its_own_evidence_is_left_done_and_named(tmp_path):
     assert nodes["ab-c0000000"]["completed_at"] is None
     assert nodes["ab-e0000000"]["completed_at"] is not None
     assert "ab-e0000000" in out
-    assert "own evidence" in err
+    assert "own evidence" in out
 
 
 def test_the_reopen_warning_stamps_a_marker_on_the_evidence_closed_parent(tmp_path):
