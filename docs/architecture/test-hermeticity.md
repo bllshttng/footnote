@@ -45,7 +45,7 @@ On its first run it caught `$CLI` in `loop_dispatch.rs`, which nothing had scrub
 Isolation must not quietly change which code path runs.
 Three pins were tried and removed because they did:
 
-- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`, and `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain.
+- **`FNO_CONFIG`** - pinning it to one path overrides project-local discovery for the whole suite. The sandboxed `HOME` already relocates `~/.fno/config.toml`. `FNO_CONFIG_SEARCH_ROOT` bounds the rest of the chain. Both legs honor it: the Python loader (`config_io._apply_search_ceiling`) and the Rust readers (`within_search_ceiling`). The Rust sites: `config_candidates`, the backlog settings walk, and the plans chain's `.claude/settings*.json` tier.
 - **`FNO_GLOBAL_SETTINGS_PATH`** - the global candidate is `Path.home()/.fno/settings.yaml`, so the sandboxed `HOME` covers it. Re-pinning additionally overrode the candidate for tests that monkeypatch `HOME` precisely to exercise the global-fallback path.
 - **`FNO_REPO_ROOT`** - pinning it points repo-root resolution at an empty sandbox, and a large part of the suite legitimately resolves the real checkout to find a lint script or the installed package. Unset is also exactly what CI has.
 
@@ -199,3 +199,11 @@ Only REGULAR files are hashed. A socket, fifo, device or symlink carries no byte
 ## The uncovered path
 
 Hermeticity is applied by the **runner**. `bash tests/whatever.sh` skips it and reads your real `HOME`, config chain, and carve-out ledger. A pass proves nothing about hermeticity. A failure can come from your machine. When someone runs these paths, `tests/README.md` and `fno doctor test smoke --help` both state the limitation. Closing it properly requires a per-file header enforced across 131 shell harnesses. That has not been done.
+
+## Session tripwire
+
+The ceiling bounds where config is READ from. It cannot stop a writer. The write-side guard is the session tripwire in `cli/tests/prod_tripwire.py`. At module load, `conftest.py` snapshots the live roots under the REAL env. It runs on the xdist controller only. The roots: the real `~/.fno` at depth 2, `~/.claude` at depth 1, and the real plans dir at depth 1. The two checkouts follow at depth 1: the canonical checkout and the running checkout's toplevel. The Rust binary resolves the plans dir, so the copy cannot drift from the answer tests actually read.
+
+When the session finishes, `pytest_sessionfinish` re-walks the roots and re-judges every new entry. A name matching the session's basetemp slug is a leak. The slug is parent-name + basetemp-name. It is never the bare `pytest-of-` prefix every other pytest run shares. File bytes containing the basetemp or sandbox path are a leak. The hook prints one line per leak and fails the run with `pytest.ExitCode.TESTS_FAILED`. A new `fno-probe-` entry warns and does not fail. A live codex spawn writes that name too. Entries under `worktrees/`, `cargo-build/`, `target/` and `.git/` are never walked. The tripwire reports and never deletes.
+
+What it cannot see: a leak carrying only another session's marker, a write deeper than the root's depth, and a modified EXISTING file. A bare `bash tests/whatever.sh` run is also unseen. The runner applies hermeticity. A bare run applies nothing.
