@@ -2636,7 +2636,8 @@ mod tests {
         let mut rows = vec![
             json!({"id": "ab-11111111", "status": "in_progress"}),
             json!({"id": "ab-22222222", "contained_in": "ab-11111111",
-                   "parent": "ab-11111111", "pr_number": 7}),
+                   "parent": "ab-11111111", "pr_number": 7,
+                   "pr_url": "https://github.com/acme/widget/pull/7"}),
             json!({"id": "ab-33333333", "parent": "ab-11111111"}),
             json!({"id": "ab-44444444", "parent": "ab-11111111",
                    "status": "done", "completed_at": "2026-01-01T00:00:00+00:00"}),
@@ -2662,8 +2663,8 @@ mod tests {
         let parent_freed = release_parented_children(&mut rows, "ab-11111111");
         assert_eq!(
             parent_freed,
-            vec!["ab-33333333".to_string()],
-            "done keeps parent as history"
+            vec!["ab-22222222".to_string(), "ab-33333333".to_string()],
+            "every non-done parented child frees; done keeps parent as history"
         );
     }
 
