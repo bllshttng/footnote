@@ -647,6 +647,8 @@ mod tests {
             ("ab-123", false),       // suffix shorter than 4
             ("ab-123456789", false), // suffix longer than 8
             ("x-ABCDEF12", false),   // uppercase hex
+            ("xbbbb", true),         // dash-less: pre-2026-09-27 minter shape
+            ("x123", false),         // dash-less with a 3-hex tail
         ]
     }
 

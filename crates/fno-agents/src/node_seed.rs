@@ -45,9 +45,13 @@ fn seed_text(payload: &Value) -> Option<String> {
 
 /// Liberal pre-check mirroring Python's `has_node_id_prefix`: a prefix-like
 /// head, one dash, and a non-strict suffix, so the short test/legacy ids that
-/// resolve by exact graph lookup stay derivable. A FORMAT check, not an
-/// identity check; resolution stays a graph lookup on the Python side.
+/// resolve by exact graph lookup stay derivable. Dash-less ids are covered by
+/// the shared well-formed gate. A FORMAT check, not an identity check;
+/// resolution stays a graph lookup on the Python side.
 fn looks_like_node_id(s: &str) -> bool {
+    if crate::backlog::node_ref::is_wellformed_node_id(s) {
+        return true;
+    }
     let Some((prefix, suffix)) = s.split_once('-') else {
         return false;
     };
