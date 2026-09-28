@@ -189,7 +189,7 @@ Present in the real root, no writer found, not confirmable as dead inside this t
 
 ## Unrotated logs
 
-Real writers, no rotation, no deleter. `ledger.md` stays at the root for now (a Python locator awaiting its port). The pr-watcher and groom logs moved under `logs/`; their rotation is still unclaimed work.
+Real writers, no rotation, no deleter. `ledger.md` stays at the root for now (a Python locator awaiting its port). The pr-watcher and groom logs moved under `logs/`. Their rotation is still unclaimed work.
 
 | Entry | Writer | State |
 |---|---|---|
