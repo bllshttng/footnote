@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # corrections-lock.sh - shared locking helper for corrections.log writers.
 #
-# Source this from any writer that appends to ~/.fno/corrections.log.
+# Source this from any writer that appends to ~/.fno/logs/corrections.log.
 # Provides corrections_lock_append() which acquires an exclusive lock,
 # appends the given line, and releases.
 #
@@ -161,7 +161,7 @@ corrections_lock_append() {
 # test redirecting FNO_HOME isolates this too.
 corrections_log_path() {
   local fno_home="${FNO_HOME:-$HOME/.fno}"
-  printf '%s\n' "$fno_home/corrections.log"
+  printf '%s\n' "$fno_home/logs/corrections.log"
 }
 
 # corrections_rejected_log_path - resolve corrections-rejected.log, same root.

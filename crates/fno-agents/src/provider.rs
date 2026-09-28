@@ -468,7 +468,7 @@ pub fn parse_verb_token(tok: &str) -> Option<(&str, bool)> {
 /// The shipped footnote verb roster, mirroring Python's `footnote_verbs()`:
 /// every `skills/<name>/SKILL.md` and `commands/<name>.md` the plugin ships.
 /// Read from the surface, never a retyped literal. Resolved from the plugin
-/// root env hints, then the persisted `~/.fno/plugin-root` pointer; empty on
+/// root env hints, then the persisted `~/.fno/install/plugin-root` pointer; empty on
 /// any resolution failure, where pass-through is the safe direction and the
 /// plugin-qualified `/fno:` spelling keeps working on namespace alone.
 fn footnote_verbs() -> std::collections::HashSet<String> {

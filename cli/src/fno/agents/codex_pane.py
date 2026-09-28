@@ -268,8 +268,6 @@ def _make_codex_bind_probe(
         return candidate
 
     return _probe
-
-
 def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> bool:
     """Send a bounded pane's seed as a fno turn/start, which carries the roots."""
     from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
@@ -278,10 +276,7 @@ def deliver_seed(thread_id: str, seed: str, cwd: Path, dirs: Sequence[str]) -> b
     env = {**os.environ, WORKER_ADD_DIRS_ENV: os.pathsep.join(dirs)}
     try:
         proc = subprocess.run([*argv, "--seed", str(cwd)], input=seed, capture_output=True, text=True, timeout=30, env=env)
-        answer = json.loads(proc.stdout.strip())
-        # An unacked turn/start is in flight, not failed: the thread may run
-        # it, so a typed fallback would seed twice. The bound pane stays
-        # mail-addressable if the turn truly died.
-        return bool(answer["delivered"]) or answer.get("reason") == "turn-start-unacked"
+        # turn-start-unacked is in flight, not failed: typing would double-seed.
+        return (answer := json.loads(proc.stdout.strip()))["delivered"] or answer.get("reason") == "turn-start-unacked"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False

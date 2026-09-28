@@ -2260,6 +2260,231 @@ def test_budget_stop_after_a_graph_timeout_keeps_the_timeout_note(
     assert summary["budget_spent"] is True
     assert "graph read timed out" in summary["note"]
     assert "budget spent after 1 of 2 crowns" in summary["note"]
+    assert "before truth:epic-" in summary["note"]
+
+
+def test_default_truth_builds_one_batch_resolver_for_every_crown(tmp_path, monkeypatch):
+    # The default truth read paid one discovery scan per crown (five scans,
+    # each near the 10s bound under load). The pass now builds one batch
+    # resolver inside the first bounded read and serves every crown from it.
+    import fno.agents.cli as agents_cli
+    import fno.agents.session_truth as truth_mod
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns, rows = _two_crown_setup(root)
+    builds: list = []
+    resolved: list = []
+
+    def fake_batch_resolver():
+        builds.append(1)
+
+        def resolve(handle):
+            resolved.append(handle)
+            return (None, [])
+
+        return resolve
+
+    monkeypatch.setattr(agents_cli, "_batch_resolver", fake_batch_resolver)
+
+    def fake_resolve_session_truth(handle, *, resolve=None, **_kw):
+        assert resolve is not None
+        resolve(handle)  # the batch pays the scan; the verdict itself is stubbed
+        return {"state": "working"}
+
+    monkeypatch.setattr(truth_mod, "resolve_session_truth", fake_resolve_session_truth)
+
+    addresses = {"king-a", "aa11bb22", "epic-a1", "king-b", "cc22dd33", "epic-b1"}
+    rec = _Recorder()
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=_court(crowns),
+        rows_fn=rows,
+        unread_fn=lambda address: [object()] if address in addresses else [],
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert len(builds) == 1
+    assert sorted(resolved) == ["king-a", "king-b"]
+    assert summary["evaluated"] == 2
+    assert sorted(r["refusal"] for r in summary["refused"]) == ["working", "working"]
+
+
+def test_default_truth_not_found_takes_the_successor_path(tmp_path, monkeypatch):
+    # A holder the batch resolver cannot find reads state unknown, reason
+    # not-found, and the pass takes the successor path exactly as the
+    # per-call resolver did.
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setattr(
+        agents_cli, "_batch_resolver", lambda: (lambda handle: (None, ["other-king"]))
+    )
+    rec, summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [object()] if a == "king-x" else [],
+        extra={"truth_fn": None},
+    )
+
+    assert rec.successor_flags == [True]
+    spawned = [e for e in rec.events if e[0] == "king_spawned_successor"]
+    assert spawned and spawned[0][1]["trigger"] == "mail"
+    assert summary["truth_reads"] == 1
+
+
+def test_graph_read_overlapping_setup_lands_in_the_first_wait(tmp_path, monkeypatch):
+    # A graph read slower than the per-read wait but faster than the setup
+    # reads plus that wait: it starts with the pass, so the first board-lane
+    # crown still gets entries and no timeout note is written.
+    import time
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.8)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns = [{"holder": "king-x", "scope": "epic-x", "status": "live"}]
+    write_manifest(
+        _manifest_for(root, "epic-x"),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    sentinel = [{"id": "board-row"}]
+
+    def slow_graph():
+        time.sleep(1.0)
+        return sentinel
+
+    def slow_court(rows):
+        time.sleep(0.5)
+        return {"crowns": crowns, "conflicts": []}
+
+    board_entries: list = []
+    monkeypatch.setattr(
+        wake_mod,
+        "_board_rows",
+        lambda scope, entries, resolver=None: board_entries.append(entries) or None,
+    )
+    rec = _Recorder()
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=slow_court,
+        rows_fn=_rows(root),
+        truth_fn=lambda holder: {"state": "working"},
+        unread_fn=lambda address: [],
+        answered_fn=lambda: [],
+        entries_fn=slow_graph,
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert board_entries == [sentinel]
+    assert "graph read timed out" not in str(summary["note"])
+    assert summary["evaluated"] == 1
+
+
+def test_a_graph_cut_poll_serves_a_later_crown_without_blocking(tmp_path, monkeypatch):
+    # The read misses crown 1's wait, so crown 1 is evaluated with no board
+    # signal. Later crowns poll the same future with timeout=0: once the read
+    # lands, one of them picks it up, the note appears once, and the pass
+    # never blocks on the read a second time.
+    import threading
+    import time
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns, rows = _two_crown_setup(root)
+    sentinel = [{"id": "board-row"}]
+
+    def slow_graph():
+        time.sleep(0.9)
+        return sentinel
+
+    def slow_unread(address):
+        # Three addresses per crown at 0.15s each: crown 1 reaches its graph
+        # step at ~0.45s and cuts at ~0.65s, crown 2 polls at ~1.1s, after
+        # the read has landed.
+        time.sleep(0.15)
+        return []
+
+    board_entries: list = []
+    monkeypatch.setattr(
+        wake_mod,
+        "_board_rows",
+        lambda scope, entries, resolver=None: board_entries.append(entries) or None,
+    )
+    rec = _Recorder()
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=_court(crowns),
+        rows_fn=rows,
+        truth_fn=lambda holder: {"state": "working"},
+        unread_fn=slow_unread,
+        answered_fn=lambda: [],
+        entries_fn=slow_graph,
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert board_entries == [sentinel]
+    assert summary["note"].count("graph read timed out") == 1
+    assert summary["evaluated"] == 2
+    assert not summary.get("budget_spent")
+
+
+def test_a_graph_cut_skips_the_pre_graph_budget_stop(tmp_path, monkeypatch):
+    # A zero-wait poll spends nothing, so once the read is cut the pre-graph
+    # budget stop no longer fires: the crown is evaluated on the poll instead.
+    import threading
+
+    from fno.pr_watch import _king_wake as wake_mod
+
+    monkeypatch.setattr(wake_mod, "_KING_TRUTH_WAIT_S", 0.2)
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns, rows = _two_crown_setup(root)
+    blocked = threading.Event()
+
+    def slow_graph():
+        blocked.wait(timeout=60)
+        return []
+
+    seconds_values = iter([30.0, 30.0, 20.0, 5.0])
+    seconds = lambda: next(seconds_values, 5.0)  # noqa: E731
+    rec = _Recorder()
+    try:
+        summary = run_king_wake(
+            _settings(),
+            emit=rec.emit,
+            now=NOW,
+            court_fn=_court(crowns),
+            rows_fn=rows,
+            truth_fn=lambda holder: {"state": "done"},
+            unread_fn=lambda address: [],
+            answered_fn=lambda: [],
+            entries_fn=slow_graph,
+            seconds_left_fn=seconds,
+            dispatch_fn=rec.dispatch,
+            ask_fn=lambda *a: None,
+        )
+    finally:
+        blocked.set()
+
+    assert summary["evaluated"] == 2
+    assert not summary.get("budget_spent")
+    assert summary["note"].count("graph read timed out") == 1
 
 
 def test_a_blocked_court_read_ends_the_pass_with_its_note(tmp_path, monkeypatch):

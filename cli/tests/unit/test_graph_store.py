@@ -326,7 +326,7 @@ def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch
     the global ~/.fno targets.
 
     Guards the board-server bug where running the test suite clobbered the
-    real ~/.fno/graph.html (served by serve_board.py over Tailscale) with
+    real ~/.fno/pages/graph.html (served by serve_board.py over Tailscale) with
     single-fixture-node renders. Simulate the global location via a
     monkeypatched state_dir; if the pass ever falls back to the global
     default again, the fake_home assertions below trip instead of polluting

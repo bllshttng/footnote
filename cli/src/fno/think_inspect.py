@@ -482,7 +482,7 @@ def _pitfalls(repo: Path, plans_path: Path, home: Path) -> dict[str, Any]:
     retros = []
     if plans_path.is_dir():
         retros = [str(path) for path in sorted(plans_path.glob("*retro-synthesis*.md"), reverse=True)[:5]]
-    candidates = home / ".fno" / "lesson-candidates.jsonl"
+    candidates = home / ".fno" / "history" / "lesson-candidates.jsonl"
     try:
         count = sum(1 for line in candidates.read_text(encoding="utf-8").splitlines() if line.strip())
     except (FileNotFoundError, OSError, UnicodeDecodeError):

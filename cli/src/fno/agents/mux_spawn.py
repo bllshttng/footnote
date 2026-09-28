@@ -3638,9 +3638,8 @@ def dispatch_spawn_pane(
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
     )
-    codex_seed = ""
-    if provider == "codex" and message and "--dangerously-bypass-approvals-and-sandbox" not in argv:
-        codex_seed, argv = argv[-1], argv[:-2]
+    bounded_codex = provider == "codex" and "--dangerously-bypass-approvals-and-sandbox" not in argv
+    codex_seed, argv = (argv[-1], argv[:-2]) if bounded_codex and message else ("", argv)
     if provider == "codex" and argv and argv[0] == provider:
         # Identity rides as config-set leaves; passthrough-checked like the
         # route splice. The argv[0] guard keeps it on codex's own form.
@@ -4311,15 +4310,9 @@ def dispatch_spawn_pane(
                 else:
                     seed_state, seed_detail, seed_source, seed_pane = _seed_once()
                     if seed_state == "unconfirmed":
-                        reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                        reaped, _ = _reap_spawned_pane(session, pane_id, runner)
                         raise DispatchAskError(
-                            f"agent {name!r} spawn seed never submitted after bind "
-                            f"({seed_detail}); pane {pane_id} "
-                            + (
-                                "reaped, no registry row written"
-                                if reaped
-                                else f"may still exist: {cleanup_detail}"
-                            ),
+                            f"agent {name!r} seed never submitted after bind ({seed_detail}); pane {pane_id} " + ("reaped" if reaped else "kept"),
                             exit_code=1,
                         )
         elif provider == "claude" and not pin_session:

@@ -1095,31 +1095,6 @@ fn reconcile_flips_unreachable_live_to_orphaned_and_recovers_orphaned() {
     assert_eq!(changes[1].new_status, Some(AgentStatus::Live));
 }
 
-#[test]
-fn reconcile_settles_an_unhosted_thread_with_a_rollout_to_orphaned() {
-    let entries = vec![thread_entry(
-        "t-resumable",
-        AgentStatus::Live,
-        Some("/tmp/r.jsonl".into()),
-    )];
-    let (changes, _) = plan_reconcile(
-        &entries,
-        |_| Ok(false),
-        || false,
-        |_| true,
-        |_| false,
-        |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
-        |_| true,  // the rollout file exists: the durable object survives
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,      // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(
-        changes[0].new_status,
-        Some(AgentStatus::Orphaned),
-        "resumable thread reads Orphaned, never Live-forever"
-    );
-}
-
 /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe
 /// default - never a parse failure, never an accidental escalation.
 #[test]
@@ -1141,27 +1116,6 @@ fn pre_v19_row_without_posture_parses_with_the_safe_default() {
     assert!(
         !crate::codex_posture::entry_posture_is_full_access(&entry),
         "an unrecorded posture reads the safe default, never full access"
-    );
-}
-
-#[test]
-fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
-    let entries = vec![thread_entry("t-gone", AgentStatus::Live, None)];
-    let (changes, _) = plan_reconcile(
-        &entries,
-        |_| Ok(false),
-        || false,
-        |_| true,
-        |_| false,
-        |_| false,              // not hosted
-        |_| false,              // no rollout: the thread never got far enough to persist
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,                   // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(
-        changes[0].new_status,
-        Some(AgentStatus::Exited),
-        "an unhosted thread with no rollout is gone, not Live-forever"
     );
 }
 

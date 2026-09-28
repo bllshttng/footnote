@@ -225,9 +225,8 @@ pub fn resolve_thread_posture(
             _ => Err(format!(
                 "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
                  (full-auto, yolo) or the <sandbox>:<approval> form \
-                 (e.g. workspace-write:on-request); a claude word such as \
-                 bypassPermissions belongs under agents.*.harness.claude, and codex reads \
-                 agents.*.harness.codex.permission_mode"
+                 (e.g. workspace-write:on-request); words from other harnesses do not \
+                 map here, and codex reads agents.*.harness.codex.permission_mode"
             )),
         },
     }
@@ -416,9 +415,8 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
                 _ => Err(format!(
                     "codex --permission-mode {mode:?} unmappable; use a shortcut \
                      (full-auto, yolo) or the <sandbox>:<approval> form \
-                     (e.g. workspace-write:on-request); a claude word such as \
-                     bypassPermissions belongs under agents.*.harness.claude, and codex \
-                     reads agents.*.harness.codex.permission_mode"
+                     (e.g. workspace-write:on-request); words from other harnesses do \
+                     not map here, and codex reads agents.*.harness.codex.permission_mode"
                 )),
             },
         },
