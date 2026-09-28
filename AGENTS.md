@@ -180,10 +180,6 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 
-## graphify
-
-Query the `graphify-out/` knowledge graph before source reads. `/graphify` loads the skill first. Prefer `query`/`path`/`explain`, wiki for navigation, report as fallback. Dirty output expected. Skip on explicit opt-out or graph debugging. After edits run `graphify update .`.
-
 ## Deep-dive docs
 
 The docs nothing above already points at:
