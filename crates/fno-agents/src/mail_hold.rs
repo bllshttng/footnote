@@ -559,7 +559,7 @@ fn hold_receipt(clock: &Clock, name: &str, now: chrono::DateTime<chrono::Utc>) -
         ));
     }
     Some(format!(
-        "held until about {}: {name} is in do-not-disturb; delivers itself then",
+        "held until about {}: {name} is in do-not-disturb (wall clock); delivers itself then",
         hhmm(until)
     ))
 }
@@ -1686,7 +1686,7 @@ pub(crate) mod tests {
             let receipt = gate(SID, None, now).receipt.unwrap();
             assert!(receipt.starts_with("held until about "), "{receipt}");
             assert!(
-                receipt.ends_with("worker is in do-not-disturb; delivers itself then"),
+                receipt.ends_with("worker is in do-not-disturb (wall clock); delivers itself then"),
                 "{receipt}"
             );
             // Idle clock: "or later", because activity restarts it.
