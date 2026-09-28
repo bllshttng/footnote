@@ -1047,7 +1047,7 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
 /// `--source` default: the source checkout `fno doctor update` pinned at its
 /// last successful install, else the cwd.
 fn default_source_dir() -> PathBuf {
-    let pin = state_root().join("source-path");
+    let pin = crate::state_layout::place(&state_root(), "source-path");
     if let Ok(text) = std::fs::read_to_string(&pin) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
