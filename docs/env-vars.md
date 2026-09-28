@@ -263,6 +263,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `USER` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:185 |
 | `USERNAME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:185 |
 | `USERPROFILE` | rs | unclear: crates/fno-agents/src/publish_review.rs:195 |
+| `UV_CACHE_DIR` | rs | Authoritative uv cache directory: the cache root a bounded codex worker is granted as a writable root; set but missing grants nothing (no fallback, uv reads exactly this variable). |
 | `WORKTREE_STATUS_REGISTRY` | py | unclear: cli/src/fno/agents/registry.py:2525 |
 | `XDG_CACHE_HOME` | rs | unclear: crates/fno/src/bootstrap.rs:1395 |
 | `XDG_DATA_HOME` | rs | Relocates uv's tools dir where the fno-py console script is resolved; unset reads the default ~/.local/share/uv layout. |
