@@ -17,6 +17,8 @@ use sources::{load_sources, Paths, Receipt, Sources};
 use transcript::scan;
 use transcript::{find_many, TranscriptFacts};
 
+const LEDGER_SESSION_UNRESOLVED: &str = "unresolved:no-harness-session";
+
 pub fn classify(args: &[OsString]) -> Option<Vec<OsString>> {
     if args.len() < 3
         || args[0].to_str()? != "agents"
@@ -76,7 +78,7 @@ fn run_to(args: &[OsString], stdout: &mut impl Write, stderr: &mut impl Write) -
             .is_some_and(|sessions| {
                 sessions
                     .iter()
-                    .any(|value| value.as_str() == Some("unresolved:no-harness-session"))
+                    .any(|value| value.as_str() == Some(LEDGER_SESSION_UNRESOLVED))
             })
         {
             let _ = writeln!(

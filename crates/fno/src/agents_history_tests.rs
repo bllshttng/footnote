@@ -333,7 +333,7 @@ fn agents_history_miss_names_every_source_and_returns_one() {
     let args = vec![
         OsString::from("never-seen"),
         OsString::from("--graph"),
-        dir.path().join("graph.json").into_os_string(),
+        dir.path().join("unavailable-graph-store").into_os_string(),
         OsString::from("--ledger"),
         dir.path().join("ledger.json").into_os_string(),
         OsString::from("--events"),
@@ -449,7 +449,7 @@ fn agents_history_node_prints_ledger_only_row_and_missing_session_reason() {
                     "graph_node_id": "x-9f2e",
                     "pr_number": 45,
                     "status": "done",
-                    "sessions": ["unresolved:no-harness-session"]
+                    "sessions": [LEDGER_SESSION_UNRESOLVED]
                 }
             ]
         })
