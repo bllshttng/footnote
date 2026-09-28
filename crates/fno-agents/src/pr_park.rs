@@ -55,7 +55,7 @@ impl Paths {
 
     /// The durable defaults beside the state root: the same files the Python
     /// watcher writes (`~/.fno/pr-watcher-state.json` + its `-delivery`
-    /// sidecar, `~/.fno/events.jsonl`, `~/.fno/pr-watcher.err.log`).
+    /// sidecar, `~/.fno/events.jsonl`, `~/.fno/logs/pr-watcher.err.log`).
     pub fn from_home() -> Paths {
         let root = AgentsHome::from_env()
             .root()

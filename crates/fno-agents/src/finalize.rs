@@ -3011,7 +3011,7 @@ fn assistant_text_blocks(val: &Value) -> String {
     String::new()
 }
 
-/// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
+/// Best-effort: append a pointer line to `~/.fno/logs/corrections.log` so the
 /// autocorrect monthly review picks the postmortem up. Creates the log when
 /// absent (mode 0600): both launchd jobs were live while the file never
 /// existed, so every pointer before 2026-09 was dropped on "autocorrect not

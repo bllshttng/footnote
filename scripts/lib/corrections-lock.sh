@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # corrections-lock.sh - shared locking helper for corrections.log writers.
 #
-# Source this from any writer that appends to ~/.fno/corrections.log.
+# Source this from any writer that appends to ~/.fno/logs/corrections.log.
 # Provides corrections_lock_append() which acquires an exclusive lock,
 # appends the given line, and releases.
 #

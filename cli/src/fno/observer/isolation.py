@@ -278,7 +278,7 @@ def check_isolation(
                             - ``repo_events_jsonl`` fno repo .fno/events.jsonl
                             - ``global_events_jsonl`` ~/.fno/events.jsonl
                             - ``memory_dir``        ~/.fno/memory/ directory
-                            - ``corrections_log``   ~/.fno/corrections.log
+                            - ``corrections_log``   ~/.fno/logs/corrections.log
 
                             Unknown keys are ignored.  Missing files are
                             silently skipped (clean).
