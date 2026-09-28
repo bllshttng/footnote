@@ -945,6 +945,66 @@ def clean_lock_dir(tmp_path: Path) -> Path:
             pass
 
 
+def run_native_create(
+    graph: Path,
+    verb: str,
+    *args: str,
+    input: str | None = None,
+    auto_difficulty: bool = True,
+    extra_env: dict[str, str] | None = None,
+):
+    """Run the native backlog create verb over a fixture store.
+
+    The create verbs (`add`/`idea`) are binary-owned since the create port,
+    so tests that used to drive the Python typer app exec the dev binary
+    with the state dir pinned to the graph path's parent and the caller's
+    cwd inherited (work-map and repo-root reads key on it). The difficulty
+    the retired add shim auto-appended rides along when the caller passes
+    none; pass auto_difficulty=False to test the bare refusal. extra_env
+    merges last (the external-backend guard tests select github there).
+    Returns a CliRunner-shaped result (exit_code/output/stdout/stderr);
+    skips when no dev build exists (the smoke shard deletes it on purpose).
+    """
+    import os as _os
+    import subprocess as _sp
+    from dataclasses import dataclass
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    @dataclass
+    class _CreateResult:
+        exit_code: int
+        stdout: str
+        stderr: str
+
+        @property
+        def output(self) -> str:
+            return self.stdout
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    argv = ["backlog", verb, *args]
+    if verb == "add" and auto_difficulty and "--difficulty" not in argv:
+        argv.extend(["--difficulty", "medium"])
+    env = dict(_os.environ)
+    env.pop("FNO_CONFIG", None)
+    env["HOME"] = str(graph.parent)
+    env["FNO_STATE_DIR"] = str(graph.parent)
+    env["FNO_TRACKER_BACKEND"] = "graph"
+    if extra_env:
+        env.update(extra_env)
+    proc = _sp.run(
+        [str(binary), *argv],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        input=input,
+    )
+    return _CreateResult(proc.returncode, proc.stdout, proc.stderr)
+
+
 @pytest.fixture
 def native_backlog_door(monkeypatch):
     """Pin the lifecycle tests' native door to THIS checkout's build (x-665f).
