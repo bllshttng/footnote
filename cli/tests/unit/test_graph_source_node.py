@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -62,9 +63,7 @@ def _by_id(g: Path, node_id: str) -> dict:
 
 def test_ac1_hp_explicit_source_node_stamps_the_origin(tmp_graph):
     """AC1-HP: --source-node on a filing verb stamps exactly that origin."""
-    result = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low"]
-    )
+    result = run_native_create(tmp_graph, "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
     assert _by_id(tmp_graph, new_id)["source_node_id"] == "x-aaaa"
@@ -72,9 +71,7 @@ def test_ac1_hp_explicit_source_node_stamps_the_origin(tmp_graph):
 
 def test_explicit_source_node_accepts_a_slug(tmp_graph):
     """A slug is the likely mistake and the resolver already handles it."""
-    result = runner.invoke(
-        app, ["backlog", "add", "follow-up", "--source-node", "the-origin-node", "--difficulty", "medium"]
-    )
+    result = run_native_create(tmp_graph, "add", "follow-up", "--source-node", "the-origin-node", "--difficulty", "medium")
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
     assert _by_id(tmp_graph, new_id)["source_node_id"] == "x-aaaa"
@@ -83,11 +80,9 @@ def test_explicit_source_node_accepts_a_slug(tmp_graph):
 def test_ac1_err_unresolvable_source_node_refuses_and_writes_nothing(tmp_graph):
     """AC1-ERR: fail closed - non-zero, the token named, and no node created."""
     before = len(_entries(tmp_graph))
-    result = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-zzzz", "--difficulty", "low"]
-    )
+    result = run_native_create(tmp_graph, "idea", "follow-up", "--source-node", "x-zzzz", "--difficulty", "low")
     assert result.exit_code != 0
-    assert "x-zzzz" in result.output
+    assert "x-zzzz" in (result.output + result.stderr)
     assert len(_entries(tmp_graph)) == before
 
 
@@ -103,7 +98,7 @@ def test_ac3_edge_stale_env_origin_degrades_through_the_real_filing_path(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
     monkeypatch.setenv("FNO_NODE", "x-deleted")
 
-    result = runner.invoke(app, ["backlog", "idea", "orphaned follow-up", "--difficulty", "low"])
+    result = run_native_create(tmp_graph, "idea", "orphaned follow-up", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     node = _by_id(tmp_graph, json.loads(result.stdout)["id"])
     assert node["source_node_id"] is None
@@ -115,7 +110,7 @@ def test_ac2_hp_env_origin_is_stamped_when_it_resolves(tmp_graph, monkeypatch):
     monkeypatch.setenv("CODEX_SESSION_ID", "sess-codex")
     monkeypatch.setenv("FNO_NODE", "x-aaaa")
 
-    result = runner.invoke(app, ["backlog", "idea", "codex-filed follow-up", "--difficulty", "low"])
+    result = run_native_create(tmp_graph, "idea", "codex-filed follow-up", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     node = _by_id(tmp_graph, json.loads(result.stdout)["id"])
     assert node["source_harness"] == "codex"
@@ -136,7 +131,7 @@ def test_ac3_err_ambient_failure_prints_no_traceback_on_either_stream(
     (tmp_graph.parent / ".fno" / "target-state.md").write_bytes(b"\xff\xfe not utf8")
     monkeypatch.chdir(tmp_graph.parent)
 
-    result = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
+    result = run_native_create(tmp_graph, "idea", "follow-up", "--difficulty", "low")
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
     assert _by_id(tmp_graph, json.loads(result.stdout)["id"])["source_node_id"] is None
@@ -148,13 +143,11 @@ def test_a_stamped_origin_is_named_but_a_signalless_filing_is_quiet(tmp_graph):
     An always-on line would be noise on the most-used verb in the CLI, and it
     lands in the mixed output stream that callers parse as JSON.
     """
-    quiet = runner.invoke(app, ["backlog", "idea", "no signal at all", "--difficulty", "low", "--separate"])
+    quiet = run_native_create(tmp_graph, "idea", "no signal at all", "--difficulty", "low", "--separate")
     assert "origin:" not in quiet.output
 
-    named = runner.invoke(
-        app, ["backlog", "idea", "with an origin", "--source-node", "x-aaaa", "--difficulty", "low", "--separate"]
-    )
-    assert "origin: x-aaaa" in named.output
+    named = run_native_create(tmp_graph, "idea", "with an origin", "--source-node", "x-aaaa", "--difficulty", "low", "--separate")
+    assert "origin: x-aaaa" in named.stderr
 
 
 def test_a_dropped_stale_origin_is_reported_not_swallowed(tmp_graph, monkeypatch):
@@ -162,9 +155,9 @@ def test_a_dropped_stale_origin_is_reported_not_swallowed(tmp_graph, monkeypatch
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
     monkeypatch.setenv("FNO_NODE", "x-deleted")
 
-    result = runner.invoke(app, ["backlog", "idea", "orphaned", "--difficulty", "low"])
-    assert result.exit_code == 0, result.output
-    assert "dropped 'x-deleted'" in result.output
+    result = run_native_create(tmp_graph, "idea", "orphaned", "--difficulty", "low")
+    assert result.exit_code == 0, result.stderr
+    assert "dropped 'x-deleted'" in result.stderr
 
 
 def test_backlog_new_captures_an_ambient_origin_too(tmp_graph, monkeypatch):

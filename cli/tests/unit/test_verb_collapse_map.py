@@ -266,7 +266,8 @@ def test_map_covers_current_surface_once():
     # file, 603 -> 604.
     # The native-verb replacement then deleted the hidden Python
     # `agents transcript-paths` action, freeing its row: 604 -> 603.
-    # The decide-retract Python twin's deletion freed its KEEP row: 603 -> 602.
+    # The decide shim's native retract door deleted its Python action,
+    # freeing the `decide retract` row: 603 -> 602.
     # The `backlog rank` T1 row stays: the mux menu binds the leaf and
     # lint_verb_ratchet.NATIVE_SERVED_LEAVES claims the live side, so the row
     # is required even though the python leg is gone.

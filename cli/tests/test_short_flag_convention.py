@@ -76,15 +76,10 @@ EXCLUSIVE_PRE_EXISTING: dict[str, str] = {
 #: table. Key: (file suffix, enclosing function). Value: long -> short pairs
 #: that command MUST declare. Purely additive - long flags are unchanged.
 PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
-    ("graph/cli.py", "cmd_add"): {
-        "--priority": "-p", "--cwd": "-c", "--details": "-d", "--type": "-t",
-    },
-    # cmd_idea was unified with cmd_add (x-9ac9): it now shares add's full option
-    # set, so -d rides --details (with --description as the no-short alias),
-    # matching cmd_add above instead of idea's old --description/-d primary.
-    ("graph/cli.py", "cmd_idea"): {
-        "--details": "-d", "--priority": "-p", "--cwd": "-c",
-    },
+    # cmd_add's and cmd_idea's rows moved with the create port: the native
+    # binary owns the surface now, and their -p/-c/-d/-t pins ride the
+    # committed ADD_HELP/IDEA_HELP goldens, the only scan that can see a Rust
+    # flag decl.
     ("graph/cli.py", "cmd_intake"): {"--title": "-t", "--priority": "-p"},
     # cmd_update's row moved with the update port: the native binary owns
     # the surface now, and its short pins ride the committed UPDATE_HELP
