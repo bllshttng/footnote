@@ -2113,7 +2113,8 @@ pub(crate) fn rotate_backups(dir: &Path, prefix: &str) -> Option<PathBuf> {
             match std::fs::rename(&prev, &pin_path) {
                 Ok(()) => {
                     eprintln!(
-                        "graph backup collapsed from {was} to {now} bytes; the last good copy is kept out of rotation at {}",
+                        "backups in {} collapsed from {was} to {now} bytes; the last good copy is kept out of rotation at {}",
+                        dir.display(),
                         pin_path.display()
                     );
                     pin = Some(pin_path);
