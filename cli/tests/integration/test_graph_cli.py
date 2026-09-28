@@ -147,12 +147,15 @@ def _read_graph(g: Path) -> list[dict]:
 
 
 def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
-    """AC3: observer reap fills the exact open row and reads it back."""
+    """AC3: observer reap fills the exact open row and reads it back.
+
+    Seeded in_progress with nothing else open: the settle rolls the node off
+    in_progress (the x-9657 red), so status_after reads idea."""
     _seed_graph_text(tmp_graph, json.dumps({
         "entries": [{
             "id": "x-reap0001",
             "title": "Reap me",
-            "status": "ready",
+            "status": "in_progress",
             "sessions": [{
                 "phase": "execute",
                 "harness": "codex",
@@ -172,11 +175,11 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     assert receipt["settled"] is True
     assert receipt["row_removed"] is False
     assert receipt["row_closed"] is True
-    assert receipt["status_after"] == "ready"
+    assert receipt["status_after"] == "idea"
     assert receipt["remaining_open_do"] == 0
     saved = _read_graph(tmp_graph)[0]
     assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
-    assert saved["status"] == "ready"
+    assert saved["status"] == "idea"
 
 
 def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
