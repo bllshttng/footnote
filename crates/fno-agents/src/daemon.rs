@@ -199,7 +199,7 @@ pub struct RecoveryReport {
 fn codex_thread_resume_identity(
     entry: &RegistryEntry,
 ) -> Result<Option<(String, PathBuf)>, String> {
-    if !is_codex_thread_entry(entry) {
+    if !is_codex_thread_entry(entry) && !is_codex_thread_heal(entry) {
         return Ok(None);
     }
     let session_id = entry
@@ -238,6 +238,15 @@ pub(crate) fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
         && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
         && entry.short_id.is_empty()
         && entry.mux.is_none()
+}
+
+/// The for-stop HEALED row shape: a session `fno agents rm` just removed,
+/// re-resolved from the harness store. The store records no host mode, so
+/// the strict `is_codex_thread_entry` gate would route such a stop to the
+/// no-op arm and the thread would keep running. The re-attach validates the
+/// durable identity (full session id + existing cwd) for itself.
+pub(crate) fn is_codex_thread_heal(entry: &RegistryEntry) -> bool {
+    entry.harness_name() == "codex" && entry.short_id.is_empty() && entry.mux.is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -4619,6 +4628,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         &requested_name,
         &ctx.home.registry_json(),
         cross_project,
+        true,
     )
     .await
     {
@@ -4665,7 +4675,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     if entry.harness_name() == "claude" {
         return stop_claude(ctx, req, &name, &entry).await;
     }
-    if is_codex_thread_entry(&entry) {
+    if is_codex_thread_entry(&entry) || is_codex_thread_heal(&entry) {
         // Stop means INTERRUPT the in-flight turn, then DROP the actor
         // (closing its connection to the shared daemon), and only then stamp
         // Exited. The old shape removed the handle and stamped Exited without
@@ -5338,6 +5348,7 @@ async fn handle_rm_with(
         &requested_name,
         &ctx.home.registry_json(),
         cross_project,
+        false,
     )
     .await
     {

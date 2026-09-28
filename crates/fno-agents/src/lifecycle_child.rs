@@ -82,7 +82,12 @@ fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
     Ok(absolute)
 }
 
-fn token_helper_args(token: &str, registry_path: &Path, cross_project: bool) -> Vec<String> {
+fn token_helper_args(
+    token: &str,
+    registry_path: &Path,
+    cross_project: bool,
+    for_stop: bool,
+) -> Vec<String> {
     let mut args = vec![
         "agents".to_string(),
         "heal-token".to_string(),
@@ -94,6 +99,9 @@ fn token_helper_args(token: &str, registry_path: &Path, cross_project: bool) -> 
     if cross_project {
         args.push("--cross-project".to_string());
     }
+    if for_stop {
+        args.push("--for-stop".to_string());
+    }
     args
 }
 
@@ -102,11 +110,17 @@ fn token_helper_output(
     registry_path: &Path,
     cross_project: bool,
     scope_cwd: Option<&Path>,
+    for_stop: bool,
 ) -> std::io::Result<std::process::Output> {
     let registry_path = helper_registry_path(registry_path)?;
     let mut command = std::process::Command::new(crate::scrape::fno_bin());
     command
-        .args(token_helper_args(token, &registry_path, cross_project))
+        .args(token_helper_args(
+            token,
+            &registry_path,
+            cross_project,
+            for_stop,
+        ))
         .env("FNO_AGENTS_RUNTIME", "python");
     match scope_cwd {
         Some(cwd) => command.current_dir(cwd),
@@ -133,8 +147,9 @@ pub(crate) fn heal_token(
     registry_path: &Path,
     cross_project: bool,
     scope_cwd: Option<&Path>,
+    for_stop: bool,
 ) -> Result<Option<Value>, String> {
-    let out = match token_helper_output(token, registry_path, cross_project, scope_cwd) {
+    let out = match token_helper_output(token, registry_path, cross_project, scope_cwd, for_stop) {
         Ok(o) => o,
         Err(exc) => {
             return Err(format!(
@@ -383,7 +398,7 @@ mod tests {
     fn heal_token_helper_forwards_cross_project_exactly_once() {
         let registry = Path::new("/tmp/registry.json");
         assert_eq!(
-            token_helper_args("deadbeef", registry, false),
+            token_helper_args("deadbeef", registry, false, false),
             vec![
                 "agents",
                 "heal-token",
@@ -394,7 +409,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            token_helper_args("deadbeef", registry, true),
+            token_helper_args("deadbeef", registry, true, false),
             vec![
                 "agents",
                 "heal-token",
@@ -403,6 +418,26 @@ mod tests {
                 "/tmp/registry.json",
                 "--all-sources",
                 "--cross-project",
+            ]
+        );
+    }
+
+    /// The for-stop lane rides the same shellout: the flag reaches the Python
+    /// healer, which resolves without adopting (no tombstone gate, no
+    /// registration).
+    #[test]
+    fn heal_token_helper_forwards_for_stop_exactly_once() {
+        let registry = Path::new("/tmp/registry.json");
+        assert_eq!(
+            token_helper_args("deadbeef", registry, false, true),
+            vec![
+                "agents",
+                "heal-token",
+                "deadbeef",
+                "--registry",
+                "/tmp/registry.json",
+                "--all-sources",
+                "--for-stop",
             ]
         );
     }
@@ -444,7 +479,7 @@ mod tests {
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =
-            token_helper_output("deadbeef", relative_registry, false, Some(&scope)).unwrap();
+            token_helper_output("deadbeef", relative_registry, false, Some(&scope), false).unwrap();
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
@@ -494,7 +529,7 @@ mod tests {
         std::env::set_var("FNO_BIN", dir.path().join("fno"));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
-        let output = token_helper_output("deadbeef", &registry, false, None).unwrap();
+        let output = token_helper_output("deadbeef", &registry, false, None, false).unwrap();
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),

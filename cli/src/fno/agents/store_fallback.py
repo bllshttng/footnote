@@ -513,6 +513,7 @@ def adopt_store_hit(
     *,
     token: Optional[str] = None,
     log_path: str = "",
+    for_stop: bool = False,
 ) -> "AgentEntry":
     """Register one verified and project-confined hit as an adopted orphan.
 
@@ -521,6 +522,11 @@ def adopt_store_hit(
     session id passes it HERE so the row is complete at the moment it
     lands, not patched in a second write the caller must survive.
 
+    ``for_stop`` resolves WITHOUT adopting: the rm tombstone is not consulted
+    and nothing is registered. A stop needs the session identity, never a
+    roster row, so a session the operator just removed stays stoppable inside
+    the grace window, and stopping it does not resurrect the removed row.
+
     This function does not scan harness stores or establish project membership.
     Batch callers must first pass their hits through :func:`confine_store_hits`.
     Registry write failures return a synthetic row so the caller can still
@@ -528,11 +534,10 @@ def adopt_store_hit(
     """
     from fno.agents.registry import (
         AgentResolutionError,
-        mint_agent_entry,
         register_existing_session,
     )
 
-    if _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
+    if not for_stop and _recent_rm_tombstone(hit.harness, hit.session_id, registry_path) is not None:
         raise AgentResolutionError(
             f"session {hit.session_id} ({hit.harness}) was removed by `fno agents rm` "
             f"inside the grace window ({RM_TOMBSTONE_GRACE_SECS // 3600}h); it is not "
@@ -543,6 +548,8 @@ def adopt_store_hit(
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
+    if for_stop:
+        return _mint_unregistered(hit, short_id=short_id, log_path=log_path)
     last_message_at = _transcript_last_write(hit)
     try:
         return register_existing_session(
@@ -576,36 +583,50 @@ def adopt_store_hit(
         )
         # The adopting session VOUCHED for this row (LD3); this
         # fallback copy skips register_session, stating the same split itself.
-        from fno.agents.dispatch import _capture_parent_edge
+        return _mint_unregistered(hit, short_id=short_id, log_path=log_path)
 
-        _sb_session = _capture_parent_edge()[0]
-        return mint_agent_entry(
-            harness_session_id=hit.session_id,
-            spawned_by_session=None,
-            spawned_by_harness=None,
-            spawned_by_cwd=None,
-            lineage_reason=None,
-            name=_fallback_name(hit.session_id),
-            cwd=hit.cwd,
-            log_path=log_path,
-            harness=hit.harness,
-            status="orphaned",
-            short_id=short_id,
-            adopted_by_session=_sb_session,
-            # Same fact as the registered row above, and it has to be stated
-            # here too: this one is handed straight back to the caller when
-            # registration fails, so it reaches a reader without ever passing
-            # the path that would have marked it.
-            origin="adopted",
-            # Adoption observed nothing about the lane; the substrate stays
-            # unknown (never "pane").
-            substrate=None,
-        )
+
+def _mint_unregistered(
+    hit: "StoreHit", *, short_id: str, log_path: str
+) -> "AgentEntry":
+    """The unregistered entry shape: reaching the session beats the roster row.
+
+    Serves both the registration-failure fallback and the for-stop heal, which
+    returns it WITHOUT any registry write, so a stop can reach a session the
+    operator just removed without resurrecting the removed row.
+    """
+    from fno.agents.dispatch import _capture_parent_edge
+    from fno.agents.registry import mint_agent_entry
+
+    _sb_session = _capture_parent_edge()[0]
+    return mint_agent_entry(
+        harness_session_id=hit.session_id,
+        spawned_by_session=None,
+        spawned_by_harness=None,
+        spawned_by_cwd=None,
+        lineage_reason=None,
+        name=_fallback_name(hit.session_id),
+        cwd=hit.cwd,
+        log_path=log_path,
+        harness=hit.harness,
+        status="orphaned",
+        short_id=short_id,
+        adopted_by_session=_sb_session,
+        # Same fact as the registered row above, and it has to be stated
+        # here too: this one is handed straight back to the caller when
+        # registration fails, so it reaches a reader without ever passing
+        # the path that would have marked it.
+        origin="adopted",
+        # Adoption observed nothing about the lane; the substrate stays
+        # unknown (never "pane").
+        substrate=None,
+    )
 
 
 def heal_from_harness_store(
     token: str, *, registry_path: Optional[Path] = None,
     scope_cwd: Optional[str] = None, cross_project: bool = False,
+    for_stop: bool = False,
 ) -> Optional["AgentEntry"]:
     """Adopt the session ``token`` names into the registry and return its row.
 
@@ -619,6 +640,9 @@ def heal_from_harness_store(
     ``scope_cwd`` defaults to the process cwd; an out-of-project hit is refused
     with the candidate named, copying the ambiguity posture. See the module
     docstring's project-confinement rule.
+
+    ``for_stop`` resolves without adopting: the tombstone grace window does not
+    apply and nothing is registered (see :func:`adopt_store_hit`).
 
     Registration is best-effort. If the registry write fails, the synthesized row
     is still returned so the verb reaches the session anyway -- reaching it wins,
@@ -646,7 +670,7 @@ def heal_from_harness_store(
             ambiguous=True,
         )
 
-    return adopt_store_hit(hits[0], registry_path, token=token)
+    return adopt_store_hit(hits[0], registry_path, token=token, for_stop=for_stop)
 
 
 def _fallback_name(session_id: str) -> str:

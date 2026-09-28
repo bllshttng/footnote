@@ -2464,6 +2464,7 @@ async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
         "deadbeef",
         std::path::Path::new("/nonexistent/registry.json"),
         false,
+        false,
     )
     .await
     .expect_err("ambiguous token must not fall back to the matching row name");

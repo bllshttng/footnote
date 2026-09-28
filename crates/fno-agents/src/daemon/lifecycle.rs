@@ -6,14 +6,18 @@ use serde_json::Value;
 /// Resolve the lifecycle target the way the session-connecting verbs do:
 /// registry first, then a best-effort harness-store heal for session-shaped
 /// tokens. `cross_project` lifts the store heal's project confinement, which
-/// is the grant `fno agents rm --cross-project` forwards. The caller's
-/// pre-heal registry snapshot rides in because the helper may have just
-/// adopted a store-only session absent from that snapshot.
+/// is the grant `fno agents rm --cross-project` forwards. `for_stop` rides
+/// the heal without adopting: the rm tombstone grace window does not apply
+/// and nothing is registered, so a stop can reach a session `fno agents rm`
+/// just removed (the rm keeps the adopting heal). The caller's pre-heal
+/// registry snapshot rides in because the helper may have just adopted a
+/// store-only session absent from that snapshot.
 pub(crate) async fn entry_for_lifecycle(
     registry: &crate::state::Registry,
     token: &str,
     registry_path: &std::path::Path,
     cross_project: bool,
+    for_stop: bool,
 ) -> Result<Option<crate::state::RegistryEntry>, String> {
     let Value::Array(rows) = serde_json::to_value(&registry.entries)
         .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
@@ -29,6 +33,7 @@ pub(crate) async fn entry_for_lifecycle(
             &path,
             cross_project,
             None,
+            for_stop,
         )
     })
     .await
