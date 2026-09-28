@@ -686,26 +686,6 @@ class GateRefused(SystemExit):
         self.receipt = receipt
 
 
-def provider_lanes_cap(budget: object) -> Optional[int]:
-    """The `lanes` dimension of one provider budget, whichever spelling arrived.
-
-    `config.agents.provider_limits.<provider>` is a :class:`~fno.config.ProviderBudget`
-    record since, and was a bare integer before it. Both reach this seam:
-    the configured table carries the record, and the fail-safe fallback below
-    carries the integer. Reading them through one function is what keeps the two
-    paths from disagreeing about a cap.
-
-    Returns None for "no lane cap", which is what an unlisted provider and an
-    unreadable budget both mean here.
-    """
-    if isinstance(budget, bool) or budget is None:
-        return None
-    if isinstance(budget, int):
-        return budget if budget >= 1 else None
-    lanes = getattr(budget, "lanes", None)
-    return lanes if isinstance(lanes, int) and lanes >= 1 else None
-
-
 #: The spawn `run_gate` is currently deciding, as ``(name, substrate)``.
 #: Set once at gate entry and read by :func:`_refuse`, so a refusal event can
 #: name the spawn it refused without threading `name` through four helper

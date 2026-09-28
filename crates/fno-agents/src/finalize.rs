@@ -165,14 +165,15 @@ pub(crate) struct ManifestFields {
     cross_project: bool,
     /// Merge posture resolved by init (config folded with this run's modifiers,
     /// where every refusal outranks every grant). Gates arming GitHub's native
-    /// auto-merge at a green terminal. `None` = the key was absent.
-    auto_merge_approved: Option<bool>,
+    /// auto-merge at a green terminal. `None` = the key was absent. Pub(crate):
+    /// loopcheck's delegated-merge park reads it beside the source.
+    pub(crate) auto_merge_approved: Option<bool>,
     /// Which input set the posture: config | flag-no-merge |
     /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
     /// surfaced as `unknown`, never guessed. No longer advisory:
     /// `env-target-auto-merge` on an approved run satisfies the standing
     /// config arm on its own, exactly as init folded it and the docs promise.
-    auto_merge_source: Option<String>,
+    pub(crate) auto_merge_source: Option<String>,
     /// The run's node claim, written to the manifest body by init when it
     /// claimed `node:<id>`. The cancel settle releases it with
     /// `--stamp-do`, closing the do row the session's acquire opened.
@@ -2223,7 +2224,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
         },
     );
     match outcome {
-        Outcome::Armed { head } => {
+        Outcome::Armed { head, .. } => {
             eprintln!("finalize: auto-merge armed for PR at {head}");
             (true, None)
         }
