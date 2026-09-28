@@ -28,7 +28,7 @@ pub(crate) const FAIL_STATES: [&str; 7] = [
 
 /// Delimiter-bounded node-id candidates of a head ref (pr/closure.branch_node_ids).
 /// Hand-rolled: the pattern needs lookaheads (`(?=$|[/-])`) that the regex
-/// crate does not support.
+/// crate does not support, including the compact legacy `x` form.
 pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
     let b = head_ref.as_bytes();
     let mut ids: Vec<String> = Vec::new();
@@ -45,6 +45,24 @@ pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
         if !b[i].is_ascii_lowercase() {
             i += 1;
             continue;
+        }
+        if b[i] == b'x' {
+            let mut k = i + 1;
+            while k < b.len()
+                && k - i - 1 < 8
+                && (b[k].is_ascii_digit() || (b'a'..=b'f').contains(&b[k]))
+            {
+                k += 1;
+            }
+            let hex_len = k - i - 1;
+            if (4..=8).contains(&hex_len) && (k == b.len() || b[k] == b'-' || b[k] == b'/') {
+                let candidate = &head_ref[i..k];
+                if !ids.iter().any(|c| c == candidate) {
+                    ids.push(candidate.to_string());
+                }
+                i = k;
+                continue;
+            }
         }
         // [a-z][a-z0-9]{0,7} then '-' then [0-9a-f]{4,8}
         let mut j = i + 1;
@@ -701,6 +719,14 @@ mod tests {
         // stops at 'E', so "x-cccc" binds and the tail never reads as id.
         assert_eq!(branch_node_ids("x-cccc-EF12"), vec!["x-cccc".to_string()]);
         assert!(branch_node_ids("main").is_empty());
+    }
+
+    #[test]
+    fn branch_ids_accept_compact_legacy_ids_at_segment_boundaries() {
+        assert_eq!(branch_node_ids("feature/xd863"), vec!["xd863"]);
+        assert_eq!(branch_node_ids("feature/xd863-close"), vec!["xd863"]);
+        assert!(branch_node_ids("feature/xd863g").is_empty());
+        assert!(branch_node_ids("feature/xg863").is_empty());
     }
 
     #[test]

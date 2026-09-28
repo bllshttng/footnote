@@ -111,14 +111,9 @@ LEGACY_HEX = 8
 # call ``mint_node_id()`` instead; this remains the legacy default prefix.
 ID_PREFIX = LEGACY_PREFIX
 
-# Liberal, bounded, config-FREE grammar for a well-formed node id: a lowercase
-# prefix (1-8 chars, letter-led) + '-' + 4-8 hex. Accepts the legacy
-# ``ab-{8hex}`` and any configured ``<prefix>-<4..8hex>``. Config-free on purpose
-# so pydantic validators (which run without a settings context) can use it. It is
-# deliberately liberal: it also matches sibling families like ``cv-12345678``, so
-# callers that EXTRACT ids from free text MUST filter the candidates against real
-# graph keys (never trust the grammar alone).
-NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
+# Config-free read grammar covers canonical prefix-hex and compact legacy x+hex.
+# New mints stay hyphenated; free-text matches still need a graph lookup.
+NODE_ID_BODY = r"(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})"
 _WELLFORMED_NODE_ID_RE = re.compile(NODE_ID_BODY)
 _NODE_ID_EXTRACT_RE = re.compile(r"\b" + NODE_ID_BODY + r"\b")
 

@@ -7110,14 +7110,7 @@ def _deliver_live(
         return False
 
     if entry.mux:
-        # `mail is None` means this is NOT a2a mail: it is an operational
-        # payload that has to land verbatim (for example, a post-merge ritual).
-        # Wrapping it as chat dressed the ritual up and the caller's `True`
-        # suppressed its cold-dispatch fallback, losing it silently. The
-        # auto-wrap also stamped this process's own handle rather than the
-        # declared `from_name`, so the envelope named the wrong peer. Hold
-        # release frames its digest once after flattening message frames, then
-        # sends it verbatim through this operational path.
+        # `mail is None` carries operational text or a preframed hold digest.
         #
         # `sender` is passed for the wrapped case too. It costs nothing there
         # (the body is already enveloped, so `prepare` passes it through) and it
@@ -7130,11 +7123,8 @@ def _deliver_live(
                 guarded=False,
                 confirm=True,
                 raw=mail is None,
-                # Verbatim operational payloads still need this gate. `raw` alone
-                # skipped `prepare`, where the read-back gate lives; on a codex auth
-                # wall the CR can take the wall's default and discard the payload
-                # even though the send reports bytes written. Held digests are now
-                # wrapped mail and go through `prepare`.
+                # Raw payloads need this gate; a visible prompt can discard them
+                # after a successful write.
                 gate=True,
                 sender=from_name or None,
                 failure_out=attempt_failure,

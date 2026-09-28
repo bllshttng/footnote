@@ -8,8 +8,16 @@ use serde_json::Value;
 
 use super::settings;
 
-/// `[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}` fullmatch.
+/// A configured `<prefix>-<hex>` id or a compact legacy `x<hex>` id.
 pub fn is_wellformed_node_id(s: &str) -> bool {
+    let compact_suffix = s.strip_prefix('x').unwrap_or("");
+    if (4..=8).contains(&compact_suffix.len())
+        && compact_suffix
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return true;
+    }
     let Some((prefix, suffix)) = s.split_once('-') else {
         return false;
     };
@@ -396,12 +404,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn wellformed_gate_matches_the_python_grammar() {
+    fn wellformed_gate_matches_python_and_compact_legacy_grammar() {
         assert!(is_wellformed_node_id("x-aaaa1111"));
+        assert!(is_wellformed_node_id("xd863"));
         assert!(is_wellformed_node_id("ab-1234"));
         assert!(!is_wellformed_node_id("nope"));
         assert!(!is_wellformed_node_id("x-AAAA1111"));
         assert!(!is_wellformed_node_id("x-123"));
+        assert!(!is_wellformed_node_id("xg863"));
     }
 
     #[test]

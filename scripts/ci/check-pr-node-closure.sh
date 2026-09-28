@@ -52,14 +52,21 @@ node_id_re="${node_id_re%\$}"
 # re-glued two segments that a '/' separated and demanded an id the branch
 # never names: "feat/cafe" asked for "feat-cafe", "target/deadbeef" for
 # "target-deadbeef". Those refs name no node, and the producer
-# (fno.pr.closure.branch_node_ids, which requires a literal '-') writes no
-# trailer for them - so the gate red a PR over a line nothing could generate.
+# (fno.pr.closure.branch_node_ids) recognizes only complete, delimiter-bounded
+# ids and writes no trailer for them - so the gate red a PR over a line nothing
+# could generate.
 candidates=()
 IFS='/' read -ra _paths <<< "$PR_HEAD_REF"
 for _path in "${_paths[@]}"; do
   IFS='-' read -ra _segments <<< "$_path"
   i=0
   while [[ $i -lt ${#_segments[@]} ]]; do
+    segment="${_segments[$i]}"
+    if [[ "$segment" =~ ^${node_id_re}$ ]]; then
+      candidates+=("$segment")
+      i=$((i + 1))
+      continue
+    fi
     # Re-glue two adjacent segments (the id's own prefix/suffix straddle the
     # '-' IFS split point: "x" and "59a6" from "feature/x-aaaa").
     if [[ $((i + 1)) -lt ${#_segments[@]} ]]; then
