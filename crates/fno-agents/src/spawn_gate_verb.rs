@@ -931,8 +931,8 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
     Value::Object(share)
 }
 
-/// The lanes block: every capped provider (the configured table, else the
-/// built-in budgets) AND every provider a live row names, capped or not.
+/// The lanes block: every provider the coerced table declares (including
+/// uncapped entries, or the built-in table when absent) and every live provider.
 /// `Err` = one lane count faulted, which is the probe's unknown verdict,
 /// never a zero.
 fn lanes_answer(
@@ -959,17 +959,8 @@ fn lanes_answer(
     } else {
         None
     };
-    let mut providers: Vec<String> = Vec::new();
-    if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
-        .and_then(|t| {
-            t.as_table()
-                .map(|t| t.keys().cloned().collect::<Vec<String>>())
-        })
-    {
-        providers.extend(table);
-    } else {
-        providers.push("zai".to_string());
-    }
+    let caps = spawn_gate_lanes::provider_lane_caps(config_cwd);
+    let mut providers: Vec<String> = caps.keys().cloned().collect();
     if let Ok(registry) = crate::state::load_registry(registry_path) {
         let mut observed: Vec<String> = registry
             .entries
@@ -994,7 +985,7 @@ fn lanes_answer(
     // judges the same waiting-worker question at the same instant.
     let questions_raw = spawn_gate_lanes::read_questions_journal(registry_path, warnings);
     for provider in providers {
-        let cap = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider);
+        let cap = caps.get(&provider).copied().flatten();
         match spawn_gate_lanes::provider_live_count_with_questions(
             registry_path,
             &provider,
