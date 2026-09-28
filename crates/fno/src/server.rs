@@ -12728,10 +12728,6 @@ async fn serve(
     // Attached-client count for the periodic readers: Core owns the
     // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
     let (client_count_tx, client_count_rx) = watch::channel(0usize);
-    // The mux server is the long-lived writer of its `owner = mux` sidecars,
-    // so it moves them at its own start, before the first store opens.
-    #[cfg(not(test))]
-    crate::proto::migrate_mux_sidecars();
     let persisted_pane_floor = crate::squad_store::load().next_pane_id;
     let initial_agents = read_guard_agents().await;
 
