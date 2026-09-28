@@ -6506,8 +6506,8 @@ pub(crate) fn run_reconcile_sweep(
     let witness = crate::liveness_sweep::BgRoster::load();
     let roster_readable = witness.readable();
     // The rollout file recorded at spawn is the durable codex thread object
-    // (docs/architecture/codex-thread-driver.md); its existence is what makes
-    // an unhosted thread Orphaned (resumable) instead of Exited.
+    // (docs/architecture/codex-thread-driver.md): existence separates an
+    // unhosted thread's Orphaned from Exited; freshness keeps working ones unsettled.
     let rollout_exists = |e: &RegistryEntry| -> bool {
         e.log_path
             .as_deref()

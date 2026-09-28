@@ -35,6 +35,106 @@ fn reconcile_leaves_a_hosted_codex_thread_untouched() {
     );
 }
 
+#[test]
+fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
+    let entries = vec![thread_entry(
+        "t-resumable",
+        AgentStatus::Live,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
+        |_| true,  // the rollout file exists: the durable object survives
+        |_| RowLiveness::Unknown, // a quiet rollout: no freshness signal
+        true,      // roster readable: the flip needs a successful roster read
+    );
+    assert_eq!(
+        changes[0].new_status,
+        Some(AgentStatus::Orphaned),
+        "resumable thread reads Orphaned, never Live-forever"
+    );
+}
+
+#[test]
+fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
+    let entries = vec![thread_entry("t-gone", AgentStatus::Live, None)];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false,                // not hosted
+        |_| false,                // no rollout: the thread never got far enough to persist
+        |_| RowLiveness::Unknown, // no freshness signal: nothing to prove life
+        true,                     // roster readable: the flip needs a successful roster read
+    );
+    assert_eq!(
+        changes[0].new_status,
+        Some(AgentStatus::Exited),
+        "an unhosted thread with no rollout is gone, not Live-forever"
+    );
+}
+
+#[test]
+fn an_unhosted_thread_with_a_fresh_rollout_keeps_running() {
+    // A rollout written within the freshness window is a positive running
+    // marker: the app-server writes it while the thread turns, so losing the
+    // hosting entry must not demote the row - the demoted row dropped out of
+    // every status-filtered census while the mux showed it working.
+    let entries = vec![thread_entry(
+        "t-working",
+        AgentStatus::Live,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false, // not hosted: the actor entry is gone
+        |_| true,  // the rollout exists and is fresh
+        |_| RowLiveness::Alive,
+        true,
+    );
+    assert_eq!(
+        changes[0].new_status, None,
+        "a fresh rollout outranks the unhosted answer"
+    );
+    assert_eq!(changes[0].new_liveness, Some("alive"));
+}
+
+#[test]
+fn an_orphaned_stamp_on_a_fresh_rollout_heals_to_live() {
+    // A row stamped Orphaned while its rollout kept moving heals on the next
+    // full sweep: the stamp was the lie, the fresh rollout is the truth.
+    let entries = vec![thread_entry(
+        "t-heals",
+        AgentStatus::Orphaned,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, out) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| true,
+        |_| RowLiveness::Alive,
+        true,
+    );
+    assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
+    assert_eq!(changes[0].new_liveness, Some("alive"));
+    assert_eq!(out.updated, vec!["t-heals".to_string()]);
+}
+
 /// AC15: a row whose startup resume FAILED reads Orphaned after the
 /// recovery pass, never Live-forever. The resume is made to fail
 /// deterministically via a nonexistent cwd (app-server spawn cannot even

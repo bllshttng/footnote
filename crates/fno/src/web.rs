@@ -160,23 +160,22 @@ struct CachedModel {
 fn reign_html_path() -> (PathBuf, bool) {
     #[cfg(not(test))]
     {
-        crate::reign_root::reign_state_root()
+        let (root, faithful) = crate::reign_root::reign_state_root();
+        (crate::state_layout::place(&root, "reign.html"), faithful)
     }
     #[cfg(test)]
     {
         let graph = crate::backlog_view::graph_path();
-        (
-            graph
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("reign.html"),
-            true,
-        )
+        let root = graph
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        (crate::state_layout::place(&root, "reign.html"), true)
     }
 }
 
 fn fleet_html_path_from_state_root(state_root: &Path) -> PathBuf {
-    state_root.join("fleet.html")
+    crate::state_layout::place(state_root, "fleet.html")
 }
 
 fn fleet_html_path() -> PathBuf {
@@ -2531,7 +2530,7 @@ console.log("backlog page helpers: 12 cases ok");
         let state = Path::new("/configured/state");
         assert_eq!(
             fleet_html_path_from_state_root(state),
-            PathBuf::from("/configured/state/fleet.html")
+            PathBuf::from("/configured/state/pages/fleet.html")
         );
     }
 

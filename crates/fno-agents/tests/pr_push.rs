@@ -28,9 +28,10 @@ fn log_of(dir: &Path, name: &str) -> String {
 /// remote-only commit, write `remote-only-merge` to make the merges log
 /// report one merge with two parents, and write `dirty-merge` to make that
 /// merge conflicted under `merge-tree` with a tree that differs from the
-/// parent auto-merge. `rev-list --count` answers 3 on the first call and 0
-/// after (the rebase happened), so the receipt reads behind-before=3
-/// behind-after=0.
+/// parent auto-merge. `rev-list --count` answers 3 until a rebase or merge
+/// touches `counted` (the integration happened), so the receipt reads
+/// behind-before=3 behind-after=0 on an integrating push and 3/3 on one that
+/// integrates nothing. `rev-list --merges --count` always answers 0.
 fn stub_git(dir: &Path) {
     write_exec(
         dir,
@@ -60,14 +61,21 @@ case "$1" in
     exit 0 ;;
   status) if [ -f "$D/dirty" ]; then echo " M src/x.rs"; fi; exit 0 ;;
   rev-list)
-    if [ -f "$D/counted" ]; then echo 0; else echo 3; touch "$D/counted"; fi
+    case "$*" in
+      *--merges*) echo 0 ;;
+      *) if [ -f "$D/counted" ]; then echo 0; else echo 3; fi ;;
+    esac
     exit 0 ;;
   fetch) exit 0 ;;
   rebase)
+    touch "$D/counted"
     if [ -f "$D/conflict" ]; then
       echo "CONFLICT (content): Merge conflict in src/a.rs" >&2
       exit 1
     fi
+    exit 0 ;;
+  merge)
+    touch "$D/counted"
     exit 0 ;;
   diff) if [ -f "$D/conflict" ]; then printf "src/a.rs\nsrc/b.rs\n"; fi; exit 0 ;;
   log)
@@ -99,7 +107,10 @@ exit 0
 
 /// Stub gh: a settled read (completed failure buckets as not pending) by
 /// default; write `pending` to make the check-runs read report a run in
-/// flight with a job link.
+/// flight with a job link. The pulls read (the push verb's integration
+/// gate) answers a DIRTY PR by default, so the integrating tests keep
+/// exercising the rebase/merge leg; write `clean-pr` for a mergeable PR
+/// that is merely behind, or `no-pr` for a branch with no open PR.
 fn stub_gh(dir: &Path) {
     write_exec(
         dir,
@@ -112,6 +123,15 @@ if [ -f "$D/gh-error" ]; then
   exit 1
 fi
 for a in "$@"; do case "$a" in
+  *pulls?state=open*)
+    if [ -f "$D/clean-pr" ]; then
+      echo '[{"number":7,"mergeable_state":"clean"}]'
+    elif [ -f "$D/no-pr" ]; then
+      echo '[]'
+    else
+      echo '[{"number":7,"mergeable_state":"dirty"}]'
+    fi
+    exit 0 ;;
   */check-runs)
     if [ -f "$D/no-runs" ]; then
       echo '{"check_runs":[]}'
@@ -203,6 +223,30 @@ fn pushes_once_with_the_behind_receipt() {
     assert!(
         d.join("stamps").join("feature_x.stamp").exists(),
         "the hook's stamp is written"
+    );
+}
+
+#[test]
+fn a_behind_clean_pr_pushes_without_integrating_main() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("clean-pr"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("integrate=none"), "{out}");
+    assert!(out.contains("behind-before=3 behind-after=3"), "{out}");
+    let log = log_of(&d, "git.log");
+    assert!(
+        !log.contains("rebase origin/main"),
+        "no rebase on a clean PR: {log:?}"
+    );
+    assert!(
+        !log.contains("merge --no-edit origin/main"),
+        "no merge on a clean PR: {log:?}"
+    );
+    assert_eq!(
+        log.matches("git push").count(),
+        1,
+        "the push still lands: {log:?}"
     );
 }
 
@@ -672,7 +716,7 @@ fn a_merge_bearing_branch_at_behind_zero_is_not_rewritten() {
     let before = git_in(&a, &["rev-parse", "HEAD"]);
     let (code, out, err) = run_verb_real(&a, &root);
     assert_eq!(code, 0, "the up-to-date merge-bearing push: {out}\n{err}");
-    assert!(out.contains("integrate=merge"), "{out}");
+    assert!(out.contains("integrate=none"), "{out}");
     let after = git_in(&a, &["rev-parse", "HEAD"]);
     assert_eq!(before.trim(), after.trim());
     assert_eq!(
