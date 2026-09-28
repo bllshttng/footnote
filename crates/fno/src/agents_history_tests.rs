@@ -318,6 +318,27 @@ fn agents_history_node_resolution_joins_graph_and_ledger_and_keeps_ledger_only_r
 }
 
 #[test]
+fn agents_history_corrupt_session_elements_do_not_hide_valid_siblings() {
+    let mut sources = empty_sources();
+    sources.graph = Ok(vec![json!({
+        "id": "x-3344",
+        "title": "Node title",
+        "sessions": [{"bad": 1}, {"session_id": SID, "phase": "do"}]
+    })]);
+    sources.ledger = Ok(vec![json!({
+        "graph_node_id": "x-3344",
+        "sessions": [{"bad": 1}, SID],
+        "status": "done"
+    })]);
+
+    let resolved = resolve("x-3344", &sources);
+    assert_eq!(resolved.sessions, vec![SID.to_string()]);
+    let rendered = card(SID, &sources, None).join("\n");
+    assert!(rendered.contains(&format!("session:    {SID}")));
+    assert!(rendered.contains("node:       x-3344  Node title"));
+}
+
+#[test]
 fn agents_history_legacy_node_and_unrecoverable_rows_remain_distinct() {
     let mut sources = empty_sources();
     sources.ledger = Ok(vec![
