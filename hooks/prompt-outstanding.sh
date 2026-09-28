@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: UserPromptSubmit - prompt outstanding
 # The open list where the user types: a UserPromptSubmit hook reading the
 # daemon's projection cache and arming the conversation hold when a real
 # message arrives. The skip rules (mail envelope, machine-shaped prompts)

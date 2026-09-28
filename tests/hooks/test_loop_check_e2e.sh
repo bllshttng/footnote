@@ -28,7 +28,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOOK="${REPO_ROOT}/hooks/target-stop-hook.sh"
-AGY_HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
+AGY_HOOK="${REPO_ROOT}/hooks/footnote-agy-target-stop-hook.sh"
 INIT_SCRIPT="${REPO_ROOT}/hooks/helpers/init-target-state.sh"
 
 # One pinned spaces root for seeds, the mux and the hook: the migration that

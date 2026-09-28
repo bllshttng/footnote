@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - restore king context after compaction
 # Re-inject the king's operating rules after a context compaction.
 #
 # The crown survives a compaction (crown_level / crown_scope live on the agent

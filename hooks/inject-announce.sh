@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - inject announcements
 # hooks/inject-announce.sh -- fleet announcements at a hook boundary.
 #
 # One announcement is ONE kind=announce bus line; every session reads it

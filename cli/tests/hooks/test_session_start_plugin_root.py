@@ -2,7 +2,7 @@
 
 The hook copy that runs can live in a linked worktree (a spawned worker's
 feature worktree), so the parent of its script dir is NOT an installed
-plugin. Writing that root to ~/.fno/plugin-root repoints every env-less
+plugin. Writing that root to ~/.fno/install/plugin-root repoints every env-less
 reader machine-wide at an unmerged branch the merge sweep later reaps.
 A linked worktree has a .git FILE; a canonical checkout has a .git
 DIRECTORY; an installed stage or plugin cache has none.
@@ -71,10 +71,11 @@ def test_pointer_gated_on_git_shape(tmp_path, git_shape, pointer_names_root):
     root = _make_plugin_root(tmp_path / "plugin", git_shape)
     home = tmp_path / "home"
     fno_home = home / ".fno"
-    fno_home.mkdir(parents=True)
-    (fno_home / "plugin-root").write_text(INSTALLED + "\n")
+    pointer = fno_home / "install" / "plugin-root"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(INSTALLED + "\n")
     _run_hook(root, home)
-    ptr = fno_home / "plugin-root"
+    ptr = pointer
     if pointer_names_root:
         assert ptr.read_text().strip() == str(root)
     else:
@@ -109,10 +110,11 @@ def test_real_linked_worktree_never_writes_pointer(tmp_path):
     (wt / "hooks" / "session-start.sh").symlink_to(HOOK)
     home = tmp_path / "home"
     fno_home = home / ".fno"
-    fno_home.mkdir(parents=True)
-    (fno_home / "plugin-root").write_text(INSTALLED + "\n")
+    pointer = fno_home / "install" / "plugin-root"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(INSTALLED + "\n")
     _run_hook(wt, home)
-    assert (fno_home / "plugin-root").read_text().strip() == INSTALLED
+    assert pointer.read_text().strip() == INSTALLED
 
 
 def test_worktree_start_neither_flips_stamp_nor_repairs(tmp_path):

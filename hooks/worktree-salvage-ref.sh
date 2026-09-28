@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: post-commit - preserve worktree commit refs
 # worktree-salvage-ref.sh - post-commit hook: make a commit gc-proof and
 # enumerable before anything can kill the worker that made it.
 #

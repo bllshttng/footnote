@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: runtime helper - context run
 # One runner for every fno context producer. The groups live in
 # hooks/context-hooks.json; fno-agents context-run runs one group and writes
 # one context_snapshot.

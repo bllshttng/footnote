@@ -978,7 +978,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
       *" $_tok "*|*" ${_tok%-*} "*) continue ;;  # already counted this id
     esac
     # `&& rc=0 || rc=$?` keeps this set -e safe: a bare failing assignment aborts.
-    _tok_probe="$(fno backlog get --strict "$_tok" --field _archived 2>/dev/null | tr -d '[:space:]')" \
+    _tok_probe="$(fno backlog get "$_tok" --strict --field _archived 2>/dev/null | tr -d '[:space:]')" \
       && _probe_rc=0 || _probe_rc=$?
     if [[ "$_probe_rc" -ne 0 ]]; then
       # 1 is the only "read cleanly, node absent" code; anything else means the
@@ -991,7 +991,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     [[ "$_tok_probe" == "True" ]] && continue
     # Canonicalize: the manifest's graph_node_id and the claim key must be the
     # STORED id, not the spelling the caller typed (xbbbb -> x-bbbb).
-    _tok_canon="$(fno backlog get --strict "$_tok" --field id 2>/dev/null | tr -d '[:space:]')"
+    _tok_canon="$(fno backlog get "$_tok" --strict --field id 2>/dev/null | tr -d '[:space:]')"
     _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }${_tok_canon:-$_tok}"
   done
   fi

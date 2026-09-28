@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - pipe guard
 # PreToolUse: refuse a Bash call whose pipe hides the exit or the rows the
 # call was run for (policy: crates/fno-agents/src/hook/pipe_guard.rs). Never
 # exec a candidate: an old build answers "unknown entry" and a nonzero

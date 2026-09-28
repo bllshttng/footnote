@@ -139,6 +139,12 @@ ACQUIRE_RC_FILE="${ACQUIRE_RC_FILE:-}"
 ACQUIRE_RC_COUNTER_FILE="${ACQUIRE_RC_COUNTER_FILE:-}"
 echo "fno $*" >> "$CALL_LOG"
 
+if [[ "${1:-} ${2:-} ${3:-}" == "do target resolve-owned-identity" ]]; then
+  printf 'HARNESS=claude\nSESSION_ID=%s\nDISPOSITION=proven\nCOLLISION=\n' \
+    "${CLAUDE_CODE_SESSION_ID:-}"
+  exit 0
+fi
+
 subcmd1="${1:-}"
 subcmd2="${2:-}"
 if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
@@ -169,23 +175,13 @@ case "$subcmd1 $subcmd2" in
     exit 0
     ;;
   "backlog get")
-    # Parse like the real CLI: flags (--strict, --field F) are never the id.
-    # PR 2723 added --strict to init's probes; reading ${3} made the flag the
-    # id and poisoned the canonicalized claim key with a full JSON row.
-    shift 2
-    field=""; id=""; prev=""
-    for a in "$@"; do
-      if [ "$prev" = "--field" ]; then field="$a"
-      elif [ "$a" != "--strict" ] && [ "$prev" != "--field" ] && [ -z "$id" ]; then id="$a"
-      fi
-      prev="$a"
-    done
-    case "$field" in
-      id) printf '%s\n' "$id" ;;
-      status) printf 'ready\n' ;;
-      *) printf 'null\n' ;;  # _archived/pr_number/...: the fiction is a live node
+    case " $* " in
+      *" --field _archived"*) printf 'null\n'; exit 0 ;;
+      *" --field id"*)        printf '%s\n' "${3:-unknown}"; exit 0 ;;
+      *" --field status"*)    printf 'ready\n'; exit 0 ;;
+      *" --field pr_number"*) printf '4242\n'; exit 0 ;;
     esac
-    exit 0
+    exit 1
     ;;
   *)
     exit 0
