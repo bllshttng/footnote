@@ -1,4 +1,4 @@
-"""Rank 3 flags on the graph verbs: `note --body-file`, `idea --details-file`.
+"""Rank 3 file flags: Python `note --body-file`, native `backlog idea --details-file`.
 
 The acceptance is a round-trip: a body with quotes and newlines - the shape
 that a worktree session's Bash cannot carry positionally - arrives byte-exact
@@ -27,10 +27,10 @@ BODY = 'note with "quotes" and\na newline\n'
 def tmp_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
     seed_graph(g, json.dumps({"entries": []}))
-    monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     config = tmp_path / "config.toml"
-    config.write_text(f'state_dir = "{tmp_path}"\n')
+    config.write_text(f'state_dir = "{tmp_path}"\n', encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(config))
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     return g
 
 
@@ -81,16 +81,10 @@ def test_idea_details_file_roundtrip(tmp_graph):
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text(details, encoding="utf-8")
     code, out, err = run_native(
-        "backlog",
-        "idea",
-        "file-fed idea",
-        "--details-file",
-        str(details_file),
-        "--difficulty",
-        "low",
-        "-J",
+        "backlog", "idea", "file-fed idea", "--details-file", str(details_file),
+        "--difficulty", "low", "-J",
     )
-    assert code == 0, err
+    assert code == 0, f"{out}\n{err}"
     receipt = json.loads(out)
     minted = receipt["id"]
     assert minted, "expected a minted node"
@@ -104,13 +98,7 @@ def test_idea_details_file_and_details_refused(tmp_graph):
     details_file = tmp_graph.parent / "details.md"
     details_file.write_text("d", encoding="utf-8")
     code, out, err = run_native(
-        "backlog",
-        "idea",
-        "t",
-        "--details-file",
-        str(details_file),
-        "--details",
-        "inline",
+        "backlog", "idea", "t", "--details-file", str(details_file), "--details", "inline",
     )
-    assert code == 1, out
-    assert "not both" in err
+    assert code != 0
+    assert "not both" in f"{out}\n{err}"

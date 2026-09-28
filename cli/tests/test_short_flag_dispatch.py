@@ -4,9 +4,8 @@
 ``typer.Option`` declarations exist but structurally cannot catch a Click
 registration failure, because every touched sub-app is lazily loaded
 (``cli/src/fno/cli.py`` ``LAZY_SUBCOMMANDS``) and the scan never
-imports the command tree. These tests drive the REAL root app so each
-touched sub-app imports, registers, and parses - the runtime counterpart
-the Phase 1 review established with ``test_cmd_ask_short_flags_behave_like_long``.
+imports the command tree. These tests drive the Python root app for its remaining
+leaves and the native binary for backlog add/idea, whose Python legs were retired.
 
 Three layers, coarsest sufficient grain (one registration probe per surface,
 one short-vs-long parity proof per previously-untested risk):
@@ -52,12 +51,19 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
 
 
 @pytest.mark.parametrize(
-    "argv",
-    list(PHASE2_HELP_SURFACES.values()),
+    ("surface", "argv"),
+    list(PHASE2_HELP_SURFACES.items()),
     ids=list(PHASE2_HELP_SURFACES.keys()),
 )
-def test_phase2_surface_registers(argv: list[str]) -> None:
-    """Each lazily-loaded sub-app imports and Click accepts its flag decls."""
+def test_phase2_surface_registers(surface: str, argv: list[str]) -> None:
+    """Creation verbs register natively; remaining Phase 2 leaves stay Python."""
+    if surface in {"backlog-add", "backlog-idea"}:
+        from tests._native_door import run_native
+
+        code, out, err = run_native(*argv)
+        assert code == 0, f"{out}\n{err}"
+        return
+
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, result.output
 
