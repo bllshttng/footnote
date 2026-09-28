@@ -2,7 +2,7 @@
 # test-backlog-aliases.sh - verify backlog sub-app stability.
 #
 # Covers ab-67de1b86 Phase 05 Task 5.2 scenarios:
-#   1. fno backlog --help succeeds and lists intake/done/next/ready/triage
+#   1. fno backlog --help succeeds and lists its advertised commands
 #   2. fno --help lists backlog (the graph top-level alias was removed)
 #   3. fno backlog intake <plan> creates a node
 #   4. fno backlog adopt <plan> creates a node + warns on stderr
@@ -51,17 +51,16 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Resolve the `fno` command: prefer an installed binary, fall back to
-# `python -m fno.cli` against the in-repo venv. Both spell the same
-# surface; the alias behavior is independent of invocation shape.
+# Resolve the `fno` command from this checkout so a globally installed version
+# cannot change which help surface the test inspects.
 resolve_fno() {
-    if command -v fno >/dev/null 2>&1; then
-        echo "fno"
-        return
-    fi
     local venv_py="$REPO_ROOT/cli/.venv/bin/python"
     if [[ -x "$venv_py" ]]; then
         echo "$venv_py -m fno.cli"
+        return
+    fi
+    if command -v fno >/dev/null 2>&1; then
+        echo "fno"
         return
     fi
     echo "python3 -m fno.cli"
@@ -96,7 +95,7 @@ verb_in_help() {
 # the advertised menu instead. `find` retired from the python surface; the
 # store serves it natively.
 out=$(run_fno backlog --help 2>&1)
-for verb in add done next get triage; do
+for verb in done next get view note defer triage; do
     if verb_in_help "$verb" "$out"; then
         pass "backlog --help lists '$verb'"
     else

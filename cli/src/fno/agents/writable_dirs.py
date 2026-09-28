@@ -172,17 +172,21 @@ def add_dir_tokens(
 def _state_roots() -> list[Path]:
     """The fno do state directories a worker cannot function without.
 
-    Normally one path (``~/.fno``). Two when they diverge: ``locks_dir`` and the
-    global claims root are deliberately config-free ($HOME / ``$FNO_CLAIMS_ROOT``)
-    while ``state_dir`` honors ``config.paths.state_dir``, so an override moves one
-    and not the other. Granting the root rather than three subdirectories keeps
-    this from drifting the moment ``config.paths.*`` moves again.
+    Normally one path (``~/.fno``). Configured registry paths, the Rust agents
+    runtime home, and the global claims root can diverge from ``state_dir``;
+    grant each owner-resolved root that the worker must write.
     """
     out: list[Path] = []
     try:
-        from fno.paths import state_dir
+        from fno.paths import (
+            agents_registry_path,
+            agents_runtime_registry_path,
+            state_dir,
+        )
 
         out.append(state_dir())
+        out.append(agents_registry_path().parent)
+        out.append(agents_runtime_registry_path().parent)
     except Exception:
         pass
     try:

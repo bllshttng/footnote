@@ -1424,6 +1424,16 @@ def agents_home_dir() -> Path:
     return (Path.home() / ".fno" / "agents").resolve()
 
 
+def agents_runtime_registry_path() -> Path:
+    """Return the Rust agents runtime registry, independently of config.state_dir."""
+    return agents_home_dir() / "registry.json"
+
+
+def process_global_agents_registry_path() -> Path:
+    """Return the HOME registry protected even when runtime or project paths move."""
+    return (Path.home() / ".fno" / "agents" / "registry.json").resolve()
+
+
 def inbox_dir(project_root: Optional[Path] = None) -> Path:
     """Return the inbox directory.
 
