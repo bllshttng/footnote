@@ -540,6 +540,21 @@ fn utc_stamp() -> String {
     )
 }
 
+/// The daemon bin calls this once at startup, BEFORE `daemon::run` opens a
+/// store: one apply pass over the state root. Best effort - a refusal only
+/// prints, and the daemon's reclaim lane retries it (law: the mover runs
+/// from the daemon, never an operator verb).
+pub fn run_at_daemon_start(home: &crate::paths::AgentsHome) {
+    let root = crate::reclaim::reclaim_state_root(home);
+    let receipt = migrate(&root, true);
+    if receipt.refused_count() > 0 {
+        eprintln!(
+            "fno-agents-daemon: state-root migration: {}",
+            receipt.summary()
+        );
+    }
+}
+
 /// `fno-agents state migrate [--apply] [--json]`: dry run by default.
 /// Resolves the state root the way every other state-root reader does.
 pub fn run_migrate_cli(args: &[String]) -> i32 {
