@@ -583,8 +583,11 @@ jobs:
     needs: [pr-affected]
     if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     runs-on: ubuntu-latest
-    # Widest of 14 passing runs sampled 2026-09-24: 6.9m.
-    timeout-minutes: 10
+    # Widest of 14 passing runs sampled 2026-09-24: 6.9m. The release build
+    # of fno-agents outgrew the 10m cap on cold runners once the crate grew
+    # the native decisions listing, and the job died inside cargo before any
+    # budget ran.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -995,9 +998,10 @@ jobs:
     runs-on: ubuntu-latest
     # Three recent green runs put the combined job at 885s, 889s, and 891s.
     # Its lib/bin step was 109-116s and serial integration 612-620s. Split the
-    # 38 integration test binaries by observed runtime; the workspace standalone
-    # journey has its own capped job below. Keep the existing 15m cap.
-    timeout-minutes: 15
+    # 38 integration test binaries by observed runtime. The 15m cap died at
+    # 15m12s inside the cold-runner compile once fno-agents grew the native
+    # decisions listing; 20m buys the build the headroom the sample predates.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
