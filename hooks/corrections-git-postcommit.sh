@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: post-commit - record Claude instruction edits
 # corrections-git-postcommit.sh - capture rule edits in ~/.claude/ to corrections.log.
 #
 # Installed as the post-commit hook in ~/.claude/.git/hooks/ by

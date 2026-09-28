@@ -604,10 +604,8 @@ def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):
     assert "scope:  x-119e,x-4d9b" in out
 
 
-def test_init_arms_a_wall_hold_for_one_checkin_interval(monkeypatch, tmp_path):
-    """The crown holds delivery between beats (x-0e09): init shells the hold
-    verb once with a wall clock for the reign interval, and the beat's
-    `hold --off` is the drain."""
+def test_init_does_not_arm_a_between_beat_hold(monkeypatch, tmp_path):
+    """Crowning a session must not put its mail on hold between check-ins."""
     popen_calls = []
     code, out = _init(monkeypatch, tmp_path, popen_calls=popen_calls)
 
@@ -617,16 +615,11 @@ def test_init_arms_a_wall_hold_for_one_checkin_interval(monkeypatch, tmp_path):
         for argv in popen_calls
         if argv[1:4] == ["agents", "mail", "hold"]
     ]
-    assert holds, f"init armed no hold: {popen_calls}"
-    argv = holds[0]
-    assert "--for" in argv, f"the crown hold must be a wall clock: {argv}"
-    assert int(argv[argv.index("--for") + 1]) >= 1
-    assert "--off" not in argv
+    assert not holds, f"init armed a between-beat hold: {holds}"
 
 
-def test_cancel_clears_the_crowns_hold(monkeypatch, tmp_path):
-    """A cancelled crown's mail must deliver normally again: the clock and
-    the bus-only stamp both leave (the never-lapses state holds forever)."""
+def test_cancel_does_not_clear_a_user_mail_hold(monkeypatch, tmp_path):
+    """Cancelling a crown must preserve a conversation or user-set DND hold."""
     import fno.king.state as state
     from typer.testing import CliRunner
 
@@ -646,8 +639,7 @@ def test_cancel_clears_the_crowns_hold(monkeypatch, tmp_path):
     real_popen = __import__("subprocess").Popen
 
     class recording_popen:
-        # Same split as _init: the mail-hold arm is recorded and stubbed;
-        # every other Popen runs for real.
+        # Mail-hold changes are recorded; every other Popen runs for real.
         def __new__(cls, argv, *args, **kwargs):
             argv = [str(a) for a in argv]
             if popen_calls is not None and argv[1:2] == ["mail-hold"]:
@@ -665,5 +657,4 @@ def test_cancel_clears_the_crowns_hold(monkeypatch, tmp_path):
     result = CliRunner().invoke(king_app, ["cancel", "--scope", "drain"])
 
     assert result.exit_code == 0, result.output
-    offs = [argv for argv in popen_calls if argv[1:] == ["mail-hold", "--session", session, "--off"]]
-    assert offs, f"cancel cleared no hold: {popen_calls}"
+    assert not popen_calls, f"cancel changed mail holds: {popen_calls}"

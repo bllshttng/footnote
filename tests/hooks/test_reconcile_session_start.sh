@@ -29,6 +29,7 @@ pass() { printf '[reconcile-ss] PASS: %s\n' "$*"; }
 command -v jq >/dev/null 2>&1 || fail "jq required for these tests"
 
 WORK=$(mktemp -d -t reconcile-ss-XXXXXX)
+git -C "$WORK" init -q
 trap 'rm -rf "$WORK"' EXIT
 
 # --- Fake `fno` on PATH: records its args and emits a reconcile-shaped JSON. ---
@@ -158,6 +159,7 @@ pass "throttle: stamp older than window re-fires"
 # ============================================================================
 log "render: closed nodes -> reminder emitted and result consumed"
 REPO4="$WORK/repo4"; mkdir -p "$REPO4/.fno"
+git -C "$REPO4" init -q
 RESULT4="$REPO4/.fno/.reconcile-result.json"
 # Pin a fresh stamp so the hook does NOT fire a reconcile during the render test.
 touch "$REPO4/.fno/.reconcile-stamp"
@@ -178,6 +180,7 @@ pass "render: closed-node reminder emitted; result consumed once"
 # ============================================================================
 log "render: empty sweep -> silent, still consumed"
 REPO5="$WORK/repo5"; mkdir -p "$REPO5/.fno"
+git -C "$REPO5" init -q
 RESULT5="$REPO5/.fno/.reconcile-result.json"
 touch "$REPO5/.fno/.reconcile-stamp"
 cat > "$RESULT5" <<'JSON'

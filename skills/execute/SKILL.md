@@ -31,7 +31,7 @@ This is a **router**, not a monolith. It parses the first argument token as a mo
 `/execute` writes code. Before resolving the mode, consult the shared location verdict (the SAME one `/target` and `/fix` use, so the canonical-main rule never drifts). Resolve the plugin root portably so the helper is found on non-Claude surfaces too. On those, `CLAUDE_PLUGIN_ROOT` is unset and the project checkout is not the fno plugin. Try `CLAUDE_PLUGIN_ROOT`, then `CODEX_PLUGIN_ROOT`, then the persisted `~/.fno/install/plugin-root` pointer (written by `session-start.sh`), then the git root.
 
 ```bash
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/install/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
 LOC_HELPER="$PLUGIN_ROOT/hooks/helpers/check-impl-location.sh"
 [[ -f "$LOC_HELPER" ]] && bash "$LOC_HELPER" || echo "verdict=ok"
 ```

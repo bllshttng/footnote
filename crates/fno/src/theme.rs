@@ -23,6 +23,13 @@ pub struct Theme {
     /// so the needs-attention glyph does not regress). The switch that makes
     /// byte-identity a single branch in [`cell_style`].
     pub inherit: bool,
+    /// The border color: every border paints it - the focused pane frame
+    /// (via `pane_paint`'s outline arm) and every modal/popover border. A
+    /// named theme defaults it to its own `brand` (the ruling: borders wear
+    /// the brand), and `mux.theme.border` overrides it everywhere at once.
+    /// `terminal` keeps its Indexed(3) brand; under `inherit` the field is
+    /// read only for the border role, so the rest of the chrome render stays
+    /// byte-identical while an override still reaches every border.
     pub border: Color,
     pub title: Color,
     /// The brand accent: selection, the active tab, the focused frame, the
@@ -48,6 +55,10 @@ pub struct Theme {
     /// `Default` under `terminal` - the emulator's own scheme IS the ground
     /// there, and fno paints nothing over it.
     pub base: Color,
+    /// The built-in a user theme inherited from, naming its 16-slot OSC
+    /// palette table ([`terminal16_slot`]). Empty for the built-ins. A user
+    /// theme keeps its parent's palette slots unless the parent has none.
+    pub inherit_from: &'static str,
 }
 
 /// How a framed cell is colored, resolved against a [`Theme`] by [`cell_style`].
@@ -62,14 +73,9 @@ pub enum Role {
     /// `(is_active,)` - a section tab; the active one carries the accent.
     Tab(bool),
     Footer,
-    /// A body content cell (the inverse block).
-    #[default]
-    Body,
     /// The selected row's cell - a cut-out under `terminal`, a `sel` highlight
     /// under a named theme.
     BodySel,
-    /// A `PopupRow::Header` cell inside the body.
-    BodyHead,
     /// A plain-body popup's emphasis text (the key column, a section
     /// heading): the theme's brand accent, bold, on the plain ground - never
     /// a band. `brand` survives the `terminal` inherit branch (the field
@@ -87,11 +93,11 @@ pub enum Role {
     /// label on a dark theme, ink label on a light one.
     Stamp,
     ScrollThumb,
-    /// A backlog panel's body cell: plain text on the terminal's own bg. The
-    /// old body was an INVERSE block, which read as one pale fill under a
-    /// named theme (the emulator's fg swapped in as bg), so the backlog
-    /// views dropped it: the panel carries no standing bg at all, under any
-    /// theme.
+    /// A body cell on the theme ground: plain text on the terminal's own bg,
+    /// under EVERY theme. The old body was an INVERSE block, which read as
+    /// one pale fill under a named theme (the emulator's fg swapped in as
+    /// bg), so no view carries it any more.
+    #[default]
     PanelBody,
     /// A backlog panel's heading (lane name, column header, section label,
     /// node title): the theme's bold fg slot - the terminal's own fg with
@@ -139,6 +145,24 @@ impl Theme {
                     "unknown mux theme {name:?}, using footnote-superscript"
                 ))),
             ),
+        }
+    }
+
+    /// Resolve a theme by name across the built-ins AND a user theme table
+    /// (config `[mux.themes.<name>]`, materialized by
+    /// [`crate::digest_overlay::user_themes`]). Built-ins resolve first, so a
+    /// user theme cannot shadow a shipped name. An unknown name still falls
+    /// back to the default carrying the same warning [`Theme::from_name`]
+    /// returns.
+    pub fn from_name_in(name: &str, user: &[(String, Theme)]) -> (Theme, Option<KeymapWarning>) {
+        let trimmed = name.trim();
+        let (t, warn) = Self::from_name(trimmed);
+        if warn.is_none() {
+            return (t, None);
+        }
+        match user.iter().find(|(n, _)| n.as_str() == trimmed) {
+            Some((_, t)) => (*t, None),
+            None => (t, warn),
         }
     }
 
@@ -197,7 +221,7 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             // A plain-body popup's cursor row: the one filled band on the
             // plain ground (the inverse block's old job, now per-row).
             Role::BodyCursor => (Color::Default, Color::Default, cell_flags::INVERSE),
-            Role::BodyHead | Role::Title | Role::Chip | Role::Tab(true) | Role::ScrollThumb => (
+            Role::Title | Role::Chip | Role::Tab(true) | Role::ScrollThumb => (
                 Color::Default,
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::BOLD,
@@ -219,14 +243,19 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             // emulator's own pair is the stamp.
             Role::Stamp => (Color::Default, Color::Default, cell_flags::INVERSE),
             // The backlog panel's slots resolved above the theme split.
-            // Body, Border: plain inverse.
+            // Border and the chrome slots: plain inverse.
+            // The border is the exception: it reads `t.border` under inherit
+            // too, because the field IS the terminal theme's own amber
+            // (Indexed(3)), and an explicit mux.theme.border override has to
+            // recolor every border under every theme, this one included.
+            Role::Border => (t.border, Color::Default, 0),
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
     }
     // Named theme: chrome takes explicit colors on the default bg; the body
-    // stays the inverse block so content reads in the emulator's own colors.
+    // rides the theme ground (PanelBody resolved above the split), so
+    // content reads in the emulator's own colors under every theme.
     match role {
-        Role::Body => (Color::Default, Color::Default, cell_flags::INVERSE),
         // The selected row's fg is the theme's `title`, not `Color::Default`:
         // every shipped `sel` is a surface the theme picked to sit under its
         // own title color, so an explicit fg stays readable regardless of the
@@ -236,11 +265,6 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         // A plain-body popup's cursor band: the `sel` surface, as BodySel.
         Role::BodyCursor => (t.title, t.sel, cell_flags::BOLD),
         Role::BodyAccent => (t.brand, Color::Default, cell_flags::BOLD),
-        Role::BodyHead => (
-            Color::Default,
-            Color::Default,
-            cell_flags::INVERSE | cell_flags::BOLD,
-        ),
         // background. The inverse block it used to sit on turned the light
         // `dim` into the BACKGROUND, so the row rendered light-on-light and
         // near invisible under every named theme (the screenshot review).
@@ -293,8 +317,12 @@ pub fn band_style(t: &Theme) -> (Color, Color, u8) {
 fn theme_terminal() -> Theme {
     Theme {
         name: "terminal",
+        inherit_from: "",
         inherit: true,
-        border: Color::Default,
+        // Indexed(3), the brand: the pane-frame outline reads this field
+        // directly (cell_style never does under `inherit` - byte-identity),
+        // so the focused frame keeps its amber under terminal.
+        border: Color::Indexed(3),
         title: Color::Default,
         // Index 3 follows the emulator's palette (amber/yellow in every scheme),
         // preserving the pre-theme needs-attention glyph exactly. Brand and
@@ -315,8 +343,9 @@ fn theme_terminal() -> Theme {
 fn theme_footnote_superscript() -> Theme {
     Theme {
         name: "footnote-superscript",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0x6c, 0x6c, 0x6c),    // overlay0
+        border: rgb(0xff, 0x34, 0x34),    // brand red
         title: rgb(0xe8, 0xe8, 0xe8),     // text
         brand: rgb(0xff, 0x34, 0x34),     // brand red
         needs_you: rgb(0xc5, 0xb7, 0x84), // needs-you yellow
@@ -333,8 +362,9 @@ fn theme_footnote_superscript() -> Theme {
 fn theme_footnote_paper() -> Theme {
     Theme {
         name: "footnote-paper",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0x90, 0x90, 0x90),    // overlay0
+        border: rgb(0xe0, 0x01, 0x19),    // brand red
         title: rgb(0x29, 0x29, 0x29),     // text
         brand: rgb(0xe0, 0x01, 0x19),     // brand red
         needs_you: rgb(0x79, 0x68, 0x23), // needs-you olive
@@ -349,10 +379,11 @@ fn theme_footnote_paper() -> Theme {
 fn theme_catppuccin() -> Theme {
     Theme {
         name: "catppuccin",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0x6c, 0x70, 0x86),    // overlay0
+        border: rgb(0x89, 0xb4, 0xfa),    // blue (the theme's primary)
         title: rgb(0x89, 0xb4, 0xfa),     // blue
-        brand: rgb(0xfa, 0xb3, 0x87),     // peach
+        brand: rgb(0x89, 0xb4, 0xfa),     // blue - its signature primary, not orange
         needs_you: rgb(0xf9, 0xe2, 0xaf), // yellow
         sel: rgb(0x31, 0x32, 0x44),       // surface0
         dim: rgb(0xa6, 0xad, 0xc8),       // subtext0
@@ -365,10 +396,11 @@ fn theme_catppuccin() -> Theme {
 fn theme_tokyo_night() -> Theme {
     Theme {
         name: "tokyo-night",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0x56, 0x5f, 0x89),    // comment
+        border: rgb(0x7a, 0xa2, 0xf7),    // blue (the theme's primary)
         title: rgb(0x7a, 0xa2, 0xf7),     // blue
-        brand: rgb(0xff, 0x9e, 0x64),     // orange
+        brand: rgb(0x7a, 0xa2, 0xf7),     // blue - its signature primary, not orange
         needs_you: rgb(0xe0, 0xaf, 0x68), // yellow
         sel: rgb(0x33, 0x3a, 0x54),       // bg_dark-ish selection
         dim: rgb(0x96, 0x9d, 0xc4),       // fg_gutter
@@ -381,16 +413,17 @@ fn theme_tokyo_night() -> Theme {
 fn theme_gruvbox() -> Theme {
     Theme {
         name: "gruvbox",
+        inherit_from: "",
         inherit: false,
-        border: rgb(0x92, 0x83, 0x74),    // gray
-        title: rgb(0x83, 0xa5, 0x98),     // blue
-        brand: rgb(0xfe, 0x80, 0x19),     // orange
+        border: rgb(0x8e, 0xc0, 0x7c), // aqua (the theme's signature accent)
+        title: rgb(0x83, 0xa5, 0x98),  // blue
+        brand: rgb(0x8e, 0xc0, 0x7c),  // aqua - its signature accent, not orange
         needs_you: rgb(0xfa, 0xbd, 0x2f), // yellow
-        sel: rgb(0x3c, 0x38, 0x36),       // bg1
-        dim: rgb(0xa8, 0x99, 0x84),       // fg4
-        chip: rgb(0xfb, 0x49, 0x34),      // red
-        stamp: rgb(0xeb, 0xdb, 0xb2),     // fg1
-        base: rgb(0x28, 0x28, 0x28),      // base
+        sel: rgb(0x3c, 0x38, 0x36),    // bg1
+        dim: rgb(0xa8, 0x99, 0x84),    // fg4
+        chip: rgb(0xfb, 0x49, 0x34),   // red
+        stamp: rgb(0xeb, 0xdb, 0xb2),  // fg1
+        base: rgb(0x28, 0x28, 0x28),   // base
     }
 }
 
@@ -445,11 +478,19 @@ pub fn terminal16_slot(slot: u8, theme: &Theme) -> Option<Color> {
     if i >= 16 {
         return None;
     }
-    match theme.name {
-        "footnote-superscript" => Some(DARK[i]),
-        "footnote-paper" => Some(LIGHT[i]),
-        _ => None,
-    }
+    // A user theme rides its parent's 16-slot table (`inherit_from`); a
+    // theme with neither its own name nor a slot-defining parent paints no
+    // palette and only the OSC 11/10 ground.
+    let table = match theme.name {
+        "footnote-superscript" => Some(&DARK),
+        "footnote-paper" => Some(&LIGHT),
+        _ => match theme.inherit_from {
+            "footnote-superscript" => Some(&DARK),
+            "footnote-paper" => Some(&LIGHT),
+            _ => None,
+        },
+    };
+    table.map(|t| t[i])
 }
 
 /// The `#rrggbb` string of an RGB color, for the hex a swatch shows beside
@@ -615,20 +656,20 @@ mod tests {
     fn terminal_is_a_true_no_op_on_color() {
         // The load-bearing property: under terminal every role resolves to
         // Default fg/bg, so the flag set alone carries every visual distinction
-        // and a pre-theme render is byte-identical.
+        // and a pre-theme render is byte-identical. Border is the one named
+        // exception: it reads the theme's own Indexed(3) amber (and any
+        // mux.theme.border override), the same field the pane frame paints.
         let t = theme_terminal();
         for role in [
-            Role::Border,
             Role::Title,
             Role::Chip,
             Role::Subtitle,
             Role::Tab(true),
             Role::Tab(false),
             Role::Footer,
-            Role::Body,
+            Role::PanelBody,
             Role::BodySel,
             Role::BodyCursor,
-            Role::BodyHead,
             Role::BodyDim,
             Role::ScrollTrack,
             Role::ScrollThumb,
@@ -682,6 +723,37 @@ mod tests {
                 t.name
             );
         }
+    }
+
+    #[test]
+    fn borders_paint_the_theme_brand_and_the_three_themes_drop_orange() {
+        // The ruling: every border paints the running theme's brand. Each
+        // named theme's border field names its own brand value, and the
+        // three orange-family brands become each palette's signature accent
+        // (catppuccin blue, tokyo-night blue, gruvbox aqua); the footnote
+        // themes keep their red.
+        let expected = [
+            ("footnote-superscript", (0xff, 0x34, 0x34)),
+            ("footnote-paper", (0xe0, 0x01, 0x19)),
+            ("catppuccin", (0x89, 0xb4, 0xfa)),
+            ("tokyo-night", (0x7a, 0xa2, 0xf7)),
+            ("gruvbox", (0x8e, 0xc0, 0x7c)),
+        ];
+        for (name, (r, g, b)) in expected {
+            let (t, warn) = Theme::from_name(name);
+            assert!(warn.is_none(), "{name}");
+            let brand = format!("#{:02x}{:02x}{:02x}", r, g, b);
+            assert_eq!(t.brand, Color::Rgb(r, g, b), "{name} brand");
+            assert_eq!(t.border, t.brand, "{name}: borders wear the brand");
+            assert_eq!(
+                cell_style(Role::Border, &t).0,
+                t.brand,
+                "{name}: Role::Border paints {brand}"
+            );
+        }
+        // terminal keeps its own brand on the border (the pane-frame outline
+        // reads the field directly); cell_style stays byte-identical.
+        assert_eq!(theme_terminal().border, Color::Indexed(3));
     }
 
     #[test]
@@ -755,6 +827,29 @@ mod tests {
                     t.name
                 );
                 let _ = fg;
+            }
+        }
+    }
+
+    #[test]
+    fn modal_bodies_never_paint_inverse_under_named_themes() {
+        // The one-rule body: under a named theme no body role resolves to the
+        // INVERSE block - the ground is the one fill. (Under `terminal` the
+        // cursor band and dim rows keep INVERSE by design; byte-identity.)
+        for t in [
+            theme_footnote_superscript(),
+            theme_footnote_paper(),
+            theme_catppuccin(),
+            theme_tokyo_night(),
+            theme_gruvbox(),
+        ] {
+            for role in [Role::BodySel, Role::BodyCursor, Role::BodyDim] {
+                let (_, _, flags) = cell_style(role, &t);
+                assert!(
+                    flags & cell_flags::INVERSE == 0,
+                    "{role:?} must not carry INVERSE under {}",
+                    t.name
+                );
             }
         }
     }

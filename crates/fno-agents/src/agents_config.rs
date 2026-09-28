@@ -1294,6 +1294,20 @@ pub fn slot_cutover_enabled(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// `[slot_cutover] threshold_pct` (default 90, valid 1-100): the shared Claude
+/// slot cuts over once its worst binding usage window reaches this share. A
+/// non-number or out-of-range value reads as the default.
+pub fn slot_cutover_threshold_pct(cwd: &Path) -> f64 {
+    resolve(cwd, |t| {
+        t.get("slot_cutover")?
+            .as_table()?
+            .get("threshold_pct")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+    })
+    .filter(|pct| (1.0..=100.0).contains(pct))
+    .unwrap_or(90.0)
+}
+
 /// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
 /// safe repairs (dead flight holds, the launchd refresh, the install from
 /// main) before it pages. Off, the rows still name the repair verb.
@@ -1543,6 +1557,31 @@ mod tests {
             "[slot_cutover]\nenabled = \"yes\"\n",
         );
         assert!(!slot_cutover_enabled(&cwd));
+        clear_config_env();
+    }
+
+    #[test]
+    fn slot_cutover_threshold_pct_defaults_and_rejects_non_numbers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("slot-threshold-default", "schema_version = 1\n");
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
+
+        let cwd =
+            write_project_settings("slot-threshold-set", "[slot_cutover]\nthreshold_pct = 99\n");
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 99.0);
+
+        let cwd = write_project_settings(
+            "slot-threshold-string",
+            "[slot_cutover]\nthreshold_pct = \"high\"\n",
+        );
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
+
+        let cwd = write_project_settings(
+            "slot-threshold-range",
+            "[slot_cutover]\nthreshold_pct = 150\n",
+        );
+        assert_eq!(slot_cutover_threshold_pct(&cwd), 90.0);
         clear_config_env();
     }
 

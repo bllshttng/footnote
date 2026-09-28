@@ -551,7 +551,7 @@ def test_newest_assistant_text_reads_the_newest_entry_only(tmp_path):
 
 def test_newest_assistant_text_reads_the_agy_shim_synthesis(tmp_path):
     """The agy stop hook normalizes Gemini-family lines to exactly this shape
-    before loop-check reads them (hooks/agy-target-stop-hook.sh); the reader
+    before loop-check reads them (hooks/footnote-agy-target-stop-hook.sh); the reader
     must accept the shim's dialect, not only a real claude transcript's."""
     synth = tmp_path / "synth.jsonl"
     synth.write_text(

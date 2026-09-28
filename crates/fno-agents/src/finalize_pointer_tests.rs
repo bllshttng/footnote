@@ -54,7 +54,9 @@ fn corrections_pointer_creates_absent_log_at_0600() {
     fs::create_dir_all(&pm_dir).unwrap();
     let real_pm = pm_dir.join("pm-x.md");
     fs::write(&real_pm, "postmortem").unwrap();
-    let log_path = fno_dir.join("corrections.log");
+    // The log resolves under logs/ (the state-root wave); the writer
+    // creates the folder on first append.
+    let log_path = fno_dir.join("logs").join("corrections.log");
 
     std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
     std::env::remove_var("FNO_HOME");

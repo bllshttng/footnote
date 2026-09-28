@@ -523,15 +523,25 @@ def run_king_wake(
         # The wake reads holder and scope, never agreement: skip that graph parse.
         court_fn = partial(gather_court, agree=False)
     if truth_fn is None:
+        from fno.agents.cli import _batch_resolver
         from fno.agents.session_truth import resolve_session_truth
+        batch: list = []  # one discovery scan per pass, built inside the first bounded read
 
-        truth_fn = resolve_session_truth
+        def _resolve(handle: str):
+            if not batch:
+                batch.append(_batch_resolver())
+            return batch[0](handle)
+        truth_fn = partial(resolve_session_truth, resolve=_resolve)
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
         answered_fn = read_answered_questions
     if entries_fn is None:
         entries_fn = graph_entries
+
+    # The graph read starts with the pass and overlaps the setup reads. Later crowns poll it.
+    graph_pool = ThreadPoolExecutor(max_workers=1)
+    graph_future, graph_cut = graph_pool.submit(entries_fn), False
 
     entries: Optional[list] = None
     if admit_fn is None:
@@ -586,9 +596,9 @@ def run_king_wake(
         prior = str(summary.get("note") or "")
         summary["note"] = f"{prior}; {msg}" if prior else msg
 
-    def _budget_stop() -> dict[str, Any]:
+    def _budget_stop(step: str) -> dict[str, Any]:
         # Appends, never clobbers: a stop keeps the note naming why.
-        _note(f"budget spent after {summary['evaluated']} of {len(targets)} crowns")
+        _note(f"budget spent after {summary['evaluated']} of {len(targets)} crowns, before {step}")
         summary["budget_spent"] = True
         return summary
 
@@ -658,13 +668,15 @@ def run_king_wake(
         if reason is None:
             if entries is None:
                 left = seconds_left_fn() if seconds_left_fn is not None else None
-                if left is not None and left < _KING_STEP_FLOOR_S:
-                    return _budget_stop()
+                if left is not None and left < _KING_STEP_FLOOR_S and not graph_cut:
+                    return _budget_stop("graph")
                 _step("graph")
-                entries, cut = _bounded(entries_fn, wait_s=_wait_cap(left))
-                if cut:
-                    entries = []
-                    _note("graph read timed out; board triggers wait for the next tick")
+                try:
+                    entries = graph_future.result(timeout=0 if graph_cut else _wait_cap(left))
+                except TimeoutError:
+                    if not graph_cut:
+                        graph_cut = True
+                        _note("graph read timed out; later crowns poll the same read")
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
             _step("board")
@@ -675,7 +687,7 @@ def run_king_wake(
             if changed:
                 reason = "board"
             elif rows is not None and _backstop_due(
-                target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
+                target, entries or [], now=now, backstop_s=backstop_s, resolver=scope_resolver
             ):
                 reason = "backstop"
         if reason is None:
@@ -689,7 +701,7 @@ def run_king_wake(
             continue
         left = seconds_left_fn() if seconds_left_fn is not None else None
         if left is not None and left < _KING_STEP_FLOOR_S:
-            return _budget_stop()
+            return _budget_stop(f"truth:{target.scope}")
         _step(f"truth:{target.scope}")
         truth, truth_timed_out = _bounded(truth_fn, target.holder, wait_s=_wait_cap(left))
         if truth_timed_out:
@@ -822,4 +834,5 @@ def run_king_wake(
         emit("king_woken", {**receipt, "window_count": window_count, "ceiling": ceiling})
         summary["woke"].append(receipt)
         summary["evaluated"] += 1
+    graph_pool.shutdown(wait=False)
     return summary

@@ -57,14 +57,14 @@ from urllib.parse import unquote
 # ${FNO_HOME:-$HOME/.fno} shell hook has). A custom config.state_dir in
 # settings.yaml is therefore not honored here.
 FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
-STATE_FILE = FNO_HOME / "git-protection.json"
+STATE_FILE = FNO_HOME / "state" / "git-protection.json"
 APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
 # Merge-gate override, `gh pr merge` ONLY. Deliberately NOT named
 # git-protection.disabled: that file was an unconditional pre-gate exit(0), so
 # one touch dropped main-branch protection for every session on every harness
 # lane. The rename leaves any stale old marker inert - fail-safe, no migration.
 MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
-OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
+OVERRIDE_LOG = FNO_HOME / "logs" / "merge-gate-overrides.log"
 # Both markers expire and are consumed: a forgotten sentinel must not linger.
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.
@@ -156,7 +156,7 @@ def save_state(state):
     push to main would proceed. Recording the attempt is best-effort; refusing
     is not. load_state already degrades to defaults for the same reason."""
     try:
-        FNO_HOME.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
     except OSError:
@@ -1687,17 +1687,18 @@ def _find_pr_create_segments(segments):
     return out
 
 
-# Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
-# scripts/lib/node-id.sh. This hook is stdlib-only and runs under a bare
-# interpreter that may not import fno at all, so it cannot defer to either.
-# test_pr_closure_producer.py pins this copy against fno.pr.closure.
-# branch_node_ids so the three cannot drift apart in silence.
+# The general node-id grammar is used for closure markers. The branch guess is
+# narrower because this hook has no graph: compact prefixes other than the
+# historical x family are common ordinary words.
 _HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}"
-_HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+_HOOK_BRANCH_NODE_ID_BODY = r"(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})"
+_HOOK_BRANCH_NODE_ID_RE = re.compile(
+    rf"(?:^|[/-])({_HOOK_BRANCH_NODE_ID_BODY})(?=$|[/-])"
+)
 _CLOSURE_MARKER_RE = re.compile(
     # Composition evidence in the command itself: the generator variable, the
     # retired `Backlog-Closure:` spelling, or the new `Fixes <id>` line.
-    r"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}",
+    rf"CLOSURE_TRAILER|Backlog-Closure|Fixes\s+{_HOOK_NODE_ID_BODY}",
     re.IGNORECASE,
 )
 _BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large

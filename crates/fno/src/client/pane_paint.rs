@@ -267,7 +267,9 @@ impl View {
                 } else if grabbable {
                     (self.theme.brand, cell_flags::BOLD)
                 } else if outline {
-                    (self.theme.brand, 0)
+                    // The focused frame follows t.border: brand by default,
+                    // recolored everywhere at once by mux.theme.border.
+                    (self.theme.border, 0)
                 } else if blank {
                     (Color::Default, 0)
                 } else {

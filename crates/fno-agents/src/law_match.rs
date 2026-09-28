@@ -63,6 +63,11 @@ enum MatchRequest {
     History(RecordDoorRequest),
     #[serde(rename = "scope-split")]
     ScopeSplit(ScopeSplitRequest),
+    /// The decisions listing read: `argv` is the `fno backlog decisions`
+    /// command line. The door owns stdout and the exit code (0 answered,
+    /// 1 unreadable index, 2 usage), like `record` and `retract`.
+    #[serde(rename = "decisions")]
+    Decisions(RecordDoorRequest),
 }
 
 /// The record door's request: the law-set argv plus the caller's stdin.
@@ -1302,6 +1307,12 @@ fn record_scope_answer_in(
 /// with a renderable note, never silence.
 fn scope_split_answer(req: ScopeSplitRequest) -> Value {
     scope_split_answer_in(None, &settings_sources(), req)
+}
+
+/// The listing's scope read: the same law-only hiding the Python verb got
+/// from its `scope-split` front-door call, one owner, no second impl.
+pub(crate) fn scope_split_rows(rows: Vec<Value>) -> Value {
+    scope_split_answer_in(None, &settings_sources(), ScopeSplitRequest { rows })
 }
 
 fn scope_split_answer_in(
@@ -2748,6 +2759,9 @@ pub fn run_law_match_str(input: &str) -> i32 {
         }
         MatchRequest::ScopeSplit(r) => {
             serde_json::to_string(&scope_split_answer(r)).expect("serializes")
+        }
+        MatchRequest::Decisions(r) => {
+            return crate::backlog::decisions_cli::run(&r.argv);
         }
     };
     println!("{answer}");

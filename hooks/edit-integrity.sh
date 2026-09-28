@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - edit integrity
 #
 # PostToolUse on Edit|Write: name what the edit just broke, as
 # additionalContext the model reads in the same turn.

@@ -393,10 +393,11 @@ async fn rm_keeps_the_row_when_the_mux_ref_has_no_session() {
 }
 
 /// AC2 (no-actor half): a live codex thread row is removed by rm itself -
-/// the interrupt-settle leg runs in the teardown (a row with no hosted
-/// actor settles as `no-turn`), and no stop verb, roster read, or pane
-/// kill is involved. CODEX_HOME rides the fake daemon so the codex index
-/// capture never touches the real one.
+/// the confirmed teardown re-attaches the unmapped thread through the row's
+/// durable identity (the fake daemon answers the resume), the interrupt-settle
+/// leg runs (a row with no hosted actor settles as `no-turn`), and no stop
+/// verb, roster read, or pane kill is involved. CODEX_HOME rides the fake
+/// daemon so the codex index capture never touches the real one.
 #[tokio::test(flavor = "current_thread")]
 async fn rm_ends_a_live_codex_thread_row_by_itself() {
     let _guard = crate::path_test_guard();
@@ -404,7 +405,12 @@ async fn rm_ends_a_live_codex_thread_row_by_itself() {
         crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-rm-alone"),
     );
     let home = short_home("rmthreadalone");
-    let row = thread_entry("t-rm-alone", AgentStatus::Live, None);
+    let cwd = tempfile::tempdir().unwrap();
+    let mut row = thread_entry("t-rm-alone", AgentStatus::Live, None);
+    row.harness_session_id = Some("thread-rm-alone".into());
+    row.codex_session_id = Some("thread-rm-alone".into());
+    row.cwd = cwd.path().to_string_lossy().into_owned();
+    row.project_root = row.cwd.clone();
     state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
     let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     let request = Request::new(1, "agent.rm", json!({"name": "t-rm-alone"}));

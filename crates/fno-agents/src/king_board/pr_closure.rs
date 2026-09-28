@@ -232,6 +232,14 @@ mod tests {
     }
 
     #[test]
+    fn compact_legacy_ids_parse_and_render() {
+        let ids = vec!["xd863".to_string(), "x664b".to_string()];
+        assert_eq!(parse("Fixes xd863 x664b"), ids);
+        assert_eq!(render(["xd863", "x664b"]), "Fixes xd863 x664b");
+        assert_eq!(render(["xg863"]), "");
+    }
+
+    #[test]
     fn a_multibyte_line_never_panics_the_keyword_slice() {
         // A body line opening with a multibyte character puts a non-char
         // boundary at the keyword length; the prefix check must read None,

@@ -22,7 +22,6 @@ remove
 migrate-priorities
 migrate-difficulty
 migrate-updated-at
-reopen
 supersede
 unsupersede
 # board and queue state

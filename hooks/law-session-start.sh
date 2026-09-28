@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - law session start
 # Tombstone (2026-09-15): the SessionStart law read is retired.
 # No session loads law in bulk - a confirmed law graduates into a rule file
 # or a gate instead. This file stays as a no-op stub for one release because

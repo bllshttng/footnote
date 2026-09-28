@@ -140,6 +140,35 @@ def _base_node(node_id: str, plan_path: str) -> dict:
     }
 
 
+def _door_close(tmp_path, entry: dict, *args: str, carveouts=(), pr_states=None, fail_stderr=""):
+    """Run the native close over a sandbox seeded like `routed` wires the
+    wheel: the same row shape, a real plan file (absolute path in the row), a
+    real carveouts.jsonl where the binary reads it, and a gh stub. Returns
+    (code, out, err, graph_path)."""
+    from tests.goldens._door import door, make_sandbox, seed_node, warm, write_pr_stub
+
+    row = _base_node(entry["id"], str(entry["plan_path"]))
+    row.update({k: v for k, v in entry.items() if k not in ("id", "plan_path")})
+    (tmp_path / f"door-{row['id']}").mkdir(exist_ok=True)
+    root = make_sandbox(tmp_path / f"door-{row['id']}", [seed_node(
+        row["id"], row.get("status", "in_review"),
+        **{k: v for k, v in row.items() if k not in ("id", "status")},
+    )])
+    warm(root, row["id"])
+    if carveouts:
+        fno_dir = root / ".fno"
+        fno_dir.mkdir(exist_ok=True)
+        rows = "\n".join(json.dumps(c) for c in carveouts)
+        (fno_dir / "carveouts.jsonl").write_text(rows + "\n", encoding="utf-8")
+    prepend = None
+    if pr_states is not None:
+        prepend = str(write_pr_stub(root, pr_states))
+    elif fail_stderr:
+        prepend = str(write_pr_stub(root, fail_stderr=fail_stderr))
+    code, out, err = door(root, ["done", row["id"], *args], path_prepend=prepend)
+    return code, out, err, root / "graph.json"
+
+
 # ---------------------------------------------------------------------------
 # resolve_promise_evidence, direct (no-declaration + conditions B / C + fail-open)
 # ---------------------------------------------------------------------------
@@ -640,22 +669,28 @@ def test_condition_c_counts_extra_refs(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _shortfall_world(g: Path, tmp_path: Path, node_id: str = "ab-prom01") -> str:
-    """A node whose plan DECLARES expected_url_count=2 but has one PR ref.
-    The merge gate passes (the one PR is merged); the promise gate refuses."""
+def _shortfall_plan(tmp_path: Path) -> str:
     plan = _write_plan(tmp_path / "shortfall.md", expected_url_count=2)
-    _seed(g, [_base_node(node_id, str(plan))])
     return str(plan)
 
 
-def test_condition_C_refuses_on_cmd_done(routed, tmp_path, monkeypatch):
-    _shortfall_world(routed, tmp_path)
-    _merged(monkeypatch, target="graph")
-    from fno.cli import app
+def _shortfall_world(g: Path, tmp_path: Path, node_id: str = "ab-prom01") -> str:
+    """A node whose plan DECLARES expected_url_count=2 but has one PR ref.
+    The merge gate passes (the one PR is merged); the promise gate refuses."""
+    plan = _shortfall_plan(tmp_path)
+    _seed(g, [_base_node(node_id, plan)])
+    return plan
 
-    r = CliRunner().invoke(app, ["backlog", "done", "ab-prom01"])
-    assert r.exit_code == 6, r.output
-    assert _node(routed, "ab-prom01").get("completed_at") is None
+
+def test_condition_C_refuses_on_cmd_done(routed, tmp_path, monkeypatch):
+    """The bare close is native: the shortfall refuses through the door."""
+    plan = _shortfall_plan(tmp_path)
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-prom01", "plan_path": plan},
+        pr_states={42: "MERGED"},
+    )
+    assert code == 6, out + err
+    assert _node(g, "ab-prom01").get("completed_at") is None
 
 
 def test_condition_C_refuses_on_fno_done(routed, tmp_path, monkeypatch):
@@ -748,10 +783,31 @@ def test_retryable_unknown_holds_open_on_all_three_verbs(routed, tmp_path, monke
     plan = _outage_world(routed, tmp_path, monkeypatch, "ab-out01")
     from fno.cli import app
 
-    r = CliRunner().invoke(app, ["backlog", "done", "ab-out01"])
-    assert r.exit_code == 4, r.output
-    assert "could not confirm 2 ships" in r.output
-    assert _node(routed, "ab-out01").get("completed_at") is None
+    # The bare close is native: ref 42 reads MERGED, ref 43's read dies, so
+    # the ship count is unknown and the door refuses retryable.
+    from tests.goldens._door import door, make_sandbox, seed_node, warm
+
+    plan_path = _write_plan(tmp_path / "outage-door.md", expected_url_count=2)
+    (tmp_path / "door-out").mkdir(exist_ok=True)
+    root = make_sandbox(tmp_path / "door-out", [seed_node(
+        "ab-out01", "in_review", domain="code", pr_number=42,
+        pr_url="https://github.com/o/r/pull/42", plan_path=str(plan_path),
+        additional_prs=[{"number": 43, "url": "https://github.com/o/r/pull/43"}],
+    )])
+    warm(root, "ab-out01")
+    stubbin = root / "stubbin"
+    stubbin.mkdir()
+    gh = stubbin / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in */pulls/42*) '
+        'printf \'%s\' \'{"state": "closed", "merged": true, "merged_at": "2026-06-01T10:00:00Z", "html_url": "https://github.com/o/r/pull/42"}\'; exit 0;; esac\n'
+        "printf '%s' 'gh: network unreachable' >&2\nexit 1\n"
+    )
+    gh.chmod(0o755)
+    code, out, err = door(root, ["done", "ab-out01"], path_prepend=str(stubbin))
+    assert code == 4, out + err
+    assert _node(root / "graph.json", "ab-out01").get("completed_at") is None
 
     r = CliRunner().invoke(app, ["done", "ab-out01", "--pr", "42", "--repo", "o/r"])
     assert r.exit_code == 4, r.output
@@ -876,7 +932,13 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     _merged(monkeypatch)
     from fno.cli import app
 
-    assert CliRunner().invoke(app, ["backlog", "done", "ab-d1"]).exit_code == 0
+    # The bare close is native: the undeclared plan closes clean through the
+    # door (a real plan file, no gh call needed - the node has no open PR).
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-d1", "plan_path": plan}, pr_states={42: "MERGED"},
+    )
+    assert code == 0, out + err
+    assert _node(g, "ab-d1").get("completed_at") is not None
     # --repo o/r: the node's recorded pr_url already names o/r, and a cwd
     # derivation from this checkout would name a different repo - refused as a
     # guess since x-43e4. Naming the repo asserts the stamp instead.
@@ -897,7 +959,8 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     from fno.graph.cli import cli
 
     assert CliRunner().invoke(cli, ["reconcile", "--json"]).exit_code == 0
-    assert _node(routed, "ab-d1").get("completed_at") is not None
+    # ab-d1 closed in the door sandbox (its close is native); d2/d3 in the
+    # wheel store.
     assert _node(routed, "ab-d2").get("completed_at") is not None
     assert _node(routed, "ab-d3").get("completed_at") is not None
 
@@ -936,8 +999,16 @@ def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
     _merged(monkeypatch)
     from fno.cli import app
 
-    assert CliRunner().invoke(app, ["backlog", "done", "ab-dc1"]).exit_code == 6
-    assert _node(routed, "ab-dc1").get("completed_at") is None
+    # The bare close is native: the carve-out ledger is a real file now, and
+    # the door refuses the node its row names.
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-dc1", "plan_path": plan},
+        carveouts=[{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43",
+                    "node": "ab-dc1"}],
+        pr_states={42: "MERGED"},
+    )
+    assert code == 6, out + err
+    assert _node(g, "ab-dc1").get("completed_at") is None
 
     assert CliRunner().invoke(app, ["done", "ab-dc2", "--pr", "42"]).exit_code == 6
     assert _node(routed, "ab-dc2").get("completed_at") is None
@@ -975,12 +1046,16 @@ def test_condition_D_force_bypass_closes(routed, tmp_path, monkeypatch):
     _merged(monkeypatch, target="graph")
     from fno.cli import app
 
-    r = CliRunner().invoke(
-        app,
-        ["backlog", "done", "ab-dc4", "--force", "--reason", "cv-99ebc0f3 filed as x-rest"],
+    # The close is native: the force bypass is a door close with real fixtures.
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-dc4", "plan_path": plan},
+        "--force", "--reason", "cv-99ebc0f3 filed as x-rest",
+        carveouts=[{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43",
+                    "node": "ab-dc4"}],
+        pr_states={42: "MERGED"},
     )
-    assert r.exit_code == 0, r.output
-    assert _node(routed, "ab-dc4").get("completed_at") is not None
+    assert code == 0, out + err
+    assert _node(g, "ab-dc4").get("completed_at") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -995,30 +1070,38 @@ def test_force_bypass_closes_a_ship_shortfall(routed, tmp_path, monkeypatch):
     _merged(monkeypatch, target="graph")
     from fno.cli import app
 
-    r = CliRunner().invoke(
-        app, ["backlog", "done", "ab-prom01", "--force", "--reason", "second ship filed as ab-rest"]
+    # The close is native: the force bypass is a door close.
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-prom01", "plan_path": _shortfall_plan(tmp_path)},
+        "--force", "--reason", "second ship filed as ab-rest",
+        pr_states={42: "MERGED"},
     )
-    assert r.exit_code == 0, r.output
-    assert _node(routed, "ab-prom01").get("completed_at") is not None
+    assert code == 0, out + err
+    assert _node(g, "ab-prom01").get("completed_at") is not None
 
 
 def test_condition_c_through_cmd_done_refuses_then_closes(routed, tmp_path, monkeypatch):
+    """The bare close is native: C refuses short, then closes on full ships."""
     plan = _write_plan(tmp_path / "c.md", expected_url_count=3)
-    _seed(routed, [_base_node("ab-ship1", str(plan))])
     _merged(monkeypatch, target="graph")
     from fno.cli import app
 
     # One merged ref < 3 promised -> refused.
-    assert CliRunner().invoke(app, ["backlog", "done", "ab-ship1"]).exit_code == 6
-    assert _node(routed, "ab-ship1").get("completed_at") is None
+    code, out, err, g = _door_close(
+        tmp_path, {"id": "ab-ship1", "plan_path": str(plan)}, pr_states={42: "MERGED"},
+    )
+    assert code == 6, out + err
+    assert _node(g, "ab-ship1").get("completed_at") is None
 
     # Three merged refs satisfy the promise -> closes.
-    _seed(routed, [{
-        **_base_node("ab-ship3", str(plan)),
-        "additional_prs": [
-            {"number": 43, "url": "https://github.com/o/r/pull/43"},
-            {"number": 44, "url": "https://github.com/o/r/pull/44"},
-        ],
-    }])
-    assert CliRunner().invoke(app, ["backlog", "done", "ab-ship3"]).exit_code == 0
-    assert _node(routed, "ab-ship3").get("completed_at") is not None
+    code, out, err, g = _door_close(
+        tmp_path,
+        {"id": "ab-ship3", "plan_path": str(plan),
+         "additional_prs": [
+             {"number": 43, "url": "https://github.com/o/r/pull/43"},
+             {"number": 44, "url": "https://github.com/o/r/pull/44"},
+         ]},
+        pr_states={42: "MERGED", 43: "MERGED", 44: "MERGED"},
+    )
+    assert code == 0, out + err
+    assert _node(g, "ab-ship3").get("completed_at") is not None

@@ -851,7 +851,7 @@ pub(crate) fn dispatch_hold_verdict(
 // Staleness (maintain.py)
 // ---------------------------------------------------------------------------
 
-fn node_is_open(node: &Value) -> bool {
+pub(crate) fn node_is_open(node: &Value) -> bool {
     if truthy(node.get("completed_at")) {
         return false;
     }

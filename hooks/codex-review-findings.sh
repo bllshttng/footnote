@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: Stop - codex review findings
 # Keep the authoring Codex session working when its native review returns findings.
 # This is a local Stop-hook nudge: the review output is already in the worker's
 # context, so no king, daemon notification, or external reader belongs here.

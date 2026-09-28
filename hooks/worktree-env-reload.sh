@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: CwdChanged - worktree env reload
 # CwdChanged/FileChanged hook: reload env vars for worktree-aware execution
 #
 # When Claude cd's into a worktree or a .env file changes,

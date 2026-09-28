@@ -35,6 +35,106 @@ fn reconcile_leaves_a_hosted_codex_thread_untouched() {
     );
 }
 
+#[test]
+fn reconcile_settles_an_unhosted_thread_with_a_quiet_rollout_to_orphaned() {
+    let entries = vec![thread_entry(
+        "t-resumable",
+        AgentStatus::Live,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
+        |_| true,  // the rollout file exists: the durable object survives
+        |_| RowLiveness::Unknown, // a quiet rollout: no freshness signal
+        true,      // roster readable: the flip needs a successful roster read
+    );
+    assert_eq!(
+        changes[0].new_status,
+        Some(AgentStatus::Orphaned),
+        "resumable thread reads Orphaned, never Live-forever"
+    );
+}
+
+#[test]
+fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
+    let entries = vec![thread_entry("t-gone", AgentStatus::Live, None)];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false,                // not hosted
+        |_| false,                // no rollout: the thread never got far enough to persist
+        |_| RowLiveness::Unknown, // no freshness signal: nothing to prove life
+        true,                     // roster readable: the flip needs a successful roster read
+    );
+    assert_eq!(
+        changes[0].new_status,
+        Some(AgentStatus::Exited),
+        "an unhosted thread with no rollout is gone, not Live-forever"
+    );
+}
+
+#[test]
+fn an_unhosted_thread_with_a_fresh_rollout_keeps_running() {
+    // A rollout written within the freshness window is a positive running
+    // marker: the app-server writes it while the thread turns, so losing the
+    // hosting entry must not demote the row - the demoted row dropped out of
+    // every status-filtered census while the mux showed it working.
+    let entries = vec![thread_entry(
+        "t-working",
+        AgentStatus::Live,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, _) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false, // not hosted: the actor entry is gone
+        |_| true,  // the rollout exists and is fresh
+        |_| RowLiveness::Alive,
+        true,
+    );
+    assert_eq!(
+        changes[0].new_status, None,
+        "a fresh rollout outranks the unhosted answer"
+    );
+    assert_eq!(changes[0].new_liveness, Some("alive"));
+}
+
+#[test]
+fn an_orphaned_stamp_on_a_fresh_rollout_heals_to_live() {
+    // A row stamped Orphaned while its rollout kept moving heals on the next
+    // full sweep: the stamp was the lie, the fresh rollout is the truth.
+    let entries = vec![thread_entry(
+        "t-heals",
+        AgentStatus::Orphaned,
+        Some("/tmp/r.jsonl".into()),
+    )];
+    let (changes, out) = plan_reconcile(
+        &entries,
+        |_| Ok(false),
+        || false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| true,
+        |_| RowLiveness::Alive,
+        true,
+    );
+    assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
+    assert_eq!(changes[0].new_liveness, Some("alive"));
+    assert_eq!(out.updated, vec!["t-heals".to_string()]);
+}
+
 /// AC15: a row whose startup resume FAILED reads Orphaned after the
 /// recovery pass, never Live-forever. The resume is made to fail
 /// deterministically via a nonexistent cwd (app-server spawn cannot even
@@ -1109,6 +1209,50 @@ async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daem
         std::fs::remove_dir_all(home.root()).ok();
     })
     .await;
+}
+
+/// An UNMAPPED codex thread (the map holds no handle; the thread itself may
+/// still be live in the shared app-server) cannot be stopped with a trivial
+/// "no-turn": the stop re-attaches through the row's durable identity, and a
+/// refused re-attach reports stopped:false and leaves the row non-terminal,
+/// exactly like an unsettled interrupt.
+#[tokio::test]
+async fn codex_thread_stop_over_an_unmapped_thread_reports_not_stopped_when_reattach_refuses() {
+    let _guard = crate::path_test_guard();
+    let home = tmp_home("codex-stop-unmapped");
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    let mut row = thread_entry("t-unmapped", AgentStatus::Live, None);
+    row.cwd = "/nonexistent-cwd-for-unmapped-stop-f313".into();
+    row.project_root = row.cwd.clone();
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    assert!(
+        !ctx.codex_threads.lock().await.contains_key("t-unmapped"),
+        "precondition: the map holds no handle for this thread"
+    );
+
+    let stop = handle_stop(
+        &ctx,
+        &Request::new(3, "agent.stop", json!({"name": "t-unmapped"})),
+    )
+    .await;
+    let res = stop.result().expect("stop must answer, not error");
+    assert_eq!(res["stopped"], false, "stop response: {res:?}");
+    let interrupt = res["interrupt"].as_str().expect("interrupt report");
+    assert!(
+        interrupt.contains("re-attach refused"),
+        "the report names the failed re-attach: {interrupt}"
+    );
+
+    let registry = load_registry_offloaded(home.registry_json())
+        .await
+        .expect("registry readable");
+    assert_eq!(
+        registry.find("t-unmapped").map(|e| e.status),
+        Some(AgentStatus::Live),
+        "a refused stop leaves the row non-terminal"
+    );
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 /// The zombie-stop probe: an interrupt the daemon never confirms must NOT

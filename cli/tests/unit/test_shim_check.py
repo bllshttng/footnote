@@ -56,6 +56,25 @@ def test_dangling_fno_link_detected_and_unrelated_link_ignored(bin_dir, no_durab
     assert not any(d["name"] == "pyfiglet" for d in report["defects"])
 
 
+def test_link_into_the_running_venv_is_healthy_even_under_the_temp_root(bin_dir, tmp_path, monkeypatch):
+    # The release smoke's topology: UV_TOOL_DIR under mktemp, so the tool venv
+    # itself is under the temp root and the bin shims resolve there. The
+    # running venv is the durable copy the repair arm targets; condemning it
+    # made repair a no-op relink the re-scan condemned again, and the
+    # installer aborted before its receipt.
+    venv_bin = tmp_path / "uv-tools" / "fno" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "fno-py").write_text("#!/bin/sh\ntrue\n")
+    monkeypatch.setattr(shim_check.sys, "executable", str(venv_bin / "python"))
+    monkeypatch.setattr(shim_check, "_temp_root", lambda: str(tmp_path))
+    os.symlink(venv_bin / "fno-py", bin_dir / "fno-py")
+
+    report = scan(bin_dir)
+
+    assert report["healthy"] is True, report
+    assert main(["--bin-dir", str(bin_dir)]) == 0
+
+
 def test_temp_resolving_live_link_detected(bin_dir, tmp_path):
     staging = tmp_path / "staging"
     staging.mkdir()
