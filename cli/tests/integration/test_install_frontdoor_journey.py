@@ -236,8 +236,8 @@ def test_authorized_target_init_journey(clean_machine):
     init = _run_fno(repo, home, "do", "target", "init", "--input", node, "--deliverables", "1")
     assert init.returncode == 0, f"init rc={init.returncode}\n{init.stdout}\n{init.stderr}"
 
-    # 4. The manifest readback: written under the ISOLATED state root, naming
-    #    this node AND the claim it acquired for it - the matching receipt.
+    # 4. The manifest readback: written under the ISOLATED state root and
+    #    preserving this input. A proven harness identity adds the node claim.
     #    Three candidate roots: repo-local (<repo>/.fno/, where a default
     #    resolve writes it - the CI runner's case), the isolated HOME's spaces
     #    dir, and the conftest autouse sandbox's tmp/spaces pin (which of the
@@ -276,7 +276,10 @@ def test_authorized_target_init_journey(clean_machine):
     # 6. The node readback: the graph agrees the work is in progress.
     got = _run_native_backlog(repo, home, "get", node)
     assert got.returncode == 0, got.stderr
-    assert "in_progress" in got.stdout, got.stdout
+    if _HARNESS_SESSION_ID:
+        assert "in_progress" in got.stdout, got.stdout
+    else:
+        assert '"status": "idea"' in got.stdout, got.stdout
 
 
 def test_both_command_families_usable_after_init(clean_machine):
