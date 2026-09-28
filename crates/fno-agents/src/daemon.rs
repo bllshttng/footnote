@@ -4674,8 +4674,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         //
         // The interrupt IS the stop now. There is no child to kill: the
         // shared daemon owns the thread, so a turn that survives the bounded
-        // settle keeps running there, and the report below says exactly that
-        // rather than claiming a kill this verb cannot perform.
+        // settle keeps running there, and the report below says exactly that.
         let interrupt_report = match rm_teardown::end_codex_thread_confirmed(ctx, &entry).await {
             Ok(report) => report,
             // Keep the handle and leave the row non-terminal. The actor still
