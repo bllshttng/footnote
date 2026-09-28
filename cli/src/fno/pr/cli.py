@@ -295,7 +295,7 @@ def list_cmd(
         )
         raise typer.Exit(code=127)
 
-    argv = [str(binary), "pr-list", "--state", state]
+    argv = [str(binary), "pr-heal", "list", "--state", state]
     if repo:
         argv += ["--repo", repo]
     result = subprocess.run(argv, check=False)

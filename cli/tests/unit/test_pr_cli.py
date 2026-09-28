@@ -172,7 +172,7 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
     }
 
 
-def test_pr_list_forwards_to_the_rust_verb(monkeypatch):
+def test_pr_list_forwards_to_the_existing_rust_action(monkeypatch):
     import subprocess
 
     import fno.rust_binary
@@ -186,7 +186,7 @@ def test_pr_list_forwards_to_the_rust_verb(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = runner.invoke(app, ["do", "pr", "list", "--state", "closed", "--repo", "o/r"])
-    assert seen["argv"] == ["/fake/fno-agents", "pr-list", "--state", "closed", "--repo", "o/r"]
+    assert seen["argv"] == ["/fake/fno-agents", "pr-heal", "list", "--state", "closed", "--repo", "o/r"]
     assert result.exit_code == 4
 
 

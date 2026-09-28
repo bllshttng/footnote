@@ -79,7 +79,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "feed",
     "ping",
     "pr-heal",
-    "pr-list",
     "probe-run",
     "honesty-sweep",
     "prove-it-verdicts",
@@ -975,13 +974,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // Daemon-free and binary-direct behind `fno do pr heal` / `fno do pr list`,
-    // not routable `fno agents` verbs, so they stay out of RUST_CLIENT_VERBS.
-    // No `verb == "..."`: the Python parity guard scrapes that form.
-    match verb {
-        "pr-heal" => return fno_agents::heal::run_heal(&args[1..]),
-        "pr-list" => return fno_agents::pr_list::run_pr_list(&args[1..]),
-        _ => {}
+    // The list path is an internal operand of the existing binary action;
+    // public callers keep using `fno do pr list` through the Python adapter.
+    if matches!(verb, "pr-heal") {
+        if args.get(1).map(String::as_str) == Some("list") {
+            return fno_agents::pr_list::run_pr_list(&args[2..]);
+        }
+        return fno_agents::heal::run_heal(&args[1..]);
     }
     if matches!(verb, "pr-push") {
         return fno_agents::pr_push::run_push(&args[1..]);

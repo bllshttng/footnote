@@ -1,5 +1,5 @@
-//! `fno-agents pr-list` -- the open, closed, or all PRs of one GitHub repo,
-//! with each open row's node binding, behind `fno do pr list`.
+//! The `list` operation behind the existing `fno-agents pr-heal` action:
+//! open, closed, or all PRs of one GitHub repo, with each open row's binding.
 //!
 //! The repo defaults to the origin of the cwd. A job scratch dir can sit inside
 //! a different checkout, so `[]` from there is a true answer about the wrong
@@ -85,8 +85,8 @@ fn list(
                 return fail(
                     2,
                     format!(
-                        "usage: pr-list [--state open|closed|all] [--repo owner/repo]; got {arg}"
-                    ),
+                    "usage: pr-heal list [--state open|closed|all] [--repo owner/repo]; got {arg}"
+                ),
                 )
             }
         }
@@ -362,7 +362,7 @@ mod tests {
                 },
                 {
                     "number": 10, "state": "open", "merged_at": null, "title": "ambiguous",
-                    "head": {"ref": "feature/x-aaaa-x-bbbb"}, "html_url": "https://github.com/o/r/pull/10",
+                    "head": {"ref": "feature/x-aaaa-x-bbbb"}, "html_url": "https://github.com/o/r/pull/110",
                     "body": "text",
                 },
             ])
@@ -407,7 +407,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("chore/tidy-docs"));
-        assert_eq!(row(10)["node_binding"], "ambiguous");
+        assert_eq!(row(110)["node_binding"], "ambiguous");
         assert!(rows.iter().all(|row| row.get("body").is_none()));
         assert_eq!(
             out.stderr,
