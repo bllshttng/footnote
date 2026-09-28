@@ -307,6 +307,31 @@ pub fn guard_birth_for_plan(env: &std::collections::BTreeMap<String, String>) {
     guard_birth(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 }
 
+/// The seed provenance group, by name. The Rust side never imports the Python
+/// tuple; the names are the wire contract (cli/src/fno/mail/seed_provenance.py).
+const SEED_PROVENANCE_KEYS: [&str; 6] = [
+    "FNO_SEED_PROV_SEED_B64",
+    "FNO_SEED_PROV_FROM",
+    "FNO_SEED_PROV_FROM_SESSION",
+    "FNO_SEED_PROV_HARNESS",
+    "FNO_SEED_PROV_NODE",
+    "FNO_SEED_PROV_MSG_ID",
+];
+
+/// The client Command for `claude-birth-exec`, holding the seed provenance
+/// group out of the child env. A claude client that finds no daemon
+/// auto-starts one from its own env, and that env is fossilized for every
+/// session the daemon forks later; the supervisor birth already holds these
+/// back (`is_poison`), so the client exec is the remaining door.
+fn client_command(argv: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    for key in SEED_PROVENANCE_KEYS {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
 /// Run a Claude client command after guarding any supervisor it may birth.
 /// `--` is a strict fence; the client argv, environment, cwd, and streams pass
 /// through unchanged when the process is replaced.
@@ -318,7 +343,7 @@ pub fn run_birth_exec(args: &[String]) -> i32 {
     guard_birth(std::iter::empty::<(&str, &str)>());
     use std::os::unix::process::CommandExt;
     let argv = &args[1..];
-    let error = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let error = client_command(argv).exec();
     eprintln!("claude CLI not found: {error}");
     127
 }
@@ -336,6 +361,27 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn the_client_exec_holds_the_seed_provenance_group_out() {
+        let held: Vec<String> = env_of(&client_command(&[
+            "claude".to_string(),
+            "--bg".to_string(),
+            "--name".to_string(),
+            "probe".to_string(),
+        ]))
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("FNO_SEED_PROV_"))
+        .map(|(k, _)| k)
+        .collect();
+        assert_eq!(held.len(), SEED_PROVENANCE_KEYS.len());
+        for key in SEED_PROVENANCE_KEYS {
+            assert!(
+                held.iter().any(|k| k == key),
+                "seed key {key} not held out of the client env"
+            );
+        }
     }
 
     #[test]
