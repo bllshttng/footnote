@@ -496,6 +496,18 @@ def test_resolve_claim_cli_wins_over_frontmatter(fixture_graph, tmp_path):
     assert source == "cli"
 
 
+def test_resolve_claim_aliases_a_dash_variant(fixture_graph, tmp_path):
+    """The minter briefly minted dash-less ids; the dashed spelling of one
+    resolves to the STORED id - the graph confirms the id, not the spelling."""
+    entries = _read_entries(fixture_graph)
+    entries.append({"id": "xbbbb", "slug": "xbbbb", "status": "idea"})
+    plan = _write_quick_plan(tmp_path)
+    node, source = _resolve_claim("x-bbbb", str(plan), entries)
+    assert node is not None
+    assert node["id"] == "xbbbb"
+    assert source == "cli"
+
+
 def test_resolve_claim_unknown_id_raises(fixture_graph, tmp_path):
     plan = _write_quick_plan(tmp_path)
     entries = _read_entries(fixture_graph)

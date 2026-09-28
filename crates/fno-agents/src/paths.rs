@@ -7,6 +7,7 @@
 //! ```text
 //! <home>/
 //!   registry.json            registry (schema v4)
+//!   registry-snapshots/      rolling pre-write copies kept by update_registry
 //!   events.jsonl             operator-facing audit log
 //!   route-settings/          --settings floors the spawn arms write (0600,
 //!                            content-addressed; read by claude, not by us)
@@ -569,6 +570,34 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
     resolved
         .and_then(|root| std::fs::canonicalize(&root).ok().or(Some(root)))
         .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// `Path.resolve()` for a path that may not exist: canonicalize the deepest
+/// existing ancestor, re-append the missing tail.
+pub(crate) fn resolve_loose(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&cur) {
+            Ok(existing) => {
+                let mut out = existing;
+                for comp in missing.iter().rev() {
+                    out.push(comp);
+                }
+                return out;
+            }
+            Err(_) => match (cur.file_name().map(|f| f.to_os_string()), cur.parent()) {
+                (Some(name), Some(parent)) => {
+                    missing.push(name);
+                    cur = parent.to_path_buf();
+                }
+                _ => return path.to_path_buf(),
+            },
+        }
+    }
 }
 
 /// `$HOME`, or `/` when the environment lost it. Shared by the install and
