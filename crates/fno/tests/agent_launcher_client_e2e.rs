@@ -158,11 +158,11 @@ fn project_picker_lists_projects_and_enter_never_launches() {
     // facts are unread) no longer sit between Project and the input; this
     // scratch is not a git repo, so the pair hides once the probe lands.
     h.wait_screen(15, |s| !s.contains("worktree"));
-    // Shift-Tab from the input lands on the Project chip; Enter drops its
-    // picker (title `project`).
+    // Shift-Tab from the input lands on the Directory chip; Enter drops its
+    // picker (title `directory`).
     type_and_settle(&mut h, b"\x1b[Z");
     type_and_settle(&mut h, b"\r");
-    let screen = h.wait_screen(10, |s| s.contains("project"));
+    let screen = h.wait_screen(10, |s| s.contains("directory"));
     assert!(
         !screen.contains("starting..."),
         "opening the project picker never launches: {screen}"
