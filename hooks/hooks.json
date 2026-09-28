@@ -95,6 +95,11 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/inject-control-drain-tool-boundary.sh",
+            "timeout": 8
           }
         ]
       },

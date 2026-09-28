@@ -942,6 +942,16 @@ def write_new_thread(
     # Best-effort: the derived markdown render. A failure is logged, not fatal.
     _write_render_best_effort(target, _format_thread(handle))
 
+    # A control body must reach the recipient at its next TOOL boundary
+    # (x-b553), so flag it for the PreToolUse drain. Best-effort: a missed
+    # flag degrades to prompt-boundary delivery, never a loss.
+    from fno.mail.budget import is_control
+
+    if is_control(body):
+        from fno.bus.cursor import mark_control_pending
+
+        mark_control_pending(recipient)
+
     return handle
 
 
@@ -1026,6 +1036,14 @@ def append_to_thread(
                 )
     finally:
         _release_lock(lock)
+
+    # Same tool-boundary contract as write_new_thread (x-b553).
+    from fno.mail.budget import is_control
+
+    if is_control(body):
+        from fno.bus.cursor import mark_control_pending
+
+        mark_control_pending(existing.to_project)
 
     return msg_id
 

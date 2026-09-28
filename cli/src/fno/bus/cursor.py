@@ -135,12 +135,18 @@ def scan_unread(
     warn: bool = True,
     exclude_from: Optional[set[str]] = None,
     messages: Optional[list[Envelope]] = None,
+    cursor_name: Optional[str] = None,
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
 
     One address, one cursor. A consumer answers to exactly the name it drains
     under, so there is nothing to reconcile: the cursor filename IS the address,
     and the address never changes under a live consumer.
+
+    ``cursor_name`` positions the scan at a DIFFERENT consumer's cursor while
+    still filtering ``to == name`` - the control lane (x-b553) scans the plain
+    address forms but advances only its own ``control:<form>`` cursors, so
+    ordinary mail keeps its prompt-boundary semantics.
 
     If the cursor is absent or its message-id is not found in any retained
     segment (rotated out / deleted), all retained messages to ``name`` are
@@ -154,7 +160,7 @@ def scan_unread(
     """
     from fno.bus.log import withdrawn_ids
 
-    cursor = read_cursor(name)
+    cursor = read_cursor(cursor_name or name)
     msgs = list(iter_messages(warn=warn)) if messages is None else messages
     excl = exclude_from or set()
     # A withdrawn message is never delivered, and neither is its tombstone.
@@ -191,3 +197,43 @@ def scan_unread(
         # Cursor id rotated out or otherwise unresolvable: rescan retained.
         return [m for m in msgs if _mine(m)]
     return after
+
+
+# --- control lane pending flags (x-b553) ------------------------------------
+#
+# A control body that demoted durable must land at the recipient's next TOOL
+# boundary, not wait for a prompt boundary a busy worker never reaches. The
+# sender stamps a per-recipient flag file; the PreToolUse hook stats three
+# flag files (shell-only) before paying a CLI start, and the drain clears
+# them. Any flag failure degrades to prompt-boundary delivery, never a loss.
+
+
+def control_pending_dir() -> Path:
+    """Directory of per-recipient ``control`` pending flags."""
+    from fno import paths
+
+    return paths.bus_dir() / "control-pending"
+
+
+def control_pending_flag(name: str) -> Path:
+    """Flag file for one recipient address form."""
+    return control_pending_dir() / f"{_safe_name(name)}.flag"
+
+
+def mark_control_pending(name: str) -> None:
+    """Flag ``name`` as holding an undrained CONTROL body (best-effort)."""
+    try:
+        p = control_pending_flag(name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    except OSError:
+        pass
+
+
+def clear_control_pending(names) -> None:
+    """Clear the flags for ``names``; absent is success."""
+    for name in names:
+        try:
+            control_pending_flag(name).unlink()
+        except OSError:
+            pass
