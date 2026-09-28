@@ -657,18 +657,14 @@ pub(crate) const PROJECTION_TYPES: &[&str] = &[
     "attention_delivery",
 ];
 
-/// The event kinds `fold` matches, beside the question pair.
-pub(crate) const NEEDS_TYPES: &[&str] = &[
+/// The types the `--items` read folds unwindowed: the question pair plus
+/// answer rows. Deliveries ride the TTL window below; the events-leg kinds
+/// (mail_escalation, loop_check, termination, loop_terminated) belong to
+/// `fold`, never this read.
+pub(crate) const ITEMS_TYPES: &[&str] = &[
     "operator_question",
     "operator_question_closed",
-    "mail_escalation",
-    "loop_check",
-    "termination",
-    "loop_terminated",
-    // The answer and delivery rows the projection folds into the answered
-    // state and the panel's answered rows.
     "attention_answer",
-    "attention_delivery",
 ];
 
 /// One store's read outcome for the `--items` sources readout. A store that
@@ -693,31 +689,53 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let mut sources: Vec<SourceRead> = Vec::new();
     let mut journals_raw = String::new();
+    // Deliveries older than the answered panel's TTL can never surface in
+    // the fold, so the read bounds them by TTL plus slack instead of pulling
+    // the fleet's full delivery history (112k rows / 36.8 MB on the live
+    // store measured 2026-09-28).
+    let delivery_since_ms =
+        crate::claims::now_ms() - (crate::attention::ANSWERED_TTL_S as i64 + 900) * 1000;
     for path in question_journals(&fno_dir, cwd) {
         let store = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("journal")
             .to_string();
-        match crate::event_store::journal_text_checked(
-            &path,
-            &crate::event_store::EventQuery::of_types(NEEDS_TYPES),
-        ) {
-            Ok(content) => {
+        let mut content = String::new();
+        let mut error: Option<String> = None;
+        let queries = [
+            crate::event_store::EventQuery::of_types(ITEMS_TYPES),
+            crate::event_store::EventQuery {
+                since_ms: Some(delivery_since_ms),
+                ..crate::event_store::EventQuery::of_types(&["attention_delivery"])
+            },
+        ];
+        for q in queries {
+            match crate::event_store::journal_text_checked(&path, &q) {
+                Ok(part) => {
+                    content.push_str(&part);
+                    if !part.ends_with('\n') {
+                        content.push('\n');
+                    }
+                }
+                Err(e) => {
+                    error.get_or_insert(e.to_string());
+                }
+            }
+        }
+        match error {
+            None => {
                 sources.push(SourceRead {
                     store,
                     readable: true,
                     error: None,
                 });
                 journals_raw.push_str(&content);
-                if !content.ends_with('\n') {
-                    journals_raw.push('\n');
-                }
             }
-            Err(e) => sources.push(SourceRead {
+            Some(e) => sources.push(SourceRead {
                 store,
                 readable: false,
-                error: Some(e.to_string()),
+                error: Some(e),
             }),
         }
     }

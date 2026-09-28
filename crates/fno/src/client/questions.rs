@@ -43,11 +43,33 @@ impl BlockPrefs {
 pub(super) fn toggle_block(view: &mut View) {
     view.questions_block.visible = !view.questions_block.visible;
     crate::view_store::save_questions_block(view.questions_block.visible);
-    view.set_notice(if view.questions_block.visible {
-        "questions block: shown".into()
+    view.set_notice(questions_notice(view));
+}
+
+/// The prefix+q toggle toast: a degraded read names why the block reads as
+/// empty, a clean fold with no open rows says so, and "shown" means rows
+/// are up.
+pub(super) fn questions_notice(view: &View) -> String {
+    if !view.questions_block.visible {
+        return "questions block: hidden".to_string();
+    }
+    if view.questions_degraded {
+        return match view.questions_degraded_reason.as_deref() {
+            Some(reason) => format!("questions unreadable: {reason}"),
+            None => "questions unreadable".to_string(),
+        };
+    }
+    let has_open = view
+        .questions_fold
+        .as_ref()
+        .is_some_and(|f| f.items.iter().any(|i| i.state == "open"));
+    if has_open {
+        "questions block: shown".to_string()
+    } else if view.questions_fold.is_some() {
+        "no open questions".to_string()
     } else {
-        "questions block: hidden".into()
-    });
+        "questions block: shown (folding)".to_string()
+    }
 }
 
 /// prefix+{ / prefix+}: grow or shrink the block by a row; the height
@@ -777,7 +799,7 @@ fn draw_notes_box(
 /// back to the run loop.
 pub(super) fn maybe_kick(
     view: &mut View,
-    tx: &tokio::sync::mpsc::UnboundedSender<Option<crate::needs_overlay::QuestionsFold>>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Result<crate::needs_overlay::QuestionsFold, String>>,
 ) {
     if view.panel_w() == 0 || view.questions_inflight {
         return;
@@ -1019,18 +1041,24 @@ impl View {
     }
 
     /// Apply a landed questions fold: the block always shows the latest
-    /// projection, so no generation guard here.
+    /// projection, so no generation guard here. An Err names why the read
+    /// failed so the toggle toast can name it too.
     pub(super) fn apply_questions_fold(
         &mut self,
-        fold: Option<crate::needs_overlay::QuestionsFold>,
+        fold: Result<crate::needs_overlay::QuestionsFold, String>,
     ) {
         self.questions_inflight = false;
         match fold {
-            Some(f) => {
-                self.questions_fold = Some(f);
+            Ok(f) => {
                 self.questions_degraded = false;
+                self.questions_degraded_reason = None;
+                self.questions_fold = Some(f);
             }
-            None => self.questions_degraded = true,
+            Err(reason) => {
+                self.questions_fold = Some(crate::needs_overlay::QuestionsFold::default());
+                self.questions_degraded = true;
+                self.questions_degraded_reason = Some(reason);
+            }
         }
     }
 
@@ -1566,6 +1594,55 @@ mod tests {
         assert!(!v.needs_want, "a failure never triggers a re-fold");
         let notice = v.notice.as_ref().expect("failure surfaces a notice");
         assert!(notice.0.contains("failed to close q-1: locked"));
+    }
+
+    #[test]
+    fn the_toggle_toast_names_a_failed_read_with_its_reason() {
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Err("timed out after 800ms".into()));
+        assert!(v.questions_degraded);
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(
+            v.notice.as_ref().unwrap().0,
+            "questions unreadable: timed out after 800ms"
+        );
+    }
+
+    #[test]
+    fn the_toggle_toast_says_no_open_questions_when_the_fold_has_none_open() {
+        let mut v = view_with_agents(vec![]);
+        let mut q = item("q-a", true);
+        q.state = "answered".into();
+        v.apply_questions_fold(Ok(fold_with(vec![q])));
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "no open questions");
+    }
+
+    #[test]
+    fn the_toggle_toast_shows_only_over_a_fold_with_open_rows() {
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
+        v.questions_block.visible = false;
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: shown");
+        toggle_block(&mut v);
+        assert_eq!(v.notice.as_ref().unwrap().0, "questions block: hidden");
+    }
+
+    #[test]
+    fn apply_questions_fold_stores_the_failure_reason() {
+        let mut v = view_with_agents(vec![]);
+        v.apply_questions_fold(Err("events.jsonl: permission denied".into()));
+        assert!(v.questions_degraded);
+        assert_eq!(
+            v.questions_degraded_reason.as_deref(),
+            Some("events.jsonl: permission denied")
+        );
+        v.apply_questions_fold(Ok(fold_with(vec![item("q-a", true)])));
+        assert!(!v.questions_degraded);
+        assert_eq!(v.questions_degraded_reason, None);
     }
 
     #[test]
