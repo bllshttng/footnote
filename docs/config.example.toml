@@ -683,8 +683,6 @@ attach_digest_threshold_min = 10
 hover_focus = true
 # Show the mux status row at the bottom of the terminal (default on).
 status_row = true
-# While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on).
-paint_background = true
 # Mux chrome theme: footnote-superscript (default, the brand dark palette) | footnote-paper (auto-picked on a light terminal background) | terminal (no-op, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker. Role overrides: quote-dotted keys in [mux] - "theme.brand" and "theme.needs_you" take #rrggbb values that hold under any theme (the tab-bar mark's stamp takes no override).
 # theme = <unset>   # optional; no default
 # While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on).

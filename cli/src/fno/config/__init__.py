@@ -3713,9 +3713,6 @@ class MuxBlock(BaseModel):
     # Show the mux status row. The interactive Rust client reads this directly
     # from config.toml, matching the `hover_focus` startup path.
     status_row: bool = True
-    # Paint the terminal's background, foreground and palette from the active
-    # theme; false leaves the terminal's own colors untouched.
-    paint_background: bool = True
     # The mux chrome theme name: one of the shipped palettes the modal
     # chrome reads (`footnote-superscript`, `footnote-paper`, `terminal`,
     # `catppuccin`, `tokyo-night`, `gruvbox`). Read by the interactive Rust
