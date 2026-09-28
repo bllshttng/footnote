@@ -176,6 +176,7 @@ pub fn build_argv_create(
     if !yolo {
         argv.extend(crate::provider::codex_git_writable_args(cwd));
         argv.extend(crate::provider::codex_plan_writable_args(cwd));
+        argv.extend(crate::provider::codex_cache_writable_args());
     }
     // an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.

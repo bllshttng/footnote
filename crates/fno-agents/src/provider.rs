@@ -622,6 +622,53 @@ pub fn render_verb_seed(message: &str, harness: &str) -> String {
     }
 }
 
+/// The uv cache directory a bounded codex worker must be able to write: 58
+/// denials on `~/.cache/uv` across 44 rollouts. An explicit `UV_CACHE_DIR` is
+/// authoritative - uv reads exactly that variable, so a missing path grants
+/// nothing rather than falling back to a cache uv will not use; otherwise the
+/// first of `$XDG_CACHE_HOME/uv` and `$HOME/.cache/uv` that exists wins.
+/// Existing-only, like the Python grant filter: a root naming a missing path
+/// buys nothing.
+pub(crate) fn codex_cache_roots() -> Vec<String> {
+    fn env_dir(key: &str) -> Option<std::path::PathBuf> {
+        std::env::var_os(key)
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    match env_dir("UV_CACHE_DIR") {
+        Some(dir) => candidates.push(dir),
+        None => {
+            if let Some(xdg) = env_dir("XDG_CACHE_HOME") {
+                candidates.push(xdg.join("uv"));
+            }
+            if let Some(home) = env_dir("HOME") {
+                candidates.push(home.join(".cache").join("uv"));
+            }
+        }
+    }
+    for dir in candidates {
+        if dir.is_dir() {
+            if let Ok(resolved) = dir.canonicalize() {
+                return vec![resolved.to_string_lossy().into_owned()];
+            }
+        }
+    }
+    vec![]
+}
+
+/// The [`codex_cache_roots`] grant in `--add-dir` form for the exec create
+/// paths. Empty when no cache directory resolves.
+pub(crate) fn codex_cache_writable_args() -> Vec<String> {
+    let roots = codex_cache_roots();
+    if roots.is_empty() {
+        return vec![];
+    }
+    let mut args = vec!["--add-dir".to_string()];
+    args.extend(roots);
+    args
+}
+
 /// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
 /// bounded codex worker can commit. workspace-write marks
 /// `<project_root>/.git` read-only, so without this every `git add` fails on
@@ -683,6 +730,15 @@ pub(crate) fn codex_writable_roots(cwd: &std::path::Path) -> Vec<String> {
     // set through `--add-dir`.
     for extra in crate::claude_ask::state_dirs_from_env() {
         if !extra.is_empty() && !roots.contains(&extra) {
+            roots.push(extra);
+        }
+    }
+    // The uv cache rides with the state dirs: a bounded worker installing
+    // sdists writes the cache (58 denials across 44 rollouts), and
+    // `writable_roots` is a whole-value override, so omitting it here removes
+    // a grant the create lane's `--add-dir` made.
+    for extra in codex_cache_roots() {
+        if !roots.contains(&extra) {
             roots.push(extra);
         }
     }
@@ -794,6 +850,7 @@ impl Provider for CodexProvider {
         if !ctx.yolo {
             argv.extend(codex_git_writable_args(&ctx.cwd));
             argv.extend(codex_plan_writable_args(&ctx.cwd));
+            argv.extend(codex_cache_writable_args());
         }
         if let Some(effort) = ctx.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             argv.push("-c".into());
@@ -1967,8 +2024,46 @@ mod tests {
         );
     }
 
+    /// Pin `UV_CACHE_DIR` for one test and restore the prior value on drop,
+    /// holding the crate-wide env lock the whole time: cache resolution reads
+    /// process-global env, so an unpinned run depends on the host's real
+    /// cache. `to_absent` names a missing path, and since `UV_CACHE_DIR` is
+    /// authoritative, that grants nothing.
+    struct UvCachePin {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl UvCachePin {
+        fn to(value: &str) -> Self {
+            let guard = crate::claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("UV_CACHE_DIR");
+            unsafe { std::env::set_var("UV_CACHE_DIR", value) };
+            Self {
+                _guard: guard,
+                prev,
+            }
+        }
+
+        fn to_absent() -> Self {
+            Self::to("/nonexistent-fno-uv-cache-probe")
+        }
+    }
+
+    impl Drop for UvCachePin {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var("UV_CACHE_DIR", v) },
+                None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
+            }
+        }
+    }
+
     #[test]
     fn codex_create_argv_defaults_to_workspace_write_sandbox() {
+        let _no_uv = UvCachePin::to_absent();
         let argv = CodexProvider.create_argv(&create_ctx());
         assert_eq!(
             argv,
@@ -2124,6 +2219,7 @@ mod tests {
     /// still applies.
     #[test]
     fn codex_create_argv_outside_a_repo_omits_only_the_git_grant() {
+        let _no_uv = UvCachePin::to_absent();
         let argv = CodexProvider.create_argv(&create_ctx());
         let grants: Vec<&String> = argv
             .iter()
@@ -2131,6 +2227,35 @@ mod tests {
             .filter_map(|(i, token)| (token == "--add-dir").then(|| &argv[i + 1]))
             .collect();
         assert_eq!(grants, vec![&expected_plan_grant()]);
+    }
+
+    /// AC4-HP: a bounded exec create grants the uv cache, canonicalized. The
+    /// cache holds sdists a worker installs; 58 denials across 44 rollouts.
+    #[test]
+    fn codex_create_argv_grants_the_uv_cache_when_it_exists() {
+        let cache = tempfile::tempdir().unwrap();
+        let _pin = UvCachePin::to(cache.path().to_str().unwrap());
+        let argv = CodexProvider.create_argv(&create_ctx());
+        let want = std::fs::canonicalize(cache.path()).unwrap();
+        assert!(
+            argv.iter()
+                .any(|a| *a == want.to_string_lossy().into_owned()),
+            "argv should grant {want:?}: {argv:?}"
+        );
+    }
+
+    /// AC4-ERR: `UV_CACHE_DIR` is authoritative, so a missing path grants
+    /// nothing and the spawn proceeds.
+    #[test]
+    fn codex_create_argv_grants_no_missing_uv_cache() {
+        let _pin = UvCachePin::to_absent();
+        let argv = CodexProvider.create_argv(&create_ctx());
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains("fno-uv-cache-probe") || a.contains(".cache/uv")),
+            "no uv root should resolve: {argv:?}"
+        );
     }
 
     /// The bounded posture does NOT survive `codex exec resume` on its own:
@@ -2180,9 +2305,7 @@ mod tests {
     /// inherit the operator's network-off `sandbox_workspace_write`.
     #[test]
     fn codex_resume_argv_pins_posture_without_any_root() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _no_uv = UvCachePin::to_absent();
         let dir = tempfile::tempdir().unwrap();
         let ctx = ResumeContext {
             session_id: "s1".into(),
@@ -2389,6 +2512,7 @@ mod tests {
     /// non-repo cwd re-pins `writable_roots` on resume unless yolo.
     #[test]
     fn codex_resume_argv_grants_plan_dir_outside_a_repo_unless_yolo() {
+        let _no_uv = UvCachePin::to_absent();
         let ctx = ResumeContext {
             session_id: "uuid-1".into(),
             message: "m".into(),

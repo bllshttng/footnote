@@ -172,7 +172,12 @@ fn build_argv_create_forwards_model() {
 fn build_argv_create_forwards_add_dir() {
     // x-b6e2: a user --add-dir grants extra write access on `codex exec`. codex's
     // own cwd rides -C, so add-dir is purely additive. Empty/None adds no USER
-    // flag; the bounded worker's internal plan grant remains.
+    // flag; the bounded worker's internal plan grant remains. UV_CACHE_DIR is
+    // pinned to a missing path (authoritative, so no grant) because the test
+    // counts --add-dir and the host's real cache would add one.
+    let _uv_guard = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let uv_prev = std::env::var_os("UV_CACHE_DIR");
+    unsafe { std::env::set_var("UV_CACHE_DIR", "/nonexistent-fno-uv-cache-probe") };
     let cwd = absent_project_dir();
     let argv = build_argv_create(&cwd, "hi", false, None, None, Some("/extra"), &[]);
     let i = argv
@@ -181,6 +186,11 @@ fn build_argv_create_forwards_add_dir() {
         .expect("--add-dir present");
     assert_eq!(argv[i + 1], "/extra");
     let none = build_argv_create(&cwd, "hi", false, None, None, Some(""), &[]);
+    match uv_prev {
+        Some(v) => unsafe { std::env::set_var("UV_CACHE_DIR", v) },
+        None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
+    }
+    drop(_uv_guard);
     assert!(!none.iter().any(|a| a == "/extra"));
     assert_eq!(none.iter().filter(|a| *a == "--add-dir").count(), 1);
 }
@@ -264,11 +274,20 @@ fn build_argv_create_internal_grants_compose_with_user_add_dir() {
     }
     unsafe { std::env::set_var("PATH", &new_path) };
 
+    // The test counts --add-dir, so the uv cache is pinned to a missing path
+    // (authoritative, so no grant): the host's real cache would add one.
+    let uv_prev = std::env::var_os("UV_CACHE_DIR");
+    unsafe { std::env::set_var("UV_CACHE_DIR", "/nonexistent-fno-uv-cache-probe") };
+
     let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"), &[]);
 
     match old_path {
         Some(path) => unsafe { std::env::set_var("PATH", path) },
         None => unsafe { std::env::remove_var("PATH") },
+    }
+    match uv_prev {
+        Some(v) => unsafe { std::env::set_var("UV_CACHE_DIR", v) },
+        None => unsafe { std::env::remove_var("UV_CACHE_DIR") },
     }
 
     assert_eq!(argv.iter().filter(|a| *a == "--add-dir").count(), 3);
