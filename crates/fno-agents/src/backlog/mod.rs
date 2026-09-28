@@ -48,6 +48,7 @@ pub mod settings;
 pub mod style_check;
 pub mod title_gate;
 pub mod update_cli;
+pub mod workflows;
 
 use crate::backlog::model::Node;
 use rusqlite::{params, Connection, OptionalExtension};

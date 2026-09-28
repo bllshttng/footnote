@@ -184,6 +184,11 @@ pub fn run(args: &[String]) -> i32 {
         // The blueprint session lifecycle is native end to end: identity,
         // claims substrate, session rows, receipts. The Python twin is gone.
         "session" => super::session_cli::run(resolved.tail),
+        // The canonical close and its inverse are native for the close-flag
+        // surface; rich completion shapes keep their Python owner (the
+        // done_command delegate) and ride the forward from inside the arm.
+        "done" => super::workflows::run_done(resolved.tail),
+        "reopen" => super::workflows::run_reopen(resolved.tail),
         _ => forward_python(&resolved),
     }
 }
