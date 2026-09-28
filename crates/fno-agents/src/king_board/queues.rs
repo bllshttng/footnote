@@ -16,7 +16,7 @@ use std::path::Path;
 /// Per-project rows rendered for the capture stream; the count stays whole.
 pub(crate) const CAPTURE_PROJECT_CAP: usize = 8;
 
-pub(crate) const NODE_ID_BODY: &str = "(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})";
+pub(crate) const NODE_ID_BODY: &str = "[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}";
 
 // ---------------------------------------------------------------------------
 // Lane: the operator's own ranked file (king/lane.py)

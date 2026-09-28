@@ -46,57 +46,56 @@ pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        if b[i] == b'x' {
-            let mut k = i + 1;
+        // [a-z][a-z0-9]{0,7} then an optional '-' then [0-9a-f]{4,8}: the
+        // dash-less minter shape stays a candidate. The run bounds the whole
+        // body (prefix 1-8 + hex 4-8 = 16), and each branch re-checks its own
+        // prefix/hex lengths.
+        let mut j = i + 1;
+        let mut alnum = 0;
+        while j < b.len() && alnum < 15 && (b[j].is_ascii_lowercase() || b[j].is_ascii_digit()) {
+            j += 1;
+            alnum += 1;
+        }
+        let mut matched: Option<(usize, usize)> = None; // (hex_start, hex_end)
+        if j < b.len() && b[j] == b'-' && j - i - 1 <= 7 {
+            // Dashed: prefix ran 1-8 chars, then '-' then 4-8 hex.
+            let hex_start = j + 1;
+            let mut k = hex_start;
             while k < b.len()
-                && k - i - 1 < 8
+                && k - hex_start < 8
                 && (b[k].is_ascii_digit() || (b'a'..=b'f').contains(&b[k]))
             {
                 k += 1;
             }
-            let hex_len = k - i - 1;
+            let hex_len = k - hex_start;
             if (4..=8).contains(&hex_len) && (k == b.len() || b[k] == b'-' || b[k] == b'/') {
-                let candidate = &head_ref[i..k];
-                if !ids.iter().any(|c| c == candidate) {
-                    ids.push(candidate.to_string());
-                }
-                i = k;
-                continue;
+                matched = Some((hex_start, k));
             }
         }
-        // [a-z][a-z0-9]{0,7} then '-' then [0-9a-f]{4,8}
-        let mut j = i + 1;
-        let mut alnum = 0;
-        while j < b.len() && alnum < 7 && (b[j].is_ascii_lowercase() || b[j].is_ascii_digit()) {
-            j += 1;
-            alnum += 1;
+        if matched.is_none() {
+            // Compact: the alnum run's own tail is the hex, greedy head first
+            // (shortest hex, head 1-8 chars); the run end is a boundary or EOL.
+            let min_tail = 4.max((j - i).saturating_sub(8));
+            for tail in min_tail..=(8.min(alnum)) {
+                let hex_start = j - tail;
+                let hex_ok = b[hex_start..j]
+                    .iter()
+                    .all(|&c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+                if hex_ok && (j == b.len() || b[j] == b'-' || b[j] == b'/') {
+                    matched = Some((hex_start, j));
+                    break;
+                }
+            }
         }
-        if j >= b.len() || b[j] != b'-' {
+        let Some((_, hex_end)) = matched else {
             i += 1;
             continue;
-        }
-        let hex_start = j + 1;
-        let mut k = hex_start;
-        while k < b.len()
-            && k - hex_start < 8
-            && (b[k].is_ascii_digit() || (b'a'..=b'f').contains(&b[k]))
-        {
-            k += 1;
-        }
-        let hex_len = k - hex_start;
-        if !(4..=8).contains(&hex_len) {
-            i += 1;
-            continue;
-        }
-        if !(k == b.len() || b[k] == b'-' || b[k] == b'/') {
-            i += 1;
-            continue;
-        }
-        let candidate = &head_ref[i..k];
+        };
+        let candidate = &head_ref[i..hex_end];
         if !ids.iter().any(|c| c == candidate) {
             ids.push(candidate.to_string());
         }
-        i = k;
+        i = hex_end;
     }
     ids
 }
@@ -718,6 +717,9 @@ mod tests {
         // Uppercase is not id body ([0-9a-f], not [0-9a-fA-F]): the hex run
         // stops at 'E', so "x-cccc" binds and the tail never reads as id.
         assert_eq!(branch_node_ids("x-cccc-EF12"), vec!["x-cccc".to_string()]);
+        // Dash-less minter shape: prefix + hex as one segment.
+        assert_eq!(branch_node_ids("feature/xbbbb"), vec!["xbbbb".to_string()]);
+        assert_eq!(branch_node_ids("xbbbb-fix"), vec!["xbbbb".to_string()]);
         assert!(branch_node_ids("main").is_empty());
     }
 

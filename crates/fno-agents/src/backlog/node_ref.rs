@@ -8,30 +8,56 @@ use serde_json::Value;
 
 use super::settings;
 
-/// A configured `<prefix>-<hex>` id or a compact legacy `x<hex>` id.
+/// `[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}` fullmatch - the dash is optional so
+/// the dash-less ids the minter briefly minted before 2026-09-27 stay
+/// first-class. The graph, not this shape, is the identity check.
 pub fn is_wellformed_node_id(s: &str) -> bool {
-    let compact_suffix = s.strip_prefix('x').unwrap_or("");
-    if (4..=8).contains(&compact_suffix.len())
-        && compact_suffix
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
-        return true;
+    if let Some((prefix, suffix)) = s.split_once('-') {
+        return valid_prefix(prefix) && valid_hex_suffix(suffix);
     }
-    let Some((prefix, suffix)) = s.split_once('-') else {
-        return false;
-    };
+    // No dash: try every prefix/hex split. get() (not split_at) keeps a
+    // multibyte input a refusal instead of a panic on a non-char boundary.
+    let bytes = s.as_bytes();
+    (4..=8).any(|tail| {
+        bytes.len() > tail && {
+            let (Some(head), Some(hex_tail)) = (s.get(..s.len() - tail), s.get(s.len() - tail..))
+            else {
+                return false;
+            };
+            valid_prefix(head) && valid_hex_suffix(hex_tail)
+        }
+    })
+}
+
+fn valid_prefix(prefix: &str) -> bool {
     let mut chars = prefix.chars();
-    let valid_prefix = matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
         && chars.count() <= 7
         && prefix
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-    let valid_suffix = (4..=8).contains(&suffix.len())
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+fn valid_hex_suffix(suffix: &str) -> bool {
+    (4..=8).contains(&suffix.len())
         && suffix
             .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
-    valid_prefix && valid_suffix
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// The alternate spellings of one node id (`x-bbbb` <-> `xbbbb`): the
+/// minter briefly minted dash-less ids, and resolution is format-agnostic.
+/// Empty when the query carries no dash to remove or no room to insert one.
+pub fn dash_variants(q: &str) -> Vec<String> {
+    let mut alts: Vec<String> = Vec::new();
+    if let Some(pos) = q.find('-') {
+        alts.push(format!("{}{}", &q[..pos], &q[pos + 1..]));
+    } else if q.len() >= 5 {
+        for i in 1..q.len().min(9) {
+            alts.push(format!("{}-{}", &q[..i], &q[i..]));
+        }
+    }
+    alts
 }
 
 /// Well-formed, or it opens with the configured prefix or the legacy `ab-`.
@@ -77,6 +103,16 @@ pub fn resolve_tiers<'a>(entries: &'a [Value], query: &str) -> Option<&'a Value>
             }
         }
     }
+    // Dash variants (`x-bbbb` <-> `xbbbb`): the graph confirms the id, not
+    // the spelling. Still exact-match only.
+    for alt in dash_variants(&q_lc) {
+        if let Some(hit) = entries
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(alt.as_str()))
+        {
+            return Some(hit);
+        }
+    }
     None
 }
 
@@ -110,9 +146,23 @@ pub fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
             }
         };
     }
-    entries
+    // Dash variants (`x-bbbb` <-> `xbbbb`), still exact-match only: the graph
+    // confirms the id, not the spelling. Exact spelling wins first.
+    if let Some(exact) = entries
         .iter()
         .find(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
+    {
+        return Some(exact);
+    }
+    for alt in dash_variants(&node_id.to_lowercase()) {
+        if let Some(hit) = entries
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(alt.as_str()))
+        {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 /// The archived read-through on a working-graph miss: the same tiers over the
@@ -412,6 +462,40 @@ mod tests {
         assert!(!is_wellformed_node_id("x-AAAA1111"));
         assert!(!is_wellformed_node_id("x-123"));
         assert!(!is_wellformed_node_id("xg863"));
+    }
+
+    #[test]
+    fn wellformed_gate_accepts_the_dash_less_shape() {
+        assert!(is_wellformed_node_id("xbbbb"));
+        assert!(is_wellformed_node_id("xaaaa"));
+        assert!(!is_wellformed_node_id("x123"));
+        assert!(!is_wellformed_node_id("xB299"));
+        assert!(!is_wellformed_node_id("-6a95"));
+        assert!(!is_wellformed_node_id("x"));
+        // A multibyte char at a would-be split point refuses, never panics.
+        assert!(!is_wellformed_node_id("x\u{e9}f9c1d2"));
+    }
+
+    #[test]
+    fn resolve_tiers_aliases_dash_shapes_both_ways() {
+        let compact = vec![json!({"id": "xbbbb", "slug": "xbbbb"})];
+        assert!(resolve_tiers(&compact, "xbbbb").is_some());
+        assert!(resolve_tiers(&compact, "x-bbbb").is_some());
+        let dashed = vec![json!({"id": "x-aaaa", "slug": "a"})];
+        assert!(resolve_tiers(&dashed, "x-aaaa").is_some());
+        assert!(resolve_tiers(&dashed, "xaaaa").is_some());
+        assert!(resolve_tiers(&dashed, "x-missing").is_none());
+    }
+
+    #[test]
+    fn find_node_aliases_the_dash_variant_after_exact() {
+        let entries = vec![json!({"id": "xbbbb"}), json!({"id": "x-aaaa"})];
+        // Exact spelling wins first...
+        assert!(find_node(&entries, "x-aaaa").is_some());
+        // ...then the dash variant aliases both ways.
+        assert!(find_node(&entries, "x-bbbb").is_some());
+        assert!(find_node(&entries, "xaaaa").is_some());
+        assert!(find_node(&entries, "x-missing").is_none());
     }
 
     #[test]

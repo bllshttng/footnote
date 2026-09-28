@@ -402,9 +402,10 @@ pub(crate) fn scan_node_tokens(s: &str) -> Vec<String> {
     out
 }
 
-/// Match a hyphenated node id or compact legacy `x` + hex at the slice start,
-/// greedily with backtracking, returning (consumed bytes, candidate). The match
-/// must be delimiter-bounded on the right: end of string, `/` or `-`.
+/// Match `[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}` at the slice start, greedily
+/// with backtracking, returning (consumed bytes, candidate). The dash is
+/// optional: the minter briefly minted dash-less ids. The match must be
+/// delimiter-bounded on the right: end of string, `/` or `-`.
 fn try_node_id(b: &[u8]) -> Option<(usize, String)> {
     if b.is_empty() || !b[0].is_ascii_lowercase() {
         return None;
@@ -431,10 +432,12 @@ fn try_node_id(b: &[u8]) -> Option<(usize, String)> {
         run += 1;
     }
     for plen in (1..=run).rev() {
-        if plen >= b.len() || b[plen] != b'-' {
-            continue;
-        }
-        let hex_start = plen + 1;
+        // Dashed: prefix '-' hex. Compact: the head's own tail is the hex.
+        let hex_start = if plen < b.len() && b[plen] == b'-' {
+            plen + 1
+        } else {
+            plen
+        };
         let mut hex_run = 0usize;
         while hex_run < 8
             && hex_start + hex_run < b.len()

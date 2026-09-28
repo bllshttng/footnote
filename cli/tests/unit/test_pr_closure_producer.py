@@ -146,16 +146,33 @@ def test_produced_body_passes_the_real_gate(head_ref):
 
 
 @pytest.mark.parametrize(
-    "head_ref", ["feat/cafe", "fix/abc123", "target/deadbeef", "chore/fee1dead"]
+    "head_ref", ["feat/cafe"]
 )
 def test_the_gate_never_demands_an_id_spanning_a_slash(head_ref):
-    # The producer requires a literal '-' between prefix and hex, so it writes
-    # no trailer for these refs. The gate used to re-glue across '/' and demand
-    # "feat-cafe" / "target-deadbeef" - reddening a PR over a line nothing on
-    # the producer side could generate, which is the whole defect this pair
-    # exists to close.
+    # The producer requires 4+ hex in the tail, so it writes no trailer for a
+    # 4-letter segment. The gate used to re-glue across '/' and demand
+    # "feat-cafe" - reddening a PR over a line nothing on the producer side
+    # could generate, which is the whole defect this pair exists to close.
     assert branch_node_ids(head_ref) == []
     assert _gate(ensure_closure_trailer("Summary.", head_ref, known_ids=KNOWN), head_ref) == 0
+
+
+@pytest.mark.parametrize(
+    "head_ref, expected",
+    [
+        ("fix/abc123", ["abc123"]),
+        ("target/deadbeef", ["deadbeef"]),
+        ("chore/fee1dead", ["fee1dead"]),
+    ],
+)
+def test_a_compact_segment_names_its_node_without_gating_the_pr(head_ref, expected):
+    # The dash-less id shape made a letter-led segment with a 4-8 hex tail a
+    # candidate for the producer. The gate splits on '/' and only re-glues a
+    # DASHED pair, so it sees no candidate here and demands no trailer: the
+    # producer may claim the node when the graph carries it, and no PR reddens
+    # over a segment nothing demanded.
+    assert branch_node_ids(head_ref) == expected
+    assert _gate("Summary.", head_ref) == 0
 
 
 # ---- Call site: fno agents worker ship ----

@@ -77,6 +77,7 @@ def group_for(entry: dict) -> str:
 # can never drift into disagreeing about what counts as a leak.
 LEAK_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
+    # Generic compact prefixes can resemble CSS hex colors; legacy compact x ids cannot.
     ("node-id", re.compile(r"\b(?:[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}|x[0-9a-f]{4,8})\b", re.I)),
     ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
     (
