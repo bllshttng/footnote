@@ -18,7 +18,7 @@
 # Args:
 #   --candidate JSON   Candidate object {type, name, description, body}
 #   --session-id SID   Source session id
-#   --file PATH        Override target (default $HOME/.fno/lesson-candidates.jsonl)
+#   --file PATH        Override target (default $HOME/.fno/history/lesson-candidates.jsonl)
 
 # No `set -e`: a failed append must not abort the caller's memory write.
 set -uo pipefail

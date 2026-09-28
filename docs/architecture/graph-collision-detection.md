@@ -228,7 +228,7 @@ stderr warning so a misconfigured environment is visible.
 - **Cross-project collisions** - today's primitive is project-scoped
   because the graph is project-scoped.
 - **Kanban edge rendering** - showing "these two cards have a connecting
-  edge" in `~/.fno/graph.md` requires extending the renderer.
+  edge" in `~/.fno/pages/graph.md` requires extending the renderer.
 - **Time-bounded collision tolerance** - "plans more than 60 days old
   don't count" risks papering over real conflicts; skipped.
 

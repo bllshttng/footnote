@@ -4239,7 +4239,7 @@ def cmd_view() -> None:
 
     Always rerenders before opening so the file reflects current graph.json
     state even if the auto-render hook hasn't fired since the last edit. The
-    file lives at ``~/.fno/graph.html`` and is opened via ``open`` on
+    file lives at ``~/.fno/pages/graph.html`` and is opened via ``open`` on
     macOS, ``xdg-open`` on Linux, ``os.startfile`` on Windows - whichever
     handler the OS has registered for ``.html`` takes over from there
     (browser, yazi, anything else).

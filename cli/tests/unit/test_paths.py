@@ -349,7 +349,7 @@ def test_global_events_json_pins_relative_ledger_override(
 
 
 def test_evals_history_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """evals_history() returns ~/.fno/evals-history.jsonl (cross-project)."""
+    """evals_history() returns ~/.fno/history/evals-history.jsonl (cross-project)."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
 
     from fno.paths import evals_history

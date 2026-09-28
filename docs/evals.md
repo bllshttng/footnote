@@ -48,7 +48,7 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
 
-Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/evals-history.jsonl` (override via `config.paths.evals_history`).
+Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/history/evals-history.jsonl` (override via `config.paths.evals_history`).
 
 ## Macro eval
 

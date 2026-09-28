@@ -564,6 +564,7 @@ def install_groom_agent(
     launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
     fno_binary = fno_binary or shutil.which("fno") or "fno"
     install_path = install_path or default_agent_path(fno_binary)
+    (Path.home() / ".fno" / "logs").mkdir(parents=True, exist_ok=True)
 
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.

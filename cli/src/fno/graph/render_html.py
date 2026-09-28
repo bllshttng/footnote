@@ -165,7 +165,7 @@ def _load_obsidian_vault() -> str | None:
     and stops at the first match: when a backlog mutation fires from a project
     whose own ``.fno/settings.yaml`` lacks an obsidian block, the
     project-local file shadows the global one and the auto-render writes
-    ``~/.fno/graph.html`` (a global artifact) with vault=None, zeroing out
+    ``~/.fno/pages/graph.html`` (a global artifact) with vault=None, zeroing out
     every Obsidian deep link.
 
     Vault is a global concept (which vault holds the plan files) and graph.html
