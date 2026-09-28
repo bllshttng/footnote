@@ -197,6 +197,22 @@ def test_merged_pr_closes_successfully(tmp_path, monkeypatch):
     assert node["completed_at"] is not None
 
 
+def test_rest_closed_plus_merged_true_is_merge_evidence(tmp_path, monkeypatch):
+    """REST never says MERGED: the wire shape is state "closed" + merged true.
+    The close reads that shape as merged evidence (x-8ac3: the reader used to
+    demand an uppercase MERGED state the REST API never sends, so every
+    genuinely merged PR refused to close)."""
+    code, out, err, g = _door_done(
+        tmp_path,
+        _node("ab-restm01", pr_number=150, pr_url="https://github.com/org/repo/pull/150"),
+        pr_states={150: "MERGED"},
+    )
+    assert code == 0, out + err
+    node = _read(g)[0]
+    assert node.get("status") == "done"
+    assert node["completed_at"] is not None
+
+
 def test_unconditional_routing_refusal_is_actionable_not_retryable(tmp_path, monkeypatch):
     code, out, err, g = _door_done(
         tmp_path,

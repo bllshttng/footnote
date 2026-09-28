@@ -277,12 +277,23 @@ pub(crate) fn query_pr_state(
             "malformed",
         )
     })?;
-    if !matches!(state, "OPEN" | "CLOSED" | "MERGED") {
-        return Err(PrReadError::new(
-            format!("REST PR info reader returned malformed state {state:?}"),
-            "malformed",
-        ));
-    }
+    // REST never says MERGED: a merged PR is state "closed" with merged true.
+    // The flag wins; otherwise the state reads case-insensitively, so a
+    // GraphQL-shaped payload still maps.
+    let state = if data.get("merged").and_then(Value::as_bool).unwrap_or(false) {
+        "MERGED"
+    } else {
+        match state.to_ascii_uppercase().as_str() {
+            "OPEN" => "OPEN",
+            "CLOSED" => "CLOSED",
+            other => {
+                return Err(PrReadError::new(
+                    format!("REST PR info reader returned malformed state {other:?}"),
+                    "malformed",
+                ))
+            }
+        }
+    };
     let url = data
         .get("html_url")
         .and_then(Value::as_str)
