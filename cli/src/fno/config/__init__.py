@@ -3670,8 +3670,6 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
-    # Paint and restore the terminal palette while a footnote theme is active.
-    paint_background: bool = True
     restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
     # Which projects the backlog board renders. The graph is ONE
     # store tagged by project, so an unscoped board shows every project's
@@ -3725,6 +3723,8 @@ class MuxBlock(BaseModel):
     # `mux.theme.brand` / `mux.theme.needs_you` (#rrggbb quoted dotted keys
     # in [mux], read by the Rust client) pin those two roles under any theme.
     theme: Optional[str] = None
+    # While a theme is active, paint the terminal's own palette from it (OSC 11/10/4); restore on exit.
+    paint_background: bool = True
 
     @field_validator("shell_integration", mode="before")
     @classmethod

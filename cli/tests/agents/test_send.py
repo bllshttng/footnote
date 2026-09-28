@@ -1759,6 +1759,17 @@ def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
     from fno.agents import registry as registry_mod
     from fno.mail import envelope as envelope_mod
 
+    # The Rust renderer reads the registry under the SHARED flock while this
+    # fixture holds it EXCLUSIVE for the whole call, so a real render would
+    # deadlock against the contention the stamp is meant to meet. Stub it;
+    # the bound under test is the stamp's, not the renderer's.
+    from fno.mail import envelope as envelope_mod
+
+    monkeypatch.setattr(
+        envelope_mod,
+        "_render_in_rust",
+        lambda _payload: '<fno_mail from="fno">stub</fno_mail>',
+    )
     monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         envelope_mod,

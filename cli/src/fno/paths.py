@@ -669,8 +669,8 @@ STATE_FILES: tuple[StateFile, ...] = (
         filename="registry.json",
         resolver="fno.paths.agents_registry_path",
         root_class="OPERATOR",
-        selector="config.paths.agents_registry_path, else config.state_dir "
-        "(Rust runtime home: FNO_AGENTS_HOME)",
+        selector="config.paths.agents_registry_path, else FNO_AGENTS_HOME, "
+        "else config.state_dir (Rust runtime home)",
         owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
     ),
     StateFile(
@@ -1407,6 +1407,11 @@ def agents_registry_path() -> Path:
     override = settings.paths.agents_registry_path
     if override is not None:
         return _guard_state_path(_resolve(override))
+    if os.environ.get("FNO_AGENTS_HOME"):
+        # Same rule as Rust AgentsHome::from_env: a declared home wins, so a
+        # caller that seeded its own home never writes the live registry
+        # (the 2026-09-27 probe overwrite).
+        return _guard_state_path(agents_home_dir() / "registry.json")
     return state_dir() / "agents" / "registry.json"
 
 
@@ -1427,11 +1432,6 @@ def agents_home_dir() -> Path:
 def agents_runtime_registry_path() -> Path:
     """Return the Rust agents runtime registry, independently of config.state_dir."""
     return agents_home_dir() / "registry.json"
-
-
-def process_global_agents_registry_path() -> Path:
-    """Return the HOME registry protected even when runtime or project paths move."""
-    return (Path.home() / ".fno" / "agents" / "registry.json").resolve()
 
 
 def inbox_dir(project_root: Optional[Path] = None) -> Path:
