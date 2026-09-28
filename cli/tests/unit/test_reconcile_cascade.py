@@ -974,8 +974,10 @@ def test_reversible_defer_writers_preserve_contained_children():
         assert "_release_contained_children" not in inspect.getsource(writer)
 
     # Permanent death still releases children so they do not strand forever.
+    # remove keeps its python leg; supersede's release moved to the native
+    # twin (release_contained_children in workflows.rs), whose behavior the
+    # collision and decompose suites pin through the door.
     assert "_release_contained_children" in inspect.getsource(gcli.cmd_remove)
-    assert "_release_contained_children" in inspect.getsource(gcli.cmd_supersede)
 
 
 def test_release_is_reported_not_silent(world, dispatches):
