@@ -1877,22 +1877,53 @@ def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch
     assert "--substrate" not in out or out[out.index("--substrate") + 1] != "bg"
 
 
-def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
+def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(tmp_path, monkeypatch):
     """FNO_SPAWN_GATE=0 is the admission escape and its contract is that it never
     blocks a spawn. Cap-SKIPPING still runs: steering onto a free lane blocks
     nothing, and dropping it would send every bypassed spawn at a saturated
     vendor."""
     import fno.agents.spawn_defaults as spawn_defaults
-    import fno.agents.spawn_gate as spawn_gate
+    import os
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    _pin_capacity(monkeypatch)
-    monkeypatch.setattr(
-        spawn_gate,
-        "probe_capacity",
-        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    config, _state = _pin_capacity(
+        monkeypatch,
+        claude="ok",
+        extra={"claude": {"zai-main": "ok"}},
+        active={"claude": "zai-main"},
     )
+    with open(config, "a", encoding="utf-8") as stream:
+        stream.write("\n[agents.provider_limits.zai]\nlanes = 2\n")
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    entries = [
+        {
+            "name": f"zai-{index}",
+            "provider": "zai",
+            "cwd": str(tmp_path),
+            "status": "live",
+            "created_at": "2026-09-27T00:00:00Z",
+            "pid": os.getpid(),
+            "mux": {"session": "test", "pane_id": index + 1},
+        }
+        for index in range(2)
+    ]
+    (agents_home / "registry.json").write_text(
+        json.dumps({"schema_version": 15, "entries": entries}), encoding="utf-8"
+    )
+    claims_root = tmp_path / "claims"
+    claims_root.mkdir()
+    fno_home = tmp_path / "fno-home"
+    fno_home.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
+    monkeypatch.setenv("FNO_HOME", str(fno_home))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
+    fno_stub = tmp_path / "fno"
+    fno_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fno_stub.chmod(0o755)
+    monkeypatch.setenv("FNO_BIN", str(fno_stub))
     err = io.StringIO()
 
     # Two lanes, one capped: the free lane is still chosen rather than refused.
