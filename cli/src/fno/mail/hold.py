@@ -866,10 +866,13 @@ def cmd_control_drain() -> None:
     if not rendered:
         return
 
+    from fno.mail.landed import _defang_reminder
+
     context = (
         "<system-reminder>\n"
-        "[fno agents mail] CONTROL delivery (tool boundary):\n"
-        + "\n".join(rendered)
+        + _defang_reminder(
+            "[fno agents mail] CONTROL delivery (tool boundary):\n" + "\n".join(rendered)
+        )
         + "\n</system-reminder>"
     )
     try:

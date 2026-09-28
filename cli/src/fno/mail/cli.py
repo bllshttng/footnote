@@ -5164,7 +5164,7 @@ def cmd_drain_self(
 from fno.mail.hold import _emit_drain_marker, cmd_control_drain, cmd_notify_self  # noqa: E402,F401
 
 for _hidden in (cmd_notify_self, cmd_control_drain):
-    mail_app.command(_hidden.__name__.removeprefix("cmd_"), hidden=True)(_hidden)
+    mail_app.command(_hidden.__name__.removeprefix("cmd_").replace("_", "-"), hidden=True)(_hidden)
 
 
 @mail_app.command("rebuild-render", hidden=True)
