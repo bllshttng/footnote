@@ -286,6 +286,8 @@ row_claude_plugin_session() {
 row_codex_plugin_session() {
   assert_clean_machine
   install_cli_via_npm @openai/codex || return 0
+  # codex refuses a CODEX_HOME that does not exist yet.
+  mkdir -p "$BASE/codex-home"
   export CODEX_HOME="$BASE/codex-home"
   run_capture codex plugin marketplace add "$REPO_ROOT"
   if [ "$RC" -ne 0 ]; then
