@@ -28,6 +28,18 @@ export PATH
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
+# HOME-as-repo guard (law d-8ddaba56): a session whose cwd is $HOME outside
+# git has no checkout to bind, and the degraded fallbacks below would write
+# at the top level of the state root. Skip: no manifest is owed when the
+# "checkout" is the machine itself.
+_git_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+_state_dir_phys=$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P || true)
+_repo_fno_phys=$(cd "$REPO_ROOT/.fno" 2>/dev/null && pwd -P || true)
+if [[ -z "$_git_toplevel" ]] \
+    || [[ -n "$_state_dir_phys" && "$_repo_fno_phys" == "$_state_dir_phys" ]]; then
+  exit 0
+fi
+
 # Project state files resolve through the owning verb (the repo's space under
 # ~/.fno/spaces/, keyed on the canonical root). Degraded fallback for an fno
 # predating the verb: the legacy checkout path, spelled with its real filename.
