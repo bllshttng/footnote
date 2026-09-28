@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - attest completed code review
 # Emit the code-review attestation with the CLASSIFIED finding record.
 # Claude and Codex expose different structured completion surfaces, so this
 # shared producer handles all reachable paths:

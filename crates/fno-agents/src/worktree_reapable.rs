@@ -403,9 +403,10 @@ pub(crate) fn scan_node_tokens(s: &str) -> Vec<String> {
     out
 }
 
-/// Match `[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}` at the slice start, greedily
-/// with backtracking, returning (consumed bytes, candidate). The match must
-/// be delimiter-bounded on the right: end of string, `/` or `-`.
+/// Match `[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}` at the slice start, greedily
+/// with backtracking, returning (consumed bytes, candidate). The dash is
+/// optional: the minter briefly minted dash-less ids. The match must be
+/// delimiter-bounded on the right: end of string, `/` or `-`.
 fn try_node_id(b: &[u8]) -> Option<(usize, String)> {
     if b.is_empty() || !b[0].is_ascii_lowercase() {
         return None;
@@ -415,10 +416,12 @@ fn try_node_id(b: &[u8]) -> Option<(usize, String)> {
         run += 1;
     }
     for plen in (1..=run).rev() {
-        if plen >= b.len() || b[plen] != b'-' {
-            continue;
-        }
-        let hex_start = plen + 1;
+        // Dashed: prefix '-' hex. Compact: the head's own tail is the hex.
+        let hex_start = if plen < b.len() && b[plen] == b'-' {
+            plen + 1
+        } else {
+            plen
+        };
         let mut hex_run = 0usize;
         while hex_run < 8
             && hex_start + hex_run < b.len()
@@ -476,14 +479,20 @@ fn done_node_arm(
     discount: &dyn Fn(&str) -> bool,
     readers: &DoneNodeReaders,
 ) -> Verdict {
-    // Content removal would destroy stays blocking, unchanged: modified
-    // tracked files (a tree holding real uncommitted work), conflicts, a
-    // worker mid-setup, and
-    // an unanswerable probe.
-    if matches!(
-        base.reason.as_str(),
-        "modified-tracked" | "unmerged" | "unborn" | "probe-failed"
-    ) {
+    // Content removal would destroy stays blocking, unchanged: conflicts, a
+    // worker mid-setup, and an unanswerable probe.
+    if matches!(base.reason.as_str(), "unmerged" | "unborn" | "probe-failed") {
+        return base;
+    }
+    // A modified tracked file keeps the tree under `balanced` (the default):
+    // the diff is uncommitted work nobody named. Under `aggressive`
+    // (`worktree.prune_done`) the caller's salvage pass writes it to a
+    // salvage ref first, so it no longer blocks; everything below (claims,
+    // grace window) still gates it.
+    if base.reason == "modified-tracked"
+        && crate::agents_config::worktree_prune_done(target)
+            != crate::agents_config::WorktreePruneDone::Aggressive
+    {
         return base;
     }
     let untracked = porcelain
@@ -696,7 +705,18 @@ pub fn run_client(args: &[String]) -> i32 {
         return 2;
     };
     let verdict = reapable_opts(path, allow_unborn, done_node);
-    println!("{}", verdict.line());
+    // The one channel the bash salvage pass reads: an aggressive done-node
+    // receipt names the policy, so the caller knows a tracked diff must be
+    // salvaged to a ref before removal. Balanced is the default and says
+    // nothing.
+    let mut line = verdict.line();
+    if verdict.reason == "done-node"
+        && crate::agents_config::worktree_prune_done(Path::new(path))
+            == crate::agents_config::WorktreePruneDone::Aggressive
+    {
+        line.push_str(" prune_done=aggressive");
+    }
+    println!("{line}");
     if verdict.reapable {
         0
     } else {
@@ -1444,6 +1464,20 @@ mod tests {
             };
             reapable_opts_with(wt, false, done_node, &readers)
         }
+
+        /// Arm a hand-built porcelain through the arm with the same injected
+        /// truth, for a state git cannot be talked into printing here.
+        fn reap_arm(&self, wt: &Path, porcelain: &str) -> Verdict {
+            let read_rows = || Some(self.rows.clone());
+            let claim_live = |id: &str| self.claims.iter().any(|c| c == id);
+            let readers = DoneNodeReaders {
+                read_rows: &read_rows,
+                claim_live: &claim_live,
+            };
+            let discount = |_: &str| false;
+            let base = classify(porcelain, Some(&discount));
+            done_node_arm(wt, porcelain, base, &discount, &readers)
+        }
     }
 
     #[test]
@@ -1482,10 +1516,23 @@ mod tests {
         assert_eq!(v.reason, "untracked");
     }
 
+    /// Pin `worktree.prune_done` in the fixture's own `.fno/config.toml` -
+    /// the first config candidate for a tmp path, so a test never reads the
+    /// operator's global file.
+    fn write_prune_cfg(wt: &Path, value: &str) {
+        fs::create_dir_all(wt.join(".fno")).unwrap();
+        fs::write(
+            wt.join(".fno").join("config.toml"),
+            format!("[worktree]\nprune_done = \"{value}\"\n"),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn done_node_modified_tracked_stays_blocking() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "balanced");
         fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
         let fakes = FakeReaders {
             rows: vec![value_row("x-abc123", "done")],
@@ -1496,6 +1543,56 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "modified-tracked");
+    }
+
+    #[test]
+    fn aggressive_reads_a_modified_tracked_done_tree_as_done_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "aggressive");
+        fs::write(wt.join("keep.py"), "x = 999\n").unwrap();
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
+    }
+
+    #[test]
+    fn aggressive_still_blocks_a_conflicted_done_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        write_prune_cfg(&wt, "aggressive");
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let porcelain = "UU conflicted.py\n";
+        let v = fakes.reap_arm(wt.as_path(), porcelain);
+
+        assert!(!v.reapable);
+        assert_eq!(v.reason, "unmerged");
+    }
+
+    #[test]
+    fn prune_done_reads_only_aggressive_and_degrades_to_balanced() {
+        use crate::agents_config::{worktree_prune_done, WorktreePruneDone};
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        write_prune_cfg(&wt, "aggressive");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Aggressive);
+        // A malformed value in the HIGHEST candidate must degrade, never fall
+        // through to a lower tier that may say otherwise.
+        write_prune_cfg(&wt, "fast");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
+        write_prune_cfg(&wt, "balanced");
+        assert_eq!(worktree_prune_done(&wt), WorktreePruneDone::Balanced);
     }
 
     #[test]

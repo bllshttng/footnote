@@ -28,6 +28,18 @@ export PATH
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
+# HOME-as-repo guard (law d-8ddaba56): a session whose cwd is $HOME outside
+# git has no checkout to bind, and the degraded fallbacks below would write
+# at the top level of the state root. Skip: no manifest is owed when the
+# "checkout" is the machine itself.
+_git_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+_state_dir_phys=$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P || true)
+_repo_fno_phys=$(cd "$REPO_ROOT/.fno" 2>/dev/null && pwd -P || true)
+if [[ -z "$_git_toplevel" ]] \
+    || [[ -n "$_state_dir_phys" && "$_repo_fno_phys" == "$_state_dir_phys" ]]; then
+  exit 0
+fi
+
 # Project state files resolve through the owning verb (the repo's space under
 # ~/.fno/spaces/, keyed on the canonical root). Degraded fallback for an fno
 # predating the verb: the legacy checkout path, spelled with its real filename.
@@ -958,14 +970,15 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # exempt; the one-liner would abort init on every host without fno.
   if command -v fno >/dev/null 2>&1; then
   for _tok in $INITIAL_INPUT; do
-    # Older graph rows may place the project prefix directly before the hex
-    # suffix; the strict lookup below still proves the token is an exact node.
-    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}(-[0-9a-f]{4,8}|[0-9a-f]{4,8})$ ]] || continue
+    # Any id shape the graph confirms counts: canonical, compact dash-less
+    # (the pre-2026-09-27 minter shape), bare hex, or a dashed alias of a
+    # compact id. The strict lookup below proves the token names a node.
+    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}(-?[0-9a-f]{4,8})$ ]] || continue
     case " $_GUARD_MATCHES " in
-      *" $_tok "*) continue ;;  # already counted this distinct id
+      *" $_tok "*|*" ${_tok%-*} "*) continue ;;  # already counted this id
     esac
     # `&& rc=0 || rc=$?` keeps this set -e safe: a bare failing assignment aborts.
-    _tok_probe="$(fno backlog get --strict "$_tok" --field _archived 2>/dev/null | tr -d '[:space:]')" \
+    _tok_probe="$(fno backlog get "$_tok" --strict --field _archived 2>/dev/null | tr -d '[:space:]')" \
       && _probe_rc=0 || _probe_rc=$?
     if [[ "$_probe_rc" -ne 0 ]]; then
       # 1 is the only "read cleanly, node absent" code; anything else means the
@@ -976,7 +989,10 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # Archived is not live work: the node is gone from the working graph, so the
     # claim and the graph_node_id stamp below would both point at nothing.
     [[ "$_tok_probe" == "True" ]] && continue
-    _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok"
+    # Canonicalize: the manifest's graph_node_id and the claim key must be the
+    # STORED id, not the spelling the caller typed (xbbbb -> x-bbbb).
+    _tok_canon="$(fno backlog get "$_tok" --strict --field id 2>/dev/null | tr -d '[:space:]')"
+    _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }${_tok_canon:-$_tok}"
   done
   fi
   set +f

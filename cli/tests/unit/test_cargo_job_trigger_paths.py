@@ -85,7 +85,7 @@ def test_every_cargo_job_input_is_a_pull_request_trigger() -> None:
     rust_inputs = _rust_cross_tree_inputs()
     step_inputs = _cargo_job_step_inputs()
     assert "schemas/spawn-brevity.json" in rust_inputs
-    assert "hooks/agy-target-stop-hook.sh" in rust_inputs
+    assert "hooks/footnote-agy-target-stop-hook.sh" in rust_inputs
     assert "docs/harnesses/capability-matrix.md" in step_inputs
 
     untriggered = _untriggered(rust_inputs | step_inputs, triggers)

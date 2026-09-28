@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - reconcile session start
 # SessionStart hook: surface the PRIOR `fno backlog reconcile` sweep as a
 # system reminder, then kick off a fresh throttled reconcile in the background.
 #
@@ -15,6 +16,19 @@ export PATH
 
 REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# HOME-as-repo guard (law d-8ddaba56): when the cwd is $HOME outside git, the
+# pwd fallback makes <repo>/.fno IS the state root, and the consume-after-show
+# mv below would rename dot-stamps at the top level of the state root. Skip
+# the repo-space work: the sweep belongs to a checkout, and the state root is
+# not one.
+_git_toplevel="$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+_state_dir_phys="$(cd "${FNO_HOME:-$HOME/.fno}" 2>/dev/null && pwd -P || true)"
+_repo_fno_phys="$(cd "$REPO_ROOT/.fno" 2>/dev/null && pwd -P || true)"
+if [[ -z "$_git_toplevel" ]] \
+    || [[ -n "$_state_dir_phys" && "$_repo_fno_phys" == "$_state_dir_phys" ]]; then
+    exit 0
+fi
 
 # shellcheck source=scripts/lib/reconcile-throttle.sh
 source "$HOOK_DIR/../scripts/lib/reconcile-throttle.sh" 2>/dev/null || exit 0

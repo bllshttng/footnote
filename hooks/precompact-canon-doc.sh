@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreCompact - precompact canon doc
 # precompact-canon-doc.sh - PreCompact mechanical backstop.
 #
 # Writes and refreshes the MECHANICAL sections of this session's canon handoff

@@ -1047,7 +1047,7 @@ fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<
 /// `--source` default: the source checkout `fno doctor update` pinned at its
 /// last successful install, else the cwd.
 fn default_source_dir() -> PathBuf {
-    let pin = state_root().join("source-path");
+    let pin = crate::state_layout::place(&state_root(), "source-path");
     if let Ok(text) = std::fs::read_to_string(&pin) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
@@ -1724,7 +1724,7 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
         return Ok("agy plugin imported; hooks.json status unknown (no HOME)".to_string());
     };
     let hooks = home.join(".gemini").join("config").join("hooks.json");
-    let adapter = stage.join("hooks").join("agy-target-stop-hook.sh");
+    let adapter = stage.join("hooks").join("footnote-agy-target-stop-hook.sh");
     let crown = stage.join("hooks").join("agy-crown-inject.sh");
     let s = crate::agy_hooks::status(
         &hooks,

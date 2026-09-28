@@ -3723,6 +3723,8 @@ class MuxBlock(BaseModel):
     # `mux.theme.brand` / `mux.theme.needs_you` (#rrggbb quoted dotted keys
     # in [mux], read by the Rust client) pin those two roles under any theme.
     theme: Optional[str] = None
+    # While a theme is active, paint the terminal's own palette from it (OSC 11/10/4); restore on exit.
+    paint_background: bool = True
 
     @field_validator("shell_integration", mode="before")
     @classmethod
@@ -3774,12 +3776,16 @@ class WorktreeBlock(BaseModel):
 
     policy: Optional[str] = None
     # The worktree.* leaves below are read ad-hoc by
-    # skills/speculate/scripts/worktree-setup.sh (wt_config), so the model
-    # carries them but never enforces their values.
+    # skills/speculate/scripts/worktree-setup.sh (wt_config) and by the
+    # done-node gate (prune_done, in Rust), so the model carries them but
+    # never enforces their values.
     auto_install: bool = True
     setup_command: str = ""
     skip_verification: bool = False
     test_command: str = ""
+    # balanced (default) keeps a done tree holding modified tracked files;
+    # aggressive salvages the tracked diff to a salvage ref, then prunes.
+    prune_done: str = "balanced"
 
 
 class ArtifactConfig(BaseModel):

@@ -61,6 +61,13 @@ _IntakeResult = Union[_IntakeAlready, _IntakeReady, _IntakeClaim]
 
 # -- Graph navigation helpers --
 
+def _dashless_variant(node_id: str) -> str:
+    """The dash-less spelling of a node id (`x-bbbb` -> `xbbbb`): the minter
+    briefly minted dash-less ids, and the graph confirms the id, not the shape.
+    """
+    return node_id.replace("-", "", 1) if "-" in node_id else node_id
+
+
 def _find_node(entries: list[dict], node_id: str) -> dict | None:
     # 'ab-' (3) + 8 hex = 11. Anything shorter that starts with 'ab-' is a
     # partial ab-id; route through the fuzzy resolver so callers like
@@ -88,7 +95,14 @@ def _find_node(entries: list[dict], node_id: str) -> dict | None:
                 f"{candidate_ids}\n"
             )
         return None
-    return next((e for e in entries if e.get("id") == node_id), None)
+    for e in entries:
+        if e.get("id") == node_id:
+            return e
+    # The dash-less twin, exact-match only: the graph confirms the id, not
+    # the spelling. Exact spelling wins first.
+    return next(
+        (e for e in entries if e.get("id") == _dashless_variant(node_id)), None
+    )
 
 
 def _find_dependents(entries: list[dict], node_id: str) -> list[str]:
@@ -1061,12 +1075,13 @@ def _resolve_claim(
             f"invalid claims value: {raw!r} (expected a <prefix>-<4..8 hex> node id)"
         )
 
-    for e in entries:
-        if e.get("id") == raw:
-            source: Literal["cli", "frontmatter"] = (
-                "cli" if cli_claim else "frontmatter"
-            )
-            return (e, source)
+    # Exact spelling first, then its dash-less twin (`x-bbbb` -> `xbbbb`):
+    # the graph confirms the id, not the spelling.
+    source: Literal["cli", "frontmatter"] = "cli" if cli_claim else "frontmatter"
+    for wanted in dict.fromkeys((raw, _dashless_variant(raw))):
+        for e in entries:
+            if e.get("id") == wanted:
+                return (e, source)
 
     raise ValueError(
         f"claims target {raw} not found on graph - "

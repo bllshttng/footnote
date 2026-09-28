@@ -112,10 +112,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # a developer's terminal reports its own palette, and a suite must not
     # resolve the theme from the machine it happens to run on.
     "COLORFGBG",
-    # The splash screen's animation suppression (splash.rs). Like NO_COLOR it
-    # SUPPRESSES behaviour rather than describing a capability, so an operator
-    # with reduced motion enabled would otherwise flip what the client draws
-    # under test.
+    # The OS reduced-motion request (splash.rs animated()); scrubbed like its terminal siblings.
     "REDUCED_MOTION",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
@@ -137,6 +134,8 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "TASK_DO_TTL_HOURS",
     "POST_MERGE_NONINTERACTIVE",
     "MCP_CHANNEL_INBOUND_POKE",
+    # User display preference; tests must not inherit the developer's setting.
+    "REDUCED_MOTION",
     # CI transport state, never developer intent: the push-event sha the
     # hook-tombstones base resolver falls back to. A test wanting a base
     # revision passes --base; inheriting the runner's push context would

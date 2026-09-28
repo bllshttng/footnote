@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - attest model
 # attest-model.sh - SessionStart guard (a) Layer 1: model/provider env coherence.
 #
 # Catches the bug class across ALL FIVE model vars: any of

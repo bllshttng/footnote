@@ -136,6 +136,15 @@ fn resolve_one(projects_root: &Path, id: &str) -> Option<PathBuf> {
     choose_from(&store_listing(projects_root), id)
 }
 
+/// The session-row writer's claude leg: one id, one fresh store walk. `None`
+/// reads `no-transcript` to the caller, never an error.
+pub(crate) fn resolve_transcript(projects_root: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    choose_from(&store_listing(projects_root), id)
+}
+
 /// The provider-cap sweep's claude bridge: every non-codex row's id answered
 /// in one pass, keyed by the id the row itself carries. The store is walked
 /// once per batch and the listing shared; a miss re-walks once for that id,

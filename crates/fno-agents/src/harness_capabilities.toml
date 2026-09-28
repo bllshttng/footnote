@@ -20,6 +20,20 @@ permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "plan", "bypass
 # roster (2026-09-27). Configured account records merge in on top at read
 # time, so a routed pin keeps its route.
 models = ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-1"]
+# The composer's `--` flag picker: launch flags captured once off
+# `claude --help` (2.1.283, 2026-09-28), chip- and door-owned flags left
+# out. An entry carries ` <value>` when the flag takes one.
+launch_flags = [
+  "--add-dir <dirs>",
+  "--agent <agent>",
+  "--append-system-prompt <prompt>",
+  "--dangerously-skip-permissions",
+  "--fallback-model <model>",
+  "--name <name>",
+  "--settings <file>",
+  "--system-prompt <prompt>",
+  "--verbose",
+]
 resume = "native-session"
 autonomous_pane = false
 route_on_pane = true
@@ -198,6 +212,22 @@ permission_modes = [
 # visibility=hide rows gpt-reserve and codex-auto-review are excluded). The
 # live cache merges in on top at read time, so a fresher catalog wins.
 models = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+# The composer's `--` flag picker: launch flags captured once off
+# `codex --help` (0.157.1, 2026-09-28); --cd/-C and --worktree stay out
+# (the cwd chip and the worktree box own them), -m (model chip), -s
+# (sandbox is the permission axis), -a (approval axis).
+launch_flags = [
+  "--config <key=value>",
+  "--enable <feature>",
+  "--disable <feature>",
+  "--image <file>",
+  "--oss",
+  "--profile <profile>",
+  "--approve-for-me",
+  "--search",
+  "--no-alt-screen",
+  "--no-daemon",
+]
 resume = "native-thread"
 # A codex thread lives on the SHARED `codex app-server daemon`, which owns it.
 # So it survives mux death AND `fno-agents-daemon` death: neither process
@@ -475,10 +505,24 @@ permission_bypass = ["--dangerously-skip-permissions"]
 # the vocabulary permission_pane_tokens maps (codex_posture.rs).
 efforts = ["low", "medium", "high"]
 permission_modes = ["default", "skip", "accept-edits", "plan", "sandbox", "accept-edits+sandbox", "plan+sandbox"]
+# The composer's `--` flag picker: launch flags captured once off
+# `agy --help` (1.2.7, 2026-09-28); --model, --effort and --mode are the
+# chips' axes, --print/--prompt family is the door's message.
+launch_flags = [
+  "--add-dir <dir>",
+  "--agent <agent>",
+  "--dangerously-skip-permissions",
+  "--disable-slash-commands",
+  "--new-project",
+  "--project <project>",
+  "--remote-control",
+  "--sandbox",
+  "--log-file <path>",
+]
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
-# agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
+# agy, measured 2026-08-28: hooks/footnote-agy-target-stop-hook.sh is a real adapter that
 # shells the same loop-check, and `fno config setup` registers it in agy's
 # ~/.gemini/config/hooks.json under the `footnote` namespace key as a `Stop`
 # handler (crates/fno-agents/src/agy_hooks.rs is the writer; the Python setup
@@ -623,6 +667,15 @@ permission_bypass = ["--dangerously-skip-permissions"]
 # offers free text rather than a list.
 efforts = []
 permission_modes = ["auto"]
+# The composer's `--` flag picker: launch flags captured once off
+# `opencode --help` (1.14.50, 2026-09-28); -m is the model chip, and the
+# session family (-c/-s/--fork/--prompt) belongs to the door and resume.
+launch_flags = [
+  "--agent <agent>",
+  "--pure",
+  "--print-logs",
+  "--log-level <level>",
+]
 resume = "native-session"
 # The serve lane is steerable through the same attach writer used at launch.
 # `POST /session` returns the full id, so this lane does not use opencode's
@@ -781,6 +834,31 @@ permission_bypass = []
 # No efforts or permission_modes key: `pi --help` names no effort list, and
 # pi ships no permission popups (see permission_bypass above), so both axes
 # have no surface here.
+# The composer's `--` flag picker: launch flags captured once off
+# `pi --help` (0.84.2, 2026-09-28); --model and --provider are chip-owned,
+# --thinking reads as an undeclared effort axis so it stays out, and the
+# session/print family belongs to the door and resume.
+launch_flags = [
+  "--name <name>",
+  "--system-prompt <text>",
+  "--append-system-prompt <text>",
+  "--models <patterns>",
+  "--tools <tools>",
+  "--exclude-tools <tools>",
+  "--no-tools",
+  "--no-builtin-tools",
+  "--extension <path>",
+  "--no-extensions",
+  "--skill <path>",
+  "--no-skills",
+  "--session-dir <dir>",
+  "--no-session",
+  "--tui-mode <mode>",
+  "--approve",
+  "--no-approve",
+  "--offline",
+  "--verbose",
+]
 resume = "native-session"
 # TRUE, and the seven-step restart journey is the evidence
 # (cli/tests/agents/test_thread_keeper_journey.py, journey wk-x61bc, first

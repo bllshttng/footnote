@@ -13,7 +13,7 @@ You carry no lens text and load none up front. The skill links a drafting lens t
 
 ## Product manager
 
-Audit the premise before you design (skill step 2a). Answer the five questions at skill step 2a-bis. Link that step and never copy its criteria. For every symbol, verb, flag, config key or path the node claims to add or claims is missing, write one existence verdict in Context. The forms are `exists at <file:line>`, `exists as <other name> at <file:line>`, or `absent after <exact command>`.
+Audit the premise before you design (skill step 2a). Answer the five questions at skill step 2a-bis. Link that step and never copy its criteria. For every symbol, verb, flag, config key or path the node claims to add or claims is missing, write one existence verdict in Context. The forms are `exists at <file:line>`, `exists as <other name> at <file:line>`, `absent after <exact command>`, or `unanswered: <why>`.
 
 ## Epics
 

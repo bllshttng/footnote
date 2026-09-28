@@ -572,6 +572,34 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+/// `Path.resolve()` for a path that may not exist: canonicalize the deepest
+/// existing ancestor, re-append the missing tail.
+pub(crate) fn resolve_loose(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&cur) {
+            Ok(existing) => {
+                let mut out = existing;
+                for comp in missing.iter().rev() {
+                    out.push(comp);
+                }
+                return out;
+            }
+            Err(_) => match (cur.file_name().map(|f| f.to_os_string()), cur.parent()) {
+                (Some(name), Some(parent)) => {
+                    missing.push(name);
+                    cur = parent.to_path_buf();
+                }
+                _ => return path.to_path_buf(),
+            },
+        }
+    }
+}
+
 /// `$HOME`, or `/` when the environment lost it. Shared by the install and
 /// reclaim verbs, which both place state under the user's home.
 pub(crate) fn dirs_home() -> PathBuf {
@@ -792,6 +820,29 @@ pub fn ledger_path(cwd: &Path) -> PathBuf {
 pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     if old == new || new.exists() || !old.exists() || old.is_symlink() {
         return false;
+    }
+    // The state root is not a checkout journal (law d-8ddaba56): a session
+    // whose cwd was $HOME outside git resolved <repo>/.fno to the state root,
+    // and moving its global journal stranded it in a fake space behind a
+    // MOVED-TO pointer at the top level of the state root. Cheap compares
+    // only: this runs on every journal resolve, and a config parse here
+    // would tax every call for a corner a config override owns.
+    if let Some(parent) = old.parent() {
+        if parent
+            .file_name()
+            .map(|n| n == std::ffi::OsStr::new(".fno"))
+            .unwrap_or(false)
+        {
+            let is_state_root = match std::env::var_os("FNO_STATE_DIR") {
+                Some(pinned) => same_path(parent, Path::new(&pinned)),
+                None => std::env::var_os("HOME")
+                    .map(|h| same_path(parent, &PathBuf::from(h).join(".fno")))
+                    .unwrap_or(false),
+            };
+            if is_state_root {
+                return false;
+            }
+        }
     }
     if let Some(repo) = repo_root_of(old) {
         let canonical = canonical_repo_root(&repo).unwrap_or(repo);
@@ -1318,6 +1369,33 @@ mod tests {
         std::os::unix::fs::symlink(&new, &link).unwrap();
         let new2 = base.join("space").join("link.jsonl");
         assert!(!migrate_from_checkout(&link, &new2));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn migrate_from_checkout_refuses_the_state_root() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = tmp("migrate-root");
+        let state_root = base.join(".fno");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let old = state_root.join("events.jsonl");
+        std::fs::write(&old, "global rows").unwrap();
+        let new = base.join("spaces").join("x").join("events.jsonl");
+        let prior = std::env::var_os("FNO_STATE_DIR");
+        std::env::set_var("FNO_STATE_DIR", &state_root);
+        let refused = migrate_from_checkout(&old, &new);
+        match prior {
+            Some(v) => std::env::set_var("FNO_STATE_DIR", v),
+            None => std::env::remove_var("FNO_STATE_DIR"),
+        }
+        assert!(!refused, "the state-root journal never moves into a space");
+        assert!(old.exists(), "legacy file untouched");
+        assert!(
+            !state_root.join("MOVED-TO").exists(),
+            "no MOVED-TO pointer at the top level of the state root"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 

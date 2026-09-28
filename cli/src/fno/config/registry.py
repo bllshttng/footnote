@@ -324,7 +324,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.state_reap.locks_retain_days": Meta("advanced", "Days to retain inactive lock files before state cleanup removes them (default 7).", default_source="default"),
     "agents.state_reap.expired_claims_retain_days": Meta("advanced", "Days to retain claims moved into the expired-claims graveyard (default 30).", default_source="default"),
     "agents.state_reap.pr_status_cache_retain_days": Meta("advanced", "Days to retain expendable PR-status cache files (default 14).", default_source="default"),
-    "agents.single_flight_ttl_seconds": Meta("advanced", "Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.", default_source="default"),
+    "agents.single_flight_ttl_seconds": Meta("advanced", "Seconds a single-flight answer counts as fresh (default 60, one liveness cadence). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.", default_source="default"),
     "agents.single_flight_join_budget_seconds": Meta("advanced", "Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents.", default_source="default"),
     "agents.orphan_reap_after_seconds": Meta("advanced", "Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.", default_source="default"),
     "agents.max_live": Meta("advanced", "Backstop cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). Sized from RAM, because every live row holds RAM whether or not it works: floor((RAM_GB - 4 GB OS reserve - your desktop apps) / 1 GB per worker). The 1 GB planning figure is generous on purpose (a build or a test suite bursts past the measured 430 MB a quiet worker holds); the CPU axis (max_fleet_cpu_share) binds first on any machine with real headroom, so raise this instead of tuning it.", default_source="default"),
@@ -430,6 +430,7 @@ FIELD_META: dict[str, Meta] = {
     "mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
     "mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
+    "mux.paint_background": Meta("advanced", "While a footnote theme is active, paint the terminal's own background, foreground and 16-color palette from the theme (OSC 11/10/4) and restore them on exit (default on).", default_source="default"),
     "mux.restore.hold_workers": Meta("advanced", "Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).", default_source="default"),
     "mux.restore.policy": Meta("advanced", "Startup restore policy for worker members: hold (rebuild named held panes, resume on focus, skip tabs whose every slot binds a done worker, default), idle (members stay idle rows), or resume (relaunch every member that is not tombstoned, gone, or reap-retired, finished work included). The policy never decides the tab count by itself: tabs rebuild from the stored tab trees under every value, so no value restores zero tabs. Overrides hold_workers when set.", default_source="default"),
     "mux.status_row": Meta("advanced", "Show the mux status row at the bottom of the terminal (default on).", default_source="default"),
@@ -590,6 +591,16 @@ FIELD_META: dict[str, Meta] = {
         "advanced",
         "Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); "
         "falls back to the script's own detection when empty. Default empty.",
+    ),
+    "worktree.prune_done": Meta(
+        "advanced",
+        "How far the merged sweep's done-node arm goes on a done tree with "
+        "uncommitted tracked changes: balanced (default) keeps the tree and "
+        "reports the diff; aggressive salvages the tracked diff to "
+        "refs/fno/salvage/<node>, then prunes once the 30m grace passes and "
+        "no live session holds the tree. Both keep the branch, salvage "
+        "untracked files, and still block on conflicts, unborn trees, "
+        "unreadable probes, live claims, and live sessions.",
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(

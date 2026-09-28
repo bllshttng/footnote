@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - restore target context after compaction
 # Re-inject plan goal + current phase after a context compaction.
 #
 # Carrier (the load-bearing decision, verified against the harness reference):

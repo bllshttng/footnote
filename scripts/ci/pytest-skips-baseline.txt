@@ -91,6 +91,9 @@ cli/tests/integration/test_graph_status.py::test_dash_a_is_shorthand_for_all_in_
 cli/tests/integration/test_graph_status.py::test_linked_idea_stub_excluded_from_next_by_default::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_node_with_plan_path_derives_to_ready::mark.skip  # on main before this ratchet
 cli/tests/integration/test_graph_status.py::test_update_on_archived_node_names_the_remedy::mark.skip  # on main before this ratchet
+cli/tests/integration/test_install_frontdoor_journey.py::_run_fno::pytest.skip  # the journey requires the Rust front door to route backlog commands
+cli/tests/integration/test_install_frontdoor_journey.py::_run_native_backlog::pytest.skip  # the journey requires the compiled Rust backlog door
+cli/tests/integration/test_install_frontdoor_journey.py::clean_machine::pytest.skip  # the isolated native journey requires a development build
 cli/tests/integration/test_install_frontdoor_journey.py::test_authorized_target_init_journey::pytest.skip  # smoke-pytest builds the front; local checkouts may lack it
 cli/tests/integration/test_install_frontdoor_journey.py::test_both_command_families_usable_after_init::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_marketplace_lint.py::<module>::mark.skipif  # on main before this ratchet
@@ -121,6 +124,8 @@ cli/tests/integration/test_worktree_cleanup_merged.py::test_done_node_detached_h
 cli/tests/integration/test_worktree_cleanup_merged.py::test_done_node_dry_run_labels_the_row_and_removes_nothing::marker.requires_gate  # on main before this ratchet
 cli/tests/integration/test_worktree_cleanup_merged.py::test_done_node_process_inside_keeps_tree::marker.requires_gate  # on main before this ratchet
 cli/tests/integration/test_worktree_cleanup_merged.py::test_done_node_salvage_failure_keeps_tree::marker.requires_gate  # on main before this ratchet
+cli/tests/integration/test_worktree_cleanup_merged.py::test_aggressive_salvages_the_tracked_diff_to_a_ref_then_prunes::marker.requires_gate  # the sweep under test needs the fno-agents gate binary; CI builders without it skip rather than fail
+cli/tests/integration/test_worktree_cleanup_merged.py::test_balanced_keeps_a_done_tree_with_a_modified_tracked_file::marker.requires_gate  # the sweep under test needs the fno-agents gate binary; CI builders without it skip rather than fail
 cli/tests/integration/test_worktree_ensure.py::<module>::mark.skipif  # on main before this ratchet
 cli/tests/journeys/test_growth_studio_faucet.py::test_resolver_core_byte_identical_to_main::pytest.skip  # on main before this ratchet
 cli/tests/lint/test_shellout_drift.py::test_ac4_hp_real_tree_full_check_passes::mark.skipif  # on main before this ratchet

@@ -217,7 +217,7 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     assert "--refresh-package fno" in uv_text
     assert "--reinstall " not in uv_text
     assert str(cli_src.resolve()) in uv_text
-    installed_rev = home / ".fno" / "installed-rev"
+    installed_rev = home / ".fno" / "install" / "installed-rev"
     assert installed_rev.read_text(encoding="utf-8").strip() == head_rev
 
     # --- Run 2: marker now fresh -> rust leg short-circuits, no cargo ---

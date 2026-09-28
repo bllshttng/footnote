@@ -368,6 +368,9 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
         return False
+    # The state root is not a checkout journal.
+    if old.parent.resolve() == state_dir().resolve():
+        return False
     try:
         repo = _repo_root_of(old)
         if repo is not None:
@@ -1426,6 +1429,11 @@ def agents_home_dir() -> Path:
     override = os.environ.get("FNO_AGENTS_HOME")
     if override:
         return Path(override).expanduser().resolve()
+    return default_agents_home_dir()
+
+
+def default_agents_home_dir() -> Path:
+    """Return the default Rust agents home, independent of FNO_AGENTS_HOME."""
     return (Path.home() / ".fno" / "agents").resolve()
 
 
@@ -1673,7 +1681,7 @@ def config_file() -> Path:
 # no env hint those were unreachable (the uv-tool wheel carries no hooks/, and
 # CLAUDE_PLUGIN_ROOT is not propagated to `fno` subprocesses), forcing a
 # hand-set FNO_REPO_ROOT. resolve_plugin_script() falls back to the persisted
-# ~/.fno/plugin-root pointer, written by the session-start hook from an
+# ~/.fno/install/plugin-root pointer, written by the session-start hook from an
 # installed or canonical root, as the env-less fallback.
 
 _PLUGIN_ROOT_POINTER_NAME = "plugin-root"
@@ -1687,7 +1695,7 @@ def _plugin_root_pointer() -> Path:
     # exactly, so the hook-written pointer and this reader always agree.
     home = os.environ.get("FNO_HOME")
     base = Path(home).expanduser() if home else Path.home() / ".fno"
-    return base / _PLUGIN_ROOT_POINTER_NAME
+    return base / "install" / _PLUGIN_ROOT_POINTER_NAME
 
 
 def _is_plugin_root(root: Path) -> bool:
@@ -1722,7 +1730,7 @@ def _canonical_plugin_root(root: Path) -> Path:
 
 
 def _read_persisted_plugin_root() -> "Path | None":
-    """Read ~/.fno/plugin-root, returning it only if it still looks like
+    """Read ~/.fno/install/plugin-root, returning it only if it still looks like
     the plugin (marker present). A stale pointer (plugin moved/removed) returns
     None so resolution falls through rather than handing back a dead path. The
     session-start hook writes installed and canonical roots only, but pointers
@@ -1745,7 +1753,7 @@ def resolve_plugin_script(relpath: str) -> Path:
     ``scripts/setup/setup-worktree.sh``.
 
     Order: env hint (CLAUDE_PLUGIN_ROOT / CODEX_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
-    package-relative -> persisted ~/.fno/plugin-root pointer -> repo."""
+    package-relative -> persisted ~/.fno/install/plugin-root pointer -> repo."""
     for env_name in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"):
         root = os.environ.get(env_name)
         if root:

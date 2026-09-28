@@ -9,11 +9,9 @@
 #   5. fno backlog done <id> marks the node complete
 #   6. fno backlog done <id> second time is a safe no-op
 #
-# Running this file directly is NOT hermetic: `bash tests/test-backlog-aliases.sh`
-# skips the runner that neutralises ambient state, so it reads your real HOME,
-# config chain and carve-out ledger - a pass proves nothing and a failure may be
-# your machine. Prefer `fno doctor test smoke --only 'backlog aliases'`. See
-# tests/README.md.
+# This script pins HOME, the state root, repo root and tracker backend below.
+# It uses the checkout's Python surface even when an unrelated installed `fno`
+# binary is on PATH, so direct runs exercise the same hermetic command shape.
 
 set -uo pipefail
 
@@ -26,6 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Path.home() / .fno resolves under $TMP. The real user graph
 # at ~/.fno/graph.json is never touched.
 export HOME="$TMP/home"
+unset FNO_CONFIG FNO_STATE_DIR FNO_SPACES_DIR FNO_CLAIMS_ROOT FNO_EVENTS_PATH FNO_TRACKER_BACKEND PYTHONPATH
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
 
@@ -42,6 +41,7 @@ GRAPH_JSON="$HOME/.fno/graph.json"
 # instead of climbing to the real checkout. Both are needed: the cd alone
 # leaves the fallback pointing at whatever ambient root it can find.
 export FNO_REPO_ROOT="$TMP/repo"
+export FNO_TRACKER_BACKEND=graph
 mkdir -p "$FNO_REPO_ROOT/.fno"
 cd "$TMP" || exit 1
 printf '{"entries": []}\n' | uv run --project "$REPO_ROOT/cli" python "$REPO_ROOT/cli/tests/fixtures/graph_seed.py" "$GRAPH_JSON"
@@ -96,9 +96,8 @@ verb_in_help() {
 # --- Scenario 1: fno backlog --help lists advertised verbs ------------------
 # x-71b6 In-N-Out tiering: intake/ready are hidden now (still invocable); probe
 # the advertised menu instead. `find` retired from the python surface; the
-# store serves it natively. `add` left the python advertised menu when its leg
-# went native: the native backlog serves it and the python help no longer
-# lists it.
+# store serves it natively. `add` went native the same way (the create door
+# moved to the store), so the python help no longer lists it.
 out=$(run_fno backlog --help 2>&1)
 for verb in done next get triage; do
     if verb_in_help "$verb" "$out"; then

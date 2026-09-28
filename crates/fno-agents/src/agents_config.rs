@@ -44,6 +44,27 @@ fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
 }
 
+/// Python `_apply_search_ceiling` (config_io.py): under `FNO_CONFIG_SEARCH_ROOT`
+/// (an os.pathsep list), a DISCOVERED config file outside every root is not
+/// read. `fno.hermetic.neutralise` sets it so the git-derived canonical climb,
+/// which no HOME redirect can bound, cannot reach a real checkout. Unset, empty,
+/// or no resolvable root: no ceiling. An explicit `FNO_CONFIG` is exempt, as in
+/// Python.
+pub(crate) fn within_search_ceiling(path: &Path) -> bool {
+    let Some(raw) = non_empty_env("FNO_CONFIG_SEARCH_ROOT") else {
+        return true;
+    };
+    let roots: Vec<PathBuf> = std::env::split_paths(&raw)
+        .filter(|r| !r.as_os_str().is_empty())
+        .map(|r| crate::paths::resolve_loose(&r))
+        .collect();
+    if roots.is_empty() {
+        return true;
+    }
+    let resolved = crate::paths::resolve_loose(path);
+    roots.iter().any(|r| resolved.starts_with(r))
+}
+
 /// Ordered config read candidates, mirroring the Python loader precedence:
 /// `$FNO_CONFIG` is the SOLE candidate when set (an explicit path, read as-is);
 /// otherwise `<cwd>/.fno/config.toml`, the CANONICAL checkout's config.toml, then
@@ -94,6 +115,7 @@ pub(crate) fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(g) = global_config_path() {
         out.push(g);
     }
+    out.retain(|c| within_search_ceiling(c));
     out
 }
 
@@ -293,6 +315,26 @@ fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
 pub enum SandboxUnavailablePolicy {
     Refuse,
     Warn,
+}
+
+/// How far the done-node arm may go on a done tree's uncommitted tracked
+/// work. `balanced` (the default) keeps the tree; `aggressive` lets the
+/// caller salvage the tracked diff to a salvage ref, then prune.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreePruneDone {
+    Balanced,
+    Aggressive,
+}
+
+/// Resolve `worktree.prune_done`. A missing or malformed value degrades to
+/// `balanced`: today's keep contract is the safe side of every typo.
+pub fn worktree_prune_done(cwd: &Path) -> WorktreePruneDone {
+    match config_lookup(cwd, &["worktree", "prune_done"]) {
+        Some(v) if scalar_to_string(&v).as_deref() == Some("aggressive") => {
+            WorktreePruneDone::Aggressive
+        }
+        _ => WorktreePruneDone::Balanced,
+    }
 }
 
 impl SandboxUnavailablePolicy {
@@ -731,9 +773,12 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default freshness window for a single-flight answer. Matches the Pydantic
-/// default.
-pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
+/// Default freshness window for a single-flight answer. Raised from 10 s to
+/// one liveness cadence after the 1800 s reader-cost window measured the
+/// truth class at 7 concurrent children with 502 births: callers inside one
+/// cadence join the answering child instead of spawning their own. Matches
+/// the Pydantic default.
+pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 60;
 /// Default join budget. Over the 23.2 s worst-measured roster read, so a loaded
 /// box joins instead of timing out. Matches the Pydantic default.
 pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
@@ -2613,5 +2658,108 @@ mod tests {
         let cwd =
             write_project_settings("ams-pad", "[auto_merge]\nmerge_strategy = \" squash \"\n");
         assert_eq!(auto_merge_strategy(&cwd), "squash");
+    }
+
+    // --- the config search ceiling -------------------------------
+
+    struct CeilingFixture {
+        base: PathBuf,
+        inside: PathBuf,
+        outside: PathBuf,
+        prior_global: Option<std::ffi::OsString>,
+    }
+
+    impl CeilingFixture {
+        fn new(tag: &str) -> Self {
+            let base =
+                std::env::temp_dir().join(format!("fno-ceiling-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let inside = base.join("inside");
+            let outside = base.join("outside");
+            for dir in [&inside, &outside] {
+                std::fs::create_dir_all(dir.join(".fno")).unwrap();
+            }
+            std::fs::write(
+                inside.join(".fno/config.toml"),
+                "plans_dir = \"inside-plans\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                outside.join(".fno/config.toml"),
+                "plans_dir = \"outside-plans\"\n",
+            )
+            .unwrap();
+            // Pin the global tier into `inside` (the pinned path's config.toml
+            // sibling), so the HOME fallback never reaches the real machine.
+            let prior_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+            std::env::set_var(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                inside.join(".fno/settings.json"),
+            );
+            CeilingFixture {
+                base,
+                inside,
+                outside,
+                prior_global,
+            }
+        }
+    }
+
+    impl Drop for CeilingFixture {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_CONFIG_SEARCH_ROOT");
+            std::env::remove_var("FNO_CONFIG");
+            match &self.prior_global {
+                Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+                None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+            }
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn search_ceiling_drops_a_discovered_config_outside_every_root() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let fx = CeilingFixture::new("drop");
+        std::env::set_var("FNO_CONFIG_SEARCH_ROOT", &fx.inside);
+
+        let candidates = config_candidates(&fx.outside);
+        assert!(
+            !candidates.iter().any(|c| c.starts_with(&fx.outside)),
+            "a discovered config outside every ceiling root must be dropped"
+        );
+        assert_eq!(
+            config_lookup(&fx.outside, &["plans_dir"])
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .as_deref(),
+            Some("inside-plans"),
+            "the inside global tier still answers"
+        );
+    }
+
+    #[test]
+    fn search_ceiling_unset_reads_every_candidate() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let fx = CeilingFixture::new("unset");
+        assert!(config_candidates(&fx.outside)
+            .iter()
+            .any(|c| c == &fx.outside.join(".fno/config.toml")));
+    }
+
+    #[test]
+    fn explicit_fno_config_ignores_the_search_ceiling() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let fx = CeilingFixture::new("explicit");
+        std::env::set_var("FNO_CONFIG", fx.outside.join(".fno/config.toml"));
+        std::env::set_var("FNO_CONFIG_SEARCH_ROOT", &fx.inside);
+
+        assert_eq!(
+            config_candidates(&fx.outside),
+            vec![fx.outside.join(".fno/config.toml")],
+            "the explicit pin is read under any ceiling, as in Python"
+        );
     }
 }

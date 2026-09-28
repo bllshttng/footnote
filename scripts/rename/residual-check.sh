@@ -13,16 +13,13 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)" || { echo "residual-check: not a git repo" >&2; exit 2; }
 cd "$ROOT"
 
-# The only allowed mentions: this guard's own pattern list and third-party
-# packaging tokens in lockfiles (abi3 wheel tags, hermit-abi crate). The
-# state-root baseline is a frozen inventory of existing top-level names: its
-# `.abilities` row records the legacy dir the rename moved off the root, so
-# the scan exempts the data file (check-state-root-rows.sh diffs against it).
+# The only allowed mentions: this guard's own pattern list, third-party
+# packaging tokens in lockfiles, and marked forensic names in inventories.
+# The marker preserves historical data labels; it never exempts a runtime path.
 KEEP_FILES=(
   ':!scripts/rename/**'
   ':!*.lock'
   ':!**/*.lock'
-  ':!scripts/ci/state-root-rows.baseline'
 )
 
 # pattern  label  [extra-pathspec ...]

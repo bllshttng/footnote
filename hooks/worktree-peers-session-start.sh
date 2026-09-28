@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - worktree peers session start
 # Shared SessionStart carrier for the worktree peer overlap advisory.
 #
 # One path for both harness manifests: Claude registers this carrier directly

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - inject governing law context
 # Put the live laws that govern a review beside the review as it starts.
 # The matcher and the index read live in `fno inbox law stage` (mode stage).
 set -uo pipefail

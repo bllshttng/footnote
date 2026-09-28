@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - cache keepalive inject
 # Inject cache-keepalive prompt at session start (conditional on project opt-in).
 # Checks .claude/settings.local.json for "cacheKeepalive": true.
 # If not opted in, exits silently.
