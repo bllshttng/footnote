@@ -52,9 +52,6 @@ def test_state_root_and_divergent_claims_root_both_granted(
     configured.mkdir()
     claims_home = tmp_path / "home" / ".fno"
     (claims_home / "claims").mkdir(parents=True)
-    agents_home = tmp_path / "agents-home"
-    agents_home.mkdir()
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setattr("fno.paths.state_dir", lambda: configured)
     monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "home")
     monkeypatch.setattr(
@@ -64,11 +61,7 @@ def test_state_root_and_divergent_claims_root_both_granted(
         "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
     )
 
-    assert worker_writable_dirs(tmp_path) == [
-        str(configured),
-        str(agents_home),
-        str(claims_home),
-    ]
+    assert worker_writable_dirs(tmp_path) == [str(configured), str(claims_home)]
 
 
 def test_granted_root_is_an_ancestor_of_the_live_claim_store(tmp_path, monkeypatch):
@@ -90,6 +83,9 @@ def test_granted_root_is_an_ancestor_of_the_live_registry_path(tmp_path, monkeyp
     claims_root = tmp_path / "elsewhere"
     (claims_root / ".fno" / "claims").mkdir(parents=True)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    # Same shape as the claims sibling: the store exists, and the grant has to
+    # reach it. The autouse fixture points FNO_AGENTS_HOME here.
+    (tmp_path / ".fno" / "agents").mkdir(parents=True, exist_ok=True)
 
     from fno import paths
 

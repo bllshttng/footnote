@@ -179,17 +179,6 @@ def _state_roots() -> list[Path]:
     except Exception:
         pass
     try:
-        from fno.paths import agents_registry_path
-
-        registry_root = Path(agents_registry_path()).parent
-        if not any(
-            registry_root == root or registry_root.is_relative_to(root)
-            for root in out
-        ):
-            out.append(registry_root)
-    except Exception:
-        pass
-    try:
         from fno.claims.io import claims_dir, global_claims_root
 
         # The claim store's own root, not the store: a worker creates the
@@ -199,6 +188,15 @@ def _state_roots() -> list[Path]:
         pass
     try:
         out.append(_mail_bus_root())
+    except Exception:
+        pass
+    try:
+        from fno.paths import agents_registry_path
+
+        # The registry write directory; FNO_AGENTS_HOME relocates it independently of state_dir.
+        registry_dir = agents_registry_path().parent
+        if not any(registry_dir.is_relative_to(root) for root in out):
+            out.append(registry_dir)
     except Exception:
         pass
     return out
