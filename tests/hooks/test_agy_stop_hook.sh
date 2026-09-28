@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test suite for the agy Stop-hook adapter (hooks/agy-target-stop-hook.sh).
+# Test suite for the agy Stop-hook adapter (hooks/footnote-agy-target-stop-hook.sh).
 #
 # The adapter is a thin translator over `fno-agents loop-check` for agy's
 # Gemini-family wire format: camelCase stdin, decision:"continue" to KEEP WORKING,
@@ -22,12 +22,17 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
+HOOK="${REPO_ROOT}/hooks/footnote-agy-target-stop-hook.sh"
+LEGACY_HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
 
 PASS=0; FAIL=0; SKIP_COUNT=0
 log()  { printf '[agy] %s\n' "$*"; }
 pass() { PASS=$((PASS+1)); printf '[agy] PASS: %s\n' "$*"; }
-fail() { FAIL=$((FAIL+1)); printf '[agy] FAIL: %s\n' "$*" >&2; }
+fail() {
+    FAIL=$((FAIL+1))
+    printf '[agy] FAIL: %s\n' "$*" >&2
+    [[ -z "${HOOK_STDERR:-}" ]] || printf '[agy] stderr: %s\n' "$HOOK_STDERR" >&2
+}
 skip() { SKIP_COUNT=$((SKIP_COUNT+1)); printf '[agy] SKIP: %s\n' "$*" >&2; }
 
 [[ -f "$HOOK" ]] || { fail "hook not found at $HOOK"; exit 1; }
@@ -111,6 +116,25 @@ log "T1: no state file -> allow {}"
         fail "T1: expected {} allow; rc=$HOOK_RC stdout=$HOOK_STDOUT"
     fi
     rm -rf "$TMP_DIR" 2>/dev/null || true
+}
+
+# ── T13: an existing agy hooks.json path still reaches the branded adapter ───
+log "T13: legacy adapter path remains valid during setup migration"
+{
+    TMP_DIR="$(mktemp -d)"; HOME_DIR="${TMP_DIR}/home"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+    TR="${TMP_DIR}/t.jsonl"; printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$TR"
+    INPUT="{\"transcriptPath\":\"${TR}\",\"fullyIdle\":true,\"conversationId\":\"legacy-path\"}"
+    CURRENT_HOOK="$HOOK"; HOOK="$LEGACY_HOOK"
+    run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}"
+    HOOK="$CURRENT_HOOK"
+    if [[ "$HOOK_RC" -eq 0 && "$(stdout_decision)" == "<none>" ]] \
+        && printf '%s' "$HOOK_STDOUT" | jq -e . >/dev/null 2>&1; then
+        pass "T13: legacy path forwards to the branded adapter"
+    else
+        fail "T13: legacy adapter path failed; rc=$HOOK_RC stdout=$HOOK_STDOUT"
+    fi
+    cleanup
 }
 
 # ── T2: fullyIdle false -> continue, binary NOT called ────────────────────────
@@ -206,6 +230,10 @@ log "T6: loop-check garbage -> continue + event"
     STUB="${TMP_DIR}/fno-agents"
     make_stub "$STUB" <<'STUB'
 #!/usr/bin/env bash
+if [[ "${1:-} ${2:-}" == "state path" && -n "${FNO_TEST_SPACE:-}" ]]; then
+    printf '%s\n' "${FNO_TEST_SPACE}/${3:-}"
+    exit 0
+fi
 echo 'not json at all'
 STUB
     INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c6\"}"

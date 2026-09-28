@@ -44,6 +44,8 @@ def _carry_harness_session_id(harness_session_id):
 
 #: Env that would route state back at the developer's checkout or fleet.
 _DEV_ENV_KEYS = (
+    "FNO_CONFIG",
+    "FNO_STATE_DIR",
     "FNO_REPO_ROOT",
     "FNO_SPACES_DIR",
     "FNO_CLAIMS_ROOT",
@@ -71,15 +73,51 @@ def _front_door() -> Path | None:
 def _run_fno(repo: Path, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """One fresh CLI process: the journey must exercise the real verb surface."""
     env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
-    # The journey rides an attributable identity: init stamps the node lock and
-    # acquires the claim against a harness session, and the shared conftest
-    # deliberately strips every marker so tests run as bare operator shells. A
-    # session that wants agent semantics sets its own marker (conftest's
-    # documented carve-out), so this journey carries one - the real session id
-    # when pytest itself runs inside a harness, a synthetic one otherwise.
-    env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
+    # Only a real session marker proves harness ownership. Without one, init
+    # must exercise the transient operator-claim path instead of treating a
+    # made-up id as a session it cannot attribute.
+    if _HARNESS_SESSION_ID:
+        env["CLAUDE_CODE_SESSION_ID"] = _HARNESS_SESSION_ID
+    else:
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env["FNO_STATE_DIR"] = str(repo / ".fno")
+    env["FNO_TRACKER_BACKEND"] = "graph"
+    argv = [sys.executable, "-c", "from fno.cli import app; app()", *args]
+    if args and args[0] == "backlog":
+        binary = env.get("FNO_AGENTS_FRONT")
+        if not binary:
+            pytest.skip("the native backlog front is required for this journey")
+        argv = [binary, *args]
     return subprocess.run(
-        [sys.executable, "-c", "from fno.cli import app; app()", *args],
+        argv,
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def _run_native_backlog(
+    repo: Path, home: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    """Use the Rust backlog door for actions ported off the Python app."""
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
+    if _HARNESS_SESSION_ID:
+        env["CLAUDE_CODE_SESSION_ID"] = _HARNESS_SESSION_ID
+    else:
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env["HOME"] = str(home)
+    env["FNO_STATE_DIR"] = str(repo / ".fno")
+    env["FNO_TRACKER_BACKEND"] = "graph"
+    return subprocess.run(
+        [str(binary), "backlog", *args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -95,6 +133,7 @@ def _run_front_door(
     """Run a verb owned by this checkout's compiled Rust front."""
     env = {k: v for k, v in os.environ.items() if k not in _DEV_ENV_KEYS}
     env.setdefault("CLAUDE_CODE_SESSION_ID", _HARNESS_SESSION_ID or "journey-fixture")
+    env["FNO_STATE_DIR"] = str(repo / ".fno")
     env["FNO_TRACKER_BACKEND"] = "graph"
     return subprocess.run(
         [str(front), *args],
@@ -116,6 +155,12 @@ def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     repo.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(REPO_ROOT))
+    from fno.rust_binary import find_dev_binary
+
+    native = find_dev_binary()
+    if native is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_FRONT", str(native))
     for key in _DEV_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
@@ -129,6 +174,9 @@ def clean_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     launcher = shim / "fno"
     launcher.write_text(
         "#!/bin/sh\n"
+        'if [ "${1:-}" = "backlog" ] && [ -n "${FNO_AGENTS_FRONT:-}" ]; then\n'
+        '  exec "$FNO_AGENTS_FRONT" "$@"\n'
+        "fi\n"
         + shlex.quote(sys.executable)
         + " -c 'from fno.cli import app; app()' \"$@\"\n"
     )
@@ -162,8 +210,9 @@ def test_authorized_target_init_journey(clean_machine):
     """Setup -> minted fixture node -> authorized init -> matching readbacks.
 
     The node is "authorized" because this test minted it in the graph it owns:
-    a fresh idea with a declared deliverable count, claimed by the init it
-    dispatched. Every readback must agree with that one identity.
+    a fresh idea with a declared deliverable count. Every readback must agree
+    with that identity; without a harness session, init preserves input and
+    leaves graph_node_id null rather than claiming it.
     """
     home, repo = clean_machine
     front = _front_door()
@@ -188,8 +237,8 @@ def test_authorized_target_init_journey(clean_machine):
     init = _run_fno(repo, home, "do", "target", "init", "--input", node, "--deliverables", "1")
     assert init.returncode == 0, f"init rc={init.returncode}\n{init.stdout}\n{init.stderr}"
 
-    # 4. The manifest readback: written under the ISOLATED state root, naming
-    #    this node AND the claim it acquired for it - the matching receipt.
+    # 4. The manifest readback: written under the ISOLATED state root and
+    #    preserving this input. A proven harness identity adds the node claim.
     #    Three candidate roots: repo-local (<repo>/.fno/, where a default
     #    resolve writes it - the CI runner's case), the isolated HOME's spaces
     #    dir, and the conftest autouse sandbox's tmp/spaces pin (which of the
@@ -211,7 +260,11 @@ def test_authorized_target_init_journey(clean_machine):
     matching = [m for m in manifests if node in m.read_text()]
     assert matching, [m.name for m in manifests]
     manifest_text = matching[0].read_text()
-    assert f"node:{node}" in manifest_text, manifest_text
+    if _HARNESS_SESSION_ID:
+        assert f'node:{node}' in manifest_text, manifest_text
+    else:
+        assert f'input: "{node}"' in manifest_text, manifest_text
+        assert "graph_node_id: null" in manifest_text
 
     # 5. The claim readback: the claims store answers for this exact key. When
     #    the run carries a provable harness session, the claim is still live;
@@ -222,9 +275,12 @@ def test_authorized_target_init_journey(clean_machine):
         assert '"state": "live"' in claim.stdout, claim.stdout
 
     # 6. The node readback: the graph agrees the work is in progress.
-    got = _run_fno(repo, home, "backlog", "get", node)
+    got = _run_native_backlog(repo, home, "get", node)
     assert got.returncode == 0, got.stderr
-    assert "in_progress" in got.stdout, got.stdout
+    if _HARNESS_SESSION_ID:
+        assert "in_progress" in got.stdout, got.stdout
+    else:
+        assert '"status": "idea"' in got.stdout, got.stdout
 
 
 def test_both_command_families_usable_after_init(clean_machine):

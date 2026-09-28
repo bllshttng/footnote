@@ -210,7 +210,7 @@ Gemini/Codex provide the last assistant message directly in hook input — they 
 
 ### agy (Antigravity CLI): a native `Stop`-hook adapter, not a fork
 
-agy is its own lane. Its hooks use Claude-shaped event names (`PreToolUse`/`PostToolUse`/`Stop`/...) but a Gemini-family wire format, so `target-stop-hook.sh` is NOT reused verbatim. Instead `hooks/agy-target-stop-hook.sh` is a thin translator over the SAME `fno-agents loop-check` authority (the OpenCode model, different surface). The deltas the adapter bridges:
+agy is its own lane. Its hooks use Claude-shaped event names (`PreToolUse`/`PostToolUse`/`Stop`/...) but a Gemini-family wire format, so `target-stop-hook.sh` is NOT reused verbatim. Instead `hooks/footnote-agy-target-stop-hook.sh` is a thin translator over the SAME `fno-agents loop-check` authority (the OpenCode model, different surface). The deltas the adapter bridges:
 
 | Aspect | Claude Code `Stop` | agy `Stop` |
 |--------|--------------------|------------|

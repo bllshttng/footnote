@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: SessionStart - frontdoor nudge session start
 # SessionStart hook: when the `fno` Rust front door is not active on PATH, start
 # the plugin installer (.claude-plugin/postinstall.sh) or remind the user to
 # install it. Claude Code has no plugin install hook, so this is the only place a

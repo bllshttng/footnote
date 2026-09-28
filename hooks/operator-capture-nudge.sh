@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: multi-event - surface captured operator turns
 # Stop + SessionStart hook: report the operator-capture queue depth, so the
 # king's capture loop is a measured number at the moment, not prose to
 # remember.

@@ -298,7 +298,7 @@ def _pi_install() -> IntegrationResult:
 # integration registers footnote's Stop adapter in agy's hooks.json customization
 # file (~/.gemini/config/hooks.json, the global dir - one install covers every
 # project). The command references the adapter that ships in the plugin
-# (hooks/agy-target-stop-hook.sh), resolved via the plugin-root pointer; a CLI-only
+# (hooks/footnote-agy-target-stop-hook.sh), resolved via the plugin-root pointer; a CLI-only
 # install (uv/curl) carries no hooks/, so it degrades to a "manual" finish rather
 # than wiring a path that does not exist.
 
@@ -312,7 +312,7 @@ def _agy_adapter_path() -> "Optional[Path]":
     # exist), so gate on is_file(): None means "not in this install" -> manual.
     from fno.paths import resolve_plugin_script
 
-    p = resolve_plugin_script("hooks/agy-target-stop-hook.sh")
+    p = resolve_plugin_script("hooks/footnote-agy-target-stop-hook.sh")
     return p if p.is_file() else None
 
 
@@ -357,7 +357,7 @@ def _agy_install() -> IntegrationResult:
             label,
             "manual",
             note="adapter ships in the plugin (not this CLI-only install); wire "
-            "hooks/agy-target-stop-hook.sh into ~/.gemini/config/hooks.json by hand",
+            "hooks/footnote-agy-target-stop-hook.sh into ~/.gemini/config/hooks.json by hand",
         )
     from fno.rust_binary import call_binary_json
 

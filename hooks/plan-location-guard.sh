@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreToolUse - plan location guard
 # plan-location-guard.sh - PreToolUse hook: a NEW plan/design doc must be saved
 # under the configured plans dir (unified-dispatch PRD G10).
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PreInvocation - agy crown inject
 # hooks/agy-crown-inject.sh -- agy (Antigravity CLI) PreInvocation crown adapter.
 #
 # agy has NO session-start event (five events only: PreToolUse, PostToolUse,

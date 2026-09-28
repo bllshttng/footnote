@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# fno hook: PostToolUse - format on edit
 #
 # PostToolUse on Edit|Write: format the file that was just written.
 #
