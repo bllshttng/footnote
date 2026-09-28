@@ -34,13 +34,22 @@ def _render_in_rust(payload: dict) -> str:
     from fno.rust_binary import find_dev_binary, resolve_binary
 
     binary = find_dev_binary() or resolve_binary() or "fno-agents"
-    result = subprocess.run(
-        [str(binary), "mail-envelope", "--registry", str(agents_registry_path())],
-        input=_json.dumps(payload),
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            [str(binary), "mail-envelope", "--registry", str(agents_registry_path())],
+            input=_json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        # The renderer reads the registry under a shared flock; a sustained
+        # writer leaves the send blocked with no envelope to paste. Same
+        # refusal shape as a failed render below.
+        raise ForgedEnvelopeError(
+            "mail-envelope render timed out after 5s (registry lock contention?); "
+            "refusing to deliver a body without its attribution frame."
+        ) from None
     if result.returncode:
         raise ForgedEnvelopeError(result.stderr.strip())
     rendered = result.stdout.removesuffix("\n")
