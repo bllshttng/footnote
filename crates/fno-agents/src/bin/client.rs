@@ -914,6 +914,11 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "trace" {
         return fno_agents::client_verbs::run_trace(&args[1..], &AgentsHome::from_env());
     }
+    // rename --from-journal: the daemon-free label rebuild, keyed by session
+    // id; every other rename form still RPCs the daemon below.
+    if verb == "rename" && args[1..].iter().any(|a| a == "--from-journal") {
+        return fno_agents::rename::run_from_journal(&args[1..], &AgentsHome::from_env());
+    }
     // registry-json: the daemon-free registry projection the hooks read.
     // Starts nothing, so the Stop hook's never-lazy-start promise holds.
     if verb == "registry-json" {

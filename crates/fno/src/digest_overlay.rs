@@ -95,6 +95,13 @@ pub fn status_row_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "status_row", true)
 }
 
+/// `config.mux.paint_background` (default ON) - the OSC background
+/// takeover's kill switch. OFF = fno never writes the terminal's default
+/// colors and never restores them; the terminal's own scheme stays.
+pub fn paint_background_enabled(cwd: &Path) -> bool {
+    mux_bool(cwd, "paint_background", true)
+}
+
 /// `config.resource_meter.enabled` (default OFF) - the whole-machine meter's
 /// toggle. OFF because the meter needs `macmon` on PATH, which fno core does
 /// not depend on; a meter that silently renders nothing must not ship on.
