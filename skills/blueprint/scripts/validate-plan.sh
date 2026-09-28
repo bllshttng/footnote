@@ -268,11 +268,20 @@ _plan_filename_node_id() {
     local base
     base=$(basename "$1")
     printf '%s' "$base" | awk '
-        match($0, /-[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\.md$/) {
+        match($0, /-[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}\.md$/) {
             print substr($0, RSTART + 1, RLENGTH - 4)
             exit
         }
     '
+}
+
+# Is this string one of the two id shapes a graph can hold? The canonical
+# <prefix>-<hex> and the bare "<prefix><hex>" literals an un-normalized older
+# mint produced both bind. A bare all-hex word stays out (the letter-led
+# git-hash shape is not an id; ERE has no lookahead, so two tests).
+_is_node_id_sh() {
+    [[ "$1" =~ ^[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}$ ]] \
+        && [[ ! "$1" =~ ^[0-9a-f]+$ ]]
 }
 
 # The decision ids the plan's frontmatter acknowledges, one per line. The
@@ -1036,7 +1045,7 @@ check_consolidation_file() {
     # and cannot run. Say NOT CHECKED here, in bash, where the absence is
     # readable - the delegate's W channel is fail-closed, for a damaged
     # index, not for a plan that names no node.
-    if [[ -z "$(_plan_node_id "$file")" ]] || [[ ! "$(_plan_node_id "$file")" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    if [[ -z "$(_plan_node_id "$file")" ]] || ! _is_node_id_sh "$(_plan_node_id "$file")"; then
         warn "$label: decisions_acknowledged check NOT CHECKED (no well-formed node:/claims: id in frontmatter) - not a pass"
     fi
     _src="$(_fno_source_python)"
@@ -1388,7 +1397,7 @@ PYEOF
     stage_node=$(_plan_node_id "$file")
     if [[ -z "$stage_node" ]]; then
         warn "$label: stage-law check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
-    elif [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    elif _is_node_id_sh "$stage_node"; then
         local stage_bin
         stage_bin=$(resolve_front_bin)
         if [[ -z "$stage_bin" ]]; then
@@ -1509,7 +1518,7 @@ check_node_binding_file() {
             error "$label: the filename names $fn_node but no node:/claims: key does - the plan binds to nothing and the node-id gates skip it. Add node: $fn_node to the frontmatter"
         fi
     else
-        if [[ -n "$fm_node" && ! "$fm_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+        if [[ -n "$fm_node" ]] && ! _is_node_id_sh "$fm_node"; then
             # A malformed id mutes the id-keyed gates exactly like an absent
             # one, so it gets the same NOT CHECKED voice, not a clean OK.
             warn "$label: the node:/claims: id in frontmatter is malformed - the id-keyed gates run NOT CHECKED against it. Use one well-formed id like ${fn_node:-x-abc123}"
@@ -2454,7 +2463,7 @@ _print_bind_hint() {
     [[ -z "$bind_target" ]] && return 0
     # A malformed extraction (an empty flow list, a stray bracket) must never
     # reach the hint as a copy-paste id. Same shape the dispatch resolver reads.
-    [[ "$bind_target" =~ ^[A-Za-z][A-Za-z0-9]{0,7}-[0-9a-fA-F]{4,8}$ ]] || return 0
+    _is_node_id_sh "$bind_target" || return 0
     local abs_path
     abs_path="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
     echo "validate-plan.sh: plan validated for $bind_target. Bind it so the graph can see it:" >&2
