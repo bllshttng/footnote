@@ -1126,21 +1126,6 @@ fn run_reap_open(args: &[String]) -> i32 {
             None,
         )
         .map_err(|e| e.to_string())?;
-        // The settle rolls each settled node off in_progress when nothing
-        // holds it open any more (the Python twin's status stamp; the
-        // read-back below verifies the store agrees).
-        let settled: Vec<String> = receipt
-            .get("node_ids")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for nid in &settled {
-            roll_reap_status(rows, nid);
-        }
         report.replace(Some(receipt));
         Ok(true)
     });
@@ -1220,7 +1205,8 @@ fn run_reap_open(args: &[String]) -> i32 {
             && row.get("harness").and_then(Value::as_str) == Some(harness.trim())
             && row.get("session_id").and_then(Value::as_str) == Some(session_id.trim())
     });
-    let (higher_precedence, expected_in_progress, remaining) = reap_settlement_state(entry);
+    let (higher_precedence, expected_in_progress, remaining) =
+        crate::graph_keeper::reap_settlement_state(entry);
     let status = entry.get("status").and_then(Value::as_str).unwrap_or("");
     let status_ok = higher_precedence || (status == "in_progress") == expected_in_progress;
     if matching_open || !status_ok {
@@ -1248,58 +1234,6 @@ status={status} remaining_open_do={remaining}"
         );
     }
     0
-}
-
-/// The settlement facts one node's row answers, shared by the in-write roll
-/// and the read-back so the two can never drift: higher-precedence fields
-/// (a done, superseded, deferred or PR-bearing row keeps its own status),
-/// then a live execute row or a lock keeps `in_progress`, and everything
-/// else falls back to `idea`.
-#[allow(clippy::type_complexity)]
-fn reap_settlement_state(entry: &Value) -> (bool, bool, usize) {
-    let higher = ["completed_at", "superseded_by", "deferred_at", "pr_number"]
-        .iter()
-        .any(|f| entry.get(*f).map(|v| !v.is_null()).unwrap_or(false))
-        || entry.get("persisted_status").and_then(Value::as_str) == Some("blocked")
-        || entry.get("status").and_then(Value::as_str) == Some("blocked");
-    let locked = entry
-        .get("locked_by")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
-    let remaining = entry
-        .get("sessions")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter(|r| crate::graph_store::is_open_phase_row(r, "execute"))
-                .count()
-        })
-        .unwrap_or(0);
-    (higher, locked || remaining > 0, remaining)
-}
-
-/// Roll one settled node off `in_progress` when nothing holds it open: the
-/// same predicate the read-back verifies, applied inside the write.
-fn roll_reap_status(rows: &mut [Value], node_id: &str) {
-    let Some(idx) = rows
-        .iter()
-        .position(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
-    else {
-        return;
-    };
-    let (higher, expected_in_progress, _remaining) = reap_settlement_state(&rows[idx]);
-    if higher {
-        return;
-    }
-    let status = if expected_in_progress {
-        "in_progress"
-    } else {
-        "idea"
-    };
-    rows[idx]
-        .as_object_mut()
-        .expect("row is an object")
-        .insert("status".into(), Value::String(status.into()));
 }
 
 #[cfg(test)]
