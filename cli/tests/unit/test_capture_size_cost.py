@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from fno.cli import app
 from fno.graph._intake import VALID_NODE_TYPES, normalize_size, normalize_type
 from fno.graph.store import read_graph_strict
+from tests.conftest import run_native_create
 
 runner = CliRunner()
 
@@ -171,13 +172,11 @@ def test_intake_non_node_type_falls_back_silently(tmp_path, monkeypatch, declare
 
 
 def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
-    """`add`/`idea` validate --type against the same set `update` does."""
-    _route_graph(tmp_path, monkeypatch)
-    result = runner.invoke(
-        app, ["backlog", "add", "T", "--type", "task", "--difficulty", "medium"]
-    )
+    """`add` validates --type against the set `update` validates."""
+    g, _ = _route_graph(tmp_path, monkeypatch)
+    result = run_native_create(g, "add", "T", "--type", "task", "--difficulty", "medium")
     assert result.exit_code == 1
-    assert "invalid type 'task'" in result.output
+    assert "invalid type 'task'" in (result.output + result.stderr)
 
 
 # -- backlog done stamps cost ledger->node ---------------------------------
