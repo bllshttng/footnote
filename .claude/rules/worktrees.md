@@ -32,7 +32,7 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:
 
 - **DIRTY** - done-and-merged tree goes whatever status; live cwd inside holds (law d-cfcf5a8e).
-- **done-node** - merged sweep prunes a finished clean 30m+ tree, branch kept. How a done tree with uncommitted TRACKED changes is judged is `worktree.prune_done`'s call (below).
+- **done-node** - merged sweep prunes a finished clean 30m+ tree, branch kept. `worktree.prune_done` judges its uncommitted tracked changes (below).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH.
 - **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
@@ -40,12 +40,12 @@ The removal contract, missing until 174 trees piled up (74 GB). Four buckets, on
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
 
-**`worktree.prune_done`** decides what a done tree's uncommitted tracked changes are worth:
+**`worktree.prune_done`** judges a done tree's uncommitted tracked changes:
 
-- **`balanced`** (default) - today's contract. The diff is uncommitted work nobody named, so a modified-tracked tree keeps and is reported (`kept (dirty)`, `reason=modified-tracked`). Untracked files are salvaged by the caller.
-- **`aggressive`** - salvage first, then prune. The gate's done-node receipt carries `prune_done=aggressive`. The salvage pass writes every tracked change (staged and unstaged) to a ref named after the node (`refs/fno/salvage/<node>`). The tree prunes once the 30 minute grace passes and no live session holds it. The untracked salvage runs under both values.
+- **`balanced`** (default) - the diff is work nobody named: a modified-tracked tree keeps (`kept (dirty)`). Untracked files are salvaged by the caller.
+- **`aggressive`** - the done-node receipt carries `prune_done=aggressive`. The salvage pass writes the tracked diff (staged and unstaged) to `refs/fno/salvage/<node>`. The tree then prunes past the 30m grace with no live session. Untracked salvage runs under both.
 
-Both values keep the branch. Both still block on conflicts (`unmerged`), a worker mid-setup (`unborn`), an unanswerable probe, a live claim, a live cwd, and the grace window. A malformed value degrades to `balanced`.
+Both keep the branch and still block on conflicts, unborn trees, unreadable probes, live claims, a live cwd, and the grace window. A malformed value degrades to `balanced`.
 
 Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 
