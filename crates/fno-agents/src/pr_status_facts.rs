@@ -102,21 +102,25 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
     let dispatch = crate::agents_config::auto_merge_grant_dispatches(&cwd);
     let mut material = format!("{head}|{state}|{enabled}|{dispatch}|");
 
-    // The PR's dispatch-hold word, through the same probe the merge path
-    // reads: exit 0 clear, 3 held, anything else unreadable.
-    let hold_word = Command::new(crate::scrape::fno_bin())
-        .args(["do", "pr", "hold-check", &pr.to_string()])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .map(|out| {
-            format!(
-                "{:?}:{}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )
-        })
-        .unwrap_or_else(|| "spawn-failed".to_string());
+    // The PR's dispatch-hold word. The status read supplies the probe it
+    // already ran (`hold_probe_word`); the op door keeps its own probe for
+    // callers that did not. Exit 0 clear, 3 held, anything else unreadable.
+    let hold_word = match payload.get("hold_probe_word").and_then(Value::as_str) {
+        Some(word) => word.to_string(),
+        None => Command::new(crate::scrape::fno_bin())
+            .args(["do", "pr", "hold-check", &pr.to_string()])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .map(|out| {
+                format!(
+                    "{:?}:{}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+            })
+            .unwrap_or_else(|| "spawn-failed".to_string()),
+    };
     material.push_str(&hold_word);
     material.push('|');
 

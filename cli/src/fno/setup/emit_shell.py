@@ -162,7 +162,7 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     if _is_project_relative(plans_raw):
         plans_tmpl = f"$REPO_ROOT/{plans_raw}"
     elif _has_template(plans_raw):
-        plans_tmpl = str(_paths.plans_dir())
+        plans_tmpl = str(_paths.plans_content_dir())
     elif plans_raw.startswith("~"):
         plans_tmpl = _home_relative(plans_raw)
     else:

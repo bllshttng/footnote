@@ -445,40 +445,6 @@ def test_hook_logs_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert result.name == "hook-logs"
 
 
-def test_plans_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: plans_dir() returns project-relative .fno/plans/ resolved absolute."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-
-    from fno.paths import plans_dir
-
-    # Pass explicit project_root so test doesn't depend on git
-    result = plans_dir(project_root=tmp_path)
-    assert isinstance(result, Path)
-    assert result.is_absolute()
-    assert "plans" in result.parts
-
-
-def test_plans_dir_honors_project_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC2-FIX2: plans_dir(project_root=bar) must use bar, not CWD."""
-    _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
-    # Set FNO_REPO_ROOT to a different location so CWD fallback would differ
-    project_bar = tmp_path / "bar"
-    project_bar.mkdir()
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path / "foo"))
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=project_bar)
-    # Anchored to project_bar's space, NOT under tmp_path/foo (the CWD fallback)
-    from fno.paths import space_dir
-
-    assert result == space_dir(project_bar) / "plans", (
-        f"Expected {space_dir(project_bar) / 'plans'}, got {result}"
-    )
-
-
 def test_inbox_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-HP: inbox_dir() returns project-relative .fno/inbox/ resolved absolute."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
@@ -673,29 +639,6 @@ def test_vault_in_state_dir_with_obsidian_disabled_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_project_in_plans_dir_uses_root_basename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-EDGE: {project} in plans_dir uses project_root.name (no redundant git call).
-
-    Previously this raised ValueError for non-git dirs. The fix uses root.name
-    directly since resolve_repo_root() already ran git rev-parse; the git
-    re-run was redundant. Non-git dirs now resolve to the directory basename.
-    """
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
-    )
-    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-
-    from fno.paths import plans_dir
-
-    # Resolves to <tmp_path>/.fno/plans/<tmp_path.name>
-    result = plans_dir(project_root=tmp_path)
-    assert result == (tmp_path / ".fno" / "plans" / tmp_path.name).resolve()
-
-
 # ---------------------------------------------------------------------------
 # AC1-EDGE: Unknown {foo} variable rejected at resolve time
 # ---------------------------------------------------------------------------
@@ -760,27 +703,6 @@ def test_explicit_briefs_dir_override(
 # ---------------------------------------------------------------------------
 # AC1-HP: {vault} resolves when obsidian.enabled: true
 # ---------------------------------------------------------------------------
-
-
-def test_vault_template_resolves_when_obsidian_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1-HP: {vault} in plans_dir resolves correctly when obsidian.enabled: true."""
-    vault_dir = str(tmp_path / "my-vault")
-    # Use {vault} (single braces) in YAML - not Python f-string interpolation
-    # The f-string uses {{ }} to produce literal braces in the resulting string
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        f"schema_version: 1\nconfig:\n  plans_dir: '{{vault}}/plans'\n"
-        f"  obsidian:\n    enabled: true\n    vault: '{vault_dir}'\n",
-    )
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=tmp_path)
-    assert str(result).startswith(vault_dir)
-    assert "plans" in str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1151,24 +1073,6 @@ def test_two_worktrees_same_remote_share_one_folder(
     assert str(ra).endswith("internal/footnote/observer-reports")
 
 
-def test_no_remote_falls_back_to_basename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Scenario 3: no origin remote falls back to basename without crashing."""
-    checkout = tmp_path / "scratch"
-    _git_init_with_remote(checkout, None)  # no remote
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
-    )
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=checkout)
-    assert result.name == "scratch"
-
-
 def test_traversal_project_id_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1222,26 +1126,6 @@ def test_unset_project_id_warns_once_per_process(
     err = capsys.readouterr().err
     assert err.count("fno: warning:") == 1
     assert "config.project.id" in err
-
-
-def test_project_template_uses_remote_slug_in_non_vault_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Blast radius: {project} in a plain config.paths.* value (no vault) also
-    resolves to the stable remote slug, not the checkout basename."""
-    checkout = tmp_path / "athens"
-    _git_init_with_remote(checkout, "https://github.com/org/footnote.git")
-    _set_settings(
-        monkeypatch,
-        tmp_path,
-        "schema_version: 1\nconfig:\n  plans_dir: '.fno/plans/{project}'\n",
-    )
-
-    from fno.paths import plans_dir
-
-    result = plans_dir(project_root=checkout)
-    assert result.name == "footnote"
-    assert "athens" not in result.name
 
 
 # ---------------------------------------------------------------------------

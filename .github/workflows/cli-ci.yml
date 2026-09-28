@@ -1002,13 +1002,9 @@ jobs:
     if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
     name: cargo test (fno mux)
     runs-on: ubuntu-latest
-    # 20 against a load measured in single minutes: the mux lib suite, the
-    # real-process integration suite, and the workspace standalone journey,
-    # which moves with the crate it exercises. The 2026-08-27 measurement put
-    # everything except the fno-agents integration leg at about six minutes.
-    # No python or uv steps here: flock_interop.rs, the cross-language test,
-    # lives in fno-agents, and no fno crate test spawns the cli venv.
-    # The widest of 14 passing runs sampled 2026-09-24 was 11.1m.
+    # Three recent green runs put the combined job at 885s, 889s, and 891s.
+    # Its lib/bin step was 109-116s and serial integration 612-620s. Split the
+    # 38 integration test binaries by observed runtime; keep the existing 15m cap.
     timeout-minutes: 15
 
     steps:
@@ -1066,16 +1062,20 @@ jobs:
         working-directory: crates/fno
         run: cargo test --lib workspace_restore_fills_a_locate_tier_portal_and_names_the_tier -- --ignored --test-threads=1
 
-      - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
+      - name: cargo test integration binaries (fno mux shard 1 of 2)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
-        # The board/restore e2e binaries run FIRST: they are the ones that
-        # have regressed, and at the back of a serial suite a red lands at
-        # minute 31 instead of minute 5.
+        # Run the previously first failing binaries first and every selected
+        # test binary once, with the two integration shards divided by timing.
         working-directory: crates/fno
-        run: |
-          cargo test --test idle_cpu_budget_e2e --test mux_restore_doneness_e2e --test cross_door_property -- --test-threads=1
-          cargo test --test '*' -- --test-threads=1
+        run: >-
+          cargo test --test idle_cpu_budget_e2e --test mux_restore_doneness_e2e
+          --test cross_door_property --test persistence --test search_e2e
+          --test court_fold_degrade --test agent_edge_e2e --test squad_prune
+          --test focus_report_hold_e2e --test layout_e2e --test mouse_e2e
+          --test squad_prune_receipt --test pane_ls_identity
+          --test board_menu_keys_e2e --test squad_prune_live_pane
+          --test server_axis_alias_e2e --test server_spine -- --test-threads=1
 
       - name: Workspace standalone journey
         # The conformance journey on the real binaries: server, plain shell
@@ -1086,9 +1086,66 @@ jobs:
         # backend absent.
         run: bash tests/mux-workspace-standalone.sh
 
+  test-mux-integration:
+    needs: [pr-affected]
+    if: ${{ !cancelled() && needs.pr-affected.outputs.cargo == 'true' }}
+    name: cargo test integration (fno mux)
+    runs-on: ubuntu-latest
+    # Companion half of the measured test-binary split. Keep the existing
+    # timeout cap; the cargo test + schema parity rollup waits for both shards.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Clean cached Rust package artifacts
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: Build fno-agents binaries (mux tests spawn the worker)
+        working-directory: crates/fno-agents
+        run: |
+          cargo build --bins
+          worker="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)/debug/fno-agents-worker"
+          test -x "$worker"
+          echo "FNO_AGENTS_WORKER=$worker" >> "$GITHUB_ENV"
+
+      - name: cargo test integration binaries (fno mux shard 2 of 2)
+        working-directory: crates/fno
+        run: >-
+          cargo test --test agent_launcher_client_e2e
+          --test process_admission_e2e --test script_api_e2e
+          --test workspace_persistence_e2e --test client_e2e
+          --test multiclient_e2e --test proto_socket
+          --test idle_reaper_e2e --test mux_config_e2e --test keymap_e2e
+          --test mux_restore_shell_cwd_e2e --test cli_registry
+          --test test_owned_keeper_reap --test agent_launcher_journey
+          --test product_boundary --test attach_override_retire
+          --test attach_override_ac1 --test attach_override_ac5
+          --test backlog_door --test court_fold_live --test thread_portal_arg
+          -- --test-threads=1
+
   test:
     name: cargo test + schema parity
-    needs: [pr-affected, test-agents, test-agents-integration, test-mux]
+    needs: [pr-affected, test-agents, test-agents-integration, test-mux, test-mux-integration]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # The check name this workflow has always reported, now an aggregator over
@@ -1100,7 +1157,7 @@ jobs:
     steps:
       - name: All shards passed
         run: |
-          echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }}"
+          echo "test-agents=${{ needs.test-agents.result }} test-agents-integration=${{ needs.test-agents-integration.result }} test-mux=${{ needs.test-mux.result }} test-mux-integration=${{ needs.test-mux-integration.result }}"
           [ "${{ needs.test-agents.result }}" = "success" ] || {
             [ "${{ needs.test-agents.result }}" = "skipped" ] \
               && [ "${{ github.event_name }}" = "pull_request" ] \
@@ -1113,6 +1170,11 @@ jobs:
           } || exit 1
           [ "${{ needs.test-mux.result }}" = "success" ] || {
             [ "${{ needs.test-mux.result }}" = "skipped" ] \
+              && [ "${{ github.event_name }}" = "pull_request" ] \
+              && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
+          } || exit 1
+          [ "${{ needs.test-mux-integration.result }}" = "success" ] || {
+            [ "${{ needs.test-mux-integration.result }}" = "skipped" ] \
               && [ "${{ github.event_name }}" = "pull_request" ] \
               && [ "${{ needs.pr-affected.outputs.cargo }}" = "false" ]
           } || exit 1

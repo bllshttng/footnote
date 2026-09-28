@@ -445,6 +445,14 @@ def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run(argv, **kw):
+        # The sealed lane probes the binary's state-root door before relying
+        # on the pin; answer that handshake the way the current binary does.
+        if argv[1] == "state-root":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=kw["env"]["FNO_STATE_DIR"] + "\n",
+                stderr="",
+            )
         captured["env"] = kw.get("env")
         # The seal's handshake asks the state-root door first; the fake
         # binary honors the pin, then answers the client call itself.
