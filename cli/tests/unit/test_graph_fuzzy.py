@@ -31,6 +31,25 @@ def _entry(id: str, title: str, *, status: str = "ready", domain: str = "code") 
 # -- resolve_id: exact match --
 
 
+def test_resolve_id_refuses_flag_shaped_query_before_the_graph():
+    """A leaked flag is never a node id, and must not title-fuzzy-match."""
+    entries = [_entry("ab-00000001", "make --strict the default")]
+    for q in ("--strict", "-strict", " -strict"):
+        result = resolve_id(q, entries)
+        assert result.kind == "none", q
+        assert result.id is None
+
+
+def test_resolve_node_refuses_flag_shaped_query():
+    from fno.graph.fuzzy import resolve_node
+
+    entries = [_entry("ab-00000001", "X", status="ready")]
+    entries[0]["slug"] = "strict"
+    result = resolve_node("--strict", entries)
+    assert result.kind == "none"
+    assert result.id is None
+
+
 def test_scenario1_hp_exact_ab_id_resolves():
     """Scenario 1 (HP): exact ab- id resolves regardless of status."""
     entries = [_entry("ab-54e461b6", "Plan 02", status="done")]
