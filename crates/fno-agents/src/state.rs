@@ -1893,6 +1893,31 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
     Ok(registry)
 }
 
+/// Best-effort registry read for enrichment-only callers: a lock contended by
+/// a writer degrades to no registry instead of blocking the caller behind it.
+/// The envelope renderer reads the registry with `.ok()` semantics already
+/// (a missing or unreadable file renders unresolved identities), so a skipped
+/// read costs the same, while a blocking one deadlocked the send child behind
+/// the Python stamp lock until the subprocess timeout killed it.
+pub fn load_registry_best_effort(path: &Path) -> Option<Registry> {
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(registry_lock_path(path))
+        .ok()?;
+    if lock_file.try_lock_shared().is_err() {
+        return None;
+    }
+    let result = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => read_registry_tolerant(path, &file).ok().map(|(r, _)| r),
+        Err(_) => None,
+    };
+    let _ = lock_file.unlock();
+    result
+}
+
 /// [`load_registry`] plus the raw on-disk row count the typed decode must be
 /// reconciled against. The daemon's startup assertion (AC5) reads both:
 /// a registry whose rows the typed reader dropped (today only a future-schema

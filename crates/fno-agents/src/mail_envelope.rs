@@ -68,7 +68,7 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let harness_hint = attr(input, "harness");
     let from_session = attr(input, "from_session");
     let to_session = attr(input, "to_session");
-    let registry = crate::state::load_registry(registry_path).ok();
+    let registry = crate::state::load_registry_best_effort(registry_path);
     let from_identity = Some(from_session.unwrap_or(from_input));
     let to_identity = to_session.or_else(|| attr(input, "to"));
     let from_row = registry
