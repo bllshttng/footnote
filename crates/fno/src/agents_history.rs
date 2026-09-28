@@ -13,7 +13,9 @@ mod transcript;
 use render::{card, event_sid, event_time, ledger_line};
 use resolve::resolve;
 use sources::{load_sources, Paths, Receipt, Sources};
-use transcript::{find_transcript, scan, TranscriptFacts};
+#[cfg(test)]
+use transcript::scan;
+use transcript::{find_transcript, TranscriptFacts};
 
 pub fn classify(args: &[OsString]) -> Option<Vec<OsString>> {
     if args.len() < 3
