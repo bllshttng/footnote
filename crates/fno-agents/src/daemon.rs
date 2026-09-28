@@ -4669,9 +4669,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     if is_codex_thread_entry(&entry) || rm_teardown::is_codex_thread_heal(&entry) {
         // Stop means INTERRUPT the in-flight turn, then DROP the actor
         // (closing its connection to the shared daemon), and only then stamp
-        // Exited. The old shape removed the handle and stamped Exited without
-        // interrupting: a driving turn still held an Arc clone and the verb
-        // reported a stop it did not perform.
+        // Exited.
         //
         // The interrupt IS the stop now. There is no child to kill: the
         // shared daemon owns the thread, so a turn that survives the bounded

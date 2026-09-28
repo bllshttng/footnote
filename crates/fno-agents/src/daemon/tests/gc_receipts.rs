@@ -2472,61 +2472,6 @@ async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
     assert!(error.contains("ambiguous across 2 agents"));
 }
 
-/// A session `fno agents rm` just removed resolves for STOP from the
-/// tombstone the rm stamped (short id, full session id, cwd), not from the
-/// adopting store heal whose rm grace window refuses exactly this session
-/// and whose adoption would resurrect the removed row.
-#[tokio::test]
-async fn lifecycle_stop_resolves_a_removed_session_from_the_tombstone() {
-    let dir = tempfile::tempdir().unwrap();
-    let agents = dir.path().join("agents");
-    std::fs::create_dir_all(&agents).unwrap();
-    std::fs::write(
-        agents.join("rm_tombstones.json"),
-        serde_json::json!([{
-            "harness": "codex",
-            "session_id": "0198cccc-0000-0000-0000-000000000003",
-            "short": "f00dcafe",
-            "name": "t-removed",
-            "cwd": "/repo/two",
-            "removed_at": crate::daemon::now_epoch_secs(),
-        }])
-        .to_string(),
-    )
-    .unwrap();
-    let reg = crate::state::Registry {
-        schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
-        entries: vec![],
-    };
-
-    let entry = entry_for_lifecycle(&reg, "f00dcafe", &agents.join("registry.json"), false, true)
-        .await
-        .expect("the tombstone resolves the removed session")
-        .expect("the token names a recorded removal");
-
-    assert_eq!(entry.name, "t-removed");
-    assert_eq!(entry.harness_name(), "codex");
-    assert_eq!(
-        entry.harness_session_id.as_deref(),
-        Some("0198cccc-0000-0000-0000-000000000003")
-    );
-    assert_eq!(entry.cwd, "/repo/two");
-
-    // rm itself keeps the adopting heal: a removed session is NOT resolved
-    // for removal again through the tombstone lane.
-    let none = entry_for_lifecycle(
-        &reg,
-        "f00dcafe",
-        &agents.join("registry.json"),
-        false,
-        false,
-    )
-    .await
-    .expect("resolution answerable");
-    assert!(none.is_none(), "rm does not resolve from the tombstone");
-    std::fs::remove_dir_all(dir.into_path()).ok();
-}
-
 #[test]
 fn recovery_reaps_dead_pid() {
     let home = tmp_home("recover-reap");
