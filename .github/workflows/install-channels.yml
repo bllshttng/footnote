@@ -41,23 +41,23 @@ jobs:
         row:
           - id: claude-marketplace
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-d5c7
+            expect: pass
+            node: ''
             readme: ['/plugin marketplace add bllshttng/footnote', '/plugin install fno@footnote']
           - id: claude-plugin-session
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-7bc0
+            expect: pass
+            node: ''
             readme: []
           - id: claude-plugin-session-macos
             runs-on: macos-14
-            expect: fail
-            node: x-7bc0
+            expect: pass
+            node: ''
             readme: []
           - id: codex-plugin-session
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-ec03
+            expect: pass
+            node: ''
             readme: ['codex plugin marketplace add bllshttng/footnote', 'codex plugin add fno@footnote']
           - id: fno-sh-served
             runs-on: ubuntu-latest
@@ -86,8 +86,8 @@ jobs:
             readme: []
           - id: pypi-uv
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-bc48
+            expect: pass
+            node: ''
             readme: ['uv tool install fno']
           - id: pypi-uv-pinned
             runs-on: ubuntu-latest
@@ -111,8 +111,8 @@ jobs:
             readme: ['npx skills add bllshttng/footnote --skill tdd']
           - id: clone-setup
             runs-on: ubuntu-latest
-            expect: fail
-            node: x-54bd
+            expect: pass
+            node: ''
             readme: ['bash scripts/setup.sh']
           - id: readme-commands
             runs-on: ubuntu-latest
