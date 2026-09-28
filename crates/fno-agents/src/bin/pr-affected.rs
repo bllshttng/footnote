@@ -85,7 +85,10 @@ fn bundle_watch_set() -> Option<Vec<String>> {
 
 fn bundle_watch_set_from(text: &str) -> Vec<String> {
     let mut skill = String::new();
-    let mut set = Vec::new();
+    // The manifest pins itself: an edit that adds or retargets a row without
+    // regenerating the copies is the exact drift this lane exists to catch,
+    // and that edit names no source or dest.
+    let mut set = vec!["skill-bundles.yaml".to_string()];
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         let line = line.strip_prefix("- ").unwrap_or(line);
@@ -307,10 +310,21 @@ mod tests {
         assert_eq!(
             bundle_watch_set_from(text),
             vec![
+                "skill-bundles.yaml".to_string(),
                 "scripts/real.sh".to_string(),
                 "skills/demo/scripts/real.sh".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_manifest_only_edit_selects_the_freshness_check() {
+        // Adding or retargeting a row without regenerating the copies names
+        // no source or dest; the manifest itself must select the check.
+        let watched = bundle_watch_set_from("bundles: []\n");
+        let changed = paths(&["skill-bundles.yaml"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        assert!(sel.skill_bundles);
     }
 
     #[test]
