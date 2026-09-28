@@ -1892,17 +1892,16 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 /// complete roster.
 pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), StateError> {
     // Lock the SAME sidecar `update_registry` locks (shared mode here), not the
-    // data file. This is the canonical cross-language lock target: a Python
-    // `fno` writer taking `flock` on `<registry>.lock` and the Rust daemon's
-    // exclusive write-lock then live in one domain, so reader/writer and
-    // cross-language writers actually mutually exclude (US6.12). Locking the
-    // data file directly would (a) not exclude against the sidecar-based
-    // writer and (b) reintroduce the rename-invalidates-fd footgun.
+    // data file. Python `fno` writers use `<agents>/locks/_registry.lock`; Rust
+    // must use that exact path or the two implementations can read and replace
+    // snapshots concurrently. Locking the data file directly would not exclude
+    // either sidecar-based writer and would reintroduce the rename-invalidates-
+    // fd footgun.
     // Acquire the lock FIRST, then decide existence: a `!path.exists()` check
     // before the lock could race a concurrent writer creating registry.json and
     // return a stale empty registry (Codex P2). The open-after-lock below is the
     // authoritative existence check.
-    let lock = acquire_shared(&lock_path(path))?;
+    let lock = acquire_shared(&registry_lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
         Ok(file) => read_registry_tolerant(path, &file),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2324,7 +2323,7 @@ where
     // Lock on a stable sidecar so the rename of the data file never invalidates
     // the lock fd (renaming the locked file out from under a held flock is the
     // classic footgun; locking the sidecar sidesteps it entirely).
-    let lock = acquire_exclusive(&lock_path(path))?;
+    let lock = acquire_exclusive(&registry_lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
     // The half of read-forward that protects the file. The read above drops
     // fields this binary does not know, so writing those rows back would erase
@@ -2880,6 +2879,16 @@ pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
+}
+
+/// Lock shared with Python's `fno.agents.registry._registry_lock_path`.
+/// Registry readers and writers use this one path across languages; per-file
+/// state records continue to use [`lock_path`].
+fn registry_lock_path(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("locks")
+        .join("_registry.lock")
 }
 
 /// Open (creating if needed) the lock sidecar and take an exclusive advisory
