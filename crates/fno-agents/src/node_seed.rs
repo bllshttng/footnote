@@ -441,11 +441,26 @@ fn spawn_node_cwd_in(
     SpawnNodeCwd::Project(project)
 }
 
+/// The spawn PARAMS (the JSON-RPC shape: `message`, optional `node`)
+/// projected onto the seed payload `resolve_node` reads: they never carry
+/// `argv`/`seed_index` themselves, so the raw params answer Null and the
+/// guard would never fire.
+fn project_params(params: &Value) -> Value {
+    json!({
+        "argv": ["spawn", params.get("message").and_then(Value::as_str).unwrap_or("")],
+        "seed_index": 1,
+        "seed_form": "positional",
+        "flag_node": params.get("node").cloned().unwrap_or(Value::Null),
+        "env_node": Value::Null,
+    })
+}
+
 /// [`spawn_node_cwd_in`] over the machine graph and the real git resolution.
-pub fn spawn_node_cwd(payload: &Value, caller: &Path) -> SpawnNodeCwd {
+pub fn spawn_node_cwd(params: &Value, caller: &Path) -> SpawnNodeCwd {
+    let payload = project_params(params);
     let rows =
         crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default();
-    spawn_node_cwd_in(payload, caller, &rows, &crate::paths::canonical_repo_root)
+    spawn_node_cwd_in(&payload, caller, &rows, &crate::paths::canonical_repo_root)
 }
 
 /// Which node does this spawn work, answered with the source that named it:
@@ -1084,5 +1099,26 @@ mod tests {
             "/repo/wt",
         );
         assert!(matches!(got, SpawnNodeCwd::Foreign(_)));
+    }
+
+    // --- the production params shape ------------------------------------- //
+
+    #[test]
+    fn the_incident_params_shape_projects_onto_the_seed_payload() {
+        // The real client params: `message` + optional `node`, never argv or
+        // seed_index. The projection must carry both into the payload
+        // resolve_node reads, or the guard never fires.
+        let got = project_params(&json!({
+            "message": "$fno:target x-1111 do the work",
+            "substrate": "thread",
+        }));
+        assert_eq!(
+            got["argv"],
+            json!(["spawn", "$fno:target x-1111 do the work"])
+        );
+        assert_eq!(got["flag_node"], Value::Null);
+        let got = project_params(&json!({"node": "x-1111"}));
+        assert_eq!(got["flag_node"], json!("x-1111"));
+        assert_eq!(got["argv"], json!(["spawn", ""]));
     }
 }
