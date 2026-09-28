@@ -10,6 +10,7 @@ use fno_agents::codex_ask::{
     approval_flag, build_argv_create, build_argv_resume, inject_from_name, parse_jsonl_line,
     sandbox_flag, sandbox_flag_resume, CodexAskError, JsonlEvent,
 };
+use fno_agents::codex_posture::BOUNDED_NETWORK_OVERRIDE;
 use std::path::PathBuf;
 
 /// Guards tests that mutate the process-global `PATH` (the crate's own
@@ -46,9 +47,17 @@ fn inject_from_name_no_escaping() {
 
 #[test]
 fn sandbox_flag_default_is_bounded() {
-    // Sandbox tokens only (workspace sandbox); approval is a separate global
-    // flag emitted before `exec` - see approval_flag.
-    assert_eq!(sandbox_flag(false), vec!["--sandbox", "workspace-write"]);
+    // Sandbox tokens (workspace sandbox + network override); approval is a
+    // separate global flag emitted before `exec` - see approval_flag.
+    assert_eq!(
+        sandbox_flag(false),
+        vec![
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            BOUNDED_NETWORK_OVERRIDE
+        ]
+    );
 }
 
 #[test]
@@ -393,8 +402,8 @@ fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
         roots.contains(want.to_str().unwrap()),
         "{roots} should grant {want:?}"
     );
-    // Both overrides ride their own -c token.
-    assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
+    // Each override rides its own -c token: mode, network, roots.
+    assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 3);
 
     // Full yolo is already unsandboxed: there is no posture to re-pin.
     let yolo = build_argv_resume(dir.path(), "s123", "p", true, None);

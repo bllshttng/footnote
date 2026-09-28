@@ -622,27 +622,6 @@ pub fn render_verb_seed(message: &str, harness: &str) -> String {
     }
 }
 
-impl CodexProvider {
-    fn sandbox_create(yolo: bool) -> Vec<String> {
-        // codex.py::sandbox_flag (LD5/LD6): mutually exclusive; never both.
-        if yolo {
-            vec!["--dangerously-bypass-approvals-and-sandbox".into()]
-        } else {
-            vec!["--sandbox".into(), "workspace-write".into()]
-        }
-    }
-
-    fn sandbox_resume(yolo: bool) -> Vec<String> {
-        // codex.py::sandbox_flag_resume: resume has no `--sandbox`; only the
-        // bypass flag is honored, else inherit the session's original mode.
-        if yolo {
-            vec!["--dangerously-bypass-approvals-and-sandbox".into()]
-        } else {
-            vec![]
-        }
-    }
-}
-
 /// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
 /// bounded codex worker can commit. workspace-write marks
 /// `<project_root>/.git` read-only, so without this every `git add` fails on
@@ -674,17 +653,18 @@ pub(crate) fn codex_plan_writable_args(cwd: &std::path::Path) -> Vec<String> {
 /// Mirror of `codex.py::sandbox_config_args_resume`: re-pin a BOUNDED posture
 /// across `codex exec resume`, which takes neither `--sandbox` nor `--add-dir`
 /// and re-resolves the sandbox from config instead of inheriting the
-/// create-time one. `-c` is the only carrier, so it pins both the mode and the
-/// writable roots that `--add-dir` grants on create.
-///
-/// Empty on any failure: a posture we cannot resolve must never break a resume.
+/// create-time one. `-c` is the only carrier, so it pins the mode and network
+/// unconditionally - a resume whose cwd resolves no writable root must still
+/// not fall back to config's network-off sandbox - and appends the writable
+/// roots that `--add-dir` grants on create when any resolve.
 pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<String> {
-    let grant = codex_writable_config_args(cwd);
-    if grant.is_empty() {
-        return vec![];
-    }
-    let mut args = vec!["-c".into(), "sandbox_mode=workspace-write".into()];
-    args.extend(grant);
+    let mut args = vec![
+        "-c".into(),
+        "sandbox_mode=workspace-write".into(),
+        "-c".into(),
+        crate::codex_posture::BOUNDED_NETWORK_OVERRIDE.into(),
+    ];
+    args.extend(codex_writable_config_args(cwd));
     args
 }
 
@@ -810,7 +790,7 @@ impl Provider for CodexProvider {
             // validated codex.py create path always passes it.
             "--skip-git-repo-check".into(),
         ]);
-        argv.extend(Self::sandbox_create(ctx.yolo));
+        argv.extend(crate::codex_ask::sandbox_flag(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_git_writable_args(&ctx.cwd));
             argv.extend(codex_plan_writable_args(&ctx.cwd));
@@ -834,7 +814,7 @@ impl Provider for CodexProvider {
         )
         .expect("embedded codex headless-resume capability");
         argv.extend(["--json".into(), "--skip-git-repo-check".into()]);
-        argv.extend(Self::sandbox_resume(ctx.yolo));
+        argv.extend(crate::codex_ask::sandbox_flag_resume(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
         }
@@ -2001,6 +1981,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                "-c",
+                crate::codex_posture::BOUNDED_NETWORK_OVERRIDE,
                 "--add-dir",
                 &expected_plan_grant(),
                 "--",
@@ -2173,6 +2155,11 @@ mod tests {
         };
         let argv = CodexProvider.resume_argv(&ctx);
         assert!(argv.contains(&"sandbox_mode=workspace-write".to_string()));
+        // AC2-HP: the bounded posture is re-pinned even when no writable root
+        // resolves, so network stays on for gh and the graph keeper socket.
+        assert!(argv
+            .iter()
+            .any(|a| a == crate::codex_posture::BOUNDED_NETWORK_OVERRIDE));
         let roots = argv
             .iter()
             .find(|a| a.starts_with("sandbox_workspace_write.writable_roots="))
@@ -2186,6 +2173,32 @@ mod tests {
         // Full yolo is already unsandboxed: no posture to re-pin.
         let yolo = ResumeContext { yolo: true, ..ctx };
         assert!(!CodexProvider.resume_argv(&yolo).iter().any(|a| a == "-c"));
+    }
+
+    /// AC2-HP: a bounded resume whose cwd resolves NO writable root still
+    /// re-pins mode and network. A resume that fell back to config could
+    /// inherit the operator's network-off `sandbox_workspace_write`.
+    #[test]
+    fn codex_resume_argv_pins_posture_without_any_root() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ResumeContext {
+            session_id: "s1".into(),
+            message: "follow up".into(),
+            cwd: dir.path().to_path_buf(),
+            from_name: None,
+            yolo: false,
+        };
+        let argv = CodexProvider.resume_argv(&ctx);
+        assert!(argv.contains(&"sandbox_mode=workspace-write".to_string()));
+        assert!(argv
+            .iter()
+            .any(|a| a == crate::codex_posture::BOUNDED_NETWORK_OVERRIDE));
+        assert!(!argv
+            .iter()
+            .any(|a| a.starts_with("sandbox_workspace_write.writable_roots=")));
     }
 
     #[test]
@@ -2394,6 +2407,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "-c",
                 "sandbox_mode=workspace-write",
+                "-c",
+                crate::codex_posture::BOUNDED_NETWORK_OVERRIDE,
                 "-c",
                 "sandbox_workspace_write.writable_roots=[\"/x/.fno/plans\"]",
                 "--",

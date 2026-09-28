@@ -11,6 +11,12 @@
 
 use serde_json::Value;
 
+/// The `-c` override every bounded codex posture carries. workspace-write with
+/// network off cannot reach GitHub, and the graph keeper socket rides AF_UNIX
+/// under the same switch (the thread lane forces it in
+/// `sandbox_policy_with_roots`); every bounded lane must force it too.
+pub const BOUNDED_NETWORK_OVERRIDE: &str = "sandbox_workspace_write.network_access=true";
+
 /// The sandbox half, in the spellings codex's own CLI takes (`--sandbox
 /// <MODE>`, and the scalar `sandbox` on `thread/start` / `thread/resume`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

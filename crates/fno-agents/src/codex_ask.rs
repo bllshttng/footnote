@@ -79,12 +79,18 @@ pub fn inject_from_name(prompt: &str, from_name: &str) -> String {
 ///
 /// `--sandbox` is an `exec`-subcommand flag, so these tokens go AFTER `exec`.
 /// The approval policy is a SEPARATE global flag, see [`approval_flag`].
-/// Mirror of `codex.py::sandbox_flag`.
+/// The bounded arm pins network access: workspace-write alone denies AF_UNIX,
+/// which takes out both `gh` and the graph keeper socket.
 pub fn sandbox_flag(yolo: bool) -> Vec<String> {
     if yolo {
         vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
     } else {
-        vec!["--sandbox".to_string(), "workspace-write".to_string()]
+        vec![
+            "--sandbox".to_string(),
+            "workspace-write".to_string(),
+            "-c".to_string(),
+            crate::codex_posture::BOUNDED_NETWORK_OVERRIDE.to_string(),
+        ]
     }
 }
 
