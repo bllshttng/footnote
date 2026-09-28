@@ -311,6 +311,7 @@ pub mod registry_guard;
 pub mod registry_json;
 pub mod reign_goal;
 pub mod reign_hygiene;
+pub mod removals;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;

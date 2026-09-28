@@ -31,7 +31,8 @@ pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
     /// `node_created` | `node_started` | `pr_created` | `node_ended` |
-    /// `session_reaped` | `day_boundary`
+    /// `session_spawned` | `session_reaped` | `crown_granted` |
+    /// `crown_vacated` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
     pub session_id: Option<String>,
@@ -55,9 +56,24 @@ pub struct FeedRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     /// A rendered recovery line the panel hands over verbatim. Set on a
-    /// `session_reaped` row; the resume string is copied, never re-derived.
+    /// receipt-backed `session_reaped` row; the resume string is copied,
+    /// never re-derived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Why the row happened, when the source records one: a removal's
+    /// recorded cause, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `L{level} {scope}` for the crown kinds and a crowned removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crown: Option<String>,
+    /// The king or epic the row rolls up to, set on non-crown rows only:
+    /// `king {holder} L{level}` or `epic {parent} {title}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The session that spawned this row's session, from the birth event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// Rows plus what the projection had to skip. Malformed question lines and
@@ -127,20 +143,23 @@ fn split_actor(raw: Option<String>) -> (Option<String>, Option<String>) {
 
 /// Sort key: epoch millis when the ts parses as RFC3339; unparseable stamps
 /// sort first and keep their raw string (the row is still shown).
-fn ts_key(ts: &str) -> (u8, i64) {
+pub(crate) fn ts_key(ts: &str) -> (u8, i64) {
     match chrono::DateTime::parse_from_rfc3339(ts) {
         Ok(t) => (1, t.timestamp_millis()),
         Err(_) => (0, 0),
     }
 }
 
-/// The pure projection: questions.jsonl text + graph entries + reap receipts
-/// -> ordered rows. Ascending by ts, so a consumer reads history forward and
+/// The pure projection: questions text + graph entries + removals + the
+/// agents journal's spawn events + the crown events (both journals) ->
+/// ordered rows. Ascending by ts, so a consumer reads history forward and
 /// `--limit` trims from the newest end.
 pub fn project(
     questions_raw: &str,
     graph_entries: &[Value],
-    receipts: &[crate::receipt::ReapReceipt],
+    removals: &[crate::removals::Removal],
+    spawns_raw: &str,
+    crown_raw: &str,
 ) -> Projection {
     let mut rows = Vec::new();
     let mut skipped_lines = 0usize;
@@ -288,12 +307,15 @@ pub fn project(
             .unwrap_or_default();
 
         // node_created needs no emitter and no new store: `created_at` parses
-        // on every entry the graph holds.
+        // on every entry the graph holds. The creating session rides the
+        // entry's source fields when the graph recorded them.
         if let Some(created) = s_field(entry, "created_at") {
             rows.push(FeedRow {
                 ts: created,
                 kind: "node_created".into(),
                 node: Some(node_id.to_string()),
+                session_id: s_field(entry, "source_session_id").filter(|s| is_session_handle(s)),
+                harness: s_field(entry, "source_harness"),
                 title: node_title.clone(),
                 ..FeedRow::default()
             });
@@ -388,63 +410,319 @@ pub fn project(
 
     // The removal leg. The receipts store qualifies where `events.jsonl` does
     // not: it never rotates, it holds exactly one durable row per removal, and
-    // it IS the record rather than a restatement of one.
-    for r in receipts {
-        let node = r
-            .ledger
-            .as_ref()
-            .and_then(|l| l.get("graph_node_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+    // it IS the record rather than a restatement of one. The fold also
+    // recovers the receipt-less removals (a never-bound row the receipt
+    // builder refused) from their `registry_row_removed` events.
+    for r in removals {
         let removed_by = if r.removed_by.is_empty() {
-            "unknown"
+            None
         } else {
-            &r.removed_by
+            Some(r.removed_by.clone())
         };
         rows.push(FeedRow {
-            ts: r.reaped_at.clone(),
+            ts: r.ts.clone(),
             kind: "session_reaped".into(),
-            node,
-            session_id: Some(r.harness_session_id.clone()),
-            harness: Some(r.harness.clone()),
+            node: r.node.clone(),
+            session_id: r.session_id.clone(),
+            harness: r.harness.clone(),
             // The receipt is the only surviving record of the lane this row
             // ran. Dropping it here would report a model the store holds as
             // NOT RECORDED.
-            model: r
-                .model_provenance
-                .as_ref()
-                .and_then(|m| m.get("model"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            title: format!("{} removed by {removed_by}", r.row_name),
-            actor: if r.removed_by.is_empty() {
-                None
-            } else {
-                Some(r.removed_by.clone())
-            },
-            // Copied verbatim. It was rendered from the capability table at
-            // reap time; re-deriving it would answer a different question if
-            // that table has moved since.
-            detail: Some(format!(
-                "resume: {} - cwd {} - trigger {}",
-                r.resume,
-                r.cwd,
-                if r.removal_trigger.is_empty() {
-                    "unknown"
-                } else {
-                    &r.removal_trigger
-                }
-            )),
+            model: r.model.clone(),
+            title: format!("{} removed", r.name),
+            actor: removed_by,
+            reason: r.reason.clone(),
+            crown: r.crown.clone(),
+            // Copied verbatim from the receipt, and set only when a receipt
+            // exists: the provenance view treats any `detail` as a recovery
+            // line, so a recovered receipt-less removal must not carry one.
+            detail: r.receipt.as_ref().map(|_| {
+                format!(
+                    "resume: {} - cwd {} - trigger {}",
+                    r.resume.as_deref().unwrap_or(""),
+                    r.cwd.as_deref().unwrap_or(""),
+                    r.trigger
+                        .as_deref()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or("unknown")
+                )
+            }),
             ..FeedRow::default()
         });
     }
 
+    // Spawn rows: `agent_spawned` (agents journal, already window-bounded by
+    // the caller). A birth carries the substrate it landed on, the model it
+    // was asked for, and the session that spawned it.
+    for line in spawns_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("agent_spawned") {
+            continue;
+        }
+        let Some(data) = v.get("data") else { continue };
+        let (Some(name), Some(ts)) = (s_field(data, "name"), s_field(&v, "ts")) else {
+            continue;
+        };
+        rows.push(FeedRow {
+            ts,
+            kind: "session_spawned".into(),
+            node: s_field(data, "node"),
+            session_id: s_field(data, "harness_session_id").filter(|s| is_session_handle(s)),
+            harness: s_field(data, "harness").or_else(|| s_field(data, "provider")),
+            model: s_field(data, "model"),
+            parent: s_field(data, "spawned_by_session"),
+            title: format!(
+                "{} spawned ({})",
+                name,
+                s_field(data, "substrate").unwrap_or_else(|| "unknown".into())
+            ),
+            ..FeedRow::default()
+        });
+    }
+
+    // Crown rows from the crown events, which land in BOTH journals, so rows
+    // dedupe on (ts, scope, holder, cause). The same parse feeds the owner
+    // assignment below.
+    let mut crown_events = parse_crown_events(crown_raw);
+    crown_events.sort_by_key(|c| ts_key(&c.ts));
+    let mut seen_crowns: std::collections::HashSet<(String, String, String, String)> =
+        std::collections::HashSet::new();
+    for c in &crown_events {
+        let key = (
+            c.ts.clone(),
+            c.scope.clone(),
+            c.holder.clone(),
+            c.cause.clone().unwrap_or_default(),
+        );
+        if !seen_crowns.insert(key) {
+            continue;
+        }
+        match c.action {
+            CrownAction::Granted => {
+                let mut title = format!("{} crowned L{} {}", c.holder, c.level, c.scope);
+                if let Some(from) = &c.vacated_scope {
+                    title.push_str(&format!(" (moved from {from})"));
+                }
+                rows.push(FeedRow {
+                    ts: c.ts.clone(),
+                    kind: "crown_granted".into(),
+                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    actor: c.actor.clone(),
+                    title,
+                    ..FeedRow::default()
+                });
+            }
+            CrownAction::Vacated => {
+                let mut title = format!(
+                    "{} left L{} {}: {}",
+                    c.holder,
+                    c.level,
+                    c.scope,
+                    c.cause.clone().unwrap_or_else(|| "unknown".into())
+                );
+                if let Some(succ) = &c.successor {
+                    title.push_str(&format!(" -> {succ}"));
+                }
+                rows.push(FeedRow {
+                    ts: c.ts.clone(),
+                    kind: "crown_vacated".into(),
+                    crown: Some(format!("L{} {}", c.level, c.scope)),
+                    actor: c.actor.clone(),
+                    title,
+                    ..FeedRow::default()
+                });
+            }
+        }
+    }
+
     rows.sort_by(|a, b| ts_key(&a.ts).cmp(&ts_key(&b.ts)));
+    assign_owners(&mut rows, &crown_events, graph_entries);
     Projection {
         rows,
         skipped_lines,
         skipped_entries,
     }
+}
+
+/// One parsed crown event, used twice: for the crown rows and for the owner
+/// assignment's scope-to-holder timeline.
+#[derive(Debug, Clone)]
+struct CrownEvent {
+    ts: String,
+    action: CrownAction,
+    holder: String,
+    scope: String,
+    level: i64,
+    cause: Option<String>,
+    successor: Option<String>,
+    actor: Option<String>,
+    vacated_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CrownAction {
+    Granted,
+    Vacated,
+}
+
+fn parse_crown_events(crown_raw: &str) -> Vec<CrownEvent> {
+    let mut out = Vec::new();
+    for line in crown_raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let data = v.get("data").cloned().unwrap_or(Value::Null);
+        let Some(ts) = s_field(&v, "ts") else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("agent_crowned") => {
+                let Some(name) = s_field(&data, "name") else {
+                    continue;
+                };
+                let Some(level) = data.get("level").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let Some(scope) = s_field(&data, "scope") else {
+                    continue;
+                };
+                out.push(CrownEvent {
+                    ts,
+                    action: CrownAction::Granted,
+                    holder: name.to_string(),
+                    scope: scope.to_string(),
+                    level,
+                    cause: None,
+                    successor: None,
+                    actor: s_field(&data, "grantor"),
+                    vacated_scope: s_field(&data, "vacated_scope"),
+                });
+            }
+            Some("agent_crown_vacated") => {
+                let Some(holder) = s_field(&data, "holder") else {
+                    continue;
+                };
+                let Some(level) = data.get("level").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let Some(scope) = s_field(&data, "scope") else {
+                    continue;
+                };
+                out.push(CrownEvent {
+                    ts,
+                    action: CrownAction::Vacated,
+                    holder: holder.to_string(),
+                    scope: scope.to_string(),
+                    level,
+                    cause: s_field(&data, "cause"),
+                    successor: s_field(&data, "successor"),
+                    actor: None,
+                    vacated_scope: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Assign `owner` to every non-crown row. Crown events folded in time order
+/// hold a map from scope to its holder; a removal row whose `crown` is set
+/// clears its scope at its own ts. A row whose node, or that node's graph
+/// parent, sits in a held scope gets `king {holder} L{level}`; otherwise a
+/// row whose node has a graph parent gets `epic {parent} {parent title}`.
+fn assign_owners(rows: &mut [FeedRow], crown_events: &[CrownEvent], graph_entries: &[Value]) {
+    if rows.is_empty() {
+        return;
+    }
+    // node -> parent / title lookups, one linear scan each (the entry set is
+    // the operator's backlog, not a hot path).
+    let parent_of = |node: &str| -> Option<String> {
+        graph_entries
+            .iter()
+            .find(|e| graph_store::entry_id(e) == Some(node))
+            .and_then(|e| s_field(e, "parent"))
+    };
+    let title_of = |node: &str| -> Option<String> {
+        graph_entries
+            .iter()
+            .find(|e| graph_store::entry_id(e) == Some(node))
+            .and_then(|e| graph_store::s_str(e, "title"))
+            .map(str::to_string)
+    };
+    // The scope timeline in time order: (ts_key, grant?, scope, holder, level).
+    // Owned strings, because a clear entry derives from a row's crown string
+    // while the walk below borrows `rows` mutably.
+    let mut timeline: Vec<((u8, i64), bool, String, String, i64)> = Vec::new();
+    for c in crown_events {
+        timeline.push((
+            ts_key(&c.ts),
+            true,
+            c.scope.clone(),
+            c.holder.clone(),
+            c.level,
+        ));
+    }
+    // A removal whose crown is set clears that crown's scope from its own ts:
+    // after the heir's removal the territory has no king, so later rows stop
+    // rolling up to it.
+    for r in rows.iter() {
+        if r.kind == "session_reaped" && r.crown.is_some() {
+            let scope = r
+                .crown
+                .as_deref()
+                .and_then(|c| c.strip_prefix("L"))
+                .and_then(|rest| rest.split_once(' '))
+                .map(|(_, scope)| scope.to_string());
+            if let Some(scope) = scope {
+                timeline.push((ts_key(&r.ts), false, scope, String::new(), 0));
+            }
+        }
+    }
+    timeline.sort_by_key(|(k, _, _, _, _)| *k);
+    let mut held: Vec<(String, String, i64)> = Vec::new();
+    let mut ti = 0usize;
+    for r in rows.iter_mut() {
+        let k = ts_key(&r.ts);
+        while ti < timeline.len() && timeline[ti].0 <= k {
+            let (_, grant, ref scope, ref holder, level) = timeline[ti];
+            if grant {
+                held.push((scope.clone(), holder.clone(), level));
+            } else {
+                held.retain(|(s, _, _)| s != scope);
+            }
+            ti += 1;
+        }
+        if r.kind == "crown_granted"
+            || r.kind == "crown_vacated"
+            || (r.kind == "session_reaped" && r.crown.is_some())
+        {
+            // A crown-band row carries no owner: the band IS its group.
+            continue;
+        }
+        let parent = r.node.as_deref().and_then(parent_of);
+        let king = held.iter().find(|(scope, _, _)| {
+            r.node.as_deref().is_some_and(|n| scope_holds(scope, n))
+                || parent.as_deref().is_some_and(|p| scope_holds(scope, p))
+        });
+        if let Some((_, holder, level)) = king {
+            r.owner = Some(format!("king {holder} L{level}"));
+        } else if let Some(p) = parent {
+            let title = title_of(&p).unwrap_or_default();
+            r.owner = Some(if title.is_empty() {
+                format!("epic {p}")
+            } else {
+                format!("epic {p} {title}")
+            });
+        }
+    }
+}
+
+/// True when a crown scope (comma-separated node ids) holds `node`.
+fn scope_holds(scope: &str, node: &str) -> bool {
+    scope.split(',').any(|seg| seg.trim() == node)
 }
 
 /// The filters the CLI flags express, applied after ordering: `--node`,
@@ -538,38 +816,36 @@ pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("graph.json"))
 }
 
-/// Read every reap receipt under `<agents home>/reap-receipts/`. An absent or
-/// unreadable directory is not fatal and yields one note naming the store
-/// skipped, matching the questions and graph legs; a receipt that will not
-/// parse is counted, not fatal.
-fn read_receipts(home: &AgentsHome) -> (Vec<crate::receipt::ReapReceipt>, Option<String>, usize) {
-    let dir = home.root().join("reap-receipts");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Some(format!(
-                    "reap-receipts store skipped ({e}): {}",
-                    dir.display()
-                )),
-                0,
-            )
-        }
+/// The agents journal's text filtered to `types`, bounded by the CLI's
+/// `since_epoch` (seconds), or empty when the store is unreadable (the
+/// removal leg's notes name the store when THAT store fails; the spawn leg
+/// degrades to no rows, in step with the questions leg's posture).
+fn agents_journal(home: &AgentsHome, types: &[&str], since_epoch: Option<u64>) -> String {
+    let query = crate::event_store::EventQuery {
+        since_ms: since_epoch.map(|s| s as i64 * 1000),
+        ..crate::event_store::EventQuery::of_types(types)
     };
-    let mut out = Vec::new();
-    let mut skipped = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        match crate::receipt::read_reap_receipt(&path) {
-            Ok(r) => out.push(r),
-            Err(_) => skipped += 1,
+    crate::event_store::journal_text_checked(&home.events_jsonl(), &query).unwrap_or_default()
+}
+
+/// The crown events, concatenated from BOTH journals so a crown row dedupes
+/// on (ts, scope, holder, cause) instead of depending on which store an
+/// emitter wrote. Unbounded by the window: a crown is granted before the
+/// events it owns.
+fn crown_journals(home: &AgentsHome) -> String {
+    let types = ["agent_crowned", "agent_crown_vacated"];
+    let mut raw = agents_journal(home, &types, None);
+    if let Some(parent) = home.root().parent() {
+        let path = parent.join("events.jsonl");
+        if let Ok(text) = crate::event_store::journal_text_checked(
+            &path,
+            &crate::event_store::EventQuery::of_types(&types),
+        ) {
+            raw.push('\n');
+            raw.push_str(&text);
         }
     }
-    (out, None, skipped)
+    raw
 }
 
 /// The `fno-agents feed` verb. A missing or unreadable store is not fatal: the
@@ -623,19 +899,25 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         eprintln!("fno-agents feed: {note}");
     }
 
-    let (receipts, receipts_note, skipped_receipts) = read_receipts(home);
-    if let Some(note) = receipts_note {
+    let (removals, removal_notes) =
+        crate::removals::read(home, args.since_epoch.map(|s| s as i64 * 1000));
+    for note in &removal_notes {
         eprintln!("fno-agents feed: {note}");
     }
-    if skipped_receipts > 0 {
-        eprintln!("fno-agents feed: skipped {skipped_receipts} unreadable reap receipt(s)");
-    }
+    let spawns_raw = agents_journal(home, &["agent_spawned"], args.since_epoch);
+    let crown_raw = crown_journals(home);
 
     let Projection {
         rows,
         skipped_lines,
         skipped_entries,
-    } = project(&questions_raw, &graph_entries, &receipts);
+    } = project(
+        &questions_raw,
+        &graph_entries,
+        &removals,
+        &spawns_raw,
+        &crown_raw,
+    );
     if skipped_lines > 0 {
         eprintln!("fno-agents feed: skipped {skipped_lines} malformed question line(s)");
     }
@@ -724,7 +1006,7 @@ mod tests {
 
     #[test]
     fn lifecycle_rows_come_from_the_graph() {
-        let p = project("", &graph_fixture(), &[]);
+        let p = project("", &graph_fixture(), &[], "", "");
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "pr_created", "node_ended"]
@@ -745,7 +1027,7 @@ mod tests {
         // The marker: a projection fed only an events-style stream yields none
         // of the three lifecycle rows - they derive from the graph and nowhere
         // else.
-        let p = project(&questions_fixture(), &[], &[]);
+        let p = project(&questions_fixture(), &[], &[], "", "");
         assert_eq!(
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
@@ -755,7 +1037,7 @@ mod tests {
     #[test]
     fn day_boundary_rows_are_projected_without_being_skipped() {
         let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
-        let p = project(questions, &[], &[]);
+        let p = project(questions, &[], &[], "", "");
         assert_eq!(p.skipped_lines, 0);
         assert_eq!(kinds(&p.rows), ["day_boundary"]);
         assert_eq!(p.rows[0].title, "day start");
@@ -764,7 +1046,7 @@ mod tests {
 
     #[test]
     fn question_rows_carry_ids_and_asker_session() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[]);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "");
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
@@ -789,7 +1071,7 @@ mod tests {
 
     #[test]
     fn rows_interleave_by_ts_ascending() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[]);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "");
         assert_eq!(
             kinds(&p.rows),
             [
@@ -812,7 +1094,7 @@ mod tests {
                 + &questions_fixture();
         let mut entries = vec![serde_json::json!("a bare string")];
         entries.extend(graph_fixture());
-        let p = project(&questions, &entries, &[]);
+        let p = project(&questions, &entries, &[], "", "");
         assert_eq!(p.skipped_lines, 2);
         assert_eq!(p.skipped_entries, 1);
         assert!(p.rows.iter().all(|r| matches!(
@@ -831,7 +1113,7 @@ mod tests {
     #[test]
     fn unparseable_ts_sorts_first_and_survives_since() {
         let questions = r#"{"ts":"yesterday-ish","type":"operator_question","source":"t","data":{"question_id":"q-0","question":"odd stamp","session_id":"s-x"}}"#.to_string();
-        let p = project(&questions, &[], &[]);
+        let p = project(&questions, &[], &[], "", "");
         assert_eq!(kinds(&p.rows)[0], "question_asked");
         assert_eq!(p.rows[0].ts, "yesterday-ish");
         let kept = filter_rows(p.rows, None, None, None, Some(1_700_000_000), None);
@@ -840,7 +1122,7 @@ mod tests {
 
     #[test]
     fn filter_node_session_and_limit_from_newest_end() {
-        let p = project(&questions_fixture(), &graph_fixture(), &[]);
+        let p = project(&questions_fixture(), &graph_fixture(), &[], "", "");
         let node_rows = filter_rows(p.rows.clone(), Some("x-aaaa"), None, None, None, None);
         // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
@@ -862,33 +1144,6 @@ mod tests {
         assert_eq!(kinds(&newest_two), ["decision_recorded", "node_ended"]);
     }
 
-    fn receipt_fixture() -> crate::receipt::ReapReceipt {
-        crate::receipt::ReapReceipt {
-            row_name: "t-d145".into(),
-            short_id: "d145".into(),
-            harness: "claude".into(),
-            harness_session_id: "00847995-e0db-47c2-ab5b-24468ba1a4f5".into(),
-            cwd: "/tmp/wt".into(),
-            log_path: None,
-            created_at: "2026-09-04T10:00:00Z".into(),
-            reaped_at: "2026-09-06T10:00:00Z".into(),
-            resume: "claude --resume 00847995".into(),
-            ledger: Some(serde_json::json!({"graph_node_id": "x-aaaa"})),
-            removed_by: "gc-sweep".into(),
-            removal_trigger: "unattended".into(),
-            schema_version: Some(2),
-            identity: None,
-            native_locator: None,
-            model_provenance: None,
-            resume_argv: Vec::new(),
-            effects: Vec::new(),
-            assignment: None,
-            details_expired_at: None,
-            writer_build: None,
-            retirement_contract: None,
-        }
-    }
-
     #[test]
     fn an_actor_that_is_not_a_session_never_becomes_an_attach_target() {
         // The live shape: `decided_by` is the literal verb on every decision
@@ -899,7 +1154,7 @@ mod tests {
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"d","data":{"decision_id":"d-1","decision":"stands","subject":"s","question_id":"q-1","decided_by":"fno agents stale-escalate"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[]);
+        let p = project(&questions, &[], &[], "", "");
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("stale-escalate"));
@@ -921,7 +1176,7 @@ mod tests {
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"d","data":{"question_id":"q-1","answer":"yes","closed_by":"20260904T151442Z-cl54345-58af0c"}}"#,
         ]
         .join("\n");
-        let p = project(&questions, &[], &[]);
+        let p = project(&questions, &[], &[], "", "");
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(
             closed.session_id.as_deref(),
@@ -930,24 +1185,42 @@ mod tests {
         assert_eq!(closed.actor, None);
     }
 
+    fn removal_fixture() -> crate::removals::Removal {
+        crate::removals::Removal {
+            ts: "2026-09-06T10:00:00Z".into(),
+            name: "t-d145".into(),
+            short_id: Some("d145".into()),
+            harness: Some("claude".into()),
+            session_id: Some("00847995-e0db-47c2-ab5b-24468ba1a4f5".into()),
+            node: Some("x-aaaa".into()),
+            removed_by: "gc-sweep".into(),
+            verb: None,
+            reason: Some("every named node done: x-aaaa".into()),
+            cause: Some("agent_row_reaped".into()),
+            cause_at: Some("2026-09-06T10:00:00Z".into()),
+            crown: None,
+            resume: Some("claude --resume 00847995".into()),
+            cwd: Some("/tmp/wt".into()),
+            trigger: Some("unattended".into()),
+            model: None,
+            receipt: Some(std::path::PathBuf::from("/tmp/reap-t-d145.json")),
+        }
+    }
+
     #[test]
     fn a_receipt_becomes_one_reaped_row_carrying_its_resume_line() {
-        let r = receipt_fixture();
-        let p = project("", &[], std::slice::from_ref(&r));
+        let r = removal_fixture();
+        let p = project("", &[], std::slice::from_ref(&r), "", "");
         let row = p
             .rows
             .iter()
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
-        // The stamp is printed, never invented. The fixture carries
-        // a writer, so the row names it and the detail carries the trigger.
-        assert!(
-            row.title.contains("removed by gc-sweep"),
-            "title was {}",
-            row.title
-        );
+        // The remover moved to the actor field; the title says what happened.
+        assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
         assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
+        assert_eq!(row.reason.as_deref(), Some("every named node done: x-aaaa"));
         assert_eq!(
             row.detail.as_deref(),
             Some("resume: claude --resume 00847995 - cwd /tmp/wt - trigger unattended")
@@ -962,25 +1235,20 @@ mod tests {
     }
 
     // A pre-stamp receipt carries no writer. The feed once invented the
-    // word `reap` for it; now it says `unknown`, and the actor is
-    // empty rather than a door nobody named.
+    // word `reap` for it; now the title says what happened and the actor
+    // stays empty rather than naming a door nobody named.
     #[test]
     fn a_pre_stamp_receipt_reads_unknown_never_reap() {
-        let mut r = receipt_fixture();
+        let mut r = removal_fixture();
         r.removed_by.clear();
-        r.removal_trigger.clear();
-        let p = project("", &[], std::slice::from_ref(&r));
+        r.trigger = None;
+        let p = project("", &[], std::slice::from_ref(&r), "", "");
         let row = p
             .rows
             .iter()
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
-        assert!(
-            row.title.contains("removed by unknown"),
-            "title was {}",
-            row.title
-        );
-        assert!(!row.title.contains("reap"), "title was {}", row.title);
+        assert_eq!(row.title, "t-d145 removed", "title was {}", row.title);
         assert_eq!(row.actor, None);
         assert!(
             row.detail
@@ -996,12 +1264,9 @@ mod tests {
     // RECORDED for a model the store is holding.
     #[test]
     fn a_reaped_row_keeps_the_model_its_receipt_recorded() {
-        let mut r = receipt_fixture();
-        r.model_provenance = Some(serde_json::json!({
-            "model": "glm-5.3-flash[1m]",
-            "basis": "requested",
-        }));
-        let p = project("", &[], std::slice::from_ref(&r));
+        let mut r = removal_fixture();
+        r.model = Some("glm-5.3-flash[1m]".into());
+        let p = project("", &[], std::slice::from_ref(&r), "", "");
         let row = p
             .rows
             .iter()
@@ -1009,7 +1274,7 @@ mod tests {
             .expect("one reaped row");
         assert_eq!(row.model.as_deref(), Some("glm-5.3-flash[1m]"));
         // A receipt without the field stays silent rather than inventing one.
-        let p = project("", &[], std::slice::from_ref(&receipt_fixture()));
+        let p = project("", &[], std::slice::from_ref(&removal_fixture()), "", "");
         let bare = p
             .rows
             .iter()
@@ -1019,23 +1284,23 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_receipts_directory_yields_no_rows_and_no_panic() {
+    fn an_absent_receipts_directory_yields_no_rows_and_a_note() {
         let home = AgentsHome::at(std::path::PathBuf::from(
             "/nonexistent/fno-feed-test/agents",
         ));
-        let (receipts, note, skipped) = read_receipts(&home);
-        assert!(receipts.is_empty());
-        assert_eq!(skipped, 0);
-        let note = note.expect("an absent store is reported, never silent");
+        let (removals, notes) = crate::removals::read(&home, None);
+        assert!(removals.is_empty());
         assert!(
-            note.contains("reap-receipts store skipped"),
-            "note was {note}"
+            notes
+                .iter()
+                .any(|n| n.contains("reap-receipts store skipped")),
+            "notes were {notes:?}"
         );
     }
 
     #[test]
     fn every_graph_entry_yields_a_node_created_row_and_the_lane_it_ran() {
-        let p = project("", &graph_fixture(), &[]);
+        let p = project("", &graph_fixture(), &[], "", "");
         let created = p
             .rows
             .iter()
@@ -1059,7 +1324,7 @@ mod tests {
             .unwrap()
             .remove("pr_number")
             .expect("fixture carries pr_number");
-        let p = project("", &[entry], &[]);
+        let p = project("", &[entry], &[], "", "");
         assert_eq!(
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
@@ -1082,5 +1347,137 @@ mod tests {
         )
         .unwrap();
         assert!(raw.contains("q-feed-1"), "{raw}");
+    }
+
+    #[test]
+    fn a_crowned_never_bound_removal_projects_with_reason_and_crown() {
+        // AC1: the jolly-finch shape, projected. The removal is recovered from
+        // its registry_row_removed event; the feed row carries the deeper
+        // uncaptured reason, the crown it held, and no detail (a recovered
+        // removal has no resume line to hand over).
+        let mut r = removal_fixture();
+        r.session_id = None;
+        r.harness = Some("codex".into());
+        r.name = "jolly-finch".into();
+        r.removed_by = "fno-py".into();
+        r.verb = Some("fno-py agents spawn --substrate pane --crown".into());
+        r.reason = Some("no unique codex rollout for this cwd after spawn".into());
+        r.crown = Some("L2 x-0e67".into());
+        r.receipt = None;
+        r.resume = None;
+        r.cwd = None;
+        r.trigger = None;
+        let p = project("", &[], std::slice::from_ref(&r), "", "");
+        let row = p
+            .rows
+            .iter()
+            .find(|row| row.kind == "session_reaped")
+            .expect("one reaped row");
+        assert_eq!(row.title, "jolly-finch removed");
+        assert_eq!(row.actor.as_deref(), Some("fno-py"));
+        assert_eq!(
+            row.reason.as_deref(),
+            Some("no unique codex rollout for this cwd after spawn")
+        );
+        assert_eq!(row.crown.as_deref(), Some("L2 x-0e67"));
+        assert_eq!(row.detail, None);
+    }
+
+    #[test]
+    fn a_spawn_event_projects_a_session_spawned_row() {
+        // AC4: agent_spawned carries provider (not harness), so the fallback
+        // is load-bearing.
+        let spawns = r#"{"ts":"2026-09-28T16:48:35Z","type":"agent_spawned","source":"python","data":{"cwd":"/repo","model":"gpt-6-sol","name":"jolly-finch","provider":"codex","spawned_by_session":"49a80492-388e-44a3-bd91-017be26bcaa0","substrate":"pane"}}"#;
+        let p = project("", &[], &[], spawns, "");
+        let row = p
+            .rows
+            .iter()
+            .find(|r| r.kind == "session_spawned")
+            .expect("one spawned row");
+        assert_eq!(row.title, "jolly-finch spawned (pane)");
+        assert_eq!(row.harness.as_deref(), Some("codex"), "provider falls back");
+        assert_eq!(row.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(
+            row.parent.as_deref(),
+            Some("49a80492-388e-44a3-bd91-017be26bcaa0")
+        );
+    }
+
+    #[test]
+    fn crown_rows_project_from_both_journals_and_dedupe() {
+        // AC5: the same crown pair landing in both journals yields exactly
+        // one granted and one vacated row.
+        let crown = [
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crowned","source":"python","data":{"grantor":"49a80492","level":2,"name":"jolly-finch","scope":"x-0e67"}}"#,
+            r#"{"ts":"2026-09-28T16:45:58Z","type":"agent_crown_vacated","source":"python","data":{"cause":"succession","grantor":"vellum","holder":"warden","level":2,"scope":"x-0e67","successor":"jolly-finch"}}"#,
+        ]
+        .join("\n");
+        let both = format!("{crown}\n{crown}");
+        let p = project("", &[], &[], "", &both);
+        let granted: Vec<_> = p
+            .rows
+            .iter()
+            .filter(|r| r.kind == "crown_granted")
+            .collect();
+        let vacated: Vec<_> = p
+            .rows
+            .iter()
+            .filter(|r| r.kind == "crown_vacated")
+            .collect();
+        assert_eq!(granted.len(), 1, "granted dedupes");
+        assert_eq!(granted[0].title, "jolly-finch crowned L2 x-0e67");
+        assert_eq!(granted[0].crown.as_deref(), Some("L2 x-0e67"));
+        assert_eq!(vacated.len(), 1, "vacated dedupes");
+        assert_eq!(
+            vacated[0].title,
+            "warden left L2 x-0e67: succession -> jolly-finch"
+        );
+    }
+
+    #[test]
+    fn owners_come_from_held_crowns_then_graph_parents() {
+        // AC6: a node in a held crown's scope rolls up to the king; a node
+        // whose only tie is a graph parent rolls up to the epic; the crown
+        // kinds get no owner at all.
+        let entries = vec![
+            serde_json::json!({
+                "id": "x-child", "title": "child node", "parent": "x-epic",
+                "created_at": "2026-09-28T17:00:00Z",
+            }),
+            serde_json::json!({
+                "id": "x-epic", "title": "the epic", "created_at": "2026-09-28T16:00:00Z",
+            }),
+        ];
+        let crown = r#"{"ts":"2026-09-28T15:30:00Z","type":"agent_crowned","source":"python","data":{"grantor":"s-king","level":2,"name":"heir","scope":"x-epic"}}"#;
+        let p = project("", &entries, &[], "", crown);
+        let child = p
+            .rows
+            .iter()
+            .find(|r| r.node == Some("x-child".into()))
+            .unwrap();
+        assert_eq!(child.owner.as_deref(), Some("king heir L2"));
+        let epic = p
+            .rows
+            .iter()
+            .find(|r| r.node == Some("x-epic".into()))
+            .unwrap();
+        assert_eq!(epic.owner.as_deref(), Some("king heir L2"));
+        // Without a crown the child rolls up to its epic by the graph parent.
+        let p = project("", &entries, &[], "", "");
+        let child = p
+            .rows
+            .iter()
+            .find(|r| r.node == Some("x-child".into()))
+            .unwrap();
+        assert_eq!(child.owner.as_deref(), Some("epic x-epic the epic"));
+        let epic = p
+            .rows
+            .iter()
+            .find(|r| r.node == Some("x-epic".into()))
+            .unwrap();
+        assert_eq!(epic.owner, None);
+        // Crown rows render in the crowns band: no owner on them.
+        let granted = p.rows.iter().find(|r| r.kind == "crown_granted");
+        assert!(granted.is_none() || granted.unwrap().owner.is_none());
     }
 }
