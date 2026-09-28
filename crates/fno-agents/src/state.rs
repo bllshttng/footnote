@@ -1900,12 +1900,16 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 /// read costs the same, while a blocking one deadlocked the send child behind
 /// the Python stamp lock until the subprocess timeout killed it.
 pub fn load_registry_best_effort(path: &Path) -> Option<Registry> {
+    let lock_file = registry_lock_path(path);
+    if let Some(parent) = lock_file.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
     let lock_file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(registry_lock_path(path))
+        .open(&lock_file)
         .ok()?;
     if lock_file.try_lock_shared().is_err() {
         return None;

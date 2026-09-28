@@ -1424,6 +1424,15 @@ def agents_home_dir() -> Path:
     return (Path.home() / ".fno" / "agents").resolve()
 
 
+def ambient_registry_path() -> Path:
+    """The HOME-anchored agents registry, independent of config and of
+    ``FNO_AGENTS_HOME``. The write guard probes this root: a test or probe
+    process must never touch the operator's real registry, and an override
+    (or a config pin) relocates sandboxes, not the root the guard protects.
+    """
+    return (Path.home() / ".fno" / "agents" / "registry.json").resolve()
+
+
 def inbox_dir(project_root: Optional[Path] = None) -> Path:
     """Return the inbox directory.
 
