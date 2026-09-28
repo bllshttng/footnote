@@ -156,17 +156,39 @@ def test_archive_then_unarchive_round_trips(store):
     assert _archived_ids(store) == set()
 
 
-def test_the_round_trip_survives_reopen(store):
+def test_the_round_trip_survives_reopen(tmp_path, monkeypatch):
     """The two verbs compose: reopen refuses an archived node and names this one,
-    so the sequence it prescribes has to actually work."""
-    _seed(store, [_node("ab-22222222", archived_at="2026-02-01T00:00:00Z")])
+    so the sequence it prescribes has to actually work. Reopen is native, so
+    its legs drive the door; unarchive stays on the wheel. Both ride ONE real
+    store: the fixture paths pin the door sandbox instead of a tmp file."""
+    from tests.goldens._door import door, make_sandbox, seed_node, warm
 
-    refused = runner.invoke(app, ["backlog", "reopen", "ab-22222222", "--reason", "x"])
-    assert refused.exit_code == 4
-    assert "unarchive" in refused.output
+    door_root = tmp_path / "door"
+    door_root.mkdir()
+    root = make_sandbox(door_root, [seed_node(
+        "ab-22222222", "done",
+        completed_at="2026-01-01T00:00:00+00:00",
+        archived_at="2026-02-01T00:00:00Z",
+    )])
+    g = root / "graph.json"
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+    from fno import paths
 
-    runner.invoke(app, ["backlog", "unarchive", "ab-22222222"])
-    reopened = runner.invoke(app, ["backlog", "reopen", "ab-22222222", "--reason", "x"])
-    assert reopened.exit_code == 0, reopened.output
-    node = {e["id"]: e for e in _rows(store)}["ab-22222222"]
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr(paths, "graph_json", lambda: g)
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+
+    warm(root, "ab-22222222")
+    code, out, err = door(root, ["reopen", "ab-22222222", "--reason", "x"])
+    assert code == 4, out + err
+    assert "unarchive" in out + err
+
+    back = runner.invoke(app, ["backlog", "unarchive", "ab-22222222"])
+    assert back.exit_code == 0, back.output
+    code, out, err = door(root, ["reopen", "ab-22222222", "--reason", "x"])
+    assert code == 0, out + err
+    node = {e["id"]: e for e in _rows(g)}["ab-22222222"]
     assert node["completed_at"] is None
