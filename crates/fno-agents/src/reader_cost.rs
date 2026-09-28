@@ -1,5 +1,5 @@
 //! Reader cost over a window: CPU-seconds per process class, with the load
-//! average beside it, for the x-a973 question: does the fleet's own reading
+//! average beside it, for the fleet-reader-cause question: does the fleet's own reading
 //! track the machine's load? One inbound caller: `crate::intel::run_intel`
 //! (`fno-agents intel --readers <secs>`). On-demand sampler, never a watcher.
 
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn build_tools_fold_and_flags_are_skipped() {
         assert_eq!(classify("/usr/bin/rustc --crate-name x"), "build");
-        assert_eq!(classify("fno backlog get x-a973"), "fno backlog get");
+        assert_eq!(classify("fno backlog get ab-1234"), "fno backlog get");
         assert_eq!(
             classify("fno-agents-daemon --home /Users/op/.fno/agents"),
             "fno-agents-daemon /Users/op/.fno/agents"
