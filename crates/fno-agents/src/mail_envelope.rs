@@ -68,7 +68,9 @@ fn render(input: &Value, registry_path: &Path) -> Result<String, String> {
     let harness_hint = attr(input, "harness");
     let from_session = attr(input, "from_session");
     let to_session = attr(input, "to_session");
-    let registry = crate::state::load_registry(registry_path).ok();
+    let registry = crate::state::try_load_registry(registry_path)
+        .ok()
+        .flatten();
     let from_identity = Some(from_session.unwrap_or(from_input));
     let to_identity = to_session.or_else(|| attr(input, "to"));
     let from_row = registry
@@ -295,6 +297,44 @@ mod tests {
         assert!(render_at(&json!({"mode":"unknown", "from":"a"}), &path)
             .unwrap_err()
             .contains("unknown render mode"));
+    }
+
+    #[test]
+    fn registry_lock_contention_does_not_block_envelope_rendering() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("agents").join("registry.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        registry(&path);
+        let lock_path = path.parent().unwrap().join("locks/_registry.lock");
+        let lock = crate::state::acquire_exclusive(&lock_path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let rendered = render_at(
+                &json!({
+                    "mode":"wrap", "body":"hello", "from":"folio-short", "harness":"claude"
+                }),
+                &path,
+            );
+            tx.send(rendered).unwrap();
+        });
+        let first_result = rx.recv_timeout(std::time::Duration::from_secs(1));
+        let completed_while_locked = first_result.is_ok();
+        drop(lock);
+        let rendered = first_result
+            .ok()
+            .or_else(|| rx.recv().ok())
+            .expect("renderer exited without a result")
+            .unwrap();
+        join.join().unwrap();
+
+        assert!(
+            completed_while_locked,
+            "envelope render waited for the registry lock"
+        );
+        assert_eq!(
+            rendered,
+            "<fno_mail from=\"folio-short\" harness=\"claude-code\">hello</fno_mail>"
+        );
     }
 
     #[test]

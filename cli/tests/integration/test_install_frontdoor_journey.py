@@ -237,7 +237,12 @@ def test_authorized_target_init_journey(clean_machine):
     matching = [m for m in manifests if node in m.read_text()]
     assert matching, [m.name for m in manifests]
     manifest_text = matching[0].read_text()
-    assert f"node:{node}" in manifest_text, manifest_text
+    if _HARNESS_SESSION_ID:
+        assert f'node:{node}' in manifest_text, manifest_text
+    else:
+        assert f'input: "{node}"' in manifest_text, manifest_text
+        assert "target_claim_blocked_reason: holder_unattributable" in manifest_text
+        assert "graph_node_id: null" in manifest_text
 
     # 5. The claim readback: the claims store answers for this exact key. When
     #    the run carries a provable harness session, the claim is still live;
