@@ -28,17 +28,6 @@ jobs:
     name: wheel ${{ matrix.target.name }}
     runs-on: ${{ matrix.target.runs-on }}
     timeout-minutes: 45
-    env:
-      # Windows cannot exec the POSIX rustc-wrapper .cargo/config.toml points
-      # at (os error 193, "%1 is not a valid Win32 application"); an empty
-      # RUSTC_WRAPPER overrides the config. Harmless on the other legs: on CI
-      # the wrapper is a fail-open no-op (no admission binary, no sccache,
-      # and its own logging skips when CI is set).
-      RUSTC_WRAPPER: ""
-    # Windows is built but not released this phase (release: false). Let its
-    # failure not fail the job, so a caller's publish leg still runs on the
-    # released macos/linux wheels.
-    continue-on-error: ${{ matrix.target.name == 'windows-x64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,10 +45,6 @@ jobs:
           - { name: macos-x64, runs-on: macos-14, rust-target: x86_64-apple-darwin, wheel-platform: macosx_10_12_x86_64 }
           - { name: linux-x64, runs-on: ubuntu-latest, rust-target: x86_64-unknown-linux-musl, wheel-platform: manylinux_2_17_x86_64 }
           - { name: linux-arm64, runs-on: ubuntu-24.04-arm, rust-target: aarch64-unknown-linux-musl, wheel-platform: manylinux_2_17_aarch64 }
-          # Windows builds but is NOT released this phase (POSIX flock + Unix-socket
-          # IPC differ; named-pipe port is a separate spec). Kept in the matrix so
-          # the toolchain stays exercised for the Phase 7+ deferral.
-          - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc, wheel-platform: "", release: false }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,13 +102,11 @@ jobs:
           # binary-complete - the advertised `fno` command AND daemon-backed
           # verbs work on a pip-only box with no second install. The build hook
           # hard-fails if any is missing (a partial set never ships).
-          ext=""
-          [ "${{ matrix.target.name }}" = "windows-x64" ] && ext=".exe"
-          cp "crates/fno/target/${{ matrix.target.rust-target }}/release/fno${ext}" \
-             "cli/src/fno/_bin/fno${ext}"
+          cp "crates/fno/target/${{ matrix.target.rust-target }}/release/fno" \
+             "cli/src/fno/_bin/fno"
           for b in fno-agents fno-agents-daemon fno-agents-worker; do
-            cp "crates/fno-agents/target/${{ matrix.target.rust-target }}/release/${b}${ext}" \
-               "cli/src/fno/_bin/${b}${ext}"
+            cp "crates/fno-agents/target/${{ matrix.target.rust-target }}/release/${b}" \
+               "cli/src/fno/_bin/${b}"
           done
 
       - name: Build wheel
@@ -145,7 +128,7 @@ jobs:
           echo "after publish. The wheel is still built, tagged, and uploaded below."
 
       - name: Clean-machine smoke (binaries on PATH, verbs run, clone-only verbs degrade)
-        if: matrix.target.name != 'windows-x64' && matrix.target.name != 'macos-x64'
+        if: matrix.target.name != 'macos-x64'
         working-directory: cli
         shell: bash
         run: |
@@ -157,7 +140,7 @@ jobs:
           bash tests/smoke/clean_machine_smoke.sh "$wheel"
 
       - name: Cargo-channel smoke (cargo install fno self-bootstraps to the wheel)
-        if: matrix.target.name != 'windows-x64' && matrix.target.name != 'macos-x64'
+        if: matrix.target.name != 'macos-x64'
         working-directory: cli
         shell: bash
         run: |
@@ -170,7 +153,7 @@ jobs:
           bash tests/smoke/cargo_bootstrap_smoke.sh "$wheel"
 
       - name: fno.sh-channel smoke (curl one-liner provisions the wheel)
-        if: matrix.target.name != 'windows-x64' && matrix.target.name != 'macos-x64'
+        if: matrix.target.name != 'macos-x64'
         working-directory: cli
         shell: bash
         run: |
