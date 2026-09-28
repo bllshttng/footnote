@@ -2606,6 +2606,9 @@ pub fn rename_agent_displacing(
         return Ok((old_name, new_name.to_string()));
     }
     let resolved_name = old_name.clone();
+    // (from, to, session) of rows displaced off the target label in this
+    // transaction, journaled beside the rename itself on success.
+    let mut displaced: Vec<(String, String, Option<String>)> = Vec::new();
     // The closure's Result IS the transaction verdict: update_registry hands it
     // back as the Ok payload, so an inner Err must propagate - dropping it would
     // report a refused rename as a success.
@@ -2646,7 +2649,18 @@ pub fn rename_agent_displacing(
                 .all(|&i| may_displace(&registry.entries[i], &registry.entries))
             {
                 for &i in &held_elsewhere {
+                    let before = registry.entries[i].name.clone();
                     vacate_label(&mut registry.entries, i, new_name, &resolved_name)?;
+                    // A displaced row whose NAME moved journals it too, or a
+                    // later --from-journal rebuild plans it back onto the
+                    // label this transaction just took from it.
+                    if registry.entries[i].name != before {
+                        displaced.push((
+                            before,
+                            registry.entries[i].name.clone(),
+                            registry.entries[i].harness_session_id.clone(),
+                        ));
+                    }
                 }
             } else {
                 return Err(format!(
@@ -2685,6 +2699,17 @@ pub fn rename_agent_displacing(
                 "to": new_name,
             }),
         );
+        for (from, to, session) in &displaced {
+            let _ = emitter.emit(
+                "agent_renamed",
+                &serde_json::json!({
+                    "name": to,
+                    "harness_session_id": session,
+                    "from": from,
+                    "to": to,
+                }),
+            );
+        }
     }
     Ok((old_name, new_name.to_string()))
 }

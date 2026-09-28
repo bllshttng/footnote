@@ -3025,3 +3025,38 @@ fn rename_agent_emits_agent_renamed() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn rename_displacement_journals_the_displaced_row() {
+    let dir = tmpdir("rename-displace");
+    let path = dir.join("registry.json");
+    update_registry(&path, |registry| {
+        let mut mover = sample_entry("mover");
+        mover.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+        registry.entries.push(mover);
+        let mut holder = sample_entry("b");
+        holder.harness_session_id = Some("aaaaaaaa-0000-0000-0000-222222222222".into());
+        holder.aliases = vec!["keeper".into()];
+        registry.entries.push(holder);
+    })
+    .unwrap();
+
+    rename_agent_displacing(&path, "mover", "b", None, |_, _| true).unwrap();
+
+    let events = crate::events::committed_journal_text(&dir.join("events.jsonl"));
+    let renamed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["type"] == "agent_renamed")
+        .collect();
+    assert_eq!(renamed.len(), 2, "both label moves journal: {events}");
+    assert_eq!(renamed[0]["data"]["from"], "mover");
+    assert_eq!(renamed[0]["data"]["to"], "b");
+    assert_eq!(renamed[1]["data"]["from"], "b");
+    assert_eq!(renamed[1]["data"]["to"], "keeper");
+    assert_eq!(
+        renamed[1]["data"]["harness_session_id"],
+        "aaaaaaaa-0000-0000-0000-222222222222"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
