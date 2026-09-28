@@ -716,10 +716,13 @@ fn harness_total(s: &SessionRow) -> u64 {
         .sum()
 }
 
-/// CLI entry: the flag parse, the env-resolved inputs, the fold, one output.
+/// CLI entry: the flag parse, the env-resolved inputs, the one output.
 pub fn run_intel(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--fleet") {
         return crate::fleet_load::run_fleet_cli(args);
+    }
+    if args.iter().any(|a| a == "--readers") {
+        return crate::reader_cost::run(args);
     }
     if args.iter().any(|a| a == "--render") {
         return crate::intel_html::run_render(args);
@@ -729,7 +732,8 @@ pub fn run_intel(args: &[String]) -> i32 {
             "fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]\n\
              [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]\n\
              [--project NAME]... [--all-projects] [--sample N|all]\n\
-             [--categories <run> --fold <saved fold JSON>] [--render <report.md>]\n\n\
+             [--categories <run> --fold <saved fold JSON>] [--render <report.md>]\n\
+             [--readers <secs>] [--every-ms N] (CPU-seconds per process class over a window)\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
              row addressed to the session. Tokens, lines, tool errors, languages,\n\
