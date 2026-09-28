@@ -185,6 +185,9 @@ pub fn run(args: &[String]) -> i32 {
         // same change (d-e11b2b3e), so the door owns every shape, help
         // included.
         "decisions" => super::decisions_cli::run(resolved.tail),
+        // The blueprint session lifecycle is native end to end: identity,
+        // claims substrate, session rows, receipts. The Python twin is gone.
+        "session" => super::session_cli::run(resolved.tail),
         _ => forward_python(&resolved),
     }
 }

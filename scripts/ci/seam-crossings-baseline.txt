@@ -96,7 +96,6 @@ crossing	crates/fno/src/server.rs	let mut command = crate::process_admission::to
 crossing	crates/fno/src/server/agent_actions.rs	let mut command = mux_command(fno_bin());
 crossing	crates/fno/src/server/agent_launch.rs	let fno = super::fno_bin().display().to_string();
 crossing	crates/fno/src/server/agent_launch.rs	let fno = super::fno_bin().display().to_string();
-crossing	crates/fno/src/server/human_input.rs	let mut cmd = crate::process_admission::tokio_command(super::fno_bin());
 crossing	crates/fno/src/yard_overlay.rs	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	let mut command = crate::process_admission::tokio_command(fno_bin());
