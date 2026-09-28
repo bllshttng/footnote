@@ -223,7 +223,7 @@ Quick summary:
 - **HARD-GATE (location), resolved from policy, never asked:** Before invoking `init-target-state.sh`, consult the shared location verdict (the SAME one `/execute`, `/fix`, and the SessionStart heads-up use, so there is no per-skill drift):
 
   ```bash
-  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
+  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/install/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
   LOC_HELPER="$PLUGIN_ROOT/hooks/helpers/check-impl-location.sh"
   [[ -f "$LOC_HELPER" ]] && bash "$LOC_HELPER" || echo "verdict=ok"
   ```

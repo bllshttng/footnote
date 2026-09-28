@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# corrections-log-init.sh - ensure ~/.fno/corrections.log exists with mode 0600.
+# corrections-log-init.sh - ensure ~/.fno/logs/corrections.log exists with mode 0600.
 #
 # Idempotent: safe to run any number of times. Creates the file on first run,
 # verifies mode on subsequent runs and corrects if drifted.
