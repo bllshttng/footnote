@@ -1359,14 +1359,16 @@ pub fn journal_text(journal: &Path, types: &[&str]) -> String {
 /// that exists and cannot be read is `Err` naming it.
 pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, String> {
     let live = live_journal(journal);
-    let live_text = match std::fs::read_to_string(&live) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+    // Offsets are BYTE offsets into the raw file, never into a lossy string:
+    // a conversion that resizes bytes would desync the stored cursor.
+    let bytes = match std::fs::read(&live) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(err) => return Err(format!("{}: {err}", live.display())),
     };
     let store = store_path(&live);
     if !store.is_file() {
-        return Ok(live_text);
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
     let conn = open_read(&store)?;
     let (sql, args) = q.build_sql();
@@ -1394,23 +1396,54 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
         text.push_str(&line);
         text.push('\n');
     }
+    // The ingest cursor records how far import_file ingested this inode.
+    // Every complete line before `offset` is committed knowledge - it sits in
+    // events or event_observation_pending, the two tables `held` probes - so
+    // only the tail pays the per-line hash + probe. A stale cursor (the head
+    // line changed, the file shrank) or an absent one falls back to the
+    // full-file scan, the pre-cursor behavior.
+    let head_hash = {
+        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        Sha256::digest(first).to_vec()
+    };
+    let complete_end = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let start: usize = match std::fs::metadata(&live) {
+        Ok(meta) => conn
+            .query_row(
+                "SELECT head_hash, \"offset\" FROM ingest_cursor WHERE dev = ?1 AND ino = ?2",
+                params![meta.dev(), meta.ino()],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .ok()
+            .and_then(|(head, offset)| {
+                let offset = offset as usize;
+                (head == head_hash && offset <= complete_end).then_some(offset)
+            })
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
     // ponytail: a pre-store line no import took reads as newest; any import fixes it.
-    for raw in live_text.lines() {
-        if raw.is_empty() {
+    for line_bytes in bytes[start..complete_end].split(|&b| b == b'\n') {
+        let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
+        if line_bytes.is_empty() {
             continue;
         }
-        let hash = Sha256::digest(raw.as_bytes()).to_vec();
+        let hash = Sha256::digest(line_bytes).to_vec();
         let not_held: bool = held
             .query_row(params![hash], |r| r.get::<_, i64>(0))
             .map(|found| found == 0)
             .unwrap_or(false);
-        if not_held && observation::tail_line_flushed(&conn, raw) {
-            // The line is represented by a flushed observation window; a
-            // second copy in the tail would double-represent it.
-            continue;
-        }
         if not_held {
-            text.push_str(raw);
+            let raw = String::from_utf8_lossy(line_bytes);
+            if observation::tail_line_flushed(&conn, &raw) {
+                // The line is represented by a flushed observation window; a
+                // second copy in the tail would double-represent it.
+                continue;
+            }
+            text.push_str(&raw);
             text.push('\n');
         }
     }
