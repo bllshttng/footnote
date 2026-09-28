@@ -77,6 +77,7 @@ use overlay_paint::{
     draw_lines_overlay, draw_overlay_layout, draw_popup_overlay, layout_lines_overlay,
     OverlayAnchor, OverlayLayout,
 };
+use theme_ground::LaunchTheme;
 // Re-exported for the test module's glob; the layout fns are the only callers.
 #[allow(unused_imports)]
 pub(crate) use overlay_paint::family_b_origin;
@@ -1055,6 +1056,10 @@ struct View {
     /// `footnote-paper`, and `terminal` stays available as the no-op that
     /// inherits the emulator's own colors.
     theme: Theme,
+    /// The user's own themes, latched at startup (theme_ground::launch_theme).
+    user_themes: Vec<(String, Theme)>,
+    /// A staged theme-switch ground repaint; the run loop drains it.
+    pending_ground: Option<theme_ground::PendingGround>,
     /// The board's work-queue cards, verbatim off the wire Layout. The
     /// sidebar renders none of them (the lane is gone); the launcher's
     /// `@` node picker composes its suggestions over this feed.
@@ -1964,6 +1969,7 @@ mod node_detail;
 mod overlay_paint;
 mod release_check;
 mod settings_modal;
+mod theme_ground;
 mod update_menu;
 
 use config_set::spawn_config_set;
@@ -2159,6 +2165,8 @@ impl View {
             search_esc: Vec::new(),
             hover_focus: true,
             theme: Theme::default_theme(),
+            user_themes: Vec::new(),
+            pending_ground: None,
             backlog: Vec::new(),
             backlog_board: None,
             sideline_view: crate::view_store::load_sideline_view(),
@@ -8092,25 +8100,14 @@ async fn attach_and_run(
     // The chrome theme, same ladder. An unknown name falls back to
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
-    let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
     // The OSC ground: set + restore ride together through the kill switch,
-    // so an operator who opts out gets byte-for-byte the old launch. Computed
-    // here because `cwd` moves into the Attach below.
-    let paint = crate::digest_overlay::paint_background_enabled(Path::new(&cwd));
-    let ground = if paint {
-        crate::theme::ground_set(&theme)
-    } else {
-        None
-    };
-    let ground_color = if paint {
-        match theme.base {
-            Color::Default => None,
-            c => Some(c),
-        }
-    } else {
-        None
-    };
-    view.theme = theme;
+    // so an operator who opts out gets byte-for-byte the old launch.
+    let LaunchTheme {
+        theme,
+        theme_warn,
+        ground,
+        ground_color,
+    } = theme_ground::launch_theme(Path::new(&cwd), &mut view);
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
     // than silently running the shipped default: a keyboard that quietly ignores
@@ -8292,7 +8289,7 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(
+    let mut guard = launch::begin(
         &mut stdin_rx,
         &splash_tx,
         &theme,
@@ -8982,6 +8979,7 @@ async fn attach_and_run(
                             } else {
                                 None
                             };
+                            theme_ground::drain_pending_ground(&mut view, &mut compositor, &mut guard);
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -11682,28 +11680,7 @@ async fn execute_aux_action(
             settings_modal::run_toggle(view, action, sock_w).await?;
         }
         AuxAction::ApplyTheme(name) => {
-            // Swap the in-memory theme first (immediate), then persist via the
-            // CLI - the mux never writes config itself, mirroring the rule that
-            // it never writes the graph. On a write failure the in-memory theme
-            // STAYS (applied this session) and the notice says so honestly,
-            // never claiming a persistence it did not achieve.
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let (theme, warn) = crate::digest_overlay::theme_role_overrides(
-                Path::new(&cwd),
-                Theme::from_name(&name),
-            );
-            view.theme = theme;
-            let notice = match spawn_config_set("mux.theme", &name).await {
-                Ok(()) => match warn {
-                    None => format!("theme: {name}"),
-                    Some(w) => w.0,
-                },
-                Err(_) => format!("theme {name} applied this session; save failed"),
-            };
-            view.set_notice(notice);
-            view.reopen_settings_keeping_sel();
+            theme_ground::apply(view, &name).await?;
         }
         AuxAction::ApplyPrefix(spec) => {
             let notice = match crate::keys::resolve_prefix_change(&spec) {
@@ -13734,6 +13711,9 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+#[cfg(test)]
+#[path = "client_tests/theme_ground_tests.rs"]
+mod theme_ground_tests;
 
 #[cfg(test)]
 #[path = "client_tests/update_modal_tests.rs"]
