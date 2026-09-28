@@ -137,6 +137,8 @@ enum Role {
     /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
+    /// `fno agents history ... --graph ...`: the native session-card reader.
+    AgentsHistory(Vec<OsString>),
     /// `fno backlog ...`: the whole backlog namespace execs the sibling Rust
     /// binary's grouped dispatcher. The argv passes through byte-verbatim
     /// (the sibling's catalog owns grouped and legacy spellings).
@@ -197,6 +199,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     // other name, so `fno doctor event emit` must keep forwarding.
     if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
         return Role::DoctorEvent(rest);
+    }
+    if let Some(rest) = fno::agents_history::classify(args) {
+        return Role::AgentsHistory(rest);
     }
     // The backlog namespace claims itself lexically, like doctor-event: the
     // sibling dispatcher owns the whole namespace's spelling (grouped and
@@ -368,6 +373,7 @@ fn main() {
         Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
+        Role::AgentsHistory(rest) => std::process::exit(fno::agents_history::run(&rest)),
         Role::InboxLaw(rest) => std::process::exit(fno::law_cli::run(&rest)),
         Role::InboxDecisions(rest) => std::process::exit(fno::law_cli::run_decisions(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
@@ -459,6 +465,29 @@ mod tests {
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn agents_history_claims_only_forwarded_graph_requests() {
+        let forwarded = os(&[
+            "agents",
+            "history",
+            "d23c3d68",
+            "--graph",
+            "/tmp/graph.json",
+        ]);
+        assert_eq!(
+            decide_role(&forwarded, false),
+            Role::AgentsHistory(os(&["d23c3d68", "--graph", "/tmp/graph.json"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["agents", "history", "d23c3d68"]), false),
+            Role::Forward
+        );
+        assert_eq!(
+            decide_role(&os(&["agents", "history", "--help"]), false),
+            Role::Forward
+        );
     }
 
     #[test]
