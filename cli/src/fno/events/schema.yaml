@@ -179,6 +179,9 @@ event_types:
         measurement_complete:
           type: boolean
           description: "True only when every expected delivery source was observed in the same hook invocation."
+        measurement_timeouts:
+          type: integer
+          description: "How many measurement_errors are producer timeouts; equal to the error count means the snapshot is a measured partial, not an unobserved hook."
         measurement_errors:
           type: array
         node_id:
@@ -3579,7 +3582,7 @@ event_types:
           description: "The Stop decision after continuation arbitration."
         class:
           type: string
-          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow]
+          enum: [delegated-to-goal, actionable-block, refusal, visitor, terminal, unavailable, live-allow, foreign-manifest]
           description: "Typed reason class for the decision."
         correlation_id:
           type: string
