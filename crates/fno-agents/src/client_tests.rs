@@ -1871,7 +1871,13 @@ fn pb(s: &str) -> std::path::PathBuf {
 #[test]
 fn effective_cwd_default_resolves_canonical() {
     // No flags: the inverted default lands on canonical (AC1-HP).
-    let got = effective_worker_cwd(None, false, false, Some(pb("/canon")), pb("/wt"));
+    let got = fno_agents::spawn_cwd::effective_worker_cwd(
+        None,
+        false,
+        false,
+        Some(pb("/canon")),
+        pb("/wt"),
+    );
     assert_eq!(got, pb("/canon"));
 }
 
@@ -1879,8 +1885,20 @@ fn effective_cwd_default_resolves_canonical() {
 fn effective_cwd_fresh_is_noop_alias() {
     // --fresh is an accepted no-op alias: identical to passing nothing, the
     // default already being canonical (AC2-EDGE).
-    let with_fresh = effective_worker_cwd(None, true, false, Some(pb("/canon")), pb("/wt"));
-    let without = effective_worker_cwd(None, false, false, Some(pb("/canon")), pb("/wt"));
+    let with_fresh = fno_agents::spawn_cwd::effective_worker_cwd(
+        None,
+        true,
+        false,
+        Some(pb("/canon")),
+        pb("/wt"),
+    );
+    let without = fno_agents::spawn_cwd::effective_worker_cwd(
+        None,
+        false,
+        false,
+        Some(pb("/canon")),
+        pb("/wt"),
+    );
     assert_eq!(with_fresh, without);
     assert_eq!(with_fresh, pb("/canon"));
 }
@@ -1888,7 +1906,13 @@ fn effective_cwd_fresh_is_noop_alias() {
 #[test]
 fn effective_cwd_here_keeps_caller() {
     // --here is the explicit opt-in to stay in the caller's worktree (AC2-HP).
-    let got = effective_worker_cwd(None, false, true, Some(pb("/canon")), pb("/wt"));
+    let got = fno_agents::spawn_cwd::effective_worker_cwd(
+        None,
+        false,
+        true,
+        Some(pb("/canon")),
+        pb("/wt"),
+    );
     assert_eq!(got, pb("/wt"));
 }
 
@@ -1896,7 +1920,7 @@ fn effective_cwd_here_keeps_caller() {
 fn effective_cwd_unresolved_canonical_falls_back_to_caller() {
     // Ambiguous / git-missing canonical resolution -> caller cwd, the safe
     // side (AC1-ERR; Failure Modes > Boundaries: never guess canonical).
-    let got = effective_worker_cwd(None, false, false, None, pb("/wt"));
+    let got = fno_agents::spawn_cwd::effective_worker_cwd(None, false, false, None, pb("/wt"));
     assert_eq!(got, pb("/wt"));
 }
 
@@ -1904,7 +1928,7 @@ fn effective_cwd_unresolved_canonical_falls_back_to_caller() {
 fn effective_cwd_explicit_cwd_wins_over_everything() {
     // --cwd is the highest-priority cwd source and wins over --here/--fresh
     // (AC2-ERR; Failure Modes > Invariants).
-    let got = effective_worker_cwd(
+    let got = fno_agents::spawn_cwd::effective_worker_cwd(
         Some(pb("/explicit")),
         true,
         true,

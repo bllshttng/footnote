@@ -24,6 +24,12 @@ def scan(bin_dir: Path | None = None) -> dict:
     """
     directory = Path(bin_dir) if bin_dir else Path.home() / ".local" / "bin"
     temp_root = _temp_root()
+    # The running venv's bin is the durable copy the repair arm relinks to
+    # (see _defect), so a shim resolving there is healthy even when the tool
+    # venv sits under the system temp root - the release smoke's UV_TOOL_DIR
+    # does exactly that. Resolved: the temp root may carry symlinked ancestors
+    # (macOS /var -> /private/var) the lexical comparison would miss.
+    venv_bin = Path(sys.executable).parent.resolve()
     defects: list[dict] = []
     for entry in sorted(Path(directory).glob("fno*")):
         if not entry.is_symlink():
@@ -34,6 +40,8 @@ def scan(bin_dir: Path | None = None) -> dict:
         resolved = target.resolve()
         if not resolved.exists():
             defects.append(_defect(entry, resolved, "dangling"))
+        elif resolved.is_relative_to(venv_bin):
+            continue
         elif resolved.is_relative_to(Path(temp_root)):
             defects.append(_defect(entry, resolved, "temp-resolving"))
     return {"bin_dir": str(directory), "defects": defects, "healthy": not defects}
