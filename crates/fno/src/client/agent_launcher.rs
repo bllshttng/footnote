@@ -27,7 +27,8 @@ use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchSt
 /// paste from growing the carry forever.
 const MAX_PASTE_CARRY: usize = 16 * 1024;
 const MAX_LAUNCH_FLAGS_CHARS: usize = 1024;
-const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
+pub(crate) const LAUNCH_EXTRA_AXES_PROTO: u32 = 91;
+pub(crate) const LAUNCH_WORKTREE_PROTO: u32 = 95;
 
 /// The editor's prompt gutter: the marker glyph and one space, before the
 /// first message row. The message wraps inside what remains.
@@ -91,11 +92,25 @@ pub(crate) struct RecentModelChoice {
 /// The catalog read's outcome (the update-probe shape): the dock opens
 /// instantly on whatever is in hand and refreshes when the probe lands. The
 /// second field of `Ok` carries the account-record read's failure when model
-/// lists could not be fetched; harness rows still stand.
+/// lists could not be fetched; harness rows still stand. The third carries
+/// one [`ProjectFacts`] row per probed project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogOutcome {
-    Ok(Vec<HarnessChoice>, Option<String>),
+    Ok(Vec<HarnessChoice>, Option<String>, Vec<ProjectFacts>),
     Degraded(String),
+}
+
+/// One project's launch facts, read during the catalog probe: the checkout's
+/// current branch, its local branches (committer-date freshest first), and
+/// the resolved worktree policy word. A non-git cwd carries no branch facts;
+/// a failed policy read lands the named reason in `policy` so the launch
+/// stays honest (`worktree ?`) instead of guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectFacts {
+    pub cwd: String,
+    pub current: Option<String>,
+    pub branches: Vec<String>,
+    pub policy: Result<String, String>,
 }
 
 /// Which control owns the keyboard. The chips carry the axes; a chip's
@@ -106,6 +121,8 @@ pub(crate) enum CatalogOutcome {
 pub(crate) enum Focus {
     Where,
     Project,
+    Branch,
+    Worktree,
     Message,
     Plus,
     Permission,
@@ -116,18 +133,22 @@ pub(crate) enum Focus {
 }
 
 impl Focus {
-    /// The chip-row cycle, in paint order. The effort chip joins only when
-    /// the catalog says the harness has an effort surface.
+    /// The chip-row cycle, in paint order. The Branch chip and worktree box
+    /// join only when the draft project's facts admit branching (a non-git
+    /// project has neither); the effort chip joins only when the catalog
+    /// says the harness has an effort surface.
     fn tab_order(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> Vec<Focus> {
-        let mut order = vec![
-            Self::Where,
-            Self::Project,
+        let mut order = vec![Self::Where, Self::Project];
+        if branch_offered(launcher, catalog) {
+            order.extend([Self::Branch, Self::Worktree]);
+        }
+        order.extend([
             Self::Message,
             Self::Plus,
             Self::Permission,
             Self::Harness,
             Self::Model,
-        ];
+        ]);
         if effort_offered(launcher, catalog) {
             order.push(Self::Effort);
         }
@@ -159,12 +180,23 @@ impl Focus {
 /// effort surface at all (`None` = no axis).
 pub(crate) fn effort_offered(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> bool {
     let harness = launcher.draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return false;
     };
     rows.iter()
         .find(|r| r.name == harness)
         .is_some_and(|r| r.efforts.is_some())
+}
+
+/// The Branch chip and worktree box paint when the draft project can take a
+/// branch at all. Facts unread (`None`) still offers: the box paints
+/// `worktree ?` until the probe lands (AC6-EDGE). Only a read non-git
+/// project (no current branch, no branches) hides both.
+pub(crate) fn branch_offered(launcher: &Launcher, catalog: &Option<CatalogOutcome>) -> bool {
+    match launcher.draft.facts(catalog) {
+        None => true,
+        Some(f) => f.current.is_some() || !f.branches.is_empty(),
+    }
 }
 
 /// The launch lifecycle the dock renders. `Submitting` freezes the
@@ -220,6 +252,9 @@ pub(crate) struct Launcher {
 pub(crate) enum PickerAction {
     /// Set the pin to this exact value (an effort, a permission mode).
     Set(String),
+    /// A branch pick: the worktree launch checks this branch out. A pick
+    /// other than the project's current branch checks the worktree box.
+    SetBranch(String),
     /// The "<harness> decides" first row: clear the pin.
     Clear,
     ClearModel,
@@ -328,6 +363,13 @@ pub(crate) struct LaunchDraft {
     /// choice is `cwd`.
     pub projects: Vec<String>,
     pub project_idx: usize,
+    /// The worktree box: `None` = follow the project's resolved policy,
+    /// `Some(v)` = an explicit pick (Space/click or a branch pick). A `never`
+    /// policy overrides both.
+    pub worktree: Option<bool>,
+    /// The branch a worktree launch checks out; `None` = ensure's default
+    /// (`main`, a fresh branch off origin/main).
+    pub branch: Option<String>,
     pub message: String,
     /// Cursor into `message`, in CHARS (the editor is char-addressed so a
     /// split UTF-8 sequence can never wedge it).
@@ -371,6 +413,37 @@ impl LaunchDraft {
             .get(self.project_idx)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The draft cwd's facts row, when the catalog probe landed one.
+    fn facts<'a>(&self, catalog: &'a Option<CatalogOutcome>) -> Option<&'a ProjectFacts> {
+        match catalog {
+            Some(CatalogOutcome::Ok(_, _, facts)) => facts.iter().find(|f| f.cwd == self.cwd()),
+            _ => None,
+        }
+    }
+
+    /// The box's effective state: `Some(v)` when the launch would take a
+    /// worktree, `None` when the policy is unread or failed AND no explicit
+    /// pick stands (the `worktree ?` state). A `never` policy always answers
+    /// `Some(false)`; a read policy answers the checked default.
+    fn worktree_state(&self, catalog: &Option<CatalogOutcome>) -> Option<bool> {
+        if self.policy_never(catalog) {
+            return Some(false);
+        }
+        self.worktree
+            .or_else(|| self.policy_known(catalog).then_some(true))
+    }
+
+    fn policy_never(&self, catalog: &Option<CatalogOutcome>) -> bool {
+        matches!(
+            self.facts(catalog).map(|f| f.policy.as_deref()),
+            Some(Ok("never"))
+        )
+    }
+
+    fn policy_known(&self, catalog: &Option<CatalogOutcome>) -> bool {
+        self.facts(catalog).is_some_and(|f| f.policy.is_ok())
     }
 
     pub(crate) fn request(&self, request_id: u64) -> AgentLaunchRequest {
@@ -420,6 +493,11 @@ impl LaunchDraft {
             }),
             message: self.message.clone(),
             extra_flags: Vec::new(),
+            // The worktree choice lands in `submit`, where the project facts
+            // (and the `worktree ?` refusal) are reachable; a bare request
+            // keeps the in-place default.
+            worktree: false,
+            branch: None,
         }
     }
 
@@ -547,26 +625,78 @@ pub(crate) fn open(view: &mut View) {
     // A missing OR degraded catalog re-probes: one transient failure must
     // not stick for the session while a healthy one stays last-outcome-wins.
     // A partial model read re-probes too: defaults still launch, but the next
-    // open retries any failed routing or harness-specific model list.
-    if !matches!(
-        &view.launcher_catalog,
-        Some(CatalogOutcome::Ok(rows, None)) if rows.iter().all(|row| row.models_error.is_none())
-    ) {
+    // open retries any failed routing or harness-specific model list. A draft
+    // project with no facts row re-probes as well, so a project that joins
+    // the list after the last probe gets its facts on the next read.
+    let facts_missing = view.launcher.as_ref().is_some_and(|l| {
+        let cwd = l.draft.cwd();
+        match &view.launcher_catalog {
+            Some(CatalogOutcome::Ok(_, _, facts)) => !facts.iter().any(|f| f.cwd == cwd),
+            _ => false,
+        }
+    });
+    if facts_missing
+        || !matches!(
+            &view.launcher_catalog,
+            Some(CatalogOutcome::Ok(rows, None, _)) if rows.iter().all(|row| row.models_error.is_none())
+        )
+    {
         view.catalog_want = true;
     }
 }
 
 /// Offer every catalog name as a harness choice; an unavailable one refuses
 /// AT SUBMIT with its own reason (visible inline), never by disappearing.
+/// The FIRST sync also picks the preselect: the last harness this session
+/// launched (the retained draft carries it), else claude, else codex - the
+/// alphabetical first row never wins.
 pub(crate) fn sync_harness_names(l: &mut Launcher, catalog: &Option<CatalogOutcome>) {
     if l.draft.harnesses.is_empty() {
-        if let Some(CatalogOutcome::Ok(rows, _)) = catalog {
+        if let Some(CatalogOutcome::Ok(rows, _, _)) = catalog {
             l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
-            if l.draft.harness_idx >= rows.len() {
-                l.draft.harness_idx = 0;
+            if l.draft.harness_idx == 0 {
+                l.draft.harness_idx =
+                    default_harness_idx(&l.draft.harnesses, remembered_harness().as_deref());
             }
         }
     }
+}
+
+/// The preselect ladder over the catalog's names: the harness the last
+/// launch used (the mux-dir store), then claude, then codex, then the first
+/// row (a catalog with none of those still shows a value).
+fn default_harness_idx(names: &[String], remembered: Option<&str>) -> usize {
+    if let Some(want) = remembered {
+        if let Some(i) = names.iter().position(|n| n == want) {
+            return i;
+        }
+    }
+    for want in ["claude", "codex"] {
+        if let Some(i) = names.iter().position(|n| n == want) {
+            return i;
+        }
+    }
+    0
+}
+
+/// The last harness a launch used: one name in the mux dir, so the
+/// preselect survives the client session.
+fn last_harness_path() -> std::path::PathBuf {
+    crate::proto::mux_dir().join("composer-last-harness")
+}
+
+fn remember_harness(name: &str) {
+    if let Some(parent) = last_harness_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(last_harness_path(), format!("{name}\n"));
+}
+
+fn remembered_harness() -> Option<String> {
+    std::fs::read_to_string(last_harness_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Open the launcher with a board prefill: the target message, the node's
@@ -622,9 +752,9 @@ pub(crate) fn open_with(
     Ok(())
 }
 
-fn fresh_draft(view: &View) -> LaunchDraft {
-    // Project candidates: the active workspace's squads, cwd-most-recent is
-    // the session's own launch cwd. The exact cwd sent is the one shown.
+/// The project candidates a fresh draft offers: the session's own launch cwd
+/// first, then the workspace squads' cwds, deduped, most-recent first.
+fn candidate_projects(view: &View) -> Vec<String> {
     let mut projects: Vec<String> = Vec::new();
     let own = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -637,11 +767,29 @@ fn fresh_draft(view: &View) -> LaunchDraft {
             projects.push(s.canonical_cwd.clone());
         }
     }
+    projects
+}
+
+/// The project list the catalog probe reads facts for: the open draft's
+/// candidates, or the fresh-draft list when the dock is closed.
+pub(crate) fn probe_projects(view: &View) -> Vec<String> {
+    view.launcher
+        .as_ref()
+        .map(|l| l.draft.projects.clone())
+        .unwrap_or_else(|| candidate_projects(view))
+}
+
+fn fresh_draft(view: &View) -> LaunchDraft {
+    // Project candidates: the active workspace's squads, cwd-most-recent is
+    // the session's own launch cwd. The exact cwd sent is the one shown.
+    let projects = candidate_projects(view);
     LaunchDraft {
         harnesses: Vec::new(),
         harness_idx: 0,
         projects,
         project_idx: 0,
+        worktree: None,
+        branch: None,
         message: String::new(),
         cursor_chars: 0,
         node: None,
@@ -777,7 +925,7 @@ async fn submit(
     // reason, draft intact.
     let selected = l.draft.harness();
     let availability = match &view.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows, _)) => match rows.iter().find(|r| r.name == selected) {
+        Some(CatalogOutcome::Ok(rows, _, _)) => match rows.iter().find(|r| r.name == selected) {
             Some(r) if !r.selectable() => Err(r.reason()),
             Some(_) => Ok(()),
             None => Err(format!("harness {selected:?} is not in the catalog")),
@@ -798,7 +946,7 @@ async fn submit(
             .model_row
             .clone()
             .unwrap_or_else(|| l.draft.model.clone());
-        if let Some(CatalogOutcome::Ok(rows, _)) = &view.launcher_catalog {
+        if let Some(CatalogOutcome::Ok(rows, _, _)) = &view.launcher_catalog {
             let row = rows.iter().find(|r| r.name == selected).and_then(|h| {
                 h.models.iter().chain(h.more.iter()).find(|m| {
                     m.name == needle && m.provider.as_deref() == Some(l.draft.provider.as_str())
@@ -825,8 +973,43 @@ async fn submit(
             }
         }
     }
+    // The worktree choice resolves against the project facts: a read policy
+    // answers its default, an explicit box pick wins, a `never` project
+    // always launches in place, and an unread policy with no pick refuses -
+    // the composer never guesses (AC6-EDGE).
+    let cwd = l.draft.cwd();
+    let explicit = l.draft.worktree;
+    let picked_branch = l.draft.branch.clone();
+    let policy = match &view.launcher_catalog {
+        Some(CatalogOutcome::Ok(_, _, facts)) => facts
+            .iter()
+            .find(|f| f.cwd == cwd)
+            .map(|f| f.policy.clone()),
+        _ => None,
+    };
+    let worktree = if matches!(&policy, Some(Ok(w)) if w == "never") {
+        Some(false)
+    } else {
+        // A failed policy read is as good as an unread one: the default
+        // needs a READ policy, never a guess (AC6-EDGE).
+        explicit.or_else(|| policy.as_ref().filter(|r| r.is_ok()).map(|_| true))
+    };
+    let Some(worktree) = worktree else {
+        l.phase = Phase::Refused {
+            request_id,
+            reason: "worktree policy unread; pick the box explicitly".to_string(),
+        };
+        return Ok(());
+    };
+    let branch = if worktree {
+        picked_branch.filter(|b| b != "main")
+    } else {
+        None
+    };
     let mut request = l.draft.request(request_id);
     request.extra_flags = extra_flags;
+    request.worktree = worktree;
+    request.branch = branch;
     if (request.provider.is_some() || !request.extra_flags.is_empty())
         && !supports_launch_extra_axes(&view.session)
     {
@@ -836,8 +1019,16 @@ async fn submit(
         };
         return Ok(());
     }
+    if request.worktree && !wire_at_least(&view.session, LAUNCH_WORKTREE_PROTO) {
+        l.phase = Phase::Refused {
+            request_id,
+            reason: "the connected mux server does not support worktree launches; reconnect to a server running current fno".to_string(),
+        };
+        return Ok(());
+    }
     l.armed = Some(request_id);
     l.phase = Phase::Submitting { request_id };
+    remember_harness(&selected);
     write_msg(sock_w, &ClientMsg::AgentLaunch(request))
         .await
         .map_err(|e| {
@@ -855,15 +1046,19 @@ async fn submit(
         })
 }
 
-fn supports_launch_extra_axes(session: &str) -> bool {
+pub(crate) fn version_at_least(version: Option<u32>, min: u32) -> bool {
+    version.is_some_and(|version| version >= min)
+}
+
+fn wire_at_least(session: &str, min: u32) -> bool {
     let version = crate::proto::socket_path(session)
         .ok()
         .and_then(|socket| crate::mux_rows::read_wire_version(&socket));
-    launch_extra_axes_supported(version)
+    version_at_least(version, min)
 }
 
-pub(crate) fn launch_extra_axes_supported(version: Option<u32>) -> bool {
-    version.is_some_and(|version| version >= LAUNCH_EXTRA_AXES_PROTO)
+fn supports_launch_extra_axes(session: &str) -> bool {
+    wire_at_least(session, LAUNCH_EXTRA_AXES_PROTO)
 }
 
 // -- input folding -----------------------------------------------------------
@@ -1350,6 +1545,19 @@ pub(crate) async fn launcher_keys(
                     // Esc is the explicit cancel while an attempt pends.
                 } else if focus == Focus::Message {
                     submit(view, sock_w).await?;
+                } else if focus == Focus::Worktree {
+                    if let Some(l) = view.launcher.as_mut() {
+                        toggle_worktree(l, &view.launcher_catalog);
+                    }
+                } else if focus == Focus::Branch
+                    && view
+                        .launcher
+                        .as_ref()
+                        .is_some_and(|l| l.draft.policy_never(&view.launcher_catalog))
+                {
+                    // A `never` project runs in place, so the Branch chip is
+                    // read-only there: it shows the current branch and opens
+                    // no picker.
                 } else if focus != Focus::ExtraFlags {
                     // A chip: Enter opens its picker, anchored one row under
                     // the chip. The flags editor paints no chip.
@@ -1384,6 +1592,9 @@ pub(crate) async fn launcher_keys(
                         }
                         Focus::Message => insert_char(&mut l.draft, c),
                         Focus::ExtraFlags => insert_extra_flag_char(&mut l.draft, c),
+                        Focus::Worktree if c == ' ' => {
+                            toggle_worktree(l, &view.launcher_catalog);
+                        }
                         Focus::Permission => {
                             // Free text only where the capability table
                             // declares an empty choice list; the TypeIn row
@@ -1424,12 +1635,24 @@ pub(crate) async fn launcher_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// Space/Enter/click on the worktree box: an explicit pick replaces the
+/// policy default. A `never` project never toggles - in place is the only
+/// legal launch there, so the box stays painted unchecked and greyed.
+fn toggle_worktree(l: &mut Launcher, catalog: &Option<CatalogOutcome>) {
+    if l.draft.policy_never(catalog) {
+        return;
+    }
+    let current = l.draft.worktree_state(catalog).unwrap_or(false);
+    l.draft.worktree = Some(!current);
+    l.draft.bump();
+}
+
 /// Cycle the current harness's effort one step (`delta` -1/+1) through the
 /// capability table's list, the empty pin (the harness default) first. A
 /// harness with no effort list keeps its pin untouched.
 fn cycle_effort(l: &mut Launcher, delta: i32, catalog: &Option<CatalogOutcome>) {
     let harness = l.draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return;
     };
     let Some(row) = rows.iter().find(|r| r.name == harness) else {
@@ -1452,7 +1675,7 @@ fn cycle_effort(l: &mut Launcher, delta: i32, catalog: &Option<CatalogOutcome>) 
 /// After the harness changes, any pin the new harness does not offer clears.
 fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome>) {
     let harness = draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows, _, _)) = catalog else {
         return;
     };
     let Some(row) = rows.iter().find(|r| r.name == harness) else {
@@ -1555,10 +1778,12 @@ fn next_free_portal(view: &View) -> u8 {
 
 /// The catalog read: a compiled-in table (each harness's model floor
 /// included) plus PATH stats, then bounded reads for configured routing
-/// rows, codex's own model cache, and OpenCode's installed model list.
-/// Delivered through the probe channel so the dock has one "not yet read"
-/// and "read" shape; async because the subprocess reads are.
-pub(crate) async fn load_catalog() -> CatalogOutcome {
+/// rows, codex's own model cache, and OpenCode's installed model list, and
+/// one facts row per project in `projects` (git branch facts + the resolved
+/// worktree policy word). Delivered through the probe channel so the dock
+/// has one "not yet read" and "read" shape; async because the subprocess
+/// reads are.
+pub(crate) async fn load_catalog(projects: Vec<String>) -> CatalogOutcome {
     let Ok(parsed) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
         return CatalogOutcome::Degraded("harness catalog: capability table unparseable".into());
     };
@@ -1756,7 +1981,85 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
         row.more = more;
         row.catalog_error = catalog_error.clone();
     }
-    CatalogOutcome::Ok(rows, models_err)
+    let facts = probe_project_facts(projects, bin.as_str(), timeout, deadline).await;
+    CatalogOutcome::Ok(rows, models_err, facts)
+}
+
+/// One project's facts read: current branch, local branches, and the
+/// worktree policy word - three bounded subprocess reads run in parallel
+/// under the probe's shared deadline. A non-git cwd yields no branch facts;
+/// the policy verb's failure lands in `policy` as the named reason.
+async fn probe_project_facts(
+    projects: Vec<String>,
+    fno: &str,
+    timeout: std::time::Duration,
+    deadline: tokio::time::Instant,
+) -> Vec<ProjectFacts> {
+    let mut facts = Vec::with_capacity(projects.len());
+    for cwd in projects {
+        let git_current = ["git", "-C", cwd.as_str(), "branch", "--show-current"];
+        let git_branches = [
+            "git",
+            "-C",
+            cwd.as_str(),
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ];
+        let policy_argv = [
+            fno,
+            "agents",
+            "workspace",
+            "worktree",
+            "policy",
+            "--repo",
+            cwd.as_str(),
+        ];
+        let (current, branches, policy) = tokio::join!(
+            crate::dispatch_launch::run_fno_captured(&git_current, timeout, deadline),
+            crate::dispatch_launch::run_fno_captured(&git_branches, timeout, deadline),
+            crate::dispatch_launch::run_fno_captured(&policy_argv, timeout, deadline),
+        );
+        let current = current.filter(|(ok, _, _)| *ok).and_then(|(_, out, _)| {
+            out.lines()
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+        let branches: Vec<String> = branches
+            .filter(|(ok, _, _)| *ok)
+            .map(|(_, out, _)| {
+                out.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let policy = match policy {
+            Some((true, out, _)) => out
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| "policy verb printed nothing".to_string()),
+            Some((false, _, stderr)) => Err(stderr
+                .lines()
+                .next()
+                .unwrap_or("policy verb failed")
+                .trim()
+                .to_string()),
+            None => Err("policy read timed out".to_string()),
+        };
+        facts.push(ProjectFacts {
+            cwd,
+            current,
+            branches,
+            policy,
+        });
+    }
+    facts
 }
 
 // -- picker ------------------------------------------------------------------
@@ -1857,6 +2160,11 @@ pub(crate) fn filtered_popup(
         .full_chrome()
         .full_width_selection()
         .label_first();
+    // The Branch and Model lists can run hundreds of rows; the popover never
+    // takes the whole screen - the composer sheet stays readable behind it.
+    if matches!(field, Focus::Branch | Focus::Model) {
+        popup = popup.body_cap_pct(50);
+    }
     if !filter.is_empty() {
         popup = popup.title(format!(
             "{title} \u{b7} filter: {filter}",
@@ -1881,6 +2189,7 @@ fn title_for(field: Focus) -> String {
         Focus::Permission => "mode".to_string(),
         Focus::Where => "where".to_string(),
         Focus::Effort => "effort".to_string(),
+        Focus::Branch => "branch".to_string(),
         _ => String::new(),
     }
 }
@@ -1986,7 +2295,7 @@ pub(crate) fn picker_rows(
     };
     match field {
         Focus::Harness => match catalog {
-            Some(CatalogOutcome::Ok(rows_found, _)) => {
+            Some(CatalogOutcome::Ok(rows_found, _, _)) => {
                 for h in rows_found.iter().filter(|h| h.selectable()) {
                     push_entry(
                         &mut rows,
@@ -2034,7 +2343,7 @@ pub(crate) fn picker_rows(
             ),
         },
         Focus::Model => match catalog {
-            Some(CatalogOutcome::Ok(rows_found, models_err)) => {
+            Some(CatalogOutcome::Ok(rows_found, models_err, _)) => {
                 let harness_row = rows_found.iter().find(|row| row.name == harness);
                 let models = harness_row.map(|row| &row.models);
                 let recent: Vec<&RecentModelChoice> = l
@@ -2275,7 +2584,7 @@ pub(crate) fn picker_rows(
                 true,
                 Some(PickerAction::Clear),
             );
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(modes) = &row.permission_modes {
                         if modes.is_empty() {
@@ -2331,6 +2640,54 @@ pub(crate) fn picker_rows(
                 );
             }
         }
+        Focus::Branch => {
+            // `main` first (ensure's default: a fresh branch off
+            // origin/main), then the project's local branches; type-to-filter
+            // finds one among thousands. Picking a branch other than the
+            // current one checks the worktree box (apply_picker_action).
+            let facts = l.draft.facts(catalog);
+            let current = facts.and_then(|f| f.current.clone());
+            push_entry(
+                &mut rows,
+                &mut actions,
+                if l.draft.branch.as_deref().unwrap_or("main") == "main" {
+                    "\u{2713}"
+                } else {
+                    "\u{2022}"
+                },
+                "main",
+                "fresh branch off origin/main",
+                true,
+                Some(PickerAction::SetBranch("main".to_string())),
+            );
+            if let Some(facts) = facts {
+                for b in &facts.branches {
+                    // The leading row already speaks for main (ensure's
+                    // fresh-branch default); the checkout's own main entry
+                    // would read as a second main.
+                    if b == "main" {
+                        continue;
+                    }
+                    push_entry(
+                        &mut rows,
+                        &mut actions,
+                        if l.draft.branch.as_deref() == Some(b.as_str()) {
+                            "\u{2713}"
+                        } else {
+                            "\u{2022}"
+                        },
+                        b,
+                        if current.as_deref() == Some(b.as_str()) {
+                            "current"
+                        } else {
+                            ""
+                        },
+                        true,
+                        Some(PickerAction::SetBranch(b.clone())),
+                    );
+                }
+            }
+        }
         Focus::Where => {
             // Run on: today only Local. Cloud, Remote Control and SSH name
             // no substrate in the door yet, so there are no rows to offer.
@@ -2378,7 +2735,7 @@ pub(crate) fn picker_rows(
                 true,
                 Some(PickerAction::Clear),
             );
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(efforts) = &row.efforts {
                         for e in efforts {
@@ -2455,7 +2812,7 @@ pub(crate) fn more_rows(
 ) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut actions: Vec<Option<PickerAction>> = Vec::new();
-    let Some(CatalogOutcome::Ok(rows_found, _)) = catalog else {
+    let Some(CatalogOutcome::Ok(rows_found, _, _)) = catalog else {
         return (rows, actions);
     };
     let harness = l.draft.harness();
@@ -2669,6 +3026,17 @@ pub(crate) fn apply_picker_action(
                 l.draft.bump();
             }
         }
+        PickerAction::SetBranch(branch) => {
+            // The composer never moves the project checkout's branch in
+            // place: a pick other than the current branch is a worktree
+            // branch, so the box turns on with it.
+            let current = l.draft.facts(catalog).and_then(|f| f.current.clone());
+            l.draft.branch = Some(branch.clone());
+            if current.as_deref() != Some(branch.as_str()) {
+                l.draft.worktree = Some(true);
+            }
+            l.draft.bump();
+        }
         PickerAction::InsertNode(id) => {
             // The node id lands at the cursor with a trailing space; the
             // `@` that opened the picker never entered the draft.
@@ -2797,7 +3165,7 @@ impl Launcher {
     }
 
     /// One chip's label: the axis's current VALUE, never the axis name.
-    pub(crate) fn chip_label(&self, f: Focus) -> String {
+    pub(crate) fn chip_label(&self, f: Focus, catalog: &Option<CatalogOutcome>) -> String {
         let d = &self.draft;
         match f {
             Focus::Where => {
@@ -2813,6 +3181,19 @@ impl Launcher {
                 .find(|s| !s.is_empty())
                 .unwrap_or("project")
                 .to_string(),
+            Focus::Branch => match d.worktree_state(catalog) {
+                Some(true) => d.branch.clone().unwrap_or_else(|| "main".to_string()),
+                Some(false) => d
+                    .facts(catalog)
+                    .and_then(|f| f.current.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+                None => "branch ?".to_string(),
+            },
+            Focus::Worktree => match d.worktree_state(catalog) {
+                Some(true) => "[x] worktree".to_string(),
+                Some(false) => "[ ] worktree".to_string(),
+                None => "worktree ?".to_string(),
+            },
             Focus::Plus => "+".to_string(),
             Focus::Permission => {
                 if d.permission.is_empty() {
@@ -2939,32 +3320,53 @@ impl Launcher {
         // Fixed rows: the cwd facts line, the top chips, a blank row, the
         // editor (1..=6 rows), a blank row, the bottom chip rows (1, or 2
         // when the right group wraps), the keybar, the lifecycle line.
+        // Top row: `Where Project` with the `Branch` + worktree pair beside
+        // them; when the pair cannot share the row it wraps to its own -
+        // a chip value is never truncated to make the row.
         // Bottom row split: `+ mode` left; harness, model and effort
         // right-aligned. When the two groups cannot share one row the right
         // group wraps to its own row - a chip value is never truncated to
         // make the row.
         let top: Vec<Focus> = vec![Focus::Where, Focus::Project];
+        let branch: Vec<Focus> = if branch_offered(self, &view.launcher_catalog) {
+            vec![Focus::Branch, Focus::Worktree]
+        } else {
+            Vec::new()
+        };
         let left: Vec<Focus> = vec![Focus::Plus, Focus::Permission];
         let right: Vec<Focus> = match Focus::tab_order(self, &view.launcher_catalog).last() {
             Some(Focus::Effort) => vec![Focus::Harness, Focus::Model, Focus::Effort],
             _ => vec![Focus::Harness, Focus::Model],
         };
+        let catalog = &view.launcher_catalog;
         let chip_w = |f: Focus| -> usize {
             if f == Focus::Plus {
                 return 1;
             }
-            label_width(&self.chip_label(f)) as usize + 3 // text + caret + padding
+            if f == Focus::Worktree {
+                // The checkbox paints no caret: label + one trailing pad.
+                return label_width(&self.chip_label(f, catalog)) as usize + 1;
+            }
+            label_width(&self.chip_label(f, catalog)) as usize + 3 // text + caret + padding
         };
+        let top_w: usize = top.iter().map(|f| chip_w(*f)).sum::<usize>() + (top.len() - 1) * 2;
+        let branch_w: usize =
+            branch.iter().map(|f| chip_w(*f)).sum::<usize>() + branch.len().saturating_sub(1) * 2;
         let left_w: usize = left.iter().map(|f| chip_w(*f)).sum::<usize>() + (left.len() - 1) * 2;
         let right_w: usize =
             right.iter().map(|f| chip_w(*f)).sum::<usize>() + (right.len() - 1) * 2;
+        let top_rows = if branch_w == 0 || top_w + 2 + branch_w <= inner_w {
+            1
+        } else {
+            2
+        };
         let bottom_rows = if left_w + 2 + right_w <= inner_w {
             1
         } else {
             2
         };
         // The editor gets the leftover height, capped at 6 wrapped rows.
-        let other = 1 + 1 + 1 + 1 + bottom_rows + 2; // cwd, top chips, 2 blanks, bottom chips, keybar+footer
+        let other = 1 + top_rows + 1 + 1 + bottom_rows + 2; // cwd, top chips, 2 blanks, bottom chips, keybar+footer
         let editor_rows = (rows.saturating_sub(2 + other)).clamp(1, 6);
         let framed_h = 2 + other + editor_rows;
         let origin = (
@@ -2984,8 +3386,12 @@ impl Launcher {
             }
         };
         push_row(1, 0, &top);
+        if !branch.is_empty() {
+            let row = if top_rows == 1 { 1 } else { 2 };
+            push_row(row, inner_w.saturating_sub(branch_w), &branch);
+        }
         // Bottom chips.
-        let bottom_y = 4 + editor_rows;
+        let bottom_y = 3 + top_rows + editor_rows;
         if bottom_rows == 1 {
             push_row(bottom_y, 0, &left);
             push_row(bottom_y, inner_w.saturating_sub(right_w), &right);
@@ -3013,7 +3419,7 @@ impl Launcher {
             framed_h,
             chips,
             cwd_line: RtRect::new(0, 0, inner_w as u16, 1),
-            message: RtRect::new(0, 3, inner_w as u16, editor_rows as u16),
+            message: RtRect::new(0, (2 + top_rows) as u16, inner_w as u16, editor_rows as u16),
             start_chunk,
             editor_rows,
             keybar_y: keybar_y as u16,
@@ -3049,9 +3455,36 @@ impl Launcher {
         );
         let (oy, ox) = (sl.origin.0 as usize + 1, sl.origin.1 as usize + 1);
         let mut buf = RtBuffer::empty(RtRect::new(0, 0, inner_w as u16, body_h as u16));
-        // The cwd facts line (row 0, reserved): the label bold, the full
-        // path regular. It shows while Project holds focus or the mouse.
-        if self.focus == Focus::Project || self.project_hover {
+        // The cwd facts line (row 0, reserved): the label bold, the value
+        // regular. It shows while Project holds focus or the mouse;
+        // Branch/Worktree focus shows the project's launch facts instead.
+        if self.focus == Focus::Branch || self.focus == Focus::Worktree {
+            let text = match self
+                .draft
+                .facts(&view.launcher_catalog)
+                .map(|f| (f.policy.as_deref(), f.current.as_deref()))
+            {
+                Some((Ok("never"), _)) => "policy never: runs in place".to_string(),
+                Some((Ok(word), Some(current))) => {
+                    format!("policy {word} \u{b7} branch {current}")
+                }
+                Some((Ok(word), None)) => format!("policy {word} \u{b7} branch ?"),
+                Some((Err(e), _)) => format!("policy unread: {e}"),
+                None => "reading project facts...".to_string(),
+            };
+            buf.set_string(
+                sl.cwd_line.x,
+                sl.cwd_line.y,
+                "Branch",
+                role_style(Role::PanelHead, &view.theme),
+            );
+            buf.set_string(
+                sl.cwd_line.x + 18,
+                sl.cwd_line.y,
+                compact_chip_value(&text, inner_w.saturating_sub(18)),
+                role_style(Role::PanelBody, &view.theme),
+            );
+        } else if self.focus == Focus::Project || self.project_hover {
             buf.set_string(
                 sl.cwd_line.x,
                 sl.cwd_line.y,
@@ -3066,15 +3499,30 @@ impl Launcher {
             );
         }
         // The chip row(s): the focused chip is the one filled chip; the
-        // caret rides the dim caret role.
+        // caret rides the dim caret role. The worktree box greys out under a
+        // `never` policy and paints no caret: there is nothing to drop.
         for (f, r) in &sl.chips {
+            let never = *f == Focus::Worktree && self.draft.policy_never(&view.launcher_catalog);
+            // Tab must SHOW where it landed: the focused chip carries the
+            // brand accent (bold, the same emphasis grammar the popups use),
+            // the `never` box included - focus names where the keyboard
+            // sits, not what the box will do (Enter still refuses there).
+            // An UNfocused `never` box is the disabled grammar: dim.
             let style = if *f == self.focus {
-                role_style(Role::BodySel, &view.theme)
+                role_style(Role::BodyAccent, &view.theme)
+            } else if never {
+                role_style(Role::BodyDim, &view.theme)
             } else {
                 role_style(Role::PanelBody, &view.theme)
             };
-            paint_chip(&mut buf, *r, &self.chip_label(*f), style, false);
-            if *f != Focus::Plus {
+            paint_chip(
+                &mut buf,
+                *r,
+                &self.chip_label(*f, &view.launcher_catalog),
+                style,
+                false,
+            );
+            if *f != Focus::Plus && *f != Focus::Worktree {
                 let caret_x = r.x + r.width - 1;
                 buf[(caret_x, r.y)].set_char('\u{25be}');
                 buf[(caret_x, r.y)].set_style(role_style(Role::PanelMeta, &view.theme));
@@ -3475,7 +3923,27 @@ pub(crate) async fn launcher_mouse(
     let Some(field) = hit_chip else {
         return Ok(true);
     };
-    // A press on a chip focuses it and drops its picker at it.
+    // A press on a chip focuses it and drops its picker at it. The worktree
+    // box toggles instead of opening a picker; a `never` project's Branch
+    // chip is read-only: focus only, no picker.
+    if field == Focus::Worktree {
+        if let Some(l) = view.launcher.as_mut() {
+            l.focus = field;
+            toggle_worktree(l, &view.launcher_catalog);
+        }
+        return Ok(true);
+    }
+    if field == Focus::Branch
+        && view
+            .launcher
+            .as_ref()
+            .is_some_and(|l| l.draft.policy_never(&view.launcher_catalog))
+    {
+        if let Some(l) = view.launcher.as_mut() {
+            l.focus = field;
+        }
+        return Ok(true);
+    }
     let anchor = view
         .launcher
         .as_ref()
