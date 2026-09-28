@@ -72,7 +72,7 @@ cli/tests/conftest.py::native_backlog_door::pytest.skip  # on main before this r
 cli/tests/conftest.py::pytest_collection_modifyitems::mark.skip  # on main before this ratchet
 cli/tests/conftest.py::pytest_collection_modifyitems::mark.skip  # the dev_build marker's hook-applied skip: the smoke pytest legs delete the dev build on purpose, so a marked test skips there (tests/test-dev-build-suites.sh runs it with the build present)
 cli/tests/events/test_producer_equivalence.py::test_resolver_reads_the_code_review_attestation_at_head::mark.skipif  # on main before this ratchet
-cli/tests/graph/test_backlog_search_fts.py::test_find_fts_flag_degrades_to_substring_with_a_warning::pytest.skip  # on main before this ratchet
+cli/tests/graph/test_backlog_search_fts.py::test_find_fts_answers_through_the_native_index::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_backlog_alias.py::_native_backlog::pytest.skip  # on main before this ratchet
 cli/tests/integration/test_backlog_reconcile.py::test_reconcile_reclaims_status_drift_from_container_rollup::mark.skip  # on main before this ratchet
 cli/tests/integration/test_claims_cross_impl.py::<module>::mark.skip  # on main before this ratchet
