@@ -226,6 +226,19 @@ def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
 
 
 def dispatch_hold(entry: object) -> DispatchHold:
+    """Read one node's hold: the plan declaration first, then the node field.
+
+    x-b553: a hold used to live ONLY in plan frontmatter, so the freeze
+    hold-set refused every plan-less node. The node row now carries the same
+    block as a fallback, and both read ABSENT before the other is consulted.
+    """
+    hold = _plan_dispatch_hold(entry)
+    if hold.state is not DispatchHoldState.ABSENT:
+        return hold
+    return _node_dispatch_hold(entry)
+
+
+def _plan_dispatch_hold(entry: object) -> DispatchHold:
     """Read one plan's hold declaration, failing closed on an unreadable plan."""
     if not isinstance(entry, dict):
         return DispatchHold(DispatchHoldState.ABSENT)
@@ -258,10 +271,25 @@ def dispatch_hold(entry: object) -> DispatchHold:
         )
     if "dispatch_hold" not in fm:
         return DispatchHold(DispatchHoldState.ABSENT)
+    return _validate_hold_block(fm["dispatch_hold"])
+
+
+def _node_dispatch_hold(entry: object) -> DispatchHold:
+    """Read a node-level hold from the row's own ``dispatch_hold`` field."""
+    if not isinstance(entry, dict):
+        return DispatchHold(DispatchHoldState.ABSENT)
+    block = entry.get("dispatch_hold")
+    if block is None:
+        return DispatchHold(DispatchHoldState.ABSENT)
+    return _validate_hold_block(block)
+
+
+def _validate_hold_block(block: object) -> DispatchHold:
+    """Validate one hold block (plan or node shape); fail closed on junk."""
     try:
         from fno.plan.schema import DispatchHoldBlock
 
-        parsed = DispatchHoldBlock.model_validate(fm["dispatch_hold"])
+        parsed = DispatchHoldBlock.model_validate(block)
     except Exception as exc:  # noqa: BLE001 - invalid means refuse, never raise
         return DispatchHold(
             DispatchHoldState.INVALID,

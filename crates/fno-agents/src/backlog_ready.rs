@@ -750,8 +750,19 @@ pub(crate) enum HoldState {
     Invalid,
 }
 
-/// Read one plan's hold declaration (`ladder.dispatch_hold`).
+/// Read one node's hold (`ladder.dispatch_hold`): the plan declaration first,
+/// then the node row's own `dispatch_hold` field (x-b553 - a hold works
+/// without a plan file).
 pub(crate) fn dispatch_hold(entry: &Value) -> HoldState {
+    let plan = dispatch_hold_plan(entry);
+    if !matches!(plan, HoldState::Absent) {
+        return plan;
+    }
+    node_field_hold(entry)
+}
+
+/// Read one plan's hold declaration (`ladder.dispatch_hold`).
+fn dispatch_hold_plan(entry: &Value) -> HoldState {
     let Some(probe) = resolve_plan_probe(entry) else {
         return HoldState::Absent;
     };
@@ -769,12 +780,25 @@ pub(crate) fn dispatch_hold(entry: &Value) -> HoldState {
     let Some(block) = fm.get("dispatch_hold") else {
         return HoldState::Absent;
     };
+    hold_block_state(block)
+}
+
+/// Read the node row's own `dispatch_hold` field (the plan-less hold home).
+/// Absent or null is ABSENT; a present non-object fails closed.
+fn node_field_hold(entry: &Value) -> HoldState {
+    match entry.get("dispatch_hold") {
+        None | Some(Value::Null) => HoldState::Absent,
+        Some(block) => hold_block_state(block),
+    }
+}
+
+/// Validate one hold block (plan frontmatter or node field): four required
+/// fields; missing, blank, or unparseable is INVALID (refuse, never raise).
+fn hold_block_state(block: &Value) -> HoldState {
     let Some(obj) = block.as_object() else {
         // A non-mapping dispatch_hold is invalid, not absent.
         return HoldState::Invalid;
     };
-    // DispatchHoldBlock shape: four required fields; missing, blank, or
-    // unparseable is INVALID (refuse, never raise).
     let str_field = |k: &str| -> Option<String> {
         match obj.get(k) {
             Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),

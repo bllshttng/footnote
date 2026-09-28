@@ -51,8 +51,8 @@ pub fn run(op: &str, payload: &Value) -> String {
         .unwrap_or(node)
         .to_string();
     match op.strip_prefix("hold-").unwrap_or(op) {
-        "set" => set_hold(&entry, &node_id, payload),
-        "release" => release_hold(&entry, &node_id, payload, &entries),
+        "set" => set_hold(&entry, &node_id, payload, &graph),
+        "release" => release_hold(&entry, &node_id, payload, &entries, &graph),
         other => receipt("refused", 2, format!("unknown hold op: {other}")).to_string(),
     }
 }
@@ -257,7 +257,7 @@ fn disarm_automerge(pr: u64) -> String {
     }
 }
 
-fn set_hold(entry: &Value, node_id: &str, payload: &Value) -> String {
+fn set_hold(entry: &Value, node_id: &str, payload: &Value, graph: &Path) -> String {
     let reason = payload_str(payload, "reason").unwrap_or("");
     let release_when = payload_str(payload, "release_when").unwrap_or("");
     let set_by = payload_str(payload, "set_by").unwrap_or("");
@@ -286,7 +286,19 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value) -> String {
     }
     let probe = match resolve_plan(entry, node_id) {
         Ok(p) => p,
-        Err(err) => return err.to_string(),
+        // x-b553: a hold no longer needs a plan file. The node row carries
+        // the same block, written through the store's locked mutation.
+        Err(_) => {
+            return set_node_hold(
+                entry,
+                node_id,
+                graph,
+                &reason,
+                &release_when,
+                &set_by,
+                &review_on,
+            )
+        }
     };
     let _lock = match PlanLock::acquire(&probe) {
         Ok(l) => l,
@@ -334,7 +346,7 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value) -> String {
         )
         .to_string();
     };
-    if let Some(err) = write_proven(&probe, entry, &new_text, &original, HoldState::Held) {
+    if let Some(err) = write_proven(&probe, entry, &new_text, original.as_str(), HoldState::Held) {
         return err.to_string();
     }
     let pr = pr_number(entry);
@@ -348,23 +360,175 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value) -> String {
         obj.insert("plan".into(), Value::String(probe.display().to_string()));
         obj.insert("hold".into(), Value::Object(hold));
         obj.insert("pr".into(), pr.map(Value::from).unwrap_or(Value::Null));
-        obj.insert("disarm".into(), Value::String(disarm));
+        obj.insert("disarm".into(), Value::String(disarm.clone()));
     }
     out.to_string()
+}
+
+/// The plan-less hold home (x-b553): the node row's own `dispatch_hold`
+/// field, written through the store's locked read-modify-write and proven by
+/// the same reader the merge gate uses. Restores (clears the field) when the
+/// readback disagrees, the way `write_proven` restores the plan bytes.
+fn set_node_hold(
+    entry: &Value,
+    node_id: &str,
+    graph: &Path,
+    reason: &str,
+    release_when: &str,
+    set_by: &str,
+    review_on: &str,
+) -> String {
+    if !matches!(dispatch_hold(entry), HoldState::Absent) {
+        let obj = entry.get("dispatch_hold").and_then(Value::as_object);
+        let say = |k: &str| {
+            obj.and_then(|o| o.get(k))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        };
+        return receipt(
+            "refused",
+            3,
+            format!(
+                "node {node_id} is already held: reason={} release_when={}; \
+                 lift it with `fno do pr hold release {node_id} --evidence <proof>`",
+                say("reason"),
+                say("release_when")
+            ),
+        )
+        .to_string();
+    }
+    let mut hold = Map::new();
+    hold.insert("reason".into(), Value::String(reason.to_string()));
+    hold.insert(
+        "release_when".into(),
+        Value::String(release_when.to_string()),
+    );
+    hold.insert("review_on".into(), Value::String(review_on.to_string()));
+    hold.insert("set_by".into(), Value::String(set_by.to_string()));
+    let rows = match mutate_node_hold(graph, node_id, Some(Value::Object(hold.clone()))) {
+        Ok(rows) => rows,
+        Err(err) => return err.to_string(),
+    };
+    let fresh = find_entry(&rows, node_id)
+        .cloned()
+        .unwrap_or_else(|| entry.clone());
+    if !matches!(dispatch_hold(&fresh), HoldState::Held) {
+        let _ = mutate_node_hold(graph, node_id, None);
+        return receipt(
+            "error",
+            1,
+            format!("node {node_id} hold readback missed Held; the field was cleared"),
+        )
+        .to_string();
+    }
+    let pr = pr_number(entry);
+    let disarm = pr
+        .map(disarm_automerge)
+        .unwrap_or_else(|| "skipped".to_string());
+    let mut out = receipt("held", 0, "");
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("node".into(), Value::String(node_id.to_string()));
+        obj.insert("action".into(), Value::String("set".to_string()));
+        obj.insert("plan".into(), Value::Null);
+        obj.insert("hold".into(), Value::Object(hold));
+        obj.insert("pr".into(), pr.map(Value::from).unwrap_or(Value::Null));
+        obj.insert("disarm".into(), Value::String(disarm.clone()));
+    }
+    out.to_string()
+}
+
+/// Locked read-modify-write of the node row's `dispatch_hold` field
+/// (`Some` sets it, `None` clears it), with the patch door's contention
+/// retry. Returns the committed rows for the readback.
+fn mutate_node_hold(graph: &Path, node_id: &str, hold: Option<Value>) -> Result<Vec<Value>, Value> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 0..ATTEMPTS {
+        let version = graph_store::base_version(graph)
+            .map_err(|e| receipt("error", 5, format!("graph read failed: {e}")))?;
+        let mut rows = graph_store::read_rows(graph)
+            .map_err(|e| receipt("error", 5, format!("graph read failed: {e}")))?;
+        let idx = rows
+            .iter()
+            .position(|e| graph_store::entry_id(e) == Some(node_id))
+            .ok_or_else(|| receipt("refused", 2, format!("no node resolves to '{node_id}'")))?;
+        {
+            let obj = rows[idx].as_object_mut().unwrap();
+            match &hold {
+                Some(h) => {
+                    obj.insert("dispatch_hold".to_string(), h.clone());
+                }
+                None => {
+                    obj.shift_remove("dispatch_hold");
+                }
+            }
+        }
+        let rungs: BTreeMap<String, String> = rows
+            .iter()
+            .filter_map(|e| {
+                graph_store::entry_id(e).map(|id| {
+                    (
+                        id.to_string(),
+                        crate::backlog_ready::plan_rung(e).to_string(),
+                    )
+                })
+            })
+            .collect();
+        match graph_store::locked_mutate(
+            graph,
+            graph_store::MutateInput {
+                entries: rows,
+                canonical_path: None,
+                base_version: version,
+                plan_rungs: Some(rungs),
+            },
+            graph_store::DEFAULT_LOCK_TIMEOUT,
+        ) {
+            Ok(outcome) => return Ok(outcome.entries),
+            Err(graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..))
+                if attempt + 1 < ATTEMPTS =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(graph_store::StoreError::Conflict) => {
+                return Err(receipt(
+                    "error",
+                    1,
+                    format!("graph changed under the hold write after {ATTEMPTS} attempts"),
+                ));
+            }
+            Err(graph_store::StoreError::LockTimeout(..)) => {
+                return Err(receipt(
+                    "error",
+                    1,
+                    format!("the graph lock stayed busy across {ATTEMPTS} attempts"),
+                ));
+            }
+            Err(e) => return Err(receipt("error", 5, format!("graph write failed: {e}"))),
+        }
+    }
+    unreachable!("every loop arm returns")
 }
 
 fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
 }
 
-fn release_hold(entry: &Value, node_id: &str, payload: &Value, entries: &[Value]) -> String {
+fn release_hold(
+    entry: &Value,
+    node_id: &str,
+    payload: &Value,
+    entries: &[Value],
+    graph: &Path,
+) -> String {
     let evidence = payload_str(payload, "evidence").unwrap_or("");
     if evidence.trim().is_empty() {
         return receipt("refused", 2, "release needs a non-blank --evidence").to_string();
     }
     let probe = match resolve_plan(entry, node_id) {
         Ok(p) => p,
-        Err(err) => return err.to_string(),
+        Err(_) => {
+            return release_node_hold(entry, node_id, graph, evidence);
+        }
     };
     let _lock = match PlanLock::acquire(&probe) {
         Ok(l) => l,
@@ -410,6 +574,51 @@ fn release_hold(entry: &Value, node_id: &str, payload: &Value, entries: &[Value]
         obj.insert("node".into(), Value::String(node_id.to_string()));
         obj.insert("action".into(), Value::String("release".into()));
         obj.insert("plan".into(), Value::String(probe.display().to_string()));
+        obj.insert(
+            "hold".into(),
+            json!({"evidence": evidence, "still_held_by": still_held_by}),
+        );
+        obj.insert("disarm".into(), Value::String("skipped".into()));
+    }
+    out.to_string()
+}
+
+/// Release the node row's own hold field (the plan-less arm, x-b553). The
+/// verdict reads the FRESH row - the stale `entry` still carries the field
+/// this op just cleared.
+fn release_node_hold(entry: &Value, node_id: &str, graph: &Path, evidence: &str) -> String {
+    match entry.get("dispatch_hold") {
+        None | Some(Value::Null) => {
+            return receipt(
+                "refused",
+                3,
+                format!("node {node_id} carries no merge hold; nothing to release"),
+            )
+            .to_string();
+        }
+        _ => {}
+    }
+    let fresh_rows = match mutate_node_hold(graph, node_id, None) {
+        Ok(rows) => rows,
+        Err(err) => return err.to_string(),
+    };
+    let fresh = find_entry(&fresh_rows, node_id)
+        .cloned()
+        .unwrap_or_else(|| entry.clone());
+    let by_id: BTreeMap<String, Value> = fresh_rows
+        .iter()
+        .filter_map(|e| {
+            e.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), e.clone()))
+        })
+        .collect();
+    let still_held_by = dispatch_hold_verdict(&fresh, &by_id).map(|v| v.guard_reason);
+    let mut out = receipt("released", 0, "");
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("node".into(), Value::String(node_id.to_string()));
+        obj.insert("action".into(), Value::String("release".into()));
+        obj.insert("plan".into(), Value::Null);
         obj.insert(
             "hold".into(),
             json!({"evidence": evidence, "still_held_by": still_held_by}),
@@ -655,5 +864,74 @@ mod tests {
         let disarm = r["disarm"].as_str().unwrap();
         assert!(disarm.starts_with("issued") || disarm.starts_with("failed"));
         assert!(matches!(dispatch_hold(&hold_entry(&fx)), HoldState::Held));
+    }
+
+    // --- node-level holds (x-b553): a merge hold works without a plan file ---
+
+    fn fixture_plan_less(extra: Value) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = json!({
+            "id": "t-0001",
+            "slug": "a-plan",
+            "cwd": dir.path().display().to_string(),
+        });
+        if let (Some(base), Some(ex)) = (entry.as_object_mut(), extra.as_object()) {
+            for (k, v) in ex {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        let graph = dir.path().join("graph.json");
+        crate::graph_store::seed_rows(&graph, &[entry]).unwrap();
+        (dir, graph)
+    }
+
+    #[test]
+    fn hold_set_on_a_plan_less_node_writes_the_node_field() {
+        let (_dir, graph) = fixture_plan_less(json!({}));
+        let out = run("hold-set", &set_payload(graph.display().to_string()));
+        let receipt: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(receipt["outcome"], "held", "{out}");
+        assert_eq!(receipt["exit_code"], 0);
+        assert_eq!(receipt["hold"]["reason"], "condition R");
+        let entry = crate::graph_store::read_rows(&graph).unwrap()[0].clone();
+        assert_eq!(entry["dispatch_hold"]["set_by"], "crown");
+        assert!(matches!(dispatch_hold(&entry), HoldState::Held));
+    }
+
+    #[test]
+    fn hold_set_twice_on_a_plan_less_node_refuses_naming_the_release() {
+        let (_dir, graph) = fixture_plan_less(json!({}));
+        let g = graph.display().to_string();
+        run("hold-set", &set_payload(g.clone()));
+        let out = run("hold-set", &set_payload(g));
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["exit_code"], 3, "{out}");
+        assert!(out.contains("already held"), "{out}");
+        assert!(out.contains("hold release"), "{out}");
+    }
+
+    #[test]
+    fn hold_release_on_a_plan_less_node_clears_the_node_field() {
+        let (_dir, graph) = fixture_plan_less(json!({}));
+        let g = graph.display().to_string();
+        run("hold-set", &set_payload(g.clone()));
+        let out = run("hold-release", &release_payload(g, "freeze lifted"));
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["outcome"], "released", "{out}");
+        assert_eq!(r["hold"]["evidence"], "freeze lifted");
+        let entry = crate::graph_store::read_rows(&graph).unwrap()[0].clone();
+        assert!(matches!(dispatch_hold(&entry), HoldState::Absent));
+    }
+
+    #[test]
+    fn hold_release_on_a_plan_less_unheld_node_refuses() {
+        let (_dir, graph) = fixture_plan_less(json!({}));
+        let out = run(
+            "hold-release",
+            &release_payload(graph.display().to_string(), "nothing held"),
+        );
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["exit_code"], 3, "{out}");
+        assert!(out.contains("no merge hold"), "{out}");
     }
 }
