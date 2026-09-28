@@ -7,6 +7,7 @@
 //! ```text
 //! <home>/
 //!   registry.json            registry (schema v4)
+//!   registry-snapshots/      rolling pre-write copies kept by update_registry
 //!   events.jsonl             operator-facing audit log
 //!   route-settings/          --settings floors the spawn arms write (0600,
 //!                            content-addressed; read by claude, not by us)

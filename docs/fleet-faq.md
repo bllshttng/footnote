@@ -38,6 +38,10 @@ Do not trust that backstop on its own. This file's own beat entry records a reig
 
 The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
 
+## The registry lost rows or names
+
+Restore the newest `~/.fno/agents/registry-snapshots/registry.json.*`, or a `pre-shrink.*` pin there when the newest copies collapsed, then run `fno-agents rename --from-journal` to bring the labels back from the journal. Without the snapshots a recovery reads whatever backup is oldest on disk, which is how a month-old copy once replaced 20 live rows.
+
 ## A worker looks dead. Is it?
 
 Probably not, and four readers will disagree with each other. Know what each one actually proves before you act on it.
