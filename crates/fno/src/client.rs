@@ -8102,6 +8102,23 @@ async fn attach_and_run(
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
     let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
+    // The OSC ground: set + restore ride together through the kill switch,
+    // so an operator who opts out gets byte-for-byte the old launch. Computed
+    // here because `cwd` moves into the Attach below.
+    let paint = crate::digest_overlay::paint_background_enabled(Path::new(&cwd));
+    let ground = if paint {
+        crate::theme::ground_set(&theme)
+    } else {
+        None
+    };
+    let ground_color = if paint {
+        match theme.base {
+            Color::Default => None,
+            c => Some(c),
+        }
+    } else {
+        None
+    };
     view.theme = theme;
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
@@ -8284,8 +8301,15 @@ async fn attach_and_run(
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| format!("signal setup: {e}"))?;
 
-    let guard = launch::begin(&mut stdin_rx, &splash_tx, &theme, &stashed_modesync).await?;
-    let mut compositor = Compositor::new();
+    let guard = launch::begin(
+        &mut stdin_rx,
+        &splash_tx,
+        &theme,
+        &stashed_modesync,
+        ground.as_deref(),
+    )
+    .await?;
+    let mut compositor = Compositor::new(ground_color);
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer
     // (US4). Client-local; the scanner state is the single source of truth
@@ -13717,11 +13741,16 @@ fn exit_with_notice(notice: String) -> i32 {
 /// prediction of server state.
 struct Compositor {
     last: Option<Frame>,
+    /// The theme's ground color, when a footnote theme paints one: a drawn
+    /// cell whose bg is Default renders the base instead, so terminals that
+    /// ignore the OSC still show it. `None` = the kill switch or the
+    /// terminal theme paints no ground.
+    ground: Option<Color>,
 }
 
 impl Compositor {
-    fn new() -> Self {
-        Compositor { last: None }
+    fn new(ground: Option<Color>) -> Self {
+        Compositor { last: None, ground }
     }
 
     fn draw(&mut self, frame: &Frame) -> std::io::Result<()> {
@@ -13764,9 +13793,16 @@ impl Compositor {
             if cell.flags & proto::cell_flags::WIDE_SPACER != 0 {
                 continue; // the wide glyph before it already covers this column
             }
+            // The ground fill: a Default background renders the theme's base
+            // when the takeover is active, so OSC-ignoring terminals still
+            // show it.
+            let mut cell = *cell;
+            if self.ground.is_some() && cell.bg == Color::Default {
+                cell.bg = self.ground.unwrap();
+            }
             let key = (cell.fg, cell.bg, cell.flags);
             if style_of != Some(key) {
-                apply_style(out, cell)?;
+                apply_style(out, &cell)?;
                 style_of = Some(key);
             }
             queue!(out, style::Print(cell.c))?;
@@ -13839,6 +13875,10 @@ mod feed_view_tests;
 #[cfg(test)]
 #[path = "client_tests/keys_modal_tests.rs"]
 mod keys_modal_tests;
+
+#[cfg(test)]
+#[path = "client_tests/ground_tests.rs"]
+mod ground_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;
