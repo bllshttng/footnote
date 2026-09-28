@@ -32,11 +32,21 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:
 
 - **DIRTY** - done-and-merged tree goes whatever status; live cwd inside holds (law d-cfcf5a8e).
-- **done-node** - merged sweep prunes a finished clean 30m+ tree; branch kept.
+- **done-node** - merged sweep prunes a finished clean 30m+ tree, branch kept. How a done tree with uncommitted TRACKED changes is judged is `worktree.prune_done`'s call (below).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH.
 - **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
-- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
+- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual. The daemon reaper pays after a grace window.
+- **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
+- **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
+
+**`worktree.prune_done`** decides what a done tree's uncommitted tracked changes are worth:
+
+- **`balanced`** (default) - today's contract. The diff is uncommitted work nobody named, so a modified-tracked tree keeps and is reported (`kept (dirty)`, `reason=modified-tracked`). Untracked files are salvaged by the caller.
+- **`aggressive`** - salvage first, then prune. The gate's done-node receipt carries `prune_done=aggressive`. The salvage pass writes every tracked change (staged and unstaged) to a ref named after the node (`refs/fno/salvage/<node>`). The tree prunes once the 30 minute grace passes and no live session holds it. The untracked salvage runs under both values.
+
+Both values keep the branch. Both still block on conflicts (`unmerged`), a worker mid-setup (`unborn`), an unanswerable probe, a live claim, a live cwd, and the grace window. A malformed value degrades to `balanced`.
+- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual. The daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
 
