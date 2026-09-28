@@ -592,6 +592,16 @@ FIELD_META: dict[str, Meta] = {
         "Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); "
         "falls back to the script's own detection when empty. Default empty.",
     ),
+    "worktree.prune_done": Meta(
+        "advanced",
+        "How far the merged sweep's done-node arm goes on a done tree with "
+        "uncommitted tracked changes: balanced (default) keeps the tree and "
+        "reports the diff; aggressive salvages the tracked diff to "
+        "refs/fno/salvage/<node>, then prunes once the 30m grace passes and "
+        "no live session holds the tree. Both keep the branch, salvage "
+        "untracked files, and still block on conflicts, unborn trees, "
+        "unreadable probes, live claims, and live sessions.",
+    ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
         "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context, context_measured_at, context_source} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. A row's context counts as a measured window only beside a context_measured_at date; an unmeasured model falls back to the id-based default. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",

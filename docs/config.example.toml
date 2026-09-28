@@ -651,6 +651,8 @@ setup_command = ""
 skip_verification = false
 # Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); falls back to the script's own detection when empty. Default empty.
 test_command = ""
+# How far the merged sweep's done-node arm goes on a done tree with uncommitted tracked changes: balanced (default) keeps the tree and reports the diff; aggressive salvages the tracked diff to refs/fno/salvage/<node>, then prunes once the 30m grace passes and no live session holds the tree. Both keep the branch, salvage untracked files, and still block on conflicts, unborn trees, unreadable probes, live claims, and live sessions.
+prune_done = "balanced"
 
 [model_routing]
 # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.

@@ -317,6 +317,26 @@ pub enum SandboxUnavailablePolicy {
     Warn,
 }
 
+/// How far the done-node arm may go on a done tree's uncommitted tracked
+/// work. `balanced` (the default) keeps the tree; `aggressive` lets the
+/// caller salvage the tracked diff to a salvage ref, then prune.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreePruneDone {
+    Balanced,
+    Aggressive,
+}
+
+/// Resolve `worktree.prune_done`. A missing or malformed value degrades to
+/// `balanced`: today's keep contract is the safe side of every typo.
+pub fn worktree_prune_done(cwd: &Path) -> WorktreePruneDone {
+    match config_lookup(cwd, &["worktree", "prune_done"]) {
+        Some(v) if scalar_to_string(&v).as_deref() == Some("aggressive") => {
+            WorktreePruneDone::Aggressive
+        }
+        _ => WorktreePruneDone::Balanced,
+    }
+}
+
 impl SandboxUnavailablePolicy {
     pub fn is_warn(self) -> bool {
         matches!(self, Self::Warn)
