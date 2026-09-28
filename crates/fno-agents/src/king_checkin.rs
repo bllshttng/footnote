@@ -383,7 +383,11 @@ fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
         let reason = s_str(&mine, "reason").unwrap_or("the fold did not run");
         return Err(format!("scope fold unreadable: {reason}"));
     }
-    Ok(json!({"fold": mine, "stuck": payload.get("stuck").cloned().unwrap_or(Value::Null)}))
+    Ok(json!({
+        "fold": mine,
+        "stuck": payload.get("stuck").cloned().unwrap_or(Value::Null),
+        "owned_scopes": payload.get("owned_scopes").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 fn r_board(
@@ -1215,6 +1219,8 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
         let floor = crate::agents_config::config_lookup(&ctx.cwd, &["dispatch", "blueprint_floor"])
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| crate::backlog_ready::DEFAULT_BLUEPRINT_FLOOR.to_string());
+        let other_owned =
+            crate::king_checkin_blueprint::other_owned_scopes(&beat.folded, &ctx.scope);
         crate::king_checkin_blueprint::r_blueprint(
             &beat.board,
             &ctx.cwd,
@@ -1222,6 +1228,7 @@ fn collect_readings(ctx: &Ctx, beat: &Beat, since: Option<&str>) -> Vec<Reading>
             claims,
             slots,
             &floor,
+            &other_owned,
         )
     });
     take(
