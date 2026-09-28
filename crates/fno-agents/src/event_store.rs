@@ -1359,16 +1359,13 @@ pub fn journal_text(journal: &Path, types: &[&str]) -> String {
 /// that exists and cannot be read is `Err` naming it.
 pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, String> {
     let live = live_journal(journal);
-    // Offsets are BYTE offsets into the raw file, never into a lossy string:
-    // a conversion that resizes bytes would desync the stored cursor.
-    let bytes = match std::fs::read(&live) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(format!("{}: {err}", live.display())),
-    };
     let store = store_path(&live);
     if !store.is_file() {
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        return match std::fs::read_to_string(&live) {
+            Ok(text) => Ok(text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(format!("{}: {err}", live.display())),
+        };
     }
     let conn = open_read(&store)?;
     let (sql, args) = q.build_sql();
@@ -1399,34 +1396,39 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
     // The ingest cursor records how far import_file ingested this inode.
     // Every complete line before `offset` is committed knowledge - it sits in
     // events or event_observation_pending, the two tables `held` probes - so
-    // only the tail pays the per-line hash + probe. A stale cursor (the head
-    // line changed, the file shrank) or an absent one falls back to the
-    // full-file scan, the pre-cursor behavior.
-    let head_hash = {
-        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
-        Sha256::digest(first).to_vec()
-    };
-    let complete_end = bytes
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .unwrap_or(bytes.len());
-    let start: usize = match std::fs::metadata(&live) {
-        Ok(meta) => conn
-            .query_row(
-                "SELECT head_hash, \"offset\" FROM ingest_cursor WHERE dev = ?1 AND ino = ?2",
-                params![meta.dev(), meta.ino()],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .ok()
-            .and_then(|(head, offset)| {
-                let offset = offset as usize;
-                (head == head_hash && offset <= complete_end).then_some(offset)
-            })
-            .unwrap_or(0),
+    // the read pulls the tail past the cursor alone: head hash from a bounded
+    // 256 KB head read, tail bytes by seek, never the whole journal (the
+    // whole-file slurp cost 118 MB of reads per read on the live store). A
+    // stale cursor (the head line changed, the file shrank) or an absent one
+    // falls back to the full-file scan, the pre-cursor behavior.
+    let start: u64 = match std::fs::metadata(&live) {
+        Ok(meta) => {
+            let cursor = conn
+                .query_row(
+                    "SELECT head_hash, \"offset\" FROM ingest_cursor WHERE dev = ?1 AND ino = ?2",
+                    params![meta.dev(), meta.ino()],
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .ok();
+            match (read_head_hash(&live), cursor) {
+                (Some(hash), Some((head, offset)))
+                    if head == hash && offset >= 0 && offset as u64 <= meta.len() =>
+                {
+                    offset as u64
+                }
+                _ => 0,
+            }
+        }
         Err(_) => 0,
     };
+    let tail = match read_range(&live, start) {
+        Ok(tail) => tail,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(format!("{}: {err}", live.display())),
+    };
+    let complete_end = tail.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     // ponytail: a pre-store line no import took reads as newest; any import fixes it.
-    for line_bytes in bytes[start..complete_end].split(|&b| b == b'\n') {
+    for line_bytes in tail[..complete_end].split(|&b| b == b'\n') {
         let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
         if line_bytes.is_empty() {
             continue;
@@ -1450,6 +1452,27 @@ pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, St
     Ok(text)
 }
 
+/// sha256 of the journal's first line, from a bounded 256 KB head read; a
+/// longer first line or an unreadable file reads None, and the caller takes
+/// the full-scan fallback. Mirrors import_file's head-hash contract.
+fn read_head_hash(live: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut fh = std::fs::File::open(live).ok()?;
+    let mut buf = vec![0u8; 262_144];
+    let n = fh.read(&mut buf).ok()?;
+    let first = buf[..n].split(|&b| b == b'\n').next().unwrap_or(&[]);
+    Some(Sha256::digest(first).to_vec())
+}
+
+/// Read the file's bytes from `start` to EOF. start beyond EOF reads empty.
+fn read_range(path: &Path, start: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut fh = std::fs::File::open(path)?;
+    fh.seek(SeekFrom::Start(start))?;
+    let mut out = Vec::new();
+    fh.read_to_end(&mut out)?;
+    Ok(out)
+}
 /// Write every committed row, in commit order, to `out` as JSONL - atomically
 /// (tmp file + rename), labeled by the caller as the snapshot it is. Returns
 /// the row count. The store stays authoritative: a failure anywhere removes
