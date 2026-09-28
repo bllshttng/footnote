@@ -36,7 +36,7 @@
 # must stay aligned with it, pinned by test_node_id_sh.py. The shell copy exists
 # because the resolvers have a legacy fallback for environments where the fno
 # Python package is unavailable.
-_NODE_ID_FNO_RE='^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'
+_NODE_ID_FNO_RE='^[a-z][a-z0-9]{0,7}-?[0-9a-f]{4,8}$'
 # Recognized external tracker shapes. Add a clause here when a new backend
 # ships; the sourcing resolvers need no other change.
 _NODE_ID_LINEAR_JIRA_RE='^[A-Z][A-Z0-9_]+-[0-9]+$'
