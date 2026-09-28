@@ -73,7 +73,7 @@ A variant is a **git ref of this repository**. Every prompt, skill, and project 
 
 The variant axis answers "did this change help?". The trend axis answers "are we regressing week over week?" - the question `--compare` cannot, because it scores git refs, not time.
 
-Where the history lives: `~/.fno/evals-history.jsonl` (`config.paths.evals_history`), one append-only line per task-run, one writer. It is not a git artifact: a bank run needs a spawn-capable machine, and rows are per machine. It is not a second journal either. The `evals_scheduled_run` event is the receipt that a run happened. The history rows are what it graded.
+Where the history lives: `~/.fno/history/evals-history.jsonl` (`config.paths.evals_history`), one append-only line per task-run, one writer. It is not a git artifact: a bank run needs a spawn-capable machine, and rows are per machine. It is not a second journal either. The `evals_scheduled_run` event is the receipt that a run happened. The history rows are what it graded.
 
 A window is `evals.stale_days` days (default 7) - the same length every health surface already calls "recent". `fno doctor evals trend` scores the recent window `(now - W, now]` against the prior window `(now - 2W, now - W]`, per task, with the same improved/regressed/unchanged verdicts the variant compare prints. Tasks present in only one window land in the missing lists with no verdict. `regressed` names regression-tier tasks whose verdict is `regressed`, and drives exit 4.
 
