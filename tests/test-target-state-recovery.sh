@@ -64,12 +64,22 @@ chmod +x "$FAKE_BIN/fno"
 cp "$ROOT_DIR/tests/helpers/fno-agents-state-path-stub.sh" "$FAKE_BIN/fno-agents"
 chmod +x "$FAKE_BIN/fno-agents"
 
+init_fixture_repo() {
+  local root="$1"
+  git -C "$root" init -q
+  git -C "$root" config user.email fno@test
+  git -C "$root" config user.name fno
+  git -C "$root" commit -q --allow-empty -m init
+  git -C "$root" checkout -q -b feature/target-state-recovery
+}
+
 run_recovery_case() {
   local case_name="$1"
   local fixture_content="$2"
   local case_dir="$TMP_DIR/$case_name"
 
   mkdir -p "$case_dir/space"
+  init_fixture_repo "$case_dir"
   printf '%s\n' "$fixture_content" > "$case_dir/space/target-state.md"
 
   (
@@ -104,6 +114,7 @@ run_recovery_case "partial-frontmatter" $'---\nstatus: IN_PROGRESS\ncurrent_phas
 # still emitted, not that a mode was resolved.
 GEMINI_CASE_DIR="$TMP_DIR/gemini-detect"
 mkdir -p "$GEMINI_CASE_DIR/space"
+init_fixture_repo "$GEMINI_CASE_DIR"
 
 (
   cd "$GEMINI_CASE_DIR"
