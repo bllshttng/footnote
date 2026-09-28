@@ -79,8 +79,7 @@ ALLOWLIST = {
     # configured graph releases.
     "cli/src/fno/graph/store.py",
     # crates/fno-agents/src/backlog/session_cli.rs run_close: the
-    # BLUEPRINT-CLOSE terminal release (the port of the deleted
-    # graph/_session.py cmd_session_close). A spawn dispatch acquires
+    # BLUEPRINT-CLOSE terminal release. A spawn dispatch acquires
     # node:<id> under spawn-handover:<worker> and a blueprint session never
     # runs init, so the close is the only terminal that lifecycle has.
     # Holder-scoped: it releases ONLY the session's own spawn-handover or
