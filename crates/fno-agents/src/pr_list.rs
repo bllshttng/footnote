@@ -38,7 +38,13 @@ pub fn run_pr_list(args: &[String]) -> i32 {
         }
     };
     let gh = |cmd: &[String], cwd: &Path| {
-        run_with_timeout(cmd, cwd, Duration::from_secs(30)).map_err(|e| e.message().to_string())
+        run_with_timeout(cmd, cwd, Duration::from_secs(30)).map_err(|e| {
+            if e.over_budget() {
+                "timed out after 30s".to_string()
+            } else {
+                e.message().to_string()
+            }
+        })
     };
     let graph = || {
         let path = crate::king_board::scope::graph_json_path(&cwd);
