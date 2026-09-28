@@ -378,6 +378,7 @@ echo "--- Rust: no plan-status reader ---"
 # blueprint_judge.rs grades plan prose against five product questions;
 # it never classifies `status:` frontmatter.
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/backlog/create_cli.rs
+crates/fno-agents/src/backlog/session_cli.rs
 crates/fno-agents/src/backlog/update_cli.rs
 crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
@@ -391,6 +392,9 @@ crates/fno-agents/src/surface_check.rs"
 # update_cli.rs reads only the plan frontmatter `size` (the doc->graph
 # linked-size flow on a plan relink); it never extracts a plan status, so
 # the shelling rule does not apply to it.
+# session_cli.rs reads only the plan frontmatter `claims:`/`node:` names
+# (the blueprint-session plan-claims join); it never extracts a plan
+# status, so the shelling rule does not apply to it.
 # merge_hold.rs reads only the dispatch_hold block (the hold the merge gate
 # refuses on); it never extracts a plan status, so the shelling rule does not
 # apply to it.
@@ -479,6 +483,18 @@ while IFS= read -r reader; do
         matches="$(
             printf '%s\n' "$matches" \
                 | grep -vE '\.get\("status"\)|row\.get\("status"\)' \
+                || true
+        )"
+    fi
+    if [ "$reader" = "crates/fno-agents/src/backlog/session_cli.rs" ]; then
+        # session_cli's "status" literals are GRAPH-row reads (the reap-open
+        # open-phase check) and the verbs' own JSON receipt vocabulary
+        # (joined/opened/closed/skipped/ended), never plan frontmatter; its
+        # only plan read is the frontmatter `claims:`/`node:` name walk.
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '\.get\("status"\)' \
+                | grep -vE '"status": (status,|if ended_existing|"(joined|opened|closed|skipped)")' \
                 || true
         )"
     fi
