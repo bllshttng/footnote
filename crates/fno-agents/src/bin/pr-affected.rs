@@ -4,13 +4,23 @@ use std::process::Command;
 struct Selection {
     cargo: bool,
     python_full: bool,
+    skill_bundles: bool,
 }
 
-fn select_jobs(event: &str, paths: Option<&[String]>, packet_fits: Option<bool>) -> Selection {
+fn select_jobs(
+    event: &str,
+    paths: Option<&[String]>,
+    packet_fits: Option<bool>,
+    bundles: Option<&[String]>,
+) -> Selection {
+    // The full lanes run the freshness check from the smoke registry; the
+    // dedicated PR job below only exists for the PR events where the selector
+    // keeps those lanes off.
     if event != "pull_request" {
         return Selection {
             cargo: true,
             python_full: true,
+            skill_bundles: false,
         };
     }
 
@@ -18,6 +28,7 @@ fn select_jobs(event: &str, paths: Option<&[String]>, packet_fits: Option<bool>)
         return Selection {
             cargo: true,
             python_full: true,
+            skill_bundles: true,
         };
     };
 
@@ -34,7 +45,65 @@ fn select_jobs(event: &str, paths: Option<&[String]>, packet_fits: Option<bool>)
         || paths
             .iter()
             .any(|path| path == ".github/workflows/cli-ci.yml");
-    Selection { cargo, python_full }
+    // An unreadable manifest fails closed: run the check rather than trust a
+    // selection we could not compute.
+    let skill_bundles = match bundles {
+        None => true,
+        Some(watched) => paths.iter().any(|path| names_a_bundle_path(path, watched)),
+    };
+    Selection {
+        cargo,
+        python_full,
+        skill_bundles,
+    }
+}
+
+/// Exact file match, or a change anywhere beneath a directory-valued
+/// source/dest (pack rows and some canonical trees name directories).
+fn names_a_bundle_path(path: &str, watched: &[String]) -> bool {
+    watched.iter().any(|w| {
+        path == w
+            || path
+                .strip_prefix(w.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Paths skill-bundles.yaml pins: every declared source plus every generated
+/// destination (dest values are relative to `skills/<skill>/`). A change to
+/// any of these must run the bundle freshness check: PR 2719 changed
+/// scripts/validate-plan.sh green while both bundled copies drifted, because
+/// no lane member owned them. Pack rows are invisible to this scan on
+/// purpose: their paths live in plugins/*/plugin.yaml, which the workflow
+/// trigger never fires on. Line shapes mirror the Python parser's fallback
+/// (comment runs to end of line, `- ` prefixes the list entries), so the
+/// header's doc examples never scan as paths.
+fn bundle_watch_set() -> Option<Vec<String>> {
+    let text = std::fs::read_to_string("skill-bundles.yaml").ok()?;
+    Some(bundle_watch_set_from(&text))
+}
+
+fn bundle_watch_set_from(text: &str) -> Vec<String> {
+    let mut skill = String::new();
+    let mut set = Vec::new();
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        if let Some(rest) = line.strip_prefix("skill:") {
+            skill = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+        } else if let Some(rest) = line.strip_prefix("source:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                set.push(value.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("dest:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() && !skill.is_empty() {
+                set.push(format!("skills/{skill}/{value}"));
+            }
+        }
+    }
+    set
 }
 
 fn changed_paths(base: &str, head: &str) -> Option<Vec<String>> {
@@ -63,17 +132,19 @@ fn main() {
             .zip(args.get(2))
             .and_then(|(base, head)| changed_paths(base, head));
         let packet_fits = args.get(3).map(|value| value == "true");
-        select_jobs(event, paths.as_deref(), packet_fits)
+        let bundles = bundle_watch_set();
+        select_jobs(event, paths.as_deref(), packet_fits, bundles.as_deref())
     } else {
-        select_jobs(event, None, None)
+        select_jobs(event, None, None, None)
     };
     println!("cargo={}", selection.cargo);
     println!("python_full={}", selection.python_full);
+    println!("skill_bundles={}", selection.skill_bundles);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{select_jobs, Selection};
+    use super::{bundle_watch_set_from, select_jobs, Selection};
 
     fn paths(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -83,10 +154,11 @@ mod tests {
     fn docs_only_pr_skips_cargo_and_full_python_when_packet_fits() {
         let changed = paths(&["docs/usage.md", "cli/tests/unit/test_example.py"]);
         assert_eq!(
-            select_jobs("pull_request", Some(&changed), Some(true)),
+            select_jobs("pull_request", Some(&changed), Some(true), Some(&[])),
             Selection {
                 cargo: false,
                 python_full: false,
+                skill_bundles: false,
             }
         );
     }
@@ -107,7 +179,7 @@ mod tests {
         ] {
             let changed = paths(&[changed]);
             assert!(
-                select_jobs("pull_request", Some(&changed), Some(true)).cargo,
+                select_jobs("pull_request", Some(&changed), Some(true), Some(&[])).cargo,
                 "cargo must run for {changed:?}"
             );
         }
@@ -117,10 +189,11 @@ mod tests {
     fn an_unfit_packet_keeps_full_python_on() {
         let changed = paths(&["docs/usage.md"]);
         assert_eq!(
-            select_jobs("pull_request", Some(&changed), Some(false)),
+            select_jobs("pull_request", Some(&changed), Some(false), Some(&[])),
             Selection {
                 cargo: false,
                 python_full: true,
+                skill_bundles: false,
             }
         );
     }
@@ -128,25 +201,33 @@ mod tests {
     #[test]
     fn missing_or_empty_diff_fails_closed() {
         assert_eq!(
-            select_jobs("pull_request", None, Some(true)),
+            select_jobs("pull_request", None, Some(true), Some(&[])),
             Selection {
                 cargo: true,
                 python_full: true,
+                skill_bundles: true,
             }
         );
         let empty = paths(&[]);
         assert_eq!(
-            select_jobs("pull_request", Some(&empty), Some(true)),
+            select_jobs("pull_request", Some(&empty), Some(true), Some(&[])),
             Selection {
                 cargo: true,
                 python_full: true,
+                skill_bundles: true,
             }
         );
         assert_eq!(
-            select_jobs("pull_request", Some(&paths(&["docs/usage.md"])), None),
+            select_jobs(
+                "pull_request",
+                Some(&paths(&["docs/usage.md"])),
+                None,
+                Some(&[])
+            ),
             Selection {
                 cargo: false,
                 python_full: true,
+                skill_bundles: false,
             }
         );
     }
@@ -155,23 +236,115 @@ mod tests {
     fn non_pr_events_always_run_both_lanes() {
         for event in ["push", "schedule", "workflow_dispatch"] {
             assert_eq!(
-                select_jobs(event, None, None),
+                select_jobs(event, None, None, None),
                 Selection {
                     cargo: true,
                     python_full: true,
+                    skill_bundles: false,
                 }
             );
         }
     }
 
     #[test]
+    fn a_changed_bundled_canonical_script_selects_the_freshness_check() {
+        // The 2026-09-28 specimen: scripts/validate-plan.sh is a source named
+        // in skill-bundles.yaml; skills/blueprint and skills/execute carry
+        // the destinations it drifted.
+        let watched = paths(&[
+            "scripts/validate-plan.sh",
+            "skills/blueprint/scripts/validate-plan.sh",
+            "skills/execute/scripts/validate-plan.sh",
+        ]);
+        let changed = paths(&["scripts/validate-plan.sh"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        assert!(
+            sel.skill_bundles,
+            "a source change must select the freshness check"
+        );
+        let changed = paths(&["docs/usage.md", "skills/blueprint/scripts/validate-plan.sh"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        assert!(
+            sel.skill_bundles,
+            "a destination change must select the freshness check"
+        );
+    }
+
+    #[test]
+    fn an_unwatched_change_leaves_the_freshness_job_off() {
+        let watched = paths(&["scripts/validate-plan.sh"]);
+        let changed = paths(&["crates/fno-agents/src/lib.rs"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        assert!(!sel.skill_bundles);
+    }
+
+    #[test]
+    fn an_unreadable_manifest_fails_the_freshness_job_on() {
+        let changed = paths(&["docs/usage.md"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), None);
+        assert!(sel.skill_bundles);
+    }
+
+    #[test]
+    fn a_directory_valued_bundle_path_matches_changes_beneath_it() {
+        let watched = paths(&["skills/growth-launch"]);
+        let changed = paths(&["skills/growth-launch/SKILL.md"]);
+        let sel = select_jobs("pull_request", Some(&changed), Some(true), Some(&watched));
+        assert!(sel.skill_bundles);
+    }
+
+    #[test]
+    fn header_doc_examples_never_scan_as_paths() {
+        let text = concat!(
+            "#   files:        # scripts copied with executable bits preserved\n",
+            "#     - source: scripts/lib/X.sh           # repo-rooted\n",
+            "bundles:\n",
+            "  - skill: demo\n",
+            "    files:\n",
+            "      - source: scripts/real.sh\n",
+            "        dest: scripts/real.sh\n",
+        );
+        assert_eq!(
+            bundle_watch_set_from(text),
+            vec![
+                "scripts/real.sh".to_string(),
+                "skills/demo/scripts/real.sh".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_live_manifest_scans_to_the_specimen_paths() {
+        // Canary on the real manifest: if skill-bundles.yaml grows a shape
+        // the scanner cannot read, this goes red instead of the selector
+        // silently going blind. A crate checked out without the repo root
+        // has no manifest to pin, so it skips.
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../../skill-bundles.yaml");
+        let Ok(text) = std::fs::read_to_string(manifest) else {
+            return;
+        };
+        let watched = bundle_watch_set_from(&text);
+        assert!(
+            watched.iter().any(|p| p == "scripts/validate-plan.sh"),
+            "source rows must scan: {watched:?}"
+        );
+        assert!(
+            watched
+                .iter()
+                .any(|p| p == "skills/blueprint/scripts/validate-plan.sh"),
+            "dest rows must scan skill-relative: {watched:?}"
+        );
+    }
+
+    #[test]
     fn bad_git_revision_fails_closed() {
         let Some(paths) = super::changed_paths("missing-pr-base", "missing-pr-head") else {
             assert_eq!(
-                select_jobs("pull_request", None, Some(true)),
+                select_jobs("pull_request", None, Some(true), Some(&[])),
                 Selection {
                     cargo: true,
                     python_full: true,
+                    skill_bundles: true,
                 }
             );
             return;
