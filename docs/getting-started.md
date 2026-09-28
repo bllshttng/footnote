@@ -46,7 +46,19 @@ In any Claude Code session:
 /plugin install fno@footnote
 ```
 
-On the first session after install, footnote starts its installer in the background and logs to `~/.claude/plugins/data/fno-footnote/postinstall.log`. After it finishes, open a new session, and `fno` is on your PATH. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `pip install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel. The wheel bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route. It builds the Rust front door with your Rust toolchain. The front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
+On the first session after install, footnote starts its installer in the background and logs to `~/.claude/plugins/data/fno-footnote/postinstall.log` (a Codex session, which has no plugin data dir, logs to the fallback at `~/.local/state/fno/plugin-install/postinstall.log`). After it finishes, open a new session, and `fno` is on your PATH. Prefer the CLI standalone? `curl -fsSL fno.sh | sh`, `uv tool install fno`, `pip install fno`, or `brew install bllshttng/fno/fno` each install the published PyPI wheel. The wheel bundles the complete set: the Rust `fno` front door, the three `fno-agents` binaries, and the Python CLI (`fno-py`). `cargo install fno` is the source route. It builds the Rust front door with your Rust toolchain. The front door bootstraps the Python CLI on first use. Full options: the [README](../README.md).
+
+### Local clone
+
+Clone, run setup, get the CLI:
+
+```bash
+git clone https://github.com/bllshttng/footnote.git
+cd footnote
+bash scripts/setup.sh
+```
+
+The setup checks the prerequisites (`bash`, `git`, `gh`, `jq`, and `python3` 3.11+ or `uv`), registers the global `~/.fno` state dir, scaffolds `.fno/config.toml` in the clone, and, when `fno` does not answer, installs the CLI through the same `fno.sh` the curl one-liner uses, so `fno`, `fno-agents`, and the mux all answer afterwards. Per-path overrides live in the `config.paths.*` keys: see [path configuration](path-config.md).
 
 ### Windows (WSL2)
 

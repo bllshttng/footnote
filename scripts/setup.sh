@@ -149,6 +149,14 @@ bash "$ROOT_DIR/scripts/preflight.sh"
 bash "$ROOT_DIR/scripts/ensure-global-dir.sh"
 mkdir -p "$ROOT_DIR/.fno/checkpoints"
 
+# A clone user needs the CLI itself, not just the repo: when no fno answers the
+# mux probe, install through the same channel the curl one-liner uses (fno.sh
+# provisions uv, then the published wheel with front door + agent binaries).
+if ! fno mux ls --json >/dev/null 2>&1; then
+  echo "fno not found; installing via scripts/install/fno.sh..."
+  sh "$ROOT_DIR/scripts/install/fno.sh"
+fi
+
 # Scaffold settings.yaml with project vision placeholders if it doesn't exist
 SETTINGS_FILE="$ROOT_DIR/.fno/config.toml"
 if [[ ! -f "$SETTINGS_FILE" ]]; then
@@ -167,11 +175,6 @@ constraints = []
 # Do-Target configuration
 [target.defaults]
 max_iterations = 40
-
-# External code review
-[review]
-provider = "gemini"
-# provider: coderabbit | claude | codex
 EOF
   echo "Created $SETTINGS_FILE - edit directly or run /setup"
 fi
