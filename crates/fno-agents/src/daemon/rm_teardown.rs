@@ -24,7 +24,7 @@ pub(crate) async fn end_codex_thread_confirmed(
     entry: &RegistryEntry,
 ) -> Result<String, String> {
     if !ctx.codex_threads.lock().await.contains_key(&entry.name) {
-        super::codex_thread_resume::ensure_codex_thread_handle_for(ctx, entry, true)
+        super::codex_thread_resume::ensure_codex_thread_handle(ctx, entry)
             .await
             .map_err(|reason| {
                 format!("thread not hosted here and the re-attach refused: {reason}")
@@ -149,16 +149,7 @@ pub(crate) fn stamp_removed_session_tombstone(
         entry.short_id.as_str(),
         &entry.name,
         &entry.cwd,
+        entry.host_mode.as_deref().unwrap_or_default(),
     )
     .err()
-}
-
-/// The for-stop HEALED row shape: a session `fno agents rm` just removed,
-/// re-resolved from the harness store or the rm tombstone. host_mode is
-/// unknown on such a row (neither store records it), so the strict
-/// `is_codex_thread_entry` gate would route the stop to the no-op arm and
-/// the thread would keep running. The re-attach validates the durable
-/// identity (full session id + existing cwd) for itself.
-pub(crate) fn is_codex_thread_heal(entry: &RegistryEntry) -> bool {
-    entry.harness_name() == "codex" && entry.short_id.is_empty() && entry.mux.is_none()
 }

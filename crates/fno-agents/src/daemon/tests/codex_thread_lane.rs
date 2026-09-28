@@ -1115,17 +1115,13 @@ async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daem
 /// still be live in the shared app-server) cannot be stopped with a trivial
 /// "no-turn": the stop re-attaches through the row's durable identity, and a
 /// refused re-attach reports stopped:false and leaves the row non-terminal,
-/// exactly like an unsettled interrupt. The row carries the HEALED shape (no
-/// host_mode, as the harness store records none), so this also pins the
-/// relaxed thread gate: the strict gate would have routed this stop to the
-/// no-op arm and reported a stop it did not perform.
+/// exactly like an unsettled interrupt.
 #[tokio::test]
 async fn codex_thread_stop_over_an_unmapped_thread_reports_not_stopped_when_reattach_refuses() {
     let _guard = crate::path_test_guard();
     let home = tmp_home("codex-stop-unmapped");
     let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     let mut row = thread_entry("t-unmapped", AgentStatus::Live, None);
-    row.host_mode = None;
     row.cwd = "/nonexistent-cwd-for-unmapped-stop-f313".into();
     row.project_root = row.cwd.clone();
     state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();

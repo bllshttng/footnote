@@ -3074,7 +3074,7 @@ fn recovery_routes_codex_thread_by_full_identity_without_short_id() {
     row.cwd = "/tmp/codex-thread-worktree".into();
 
     assert_eq!(
-        codex_thread_resume_identity(&row, false).unwrap(),
+        codex_thread_resume_identity(&row).unwrap(),
         Some((
             "019f0000-0000-7000-8000-000000000001".into(),
             std::path::PathBuf::from("/tmp/codex-thread-worktree"),
@@ -3091,12 +3091,12 @@ fn recovery_refuses_codex_thread_when_identity_is_missing_by_name() {
     row.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
     row.cwd = "/tmp/codex-thread-worktree".into();
 
-    let error = codex_thread_resume_identity(&row, false).unwrap_err();
+    let error = codex_thread_resume_identity(&row).unwrap_err();
     assert!(error.contains("harness_session_id"), "error: {error}");
 
     row.harness_session_id = Some("019f0000-0000-7000-8000-000000000001".into());
     row.cwd.clear();
-    let error = codex_thread_resume_identity(&row, false).unwrap_err();
+    let error = codex_thread_resume_identity(&row).unwrap_err();
     assert!(error.contains("cwd"), "error: {error}");
 }
 
@@ -3112,10 +3112,7 @@ fn recovery_skips_stopped_codex_thread_rows() {
     row.cwd = "/tmp/codex-thread-worktree".into();
 
     // The identity is complete; the Exited stop status vetoes resurrection.
-    assert!(codex_thread_resume_identity(&row, false)
-        .ok()
-        .flatten()
-        .is_some());
+    assert!(codex_thread_resume_identity(&row).ok().flatten().is_some());
     assert!(!codex_thread_recovery_candidate(&row));
 
     row.status = AgentStatus::Live;

@@ -40,6 +40,7 @@ pub(crate) fn record(
     short: &str,
     name: &str,
     cwd: &str,
+    host_mode: &str,
 ) -> Result<(), String> {
     record_at(
         home,
@@ -48,6 +49,7 @@ pub(crate) fn record(
         short,
         name,
         cwd,
+        host_mode,
         now_epoch_secs(),
     )
 }
@@ -59,6 +61,7 @@ pub(crate) fn record_at(
     short: &str,
     name: &str,
     cwd: &str,
+    host_mode: &str,
     now: i64,
 ) -> Result<(), String> {
     if session_id.trim().is_empty() {
@@ -85,6 +88,7 @@ pub(crate) fn record_at(
         "short": short,
         "name": name,
         "cwd": cwd,
+        "host_mode": host_mode,
         "removed_at": now,
     }));
     // Atomic rename so the Python reader never sees a torn write; the pid
@@ -107,6 +111,7 @@ pub(crate) struct RemovedSession {
     pub short: String,
     pub name: String,
     pub cwd: String,
+    pub host_mode: String,
 }
 
 /// The in-window removal `token` names, matched against the row's own
@@ -152,6 +157,11 @@ pub(crate) fn lookup_removed_beside(registry_path: &Path, token: &str) -> Option
                 .to_string(),
             cwd: row
                 .get("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            host_mode: row
+                .get("host_mode")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),

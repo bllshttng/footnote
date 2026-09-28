@@ -192,15 +192,11 @@ pub struct RecoveryReport {
 }
 
 /// Resolve the resume identity for a daemon-hosted Codex thread: the full
-/// harness session id and cwd are the only durable inputs. `allow_heal`
-/// admits the healed row shape for the STOP re-attach alone; the startup
-/// recovery pass stays strict, or its candidates settle Orphaned on a failed
-/// resume.
+/// harness session id and cwd are the only durable inputs.
 fn codex_thread_resume_identity(
     entry: &RegistryEntry,
-    allow_heal: bool,
 ) -> Result<Option<(String, PathBuf)>, String> {
-    if !is_codex_thread_entry(entry) && !(allow_heal && rm_teardown::is_codex_thread_heal(entry)) {
+    if !is_codex_thread_entry(entry) {
         return Ok(None);
     }
     let session_id = entry
@@ -287,7 +283,7 @@ fn recover_with_policy(
 
     // Steps 2-5: per registry entry, reconcile its state.json.
     for entry in &registry.entries {
-        match codex_thread_resume_identity(entry, false) {
+        match codex_thread_resume_identity(entry) {
             Ok(Some((_session_id, _cwd))) => {
                 report.recovered_threads.push(entry.name.clone());
                 continue;
@@ -4667,7 +4663,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     if entry.harness_name() == "claude" {
         return stop_claude(ctx, req, &name, &entry).await;
     }
-    if is_codex_thread_entry(&entry) || rm_teardown::is_codex_thread_heal(&entry) {
+    if is_codex_thread_entry(&entry) {
         // Stop means INTERRUPT the in-flight turn, then DROP the actor
         // (closing its connection to the shared daemon), and only then stamp
         // Exited.

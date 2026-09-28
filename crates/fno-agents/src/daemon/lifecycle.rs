@@ -42,6 +42,11 @@ pub(crate) async fn entry_for_lifecycle(
                     "harness": removed.harness,
                     "harness_session_id": removed.session_id,
                     "cwd": removed.cwd,
+                    "host_mode": if removed.host_mode.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(removed.host_mode)
+                    },
                     "status": "orphaned",
                     "origin": "adopted",
                     "created_at": crate::daemon::now_rfc3339_like(),
@@ -99,6 +104,7 @@ mod tests {
                 "short": "f00dcafe",
                 "name": "t-removed",
                 "cwd": "/repo/two",
+                "host_mode": "interactive",
                 "removed_at": super::super::now_epoch_secs(),
             }])
             .to_string(),
@@ -122,6 +128,9 @@ mod tests {
             Some("0198cccc-0000-0000-0000-000000000003")
         );
         assert_eq!(entry.cwd, "/repo/two");
+        // The recorded host mode rides along so the synthesized row passes the
+        // strict codex-thread gate; a codex ask row must not.
+        assert_eq!(entry.host_mode_or_default(), "interactive");
 
         std::fs::remove_dir_all(dir.keep()).ok();
     }
