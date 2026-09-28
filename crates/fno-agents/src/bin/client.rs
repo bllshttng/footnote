@@ -46,6 +46,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "distress-scan",
     "drive",
     "drive-authority",
+    "mail-control-drain",
     "evals-macro",
     "evidence-gate",
     "finalize",
@@ -627,6 +628,14 @@ async fn run(args: Vec<String>) -> i32 {
     // scan + cursor write, and both must work when the daemon is wedged.
     if verb == "announce" {
         return fno_agents::announce::run_announce(&args[1..]);
+    }
+
+    // `mail-control-drain`: the control lane's recipient-side drain (see
+    // mail_control_drain.rs doc). Direct dispatch, no daemon RPC: the hook
+    // runs it at every tool boundary and a frozen worker's freeze mail must
+    // land even when the daemon is the thing wedged.
+    if verb == "mail-control-drain" {
+        return fno_agents::mail_control_drain::run(&args[1..]);
     }
 
     // `capabilities` / `target-family` (change 2): read-only leaves

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from fno.bus.log import Envelope
+    pass
 
 from fno import paths
 
@@ -798,100 +798,3 @@ def cmd_notify_self() -> None:
         for m in unread:
             reason = "skipped-duplicate" if _dup(m) else "printed"
             _emit_drain_marker(m.id, handle, handle, m.from_, reason)
-
-
-def cmd_control_drain() -> None:
-    """Body of ``fno agents mail control-drain`` (hidden): land CONTROL bodies
-    at the recipient's next TOOL boundary.
-
-    A control body that demoted durable waits on ``notify-self``, which only
-    fires at a prompt boundary; a busy worker holding one long turn never
-    reaches one, so a freeze could not stop it. The PreToolUse hook runs this
-    at every tool call. On its OWN cursors (``control:<form>``) so ordinary
-    mail keeps its prompt-boundary semantics untouched, gated on the sender's
-    pending flags so a clean tool call pays three stat calls, nothing more.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.bus.cursor import (
-        advance_cursor,
-        clear_control_pending,
-        control_pending_flag,
-        scan_unread,
-    )
-    from fno.harness_identity import canonical_handle, legacy_suffix_handle, session_identity_key
-    from fno.mail.budget import is_control
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        print(f"error: control-drain: {exc}", file=sys.stderr)
-        return
-    if not ident.harness or not ident.session_id:
-        return
-
-    sid = ident.session_id
-    forms = [canonical_handle(sid), session_identity_key(sid), legacy_suffix_handle(sid)]
-
-    # Cheap gate, enforced again here for direct callers: no pending flag,
-    # nothing to land. Today's prompt-boundary delivery still owns the body.
-    if not any(control_pending_flag(f).exists() for f in forms):
-        return
-
-    from fno.mail.reply_resolve import present_mail_ids
-
-    present = present_mail_ids()
-
-    rendered: list[str] = []
-    landed: list[tuple[str, "Envelope"]] = []
-    for form in forms:
-        control = [
-            m
-            for m in scan_unread(form, warn=False, cursor_name=f"control:{form}")
-            if is_control(m.body)
-        ]
-        if not control:
-            continue
-        for message in control:
-            if present is not None and getattr(message, "id", "") in present:
-                _emit_drain_marker(
-                    message.id, form, form, message.from_, "skipped-duplicate"
-                )
-                continue
-            rendered.append(
-                f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---\n"
-                + message.body.rstrip("\n")
-            )
-            landed.append((form, message))
-        advance_cursor(f"control:{form}", control[-1].id)
-
-    clear_control_pending(forms)
-
-    if not rendered:
-        return
-
-    from fno.mail.landed import _defang_reminder
-
-    context = (
-        "<system-reminder>\n"
-        + _defang_reminder(
-            "[fno agents mail] CONTROL delivery (tool boundary):\n" + "\n".join(rendered)
-        )
-        + "\n</system-reminder>"
-    )
-    try:
-        payload = json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": context,
-                }
-            },
-            ensure_ascii=False,
-        )
-        sys.stdout.write(payload + "\n")
-        sys.stdout.flush()
-    except (OSError, TypeError, ValueError):
-        return
-
-    for form, message in landed:
-        _emit_drain_marker(message.id, form, form, message.from_, "printed-control-tool-boundary")

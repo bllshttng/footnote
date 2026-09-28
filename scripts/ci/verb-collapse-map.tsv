@@ -62,7 +62,6 @@ agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a h
 agents loops	T1	agents loops	0
 agents mail ack	T1	agents mail ack	10
 agents mail drain	T1	agents mail drain	10
-agents mail control-drain	T1	agents mail control-drain	0	
 agents mail drain-self	T1	agents mail drain-self	6
 agents mail hold	T1	agents mail hold	0
 agents mail hold-release	T1	agents mail hold-release	1
@@ -432,7 +431,6 @@ loops resume-all	KEEP	loops resume-all	0	ruled KEEP: only release for the pause-
 loops status	T1	loops status	3
 mail ack	T1	mail ack	10
 mail drain	T1	mail drain	10
-mail control-drain	T1	mail control-drain	0	
 mail drain-self	T1	mail drain-self	6
 mail hold	T1	mail hold	0
 mail hold-release	T1	mail hold-release	1

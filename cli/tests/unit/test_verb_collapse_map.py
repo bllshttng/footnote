@@ -275,8 +275,9 @@ def test_map_covers_current_surface_once():
     # is required even though the python leg is gone.
     # The native decisions listing retired the `decide list` KEEP shim,
     # freeing one more row: counted from the merged file, 600 -> 599.
-    # The tool-boundary control lane added two T1 mail verbs: 599 -> 601.
-    assert len(mapped) == 601, (
+    # The control drain ported to the fno-agents client binary, which the
+    # click inventory does not see, freeing its row: 600 -> 599.
+    assert len(mapped) == 599, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

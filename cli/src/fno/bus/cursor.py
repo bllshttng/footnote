@@ -135,18 +135,12 @@ def scan_unread(
     warn: bool = True,
     exclude_from: Optional[set[str]] = None,
     messages: Optional[list[Envelope]] = None,
-    cursor_name: Optional[str] = None,
 ) -> list[Envelope]:
     """Return messages addressed to ``name`` after its cursor, oldest -> newest.
 
     One address, one cursor. A consumer answers to exactly the name it drains
     under, so there is nothing to reconcile: the cursor filename IS the address,
     and the address never changes under a live consumer.
-
-    ``cursor_name`` positions the scan at a DIFFERENT consumer's cursor while
-    still filtering ``to == name`` - the control lane scans the plain
-    address forms but advances only its own ``control:<form>`` cursors, so
-    ordinary mail keeps its prompt-boundary semantics.
 
     If the cursor is absent or its message-id is not found in any retained
     segment (rotated out / deleted), all retained messages to ``name`` are
@@ -160,7 +154,7 @@ def scan_unread(
     """
     from fno.bus.log import withdrawn_ids
 
-    cursor = read_cursor(cursor_name or name)
+    cursor = read_cursor(name)
     msgs = list(iter_messages(warn=warn)) if messages is None else messages
     excl = exclude_from or set()
     # A withdrawn message is never delivered, and neither is its tombstone.
