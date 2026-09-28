@@ -1002,11 +1002,8 @@ jobs:
     runs-on: ubuntu-latest
     # Three recent green runs put the combined job at 885s, 889s, and 891s.
     # Its lib/bin step was 109-116s and serial integration 612-620s. Split the
-    # 38 integration test binaries by observed runtime. The widest of 14
-    # passing runs sampled 2026-09-24 was 11.1m; the 2026-09-27 runs were
-    # killed at 15m1s and 15m3s with every leg passing, so the cap moved
-    # 15 -> 25.
-    timeout-minutes: 25
+    # 38 integration test binaries by observed runtime; keep the existing 15m cap.
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
